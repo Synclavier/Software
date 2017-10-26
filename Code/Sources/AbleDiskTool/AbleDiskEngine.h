@@ -1,0 +1,1 @@
+/* Able Disk Engine */#pragma onceextern	long	AbleDiskToolNormalTermination;extern	long	AbleDiskToolAllowPointers;extern	int	 	AbleDiskTool( int argc, const char *argv[]);extern	long	(*AbleDiskToolAskForRename)(short dialog_id, const char *mac_entity, char *able_path, char *able_file, char *new_file);

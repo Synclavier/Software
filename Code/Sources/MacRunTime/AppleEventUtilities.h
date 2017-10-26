@@ -1,0 +1,1 @@
+/* AppleEventUtilities.h */#ifndef	APPLE_EVENT_UTILITIES_Hvoid	AEU_SendRevealInFinder(struct FSSpec& theSpec);#endif

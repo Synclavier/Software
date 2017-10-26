@@ -1,0 +1,1 @@
+/* ResourceUtilities.h */#ifndef	RESOURCE_UTILITIES_Htypedef	char *	PascalStr;void	replace_1_resource		(Handle the_resource, short res_file_refnum,								 OSType res_type, int res_id, const unsigned char * res_name);void	delete_1_resource		(short res_file_refnum,								 OSType res_type, int res_id);#endif

@@ -1,0 +1,1 @@
+// CCastableObject.h// Declare a base class "CCastableObject".  Any object descending from this object// can by dynamically cast to its correct type.  Use instead of void*#pragma onceclass CCastableObject{	virtual void* GetClassID() {return NULL;}			// someday we will figure out C++ class ID mechanism...};

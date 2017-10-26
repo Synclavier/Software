@@ -1,0 +1,1 @@
+// Trace header file for Toolkitvoid	tooltrc (const char *f,long n1,long n2);	/* make trace 			 	*/// could use printf for tracking (only in PPC configuration, obviously!):#if 0	#include <StdIO.h>	#define	tooltrc printf#endif// could eliminate trc calls:#if 1	#define	tooltrc(fmt,n1,n2)	{}						// disable packet tracking#endif

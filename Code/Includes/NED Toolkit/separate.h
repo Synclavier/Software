@@ -1,0 +1,1 @@
+/* This file contains interfaces shared between separate and other  modules (they are used by separate, but defined elsewhere). */extern	void 	module_forward(module_ptr module);		/* bring a module forward 				*/extern	int32 	ms_to_tics(int32 ms);				/* convert milliseconds to Macintosh ticks 	*/

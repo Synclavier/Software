@@ -1,0 +1,1 @@
+/* Gmod lits - literals used by globmod */#define	extbuf_len		4						/* Sectors of buffer in ext.buf					*//* words for pdl stack in external memory: */#define	stack_xmem_wrds	1024#define	stack_arg		read("312")

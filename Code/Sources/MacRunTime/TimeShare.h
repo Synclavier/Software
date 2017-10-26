@@ -1,0 +1,1 @@
+// 	TimeShare.h//	C. Jones//	6/4/99//	Handy routine to timeshare at the main event level.#pragma	onceextern	void	TimeShare_Initialize();extern	void	TimeShare_TimeShare (short events_to_toss);extern	void	TimeShare_CleanUp   ();

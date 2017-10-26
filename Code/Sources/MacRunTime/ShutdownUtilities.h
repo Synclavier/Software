@@ -1,0 +1,1 @@
+// ShutDownUtilities.h#ifndef	__SHUTDOWNUTILITIES__extern	OSErr	RestartSafely();#endif

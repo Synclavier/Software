@@ -1,0 +1,1 @@
+// #include as header file to map memory routines to MemDebug.c#define	free			debug_mem_free#define	malloc			debug_mem_malloc#define	NewPtr			debug_mem_NewPtr#define	NewPtrSys		debug_mem_NewPtrSys#define	NewHandle		debug_mem_NewHandle#define DisposeHandle	debug_mem_DisposeHandle#define	DisposePtr		debug_mem_DisposePtr
