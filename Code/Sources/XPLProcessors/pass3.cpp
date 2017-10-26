@@ -6137,7 +6137,7 @@ static	void	finish()						/* clean up and output compilation stats		*/
 	}											/* if stats printed on dump or compile			*/
 }
 
-#define sym_only_sectors	2048
+#define sym_only_sectors	3000
 
 static	fixed	pass3()							/* create object file							*/
 {
