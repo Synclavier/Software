@@ -123,14 +123,19 @@ static int MatchExtension(const char *nameEnd, const  char *extension)
 {
 	int i = 0;
 
-	for (i=0; i<5; i++)
+	for (i=0; i<strlen(extension); i++)
 		if (nameEnd[i] != extension[i])
 			return false;
 			
 	return true;
 }
 
-static void WipeExtension(char *nameEnd)
+static void WipeExtension4(char *nameEnd)
+{
+    nameEnd[0] = nameEnd[1] = nameEnd[2] = nameEnd[3] = nameEnd[4] = 0;
+}
+
+static void WipeExtension5(char *nameEnd)
 {
 	nameEnd[0] = nameEnd[1] = nameEnd[2] = nameEnd[3] = nameEnd[4] = nameEnd[5] = 0;
 }
@@ -138,22 +143,30 @@ static void WipeExtension(char *nameEnd)
 static void WipeNameExtension(char *itsName)
 {
 	int i = strlen(itsName);
-	
+    
+    if (i < 5)
+        return;
+    
+    char* nameEnd = itsName + i - 4;
+
+    if (MatchExtension(nameEnd, ".txt")) {WipeExtension4(nameEnd); return;}
+
 	if (i < 6)
 		return;
 	
-	char* nameEnd = itsName + i - 5;
+	nameEnd = itsName + i - 5;
 
-	if (MatchExtension(nameEnd, ".sprg")) {WipeExtension(nameEnd); return;}
-	if (MatchExtension(nameEnd, ".srel")) {WipeExtension(nameEnd); return;}
-	if (MatchExtension(nameEnd, ".sdat")) {WipeExtension(nameEnd); return;}
-	if (MatchExtension(nameEnd, ".sseq")) {WipeExtension(nameEnd); return;}
-	if (MatchExtension(nameEnd, ".ssnd")) {WipeExtension(nameEnd); return;}
-	if (MatchExtension(nameEnd, ".simg")) {WipeExtension(nameEnd); return;}
-	if (MatchExtension(nameEnd, ".sdmp")) {WipeExtension(nameEnd); return;}
-	if (MatchExtension(nameEnd, ".sspe")) {WipeExtension(nameEnd); return;}
-	if (MatchExtension(nameEnd, ".sind")) {WipeExtension(nameEnd); return;}
-	if (MatchExtension(nameEnd, ".stmb")) {WipeExtension(nameEnd); return;}
+    if (MatchExtension(nameEnd, ".text")) {WipeExtension5(nameEnd); return;}
+    if (MatchExtension(nameEnd, ".sprg")) {WipeExtension5(nameEnd); return;}
+	if (MatchExtension(nameEnd, ".srel")) {WipeExtension5(nameEnd); return;}
+	if (MatchExtension(nameEnd, ".sdat")) {WipeExtension5(nameEnd); return;}
+	if (MatchExtension(nameEnd, ".sseq")) {WipeExtension5(nameEnd); return;}
+	if (MatchExtension(nameEnd, ".ssnd")) {WipeExtension5(nameEnd); return;}
+	if (MatchExtension(nameEnd, ".simg")) {WipeExtension5(nameEnd); return;}
+	if (MatchExtension(nameEnd, ".sdmp")) {WipeExtension5(nameEnd); return;}
+	if (MatchExtension(nameEnd, ".sspe")) {WipeExtension5(nameEnd); return;}
+	if (MatchExtension(nameEnd, ".sind")) {WipeExtension5(nameEnd); return;}
+	if (MatchExtension(nameEnd, ".stmb")) {WipeExtension5(nameEnd); return;}
 }
 
 static fixed GetAbleFileType(OSType mac_type, OSType mac_creator, const FSSpec* its_spec)
@@ -163,10 +176,18 @@ static fixed GetAbleFileType(OSType mac_type, OSType mac_creator, const FSSpec* 
 	// Give priority to file name extension
 	int i = its_spec->name[0];
 	
+    if (i > 4)
+    {
+        const char* nameEnd = (const char *) & its_spec->name[i-4+1];
+        
+        if (MatchExtension(nameEnd, ".txt")) return t_text;
+    }
+    
 	if (i > 5)
 	{
 		const char* nameEnd = (const char *) & its_spec->name[i-5+1];
 		
+        if (MatchExtension(nameEnd, ".text")) return t_text;
 		if (MatchExtension(nameEnd, ".sprg")) return t_exec;
 		if (MatchExtension(nameEnd, ".srel")) return t_reloc;
 		if (MatchExtension(nameEnd, ".sdat")) return t_data;
@@ -5862,7 +5883,7 @@ int AbleDiskTool( int argc, const char *argv[])
 			
 			for (do_copy = 0; do_copy < 2; do_copy++)
 			{
-				// Resolve volder alias if needed
+				// Resolve folder alias if needed
 				
 				// Initialize for recursive scan
 				level         = 0;
@@ -6381,6 +6402,9 @@ int AbleDiskTool( int argc, const char *argv[])
 					// the full path name
 					
 					p2cstr((uint8 *) entry_name);
+                    
+                    // Ignore Mac OS .DS_Store files on folder export
+                    bool is_DS_Store = (strcmp((const char *) entry_name, ".DS_Store") == 0);
 
 					strncpy(this_mac_name, mac_path_name, sizeof(this_mac_name));
 					strncat(this_mac_name, entry_name,    sizeof(this_mac_name) - strlen(this_mac_name) - 1);
@@ -6423,6 +6447,10 @@ int AbleDiskTool( int argc, const char *argv[])
 					if (info_rec.hFileInfo.ioFlFndrInfo.fdFlags & kIsInvisible)
 						;
 
+                    // Skip .DS_Store. Puzzling that is not identified as "Invisible"...
+                    else if (is_DS_Store)
+                        ;
+                    
 					// Skip the file or directory if exporting system files only
 					// and this is not a system entity
 					

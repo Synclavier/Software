@@ -25,6 +25,10 @@
 #include "InterChange.h"
 #include "SynclavierFileReference.h"
 
+#ifndef SYNC_USE_KERNEL
+    #define SYNC_USE_KERNEL 1
+#endif
+
 #if SYNC_USE_KERNEL
     #include "Synclavier3Constants.h"
     #include "SynclavierPCILib.h"
