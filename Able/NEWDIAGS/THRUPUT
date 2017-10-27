@@ -1,0 +1,1231 @@
+/*
+
+Title           : THRUPUT - Audio generation/routing program
+Project Engineer: William Leathers
+Project Start   : 10/01/88 
+New England Digital Corporation
+
+Modification History:
+
+  06/09/89  WSL  - Fixed multi-channel max output number limit
+  04/04/89  WSL  - Changed output channel limit for multiple poly systems
+                   with less than 32 voices per bin.
+  04/01/89  WSL  - Added support for more than one STM box.
+  02/06/89  WSL  - Added PRM identification. 
+  01/18/89  WSL  - Removed exit if d32x not found.
+                   
+
+*/
+configuration modelc, MULDIV;
+
+insert ':-xpl:asciidef';
+insert ':-xpl:termutil';
+insert ':-xpl:intrprtr';
+insert ':newdiags:sysinit';
+insert ':newdiags:datelit';
+
+/***************************************************************************/
+/***************************     Literals     ******************************/
+
+dcl column1      lit '10';
+dcl column2      lit '30';
+dcl status_line1 lit '20,10';
+
+dcl (i,j,k,chr) fixed;
+dcl x           floating;
+
+dcl bin# fixed;
+dcl current_field fixed;
+
+dcl poly_mode      fixed,  sync lit '0',   dtd   lit '1';
+dcl poly_pan       fixed,  left lit '0',   right lit '1',  both lit '2';
+dcl poly_volume    fixed;
+dcl input_channel  fixed;
+dcl output_channel fixed;
+dcl stm_gain       fixed;
+dcl stm_mode       fixed;
+dcl increment      fixed;
+dcl modulus        fixed;
+dcl waveform       fixed,  sine lit '0';
+dcl ch_mode        fixed;
+
+dcl max_out_channel fixed;
+
+dcl (samples_per_wave,bits_per_wave) fixed;
+   
+/*dcl daughter_type  fixed;*/
+dcl sample_rate    floating;
+
+dcl ned_daughter lit '0';
+dcl analogic_daughter lit '1';
+
+dcl master   fixed;  /* A/D channel */
+dcl playback fixed;  /* poly channel playback master */
+
+dcl (poly_address, AD_channel) fixed;
+dcl (ms_samples, ls_samples)   fixed; /* number of samples */
+
+/********************************************************************/
+dcl con    lit  '"32"';             /* d32x control address          */
+dcl mtdat  lit  '"33"';             /* d32x data    address          */
+dcl vcon   lit '"040000"';          /* voice on  bit                 */
+dcl vcoff  lit '"000000"';          /* voice off bit                 */
+
+dcl ps_map((64*psmaxbins)-1)  fixed;         /* holds PS chans. mt input #'s  */
+dcl num_output      fixed;         /* number of mt outputs          */
+dcl mt_short(256) boolean;         /* mt_short(i) true if shorted   */
+dcl multi_out fixed;
+dcl multi_channel_exists fixed;
+
+/***************************************************************************/
+get_fnum: proc(integer_length,fraction_length) returns (floating);
+  dcl (length,integer_length,fraction_length) fixed;
+  dcl input_string(10) fixed;
+  dcl (i,j,k) fixed;
+  dcl value floating;
+  dcl place_value floating;
+  dcl (chr,point_mark,digit_count) fixed;
+  dcl (integer_found,fraction_found,invalid_entry,negative) boolean;
+
+  length = integer_length + fraction_length + 3;
+  get_string('',1,input_string,length);
+
+  negative = false;
+  invalid_entry = false;  integer_found = true;  fraction_found = true; 
+  value = 0.0;  i = 0;    chr = -1;              point_mark = -1;
+
+  do while (i < input_string(0)) & (chr <> dot);
+    chr = byte(input_string,i);
+    if chr = dot then point_mark = i;
+    if chr = asc.min then do;
+      negative = true;
+      call pbyte(input_string,i,sp);
+    end;
+    i = i + 1;
+  end;
+  if (point_mark < 0) or (point_mark = input_string(0) - 1) 
+   then fraction_found = false;
+  if point_mark = 0 then integer_found = false;
+
+  digit_count = 0;  place_value = 1.0;  value = 0.0; 
+  if integer_found then do;
+    if point_mark < 0 then do;
+      i = input_string(0) - 1;
+      do while byte(input_string,i) = sp;
+        i = i - 1;
+      end;
+    end;
+    else i = point_mark - 1;
+
+    do while (i >= 0) & (not invalid_entry);
+      chr = byte(input_string,i);
+      if chr = sp then i = -1;
+      else do;
+        if (chr >= asc.0) & (chr <= asc.9) 
+         then value = value + (( chr - "60") * place_value);
+        else invalid_entry = true;
+        place_value = place_value * 10;
+        digit_count = digit_count + 1;
+      end;
+      i = i - 1;
+      if digit_count > integer_length then invalid_entry = true;
+    end;
+  end;
+
+  if fraction_found & (not invalid_entry) then do;
+    digit_count = 0;    place_value = .10;    i = point_mark + 1;
+    do while (i < input_string(0)) & (not invalid_entry);
+      chr = byte(input_string,i);
+      if chr = sp then i = input_string(0);
+      else do;
+        if (chr >= asc.0) & (chr <= asc.9) 
+         then value = value + (( chr - "60") * place_value);
+        else invalid_entry = true;
+        place_value = place_value / 10;
+        digit_count = digit_count + 1;
+      end;
+      i = i + 1;
+      if digit_count > fraction_length then invalid_entry = true;
+    end;
+  end;
+
+  if invalid_entry then value = 0.0;
+  if negative then value = 0.0 - value;
+  return value;
+
+end get_fnum;
+
+/***************************************************************************/
+dcl generate_perfect_wave lit 'call #generate_perfect_wave';
+#generate_perfect_wave: proc(number_of_samples);
+  dcl number_of_samples fixed;
+  dcl (i,j,k) fixed;
+  dcl (bin#,bin_base) fixed;
+  dcl scale fixed;
+
+  scale = (  shl(1,(bits_per_wave - 1))) -1;
+  do bin# = 0 to #_poly_bins-1;
+    call pbmwrite(bin#,0,0);
+    /*@@ do i = 0 to number_of_samples - 1;*/ 
+    do i = 0 to number_of_samples; 
+       /*@@write(psd) = int((scale*sin(i*2*3.14159265/(number_of_samples-1)))); */
+       write(psd) = int((scale*sin(i*2*3.14159265/(number_of_samples)))); 
+    end;
+  end;
+  bin# = 0;
+
+  do i = 0 to 64*(#_poly_bins-1) by 64;     /* ZERO EACH OF 4 SUBSYSTEMS  */
+    do j = 0 to 63;
+       write(psc) = i+j;  write(psf) = pswl;
+       write(psd) =  -1;  write(psd) = -(number_of_samples); /* wave table length*/
+       write(psd) =   0;  write(psd) = 0;   
+       write(psd) =  -1;  write(psd) = -(number_of_samples);
+       write(psd) =   0;  write(psd) = 1; /* phase increment of 1 */
+       write(psd) = increment - 1; 
+       write(psd) = 256 - modulus;
+       write(psd) =   0;                  /* off with no loop */
+    end;
+  end;
+end #generate_perfect_wave;
+
+/***************************************************************************/
+dcl init_ps_voices lit 'call #init_ps_voices';
+#init_ps_voices:  proc; /* set up ps voices */
+   dcl num_polyv fixed;
+   dcl (i,j,k)   fixed;
+
+   call polyinit;
+   do i = 0 to #_poly_bins - 1;
+     call pbmwrite(i,0,255);
+     write(psd) = 32767;
+   end;
+
+end #init_ps_voices;
+
+/***************************************************************************/
+dcl generate_poly lit 'call #generate_poly';
+#generate_poly: proc(bin#,chan,pan,vol,env);
+    dcl (bin#,chan,pan,vol,env) fixed;
+    dcl (l_vol,r_vol) fixed;
+    dcl bin_base fixed;
+
+    bin_base = bin# * 64;
+    l_vol = 0; r_vol = 0;
+    if pan = 0 then l_vol = vol;
+    else r_vol = vol;
+    if pan = 2 then l_vol = vol;
+
+    write(psc) = bin_base + chan;
+    write(psf) = pselim;
+    write(psd) = env;    write(psd) = env;
+
+    write(psf) = psrcvol;
+    write(psd) = r_vol;  write(psd) = l_vol;
+    write(psd) = r_vol;  write(psd) = l_vol;
+    write(psf) = 10;     write(psd) = 3;           
+
+    write(psc) = 0; /* reset to first bin */
+end #generate_poly;
+
+/***************************************************************************/
+poly_turn_on:  proc(bin#,chan,pan);                /* turn on poly channel   */
+   dcl (bin#,chan,pan)   fixed;
+   dcl (bin_base,i)      fixed;
+
+   bin_base = bin# * 64;
+   write(psc) = bin_base + CHAN;              /* SELECT CHANNEL         */
+   write(psf) = PSELIM;                       /* SET UP FOR LIMIT, CVAL */
+   write(psd) = 4095;   write(PSD)=4095;      /* LIMIT, CVAL TO MAX     */
+   write(psf) = PSRCVOL; 
+   write(psd) = PAN;    write(PSD)=4095-PAN;  /* R,L CVOL               */
+   write(psd) = PAN;    write(PSD)=4095-PAN;  /* R,L DVOL               */
+   write(psf) = PSON;   write(PSD) = 3;       /* TURN CHANNEL ON        */
+   do i = 1 to 1000; end;                     /* delay                  */
+
+end poly_turn_on;
+
+/***************************************************************************/
+poly_turn_off:  proc(bin#,chan);                      /* turn off poly channel  */
+   dcl (bin#,chan) fixed;
+   dcl bin_base fixed;
+
+   bin_base = bin# * 64;
+   write(psc) = bin_base + chan;
+   write(PSF)= PSELIM;                           /* SET UP FOR LIMIT, CVAL */
+   write(PSD)=0; write(PSD)=0;                   /* LIMIT, CVAL TO 0       */
+   write(PSF)= PSRCVOL;                          /* RIGHT CUR VOL          */
+   write(PSD)= 0; write(PSD)=0;                  /* R,L CVOL               */
+   write(PSD)= 0; write(PSD)=0;                  /* R,L DVOL               */
+   write(PSF)= PSON;                             /* ON/OFF                 */
+   write(PSD)= 0;                                /* TURN OFF               */
+end poly_turn_off;
+
+/***************************************************************************/
+dcl wait_for_voice lit 'call vwait';
+vwait: proc;
+   dcl i fixed;
+   do i = 1 to 15; end;
+end vwait;
+
+/***************************************************************************/
+search_for_input:  proc(map,index) returns (boolean);
+   dcl map     fixed array;                /* voice-mt input mapping array */
+   dcl index   fixed;                      /* array index                  */
+   dcl num_out fixed;
+   dcl i     fixed;                        /* counter                      */
+
+   map(index) = (-1);                      /* assume no connection         */
+   write(con) = "21";                      /* select mt operations         */
+
+   do i = 0 to 255;                        /* loop over mt input channels  */
+      write(mtdat) = vcon \ shl(7,8) \ i;    /* route voice i to output 7    */
+
+      wait_for_voice;                      /* delay for voice to start up  */
+       if read(mtdat) then                   /* found a routing              */
+        if map(index) = -1 then do;        /* if 1st route found then      */
+          map(index) = i;                  /* store mt input # in map      */
+          num_out = 0;                     /* assume no outputs            */
+          do j = 0 to 63;                  /* count multi-channel outputs  */
+            write(mtdat) = vcon\shl(j,8)\i; 
+            wait_for_voice;                /* delay for voice to start up  */
+            if read(mtdat) then num_out = num_out + 1;
+          end;
+          wchar(asc.0+i/100); wchar(asc.0+((i/10) mod 10)); wchar(asc.0+(i mod 10));
+        end;
+        else do;                           /* routed to > 1 mt input       */
+          if map(index) >= 0 then do;      /* if mt input in voice map then*/
+            mt_short(map(index)) = true;   /* mark that input in short map */
+            map(index) = -2;               /* mark input index in short map*/
+          end;
+          mt_short(i) = true;              /* mark input i in short map    */
+          wchar(bs); wchar(bs); wchar(bs); /* XXX out input on terminal    */
+          pstring('XXX');
+        end;
+
+      write(mtdat) = vcoff \ shl(7,8) \ i;   /* turn off routing for input   */
+   end;
+   if map(index) = -1 then pstring('   '); /* if no input found then       */
+
+   if num_out > num_output                 /* global num_output = the max  */
+     then num_output = num_out;            /*   # of outputs routed to     */
+
+   if map(index) < 0 then return false;    /* error occurred               */
+   else return true;                       /* voices mt input found        */
+
+end search_for_input;
+
+/***************************************************************************/
+route_ps_voices:  proc returns(boolean);
+   dcl routed boolean;
+   dcl (bin#,bin_base,i) fixed;
+
+   routed = true;
+   do i = 0 to 255;
+     mt_short(i) = false;
+   end;
+
+   do bin# = 0 to (#_poly_bins - 1);
+     bin_base = bin# * 64;
+     do i = 0 to (#_poly_voices(bin#) - 1);
+        call poly_turn_on(bin#,i,0);                      /* pan it to left */
+        pstring('              ');  pnum((bin_base/2)+i,2);  pstring('     ');
+        routed = routed & search_for_input(ps_map,bin_base+i+i);
+
+        call poly_turn_on(bin#,i,4095);                  /* pan it to right */
+        pstring('     ');
+        routed = routed & search_for_input(ps_map,bin_base+i+i+1);
+
+        call poly_turn_off(bin#,i);
+        if (i mod 2)=1 then crlf;
+     end;
+   end;
+   crlf;
+   return routed;
+end route_ps_voices;
+
+/************************************************************************/
+mt1_short: proc;                         /* display mt1 shorts          */
+   dcl (i,j,card_num,input_cnt) fixed;
+   dcl left_col boolean;
+
+    pstringr('The following MT1 inputs were involved:');
+    pstring('      ');                   /* margin                      */
+    card_num = -1;                       /* init an invalid mt1 card #  */
+    left_col = false;                    /* not in left col of display  */
+    input_cnt = 0;                       /* bad input per card count = 0*/
+                                         
+    do i = 0 to 255;                     /* do for each mt1 input       */
+      if mt_short(i) = true then do;     /* if mt input was shorted     */
+        if card_num <> int(i/8) then do; /* if input not on current card*/
+          wchar(bs); wchar(sp);          /* erase last comma displayed  */
+          if left_col then do;           /* if in left display column   */
+            left_col = false;            /* not there any more          */
+            do j = 1 to (8 - input_cnt); /* do for each good card input */
+              pstring('  ');             /* print spaces instead of n,  */
+            end;
+            pstring('     ');            /* margin between columns      */
+          end;                           
+          else do;                       /* if in right display column  */
+            left_col = true;             /* not there any more          */
+            crlf; pstring('      ');     /* carriage return, margin     */
+          end;
+          card_num = int(i/8);           /* update current mt1 card #   */
+          pstring('MT1 card #'); pnum(card_num,2); pstring(': ');
+          input_cnt = 0;
+        end;
+        pnum((i mod 8),1); pstring(','); /* display card input number   */
+        input_cnt = input_cnt + 1;
+      end;
+    end;   /* do i = 0 to 255 */
+    wchar(bs); wchar(sp);                /* erase last comma displayed  */
+
+end mt1_short;
+
+/***************************************************************************/
+ps_rte_err: proc;                        /* show PS routing errors         */
+  dcl (r_flag,s_flag,left_col) boolean;
+  dcl (i,j,card_num) fixed;
+
+  clear_screen;  pos(2,5);               /* clear screen, position cursor */
+  r_flag = false;                        /* init no-route flag to false   */
+  s_flag = false;                        /* init short flag to false      */
+  do i = 0 to (2*total_poly_voices)-1;   /* do for each voice (l & r)     */
+    if ps_map(i) = -1 then r_flag = true;/* if map has no-route, set flag */
+    if ps_map(i) = -2 then s_flag = true;/* if map has short, set flag    */
+  end;
+
+  if r_flag then do;                     /* if a voice didn't route then  */
+    pstringr('The following PS voices did not route:');
+    pstring('      ');
+    j = 0;
+    do i = 0 to (2*total_poly_voices)-1;           /* do for each voice (l & r)    */
+      if ps_map(i) = -1 then do;         /* if voice didn't route then   */
+        pnum(i/2,2);                     /* display channel number       */
+        if i & 1 then pstring('R');      /* if right then display 'R'    */
+        else pstring('L');               /* if left then display 'L'     */
+        pstring(',');                    /* display comma                */
+        j = j + 1;                       /* count voices listed on line  */
+        if j = 16 then do;               /* if 16 on this display line,  */
+          wchar(bs); wchar(sp);          /* erase last comma displayed   */
+          crlf; pstring('      '); j = 0;/* carriage return, margin      */
+        end; /* if */
+      end; /* if */
+    end; /* do */
+    wchar(bs); wchar(sp);                /* erase last comma displayed   */
+    crlf; crlf; pstring('    ');         /* skip a line, margin          */
+  end; /* if */
+
+  if s_flag then do;                     /* if mt inputs shorted then    */
+    pstringr('The following PS voices routed to more than one MT1 input:');
+    pstring('      ');
+    j = 0;                               /* count chans on display line  */
+    do i = 0 to (2*total_poly_voices)-1;           /* do for each voice (l & r)    */
+      if ps_map(i) = -2 then do;         /* if voice routed > 1 time     */
+        pnum(i/2,2);                     /* display channel number       */
+        if i & 1 then pstring('R');      /* if right then display 'R'    */
+        else pstring('L');               /* if left then display  'L'    */
+        pstring(',');                    /* display comma                */
+        j = j + 1;                       /* count chans on display line  */
+        if j = 16 then do;               /* if at end of display line    */
+          wchar(bs); wchar(sp);          /* erase last comma displayed   */
+          crlf; pstring('      '); j = 0;/* carriage return, margin      */
+        end; /* if */
+      end; /* if */
+    end; /* do */
+    wchar(bs); wchar(sp);                /* erase last comma displayed  */
+    crlf; crlf; pstring('    ');         /* skip a line, margin         */
+    call mt1_short;                      /* display mt1 shorts          */
+  end; /* if flag */
+
+end ps_rte_err;
+
+/***************************************************************************/
+dcl display_map_heading lit 'call map_heading';
+map_heading: proc;
+  pos(3,22);  pstring('MT1 Inputs');  pos(3,54); pstring('MT1 Inputs');
+  pos(4,14);  pstring('Chan   Left   Right'); 
+  pos(4,46);  pstring('Chan   Left   Right');
+  pos(5,14);  pstring('-------------------');
+  pos(5,46);  pstring('-------------------');
+  crlf;
+end map_heading;
+/***************************************************************************/
+mapps:proc;
+  dcl chr fixed;
+
+mapps1:;
+  clear_typeahead;
+  if total_poly_voices > 0 then do;                        /* poly voices exist */
+    clear_screen;
+    pos(1,14); pstring('PS voice routing, Multi-channel test - ');
+    display_release_date; 
+    display_map_heading;
+
+     if route_ps_voices then pstring('       Poly voices route properly');
+     else do;
+       wchar(bel); 
+       pstring('       PS voice routing error, press <RETURN> for more information...');
+       chr = rchar;
+       call ps_rte_err;
+     end;
+     crlf;
+     pstring('       Press <RETURN> to continue or any key to map PS voices again...');
+     chr = rchar;
+     if chr <> cr then goto MAPPS1;
+  end; /* poly voices exist */
+end mapps;
+
+/***************************************************************************/
+dcl set_poly_rate lit 'call hzcomp';
+hzcomp: proc(khz);  /* program to compute frequency table for Live Overdub */
+dcl (khz)     floating;
+dcl (i,j,k,l) fixed;
+dcl (inc,div) fixed;
+
+dcl (error)   floating;
+
+dcl (bestinc) fixed;
+dcl (bestdiv) fixed;
+dcl (besterr) floating;
+
+compute_rate:proc(inc,div) floating;   /* khz = (10000*inc)/(99*div); */
+   dcl (inc,div) fixed;
+   return (10000.0*inc)/(99.0*div);
+end compute_rate;
+
+bestinc=0; bestdiv=0; besterr=0;
+
+do div=175 to 225;       /* limit divisor range to avoid increment/remainder problems */
+   inc=int(khz*99.0*div/10000.0);
+   do i=0 to 1;          /* try inc, inc+1       */
+      if inc>div then inc=div;    /* limit to max */
+      error=abs(compute_rate(inc,div)-khz);
+      if bestdiv=0 then do;       /* first one     */
+         bestinc=inc;
+         bestdiv=div;
+         besterr=error;
+      end;
+      else if error<besterr
+      then do;
+         bestinc=inc;
+         bestdiv=div;
+         besterr=error;
+      end;
+      inc=inc+1;
+   end;
+end;
+increment  = bestinc; modulus  = bestdiv;  
+
+end hzcomp;
+
+/***************************************************************************/
+ps_setmode: proc(mode); /* set A/D mode */
+   dcl mode fixed;
+
+   write(psf) = psadmode;
+   write(psd) = mode;
+end ps_setmode;
+
+/***************************************************************************/
+ps_actchan: proc(channel, number); /* activate A/D channel(s) */
+   dcl channel fixed; /* channel to activate (0-15) */
+   dcl number  fixed; /* number of channels to activate at once */
+   dcl code    fixed;
+
+   write(psc) = (channel and "14"); /* set first channel in box */
+   write(psf) = psadact;
+
+   code = 0; /* no channels yet */
+   do channel = channel to channel + number - 1; /* activate all channels required */
+      code = (code or shl(1, channel and "3")); /* set channel number in that box */
+   end;
+
+   write(psd) = code; /* set channel number(s) in that box */
+end ps_actchan;
+
+/***************************************************************************/
+ps_maxchan: proc(channels, LOD); /* turn on A/D channels */
+   dcl channels fixed; /* number of sampling channels */
+   dcl LOD      fixed; /* 1: LOD, 0: STM, 3: LOD w/Monitor */
+
+   if LOD then channels = (channels or shl(LOD, 5)); /* set LOD bit */
+
+   write(psf) = psadmc;
+   write(psd) = channels;
+end ps_maxchan;
+
+/***************************************************************************/
+dcl set_stm_gain lit 'call #set_stm_gain';
+#set_stm_gain: proc(channel,gain) fixed;
+  dcl (channel,gain) fixed;
+  dcl mult    fixed; /* multiplier to write to A/D */
+  dcl multiplier data (4, 1,    3,     9,    27); /* table of multipliers */
+  dcl mult_value data (4, 0, "40", "140", "340"); /* values to write to A/D */
+  dcl chr fixed;
+  dcl bin# fixed;
+
+  bin# = 0;
+  if daughter_type(bin#) = analogic_daughter then gain = gain + 3;
+  else do;   /* NED daughter */
+     mult = 1;
+     do while ((mult <= multiplier (0)) and (gain >= multiplier (mult))); /* find multiplier */
+       mult = mult + 1;
+     end;
+     mult = mult - 1;                         /* point to correct multiplier */
+     gain = mult_value (mult) + 16*gain/multiplier (mult) - 16; /* get A/D gain */
+  end;
+
+  write(psc) = channel;                              /* select A/D channel */
+  write(psf) = psadvol;                              /* set gain */
+  write(psd) = gain;   
+
+end #set_stm_gain;
+
+/***************************************************************************/
+ps_on: proc(channel, type); /* turn poly channel on/off */
+   dcl channel fixed; /* channel to change */
+   dcl type fixed;    /* type of channel (0: off, 1: stop, 3: loop) */
+
+   write(psc) = channel; /* select poly channel */
+   write(psf) = pson;    /* turn the channel on */
+   write(psd) = type;
+end ps_on;
+
+/***************************************************************************/
+ps_wave: proc(channel, wavelen, waveaddr); /* set up poly wave table */
+   dcl channel  fixed; /* channel to set up */
+   dcl wavelen  fixed; /* wave table length (sectors) */
+   dcl waveaddr fixed; /* wave table address (sector) */
+
+   write(psc) = channel; /* select channel */
+   write(psf) = pswl; /* start with wave table length */
+   write(psd) = -wavelen; write(psd) = 0; /* wave table length */
+   write(psd) = waveaddr; write(psd) = 0; /* base address */
+   write(psd) = -wavelen; write(psd) = 0; /* loop length (entire wave table) */
+end ps_wave;
+
+/***************************************************************************/
+ps_freq: proc(channel, pi, inc, mod); /* set poly channel frequency */
+   dcl channel fixed; /* channel to set up */
+   dcl pi      fixed; /* phase increment (LSB) */
+   dcl inc     fixed; /* increment */
+   dcl mod     fixed; /* modulus */
+
+   write(psc) = channel; /* select channel */
+   write(psf) = pspi; /* write phase increment first */
+   write(psd) = 0;       write(psd) = pi; /* phase increment of PI */
+   write(psd) = inc - 1; write(psd) = 256 - mod; /* increment of INC/modulus of MOD (if MOD = 2, 50 kHz) */
+end ps_freq;
+
+/***************************************************************************/
+ps_volume: proc(channel, on); /* turn on volume for playback channel */
+   dcl channel fixed; /* channel to turn volume on */
+   dcl on      fixed; /* 1: on, 0: off */
+
+   if on then on = 4095; /* set volume to max */
+
+   write(psc) = channel; /* select channel */
+   write(psf) = pselim; /* set envelope */
+   write(psd) = on; write(psd) = on; /* limit and current value */
+   
+   write(psf) = psrcvol; /* set volume */
+   write(psd) = on; write(psd) = on; /* right and left current */
+   write(psd) = on; write(psd) = on; /* right and left limit */
+
+end ps_volume;
+/***************************************************************************/
+dcl display_fields lit 'call #display_fields';
+#display_fields: proc;
+
+    pos(4,column2);
+    do case poly_mode;
+      pstring('Sync');
+      pstring(' DTD');
+    end; /* case */
+
+    pos(5,column2+2);
+    do case input_channel;
+       pstring('1A'); pstring('1B'); pstring('1C'); pstring('1D');
+       pstring('2A'); pstring('2B'); pstring('2C'); pstring('2D');
+       pstring('3A'); pstring('3B'); pstring('3C'); pstring('3D');
+       pstring('4A'); pstring('4B'); pstring('4C'); pstring('4D');
+    end; /* case */
+
+  pos( 6,column2);  pnum(stm_gain,4);
+  pos( 7,column2);  pnum(stm_mode,4);
+  pos( 8,column2);  pnum(output_channel,4);
+  pos( 9,column2-1); 
+    do case poly_pan;
+      pstring(' left');
+      pstring('right');
+      pstring(' both');
+    end; /* case */
+
+  pos(10,column2);    pnum(poly_volume,4);
+  pos(11,column2-3);  fprint(sample_rate,3,2);
+  pos(12,column2);    pnum(increment,4);
+  pos(13,column2);    pnum(modulus,4);
+  pos(14,column2);  
+  do case waveform;
+    pstring('sine');
+  end;
+
+  pos(15,column2);  pnum(samples_per_wave,4);
+  pos(16,column2);  pnum(bits_per_wave,4);
+  pos(17,column2);  pnum(multi_out,4);
+
+end #display_fields;
+
+/***************************************************************************/
+dcl display_menu lit 'call #display_menu';
+#display_menu: proc;
+  dcl bin# fixed;
+
+  clear_screen;
+  pos(1,column1); pstring('A/D D/A Testing Program '); display_release_date;
+  pos(2,column1); pstring('----------------------------------');
+
+  pos( 4,column1);  pstring('Polyphonic mode');
+  pos( 5,column1);  pstring('STM Input channel');
+
+  pos( 6,column1);  pstring('  Gain ');
+  if daughter_type(bin#) = analogic_daughter then pstring('(dB)');
+  pos( 6,column2);  pnum(stm_gain,4);
+
+  pos( 7,column1);  pstring('  STM relay mode'); 
+  pos( 8,column1);  pstring('Output channel'); 
+  pos( 9,column1);  pstring('  Pan'); 
+  pos(10,column1);  pstring('  Volume (0-4095)');
+  pos(11,column1);  pstring('  Sample rate'); 
+  pos(12,column1);  pstring('    Increment');
+  pos(13,column1);  pstring('    Modulus');
+  pos(14,column1);  pstring('Waveform');  
+  pos(15,column1);  pstring('  Samples per wave');
+  pos(16,column1);  pstring('  Bits per wave');
+  pos(17,column1);  pstring('Multichannel out'); 
+
+  display_fields;
+
+  pos(22,5); pstring('<Break> - Exit ');
+
+end #display_menu;
+
+/***************************************************************************/
+dcl input_value lit 'call #input_value';
+#input_value: proc(field);
+  dcl field fixed;
+  dcl i fixed;
+  dcl nop lit 'i = i';
+  dcl bin# fixed;
+
+  bin# = 0;      /* only bin 0 for now */
+
+  do case field;
+    nop;   /* poly mode */
+    nop;   /* input channel */
+    do;
+      stm_gain = getnum;
+      if daughter_type(0) = ned_daughter then do;
+        if stm_gain < 1 then stm_gain = 1;
+        if stm_gain > 25 then stm_gain = 25;
+      end;
+      else do;
+        if stm_gain < -3 then stm_gain = 0;
+        if stm_gain > 25 then stm_gain = 25;
+      end; 
+    end;
+    nop;   /* stm mode */
+    do; /* 4 */
+      output_channel = getnum;
+      if output_channel > max_out_channel then output_channel = max_out_channel;
+      if output_channel < 0 then output_channel = 0;
+      if poly_mode = dtd then do;
+        if output_channel >   (#_poly_voices(0)-1) 
+        then output_channel = (#_poly_voices(0)-1);
+      end;
+    end;
+    nop;   /* poly pan */
+    do;
+      poly_volume = getnum;
+      if poly_volume < 0 then poly_volume = 0;
+      if poly_volume > 4095 then poly_volume = 4095;
+    end;
+    do;  /* sample rate */
+      sample_rate = get_fnum(3,2); 
+      if sample_rate > 101.01 then sample_rate = 101.01;
+      if sample_rate < 10.0 then sample_rate = 10.0;
+      if prm_exists(0) then set_poly_rate(sample_rate);
+      else do;
+        if sample_rate > 50.0 then do;
+          if input_channel > 1 then do;
+            sample_rate = 50.0;
+            stm_mode = 0;
+          end;
+          else stm_mode = 1;
+        end;
+        else stm_mode = 0;
+        set_poly_rate(sample_rate);
+      end;
+    end;
+    do;  /* increment */
+      i = getnum;
+      x = (i*(10000))/(modulus*99.0);  /* x = sample rate */
+      if (x > 10.0) & (x <= 101.01) then do;
+        if prm_exists(0) then do;
+          increment = i; sample_rate = x;
+        end;
+        else do;
+          if x > 50.0 then do;
+            if input_channel < 2 then do;
+              stm_mode = 1;
+              increment = i; sample_rate = x;
+            end;
+          end;
+          else do;
+            stm_mode = 0;
+            increment = i; sample_rate = x;
+          end;
+        end;
+      end;
+    end;
+    do; /* modulus */
+      i = getnum;
+      x = (increment*(10000))/(i*99.0);   /* x = sample rate */
+      if (x > 10.0) & (x <= 101.01) then do;
+        if prm_exists(0) then do;
+          modulus = i; sample_rate = x;
+        end;
+        else do;
+          if x > 50.0 then do;
+            if input_channel < 2 then do;
+              stm_mode = 1;
+              modulus = i; sample_rate = x;
+            end;
+          end;
+          else do;
+            stm_mode = 0;
+            modulus = i; sample_rate = x;
+          end;
+        end;
+      end;
+    end;
+    nop; /* waveform */
+    do;
+      samples_per_wave = getnum;
+      if samples_per_wave <   4 then samples_per_wave =   4;
+      if samples_per_wave > 256 then samples_per_wave = 256;
+    end;
+    do;
+      bits_per_wave = getnum;
+      if bits_per_wave <  0 then bits_per_wave =  0;
+      if bits_per_wave > 16 then bits_per_wave = 16;
+    end;
+    do;
+      multi_out = getnum;
+      if multi_out < 0 then multi_out = 0;
+      if multi_out > (num_output-1) then multi_out = (num_output-1);
+    end;
+ end; /* case */
+end #input_value;
+
+/***************************************************************************/
+dcl position_cursor lit 'call #position_cursor';
+#position_cursor: proc(field);
+  dcl field fixed;
+
+  do case field;
+    pos( 4,column2);
+    pos( 5,column2);
+    pos( 6,column2);
+    pos( 7,column2);
+    pos( 8,column2);
+    pos( 9,column2);
+    pos(10,column2);
+    pos(11,column2-3);
+    pos(12,column2);
+    pos(13,column2);
+    pos(14,column2);
+    pos(15,column2);
+    pos(16,column2);
+    pos(17,column2);
+    pos(18,column2);
+  end;
+
+end #position_cursor;
+
+/***************************************************************************/
+number_allowed: proc(field) returns (boolean);
+  dcl field fixed;
+
+  do case field;
+    return false;  /* poly mode */
+    return false;  /* STM input channel */
+    return true;   /* STM gain */
+    return false;  /* STM relay mode */
+    return true;   /* output channel */
+    return false;  /* poly pan */
+    return true;   /* poly volume */
+    return true;   /* sample rate */
+    return true;   /* increment */
+    return true;   /* modulus */
+    return false;  /* waveform */
+    return true;   /* samples per wave */
+    return true;   /* bits per wave */
+    return true;   /* multichannel out */
+  end;
+
+end number_allowed;
+
+
+/***************************************************************************/
+dcl setup_genda lit 'call #setup_genda';
+#setup_genda: proc;
+   dcl (bin#,chan) fixed;
+
+   bin# = 0;
+   if output_channel > 31 then bin# = 1;
+   if output_channel > 63 then bin# = 2;
+   chan = output_channel mod 32;
+
+   call polyinit;
+   generate_perfect_wave(samples_per_wave);
+   generate_poly(bin#,chan,poly_pan,poly_volume,4095);
+
+  if multi_channel_exists then do; /* route to current multi-channel output */
+    write(con) = "21";                         /* select mt operations         */
+    do case poly_pan; /* 0,1,2 - left,right,both */
+      write(mtdat) = vcon \ shl(multi_out,  8) \ ps_map(2*output_channel);
+      write(mtdat) = vcon \ shl(multi_out,  8) \ ps_map((2*output_channel)+1); 
+      do;
+        write(mtdat) = vcon \ shl(multi_out,  8) \ ps_map(2*output_channel);
+        write(mtdat) = vcon \ shl(multi_out+1,8) \ ps_map((2*output_channel)+1); 
+      end;
+    end; /* case */
+  end;
+
+end #setup_genda;
+/***************************************************************************/
+dcl turn_off_genda lit 'call #turn_off_genda';
+#turn_off_genda: proc;
+  dcl (bin#,chan) fixed;
+
+   bin# = 0;
+   if output_channel > 31 then bin# = 1;
+   if output_channel > 63 then bin# = 2;
+   chan = output_channel mod 32;
+   call poly_turn_off(bin#,chan);
+
+  if multi_channel_exists then do; /* route to current multi-channel output */
+    write(con) = "21";                         /* select mt operations         */
+    do case poly_pan; /* 0,1,2 - left,right,both */
+      write(mtdat) = vcoff \ shl(multi_out,  8) \ ps_map(2*output_channel);
+      write(mtdat) = vcoff \ shl(multi_out,  8) \ ps_map((2*output_channel)+1); 
+      do;
+        write(mtdat) = vcoff \ shl(multi_out,  8) \ ps_map(2*output_channel);
+        write(mtdat) = vcoff \ shl(multi_out+1,8) \ ps_map((2*output_channel)+1); 
+      end;
+    end; /* case */
+  end;
+
+end #turn_off_genda;
+
+/***************************************************************************/
+dcl setup_adda lit 'call #setup_adda';
+#setup_adda: proc;
+  dcl (i,chr) fixed;
+  dcl bin# fixed;
+  dcl #input_channel fixed;
+  dcl channels lit '1';
+  dcl ad_master lit '0';
+
+  #input_channel = input_channel;
+
+  do i = 0 to 15 by 4;         /* do once for each box */
+    write(psc) = i;            /* deactivate all channels */
+    write(psf) = psadact;
+    write(psd) = 0;
+  end;
+
+
+  if ^prm_exists(0) then do;
+    if (stm_mode = 1) & ((#input_channel mod 4) > 0)    /* if > 50 Khz */
+    then #input_channel = #input_channel + 1;
+  end;
+
+  poly_address = 0;         /* sector address of where to store sampled data */
+  call ps_setmode(stm_mode);
+  set_stm_gain(#input_channel,stm_gain);
+
+  call ps_wave (ad_master,256,poly_address); /* set up master wave table */
+  call ps_wave (output_channel,256,poly_address); /* set up master playback wave table */
+  call ps_wave (32, 256, poly_address);           /* set up master LOD channel */
+  
+  call ps_freq (ad_master,0,1,1); /* set up the frequency (no phase increment, 50kHz) */
+  call ps_freq (output_channel,0,1,1); /* set up the frequency (no phase increment, 50kHz) */
+  call ps_freq (32, 0, increment, modulus); 
+
+  call ps_actchan (#input_channel, channels); 
+  if output_channel = 0 then  call ps_maxchan (channels, 3);         /* turn on the A/D channels (LOD w/ monitor mode) */
+  else call ps_maxchan (channels, 1);         /* turn on the A/D channels (LOD) */
+
+  call ps_on (ad_master,3);          /* turn A/D master channel on with looping */
+  call ps_on (output_channel,3);     /* turn output channel off */
+  call ps_on (32, 3);                /* turn on LOD master */
+  /* @@call ps_volume (output_channel,1);*/ /* turn output channel volume on */
+  generate_poly(0,output_channel,poly_pan,poly_volume,4095);
+
+  if multi_channel_exists then do; /* route to current multi-channel output */
+    write(con) = "21";                         /* select mt operations         */
+    do case poly_pan; /* 0,1,2 - left,right,both */
+      write(mtdat) = vcon \ shl(multi_out,  8) \ ps_map(2*output_channel);
+      write(mtdat) = vcon \ shl(multi_out,  8) \ ps_map((2*output_channel)+1); 
+      do;
+        write(mtdat) = vcon \ shl(multi_out,  8) \ ps_map(2*output_channel);
+        write(mtdat) = vcon \ shl(multi_out+1,8) \ ps_map((2*output_channel)+1); 
+      end;
+    end; /* case */
+  end;
+end #setup_adda;
+
+/***************************************************************************/
+dcl turn_off_adda lit 'call #turn_off_adda';
+#turn_off_adda: proc;
+  dcl ad_master lit '0';
+
+  call ps_on (32,0); /* turn off LOD master */
+  call ps_on (output_channel,0); /* turn master playback channel off */
+  call ps_on (ad_master,0); /* turn master channel off */
+  call ps_maxchan (0, 1);             /*  turn off A/D */
+  /* @@call ps_volume (output_channel,0);*/ /* turn master volume off */
+  generate_poly(0,output_channel,poly_pan,0,4095);
+
+  if multi_channel_exists then do; /* route to current multi-channel output */
+    write(con) = "21";                         /* select mt operations         */
+    do case poly_pan; /* 0,1,2 - left,right,both */
+      write(mtdat) = vcoff \ shl(multi_out,  8) \ ps_map(2*output_channel);
+      write(mtdat) = vcoff \ shl(multi_out,  8) \ ps_map((2*output_channel)+1); 
+      do;
+        write(mtdat) = vcoff \ shl(multi_out,  8) \ ps_map(2*output_channel);
+        write(mtdat) = vcoff \ shl(multi_out+1,8) \ ps_map((2*output_channel)+1); 
+      end;
+    end; /* case */
+  end;
+
+end #turn_off_adda;
+
+/***************************************************************************/
+/***********************     Main Program     ******************************/
+/***************************************************************************/
+clear_screen;
+/* new multi-channel kludge code for route after powerup */
+write(con) = "21";                      /* select mt operations         */
+do i = 0 to 255;                        /* loop over mt input channels  */
+   write(mtdat) = vcon \ shl(7,8) \ i;  /* route voice i to output 7    */
+end;                                  
+do i = 0 to 100; Really.Do.Delay(1); Really.Run.Host(); end;
+do i = 0 to 255;                            /* loop over mt input channels  */
+   write(mtdat) = vcoff \ shl(7,8) \ i;     /* turn off routing for input   */
+end;
+do j = 0 to 100; Really.Do.Delay(1); Really.Run.Host(); end;
+
+/* if poly_exists then initialize_poly_wave(dc_hi); */
+do bin# = 0 to (#_poly_bins - 1);
+  do i = 0 to (#_poly_voices(bin#) - 1); 
+     /*call poly_turn_on(bin#,i,0,4095);   */ /* pan it to left */
+     call poly_turn_on(bin#,i,4095); /* pan it to right */
+     call poly_turn_off(bin#,i);
+  end;                                   
+end;
+/*************/
+
+if #_poly_bins > 1 then do;
+  max_out_channel = 32 * (#_poly_bins - 1);
+end;
+max_out_channel = max_out_channel + #_poly_voices(#_poly_bins-1) -1;
+
+bin# = 0;
+if #_poly_mbytes(bin#) = 0 then do;
+   pstring('No poly memory.');  flush_term;
+   call exit(0);
+end;
+
+write(con)="20";                             /* check MT3                 */
+if (read(mtdat)) then do;
+  multi_channel_exists = true;
+  if poly_exists then do;
+     init_ps_voices;
+     if #_poly_voices(bin#) > 0 then call mapps; 
+  end;
+end;
+else multi_channel_exists = false;
+
+current_field = 0;
+
+poly_mode         = sync;
+input_channel     = 0;
+
+if daughter_type(0) = ned_daughter then stm_gain = 1;
+else stm_gain = 0;  /* dB */
+
+stm_mode          = 0;
+output_channel    = 0;
+poly_pan          = both;
+poly_volume       = 4095;
+sample_rate       = 50.0;
+increment         = 99;    
+modulus           = 200;   
+waveform          = sine;
+samples_per_wave  = 50;
+bits_per_wave     = 16;
+multi_out         = 0;
+
+display_menu;
+if poly_mode = dtd then setup_adda; 
+else setup_genda;
+position_cursor(current_field);
+
+do forever;
+  chr = peek;
+  if chr <> -1 then do;
+    if (chr > "H2F") & (chr < "H3A") then do; /* a number was typed */
+      if number_allowed(current_field) then do;
+        if poly_mode = dtd then turn_off_adda;
+        else turn_off_genda;
+        input_value(current_field);
+        if poly_mode = dtd then setup_adda;
+        else setup_genda;
+        display_fields;
+        position_cursor(current_field);
+      end;
+      else clear_typeahead;
+    end;
+    else do;
+      chr = rchar;
+      if chr = sp then do;
+        if poly_mode = dtd then turn_off_adda;
+        else turn_off_genda;
+        do case current_field;
+          do;   /* 0 */
+            if psadc_exists(0) then do;
+              poly_mode = (poly_mode + 1) mod 2;
+            end;
+            else do;
+              pos(status_line1); 
+              pstring('DTD mode not possible, no PSADC found. Press <RETURN> to continue ... ');
+              chr = rchar; pos(status_line1); erase_line;
+            end;
+          end; 
+          do;  /* 1 */
+            input_channel = (input_channel + 1) mod (4 * #_stm_boxes(bin#));
+            if input_channel > (2 * #_daughters(bin#)) - 1
+              then input_channel = 0;
+            if (^prm_exists(0)) & (sample_rate > 50.0) then do;
+              if input_channel > 1 then input_channel = 0;
+            end;
+          end;
+          do; /* 2 */
+            stm_gain = (stm_gain + 1) mod 25;
+            if (daughter_type(0) = ned_daughter) & (stm_gain = 0) 
+            then stm_gain = 1;
+          end;
+          do; /* 3 */
+            if ^prm_exists(0) then do;
+              stm_mode = (stm_mode + 1) mod 2;
+            end;
+          end;
+          do; /* 4 */
+            output_channel = output_channel + 1;
+            if output_channel > max_out_channel then output_channel = 0;
+          end;
+          poly_pan = (poly_pan + 1) mod 3; /* 5 */
+          poly_volume = (poly_volume + 32) mod 4096; /* 6 */
+          do; /* 7 */
+            if prm_exists(0) 
+            then sample_rate = (sample_rate + 1.0) mod 102;
+            else do;
+              if sample_rate >= 50.0 then do;
+                if input_channel < 2 then do;
+                  stm_mode = 1;
+                  sample_rate = (sample_rate + 1.0) mod 102;
+                end;
+              end;
+              else stm_mode = 0;
+            end;
+            set_poly_rate(sample_rate);
+          end;
+          do; /* 8 */
+            i = (increment + 1) mod 256;
+            x = (i*(10000))/(modulus*99.0);
+            if prm_exists(0) then do;
+               increment = i; sample_rate = x;
+            end;
+            else do;
+              if (x > 50.0) then do;
+                if input_channel < 2 then do;
+                  stm_mode = 1;
+                  increment = i;
+                  sample_rate = x;
+                end;
+              end;
+              else do;
+                stm_mode = 1;
+                increment = i;
+                sample_rate = x;
+              end;
+            end;
+          end;
+          do; /* 9 */
+            i = (modulus + 1) mod 256;
+            x = (increment*(10000))/(i*99.0);
+            if prm_exists(0) then do;
+               modulus = i; sample_rate = x;
+            end;
+            else do;
+              if (x > 50.0) then do;
+                if input_channel < 2 then do;
+                  stm_mode = 1;
+                  modulus = i;
+                  sample_rate = x;
+                end;
+              end;
+              else do;
+                stm_mode = 1;
+                modulus  = i;
+                sample_rate = x;
+              end;
+            end;
+          end;
+
+          waveform = 0;
+          samples_per_wave = (samples_per_wave + 1) mod 255;
+          bits_per_wave = (bits_per_wave + 1) mod 17;
+          do;
+            multi_out = (multi_out + 1) mod 32;
+            if multi_out > (num_output-1) then multi_out = 0;
+          end;
+        end; /* case */
+
+        if poly_mode = dtd then setup_adda;
+        else setup_genda;
+        display_fields;
+        position_cursor(current_field);
+      end;
+      if (chr = cur.up) or (chr = vt) then do;
+        if current_field > 0 then current_field = current_field - 1;
+        position_cursor(current_field);
+      end;
+      if (chr = cur.down) or (chr = lf) then do;
+        if current_field < 13 then current_field = current_field + 1;
+        position_cursor(current_field);
+      end;
+
+      if chr = 0 then do;
+        call polyinit;
+        call exit(0);
+      end;
+
+    end;
+  end;
+
+end;  /* Do forever */
+

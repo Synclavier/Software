@@ -1,0 +1,1395 @@
+/*	:SYNRSOU:05-BUTT:174-PRF4  ADDITIONAL BUTTON ROUTINES - $SUBTITLE  PROCESS TRACK BUTTONS	*/
+
+/*
+Modified:
+2002/08/10 - TY  - Added Conditionally_Set_Solos() for long-awaited track solo functions.
+2000/10/07 - TY  - Modified RTE.BUTTON() to handle the mod wheel proxy parameter
+1999/04/20 - TY  - Changed the VK window prompts for the functions which generate tempo maps from a track,
+						 to use nomenclature consistent with the prompts for the functions which erase the maps.
+1999/04/12 - TY  - Made modifications to account for the independence of CLICK.DISP.MODE from CLICK.TRACK.MODE.
+1999/03/22 - TY  - Removed some redundant code from "TRACK.BUTTON"
+1998/07/12 - TY  - Mark is automatically set to on when the user sets it's value by holding
+						 mark while pressing a track button.
+1998/07/08 - TY  - Rewrote the HELD.MARK.BUTTON block of TRACK.BUTTON to work with click tracks.
+1998/06/26 - TY  - Modified the SKT case of TRACK.BUTTON to suppress the copying of track head
+						 parameters to the keyboard when only selected partials are being recalled
+						 (i.e., when partial buttons are held).  Also nuked unnecessary variable TMP.
+1998/06/24 - TY  - Moved Create.Tempo.Map.From.Track code from TRACK.BUTTON to the
+						 "release click button" part of PARAMETER.BUTTON in :SYNRSOU:05-BUTT:171-PRF1.
+						 Replaced it here with code allowing the user to select one of several
+						 click track functions.
+1991/12/15 - PF  - Added ability to toggle MIDI Sustain Mode On/Off
+1991/03/20 - PF  - Added Create.Tempo.Map.From.Track code
+1990/09/06 - TSS - ENHANCED PRESSURE CALIBRATION FOR REV 2 TRIPP KBD
+1990/07/16 - PF  - Made Mark Start/Track Button work with Meter Map
+1989/09/22 - TSS - Made pressure calibration write to disk after each key
+1989/08/24 - PF  - Add copy of THD.MIDI.PATH in TRACK.BUTTON
+1989/06/14 - TSS - Added code to run pressure calibration stuff
+1989/03/28 - TSS - Fixed bug in prior SKT bug fix
+1989/03/21 - TSS - Fix bug where SKT was not getting files from Optical
+1988/11/10 - PF  - bug fix for SPLIT function and STOP button
+1988/10/20 - PF  - Set new.motion in new seq info on mark start change
+1988/04/13 - PF  - ADDED CODE FOR ARMING MULTIPLE TRACKS(MULTI RECORD MODE)
+1988/04/13 - PF  - CHANGED INFO LOGIC TO BLINK BUTTONS WITH TRK HEAD BUT NO NOTES
+1988/03/15 - cj  - Send over info to dtd after changing track volume
+1987/12/18 - MWH - Merge poly updates with N-Final plus AEE sources
+1987/11/12 - MWH - Make timer comparisons unsigned to fix "30 sec hang"
+1987/09/09 - MWH - ADDED PREFERED POLY BIN TO TRACK HEADER
+1987/06/23 - cj  - broke out track info trigger
+1987/04/16 - TS  - MADE TOGGLE.TRACK.SOLO.STATE TAKE A TRK RANGE
+1987/04/14 - TS  - ADDED ARG TO BOUNCE.DOWN CALL
+1987/01/19 - TS  - sets NEW.ENTRY.WRITES bit after bank or entry write
+1986/05/15 - "official" creation of release-M modules
+*/
+
+DCL HELD.KCV.BUTTON				FIXED PUBLIC;		/*	USED FOR SETTING KCV			*/
+DCL KCV.TRACK						FIXED PUBLIC;		/*	FOR KCV OUTPUT					*/
+DCL DISPLAY.TRACK.INFO			FIXED PUBLIC;		/*	TIME TO DO TRK DISPLAY		*/
+DCL DISPLAY.TRACK.#				FIXED PUBLIC;		/*	ABS. TRK # TO DISPLAY		*/
+DCL (BANK.WRITE,ENTRY.WRITE)	FIXED PUBLIC;
+DCL MIDISUST.MODE					FIXED PUBLIC;
+
+CLEAR.TRACK.SOLO.STATES: proc public swapable;	//	clear solo state of track
+	dcl abs.trk#			fixed;
+	dcl recompute.flag	boolean;
+
+	recompute.flag = false;
+	clear.eras.button();
+
+	write(mam)	= tbut.ptr;
+
+	do abs.trk# = num.kbd.tracks to 255;
+
+		write(mal)	= abs.trk#;
+
+		if
+		(	(recd == false)											//	not recording
+		||	(	(abs.trk# != recd.trk)								//	not on this synclavier track
+			&&	(	(recd.trk == 0)									//	synclavier isn't recording
+				||	((read(md)&b.ready.trk) == 0)					//	this track is unarmed
+				)
+			)
+		)
+		{
+			if ((read(md)&b.soloed.trk) != 0)					//	only unsolo if currently soloed
+			{
+				write(md)	= read(md)&(not b.soloed.trk);	//	clear solo bit
+				num.of.soloed.tracks	= num.of.soloed.tracks-1;
+
+				if (abs.trk# == recd.trk)	recd.trk	= 0;		//	if track was blinking, then turn it off
+
+				recompute.flag	= true;
+			}
+		}
+	end;
+
+	if (recompute.flag != false)
+	{
+		call compute.active.trks;									//	recompute active.tracks
+		call display.track.buttons;								//	display new track buttons
+	}
+
+	RETURN 1;
+end CLEAR.TRACK.SOLO.STATES;
+
+#if (false)
+
+//	For the "Toggle Solos" function in the S-page's "Track Solos" dialog
+//	Toggle_Solos() brainlessly swaps the on/off state of each button.  This function is provided
+//	to make it quick and easy for a user to erase all tracks *except* the soloed tracks.
+//	Note that Toggle_Solos() only applies to sequencer tracks 1 - 200.
+Toggle_Solos: proc public swapable;
+	dcl track				fixed;
+	dcl recompute.flag	boolean;
+
+	clear.eras.button();
+
+	write(mam)	= tbut.ptr;
+
+	do track = num.kbd.tracks to first.lod.track-1;
+
+		write(mal)	= track;
+
+		if
+		(	(recd == false)										//	not recording
+		||	(	(track != recd.trk)								//	not on this synclavier track
+			&&	(	(recd.trk == 0)								//	synclavier isn't recording
+				||	((read(md)&b.ready.trk) == 0)				//	this track is unarmed
+				)
+			)
+		)
+		{
+			if ((read(md)&b.soloed.trk) == 0)				//	if this track was unsoloed...
+			{
+				num.of.soloed.tracks	= num.of.soloed.tracks + 1;
+				//	arm for record if not already recording and no DtoD tracks armed
+				if ((recd == 0) && (lod.recd.tracks == 0))	recd.trk	= track;
+			}
+			else														//	if this track was soloed...
+			{
+				num.of.soloed.tracks	= num.of.soloed.tracks - 1;
+				//	if track was blinking, then turn it off
+				if (track == recd.trk)								recd.trk	= 0;
+			}
+
+			write(md)	= read(md) xor b.soloed.trk;		//	toggle the solo bit
+		}
+	end;
+
+	call compute.active.trks;									//	recompute active.tracks
+	call display.track.buttons;								//	display new track buttons
+
+end Toggle_Solos;
+
+#endif
+
+//	Conditionally_Set_Solos() solos all tracks meeting the condidions specified by function_id
+//	and unsolos all other tracks.  Note that Conditionally_Set_Solos() only applies to sequencer tracks 1 - 200.
+
+//	Possible improvement:
+//	The use of FIND.FIRST.NONREST() for case 1 means that tracks containing only loops will be soloed as well.
+//	Perhaps we should write a modified version of FIND.FIRST.NONREST() that ignores ilp data.
+
+Conditionally_Set_Solos: proc(function_id) public swapable;
+	dcl function_id		fixed;	//	specifies what function to use to determine the solo state for each track
+	dcl track				fixed;
+	dcl solo_state			fixed;	//	remember the prior solo state of the track
+	dcl bSoloThisTrack	boolean;
+	dcl recompute.flag	boolean;
+
+	recompute.flag = false;
+	clear.eras.button();
+
+	do track = num.kbd.tracks to first.lod.track-1;
+
+		write(mam)	= tbut.ptr;
+		write(mal)	= track;
+		solo_state	= read(md) & b.soloed.trk;
+
+		if
+		(	(recd == false)											//	not recording
+		||	(	(track != recd.trk)									//	not on this synclavier track
+			&&	(	(recd.trk == 0)									//	synclavier isn't recording
+				||	((read(md)&b.ready.trk) == 0)					//	this track is unarmed
+				)
+			)
+		)
+		{
+			do case function_id;
+				{															//	CASE 0:	Solo all non-blank tracks
+					write(mam)		= trk.head;
+					write(mal)		= track;
+					bSoloThisTrack	= (read(md) != NULL);		//	solo only if this track has been allocated a header
+				}
+				bSoloThisTrack	= FIND.FIRST.NONREST(track);	//	CASE 1:	Solo all tracks with events
+				bSoloThisTrack	= FIND.FIRST.NOTE(track);		//	CASE 2:	Solo all tracks with sounding notes
+				bSoloThisTrack	= (solo_state == 0);				//	CASE 3:	Toggle Solos
+			end;
+
+			//	reset extmem pointers since the functions in the do case block above just altered them
+			write(mam)	= tbut.ptr;
+			write(mal)	= track;
+
+			if (bSoloThisTrack == false)							//	we want this track unsoloed
+			{
+				if (solo_state != 0)									//	if this track was soloed...
+				{
+					write(md)	= read(md) & (!b.soloed.trk);	//	clear solo bit
+					num.of.soloed.tracks	= num.of.soloed.tracks - 1;
+					//	if track was blinking, then turn it off
+					if (track == recd.trk)								recd.trk	= 0;
+					recompute.flag	= true;
+				}
+			}
+			else	//	if (bSoloThisTrack == true)				//	we want this track soloed
+			{
+				if (solo_state == 0)									//	if this track was unsoloed...
+				{
+					write(md)	= read(md) | b.soloed.trk;		//	set solo bit
+					num.of.soloed.tracks	= num.of.soloed.tracks + 1;
+					//	arm for record if not already recording and no DtoD tracks armed
+					if ((recd == 0) && (lod.recd.tracks == 0))	recd.trk	= track;
+					recompute.flag	= true;
+				}
+			}
+		}
+	end;
+
+	if (recompute.flag != false)
+	{
+		call compute.active.trks;								//	recompute active.tracks
+		call display.track.buttons;							//	display new track buttons
+	}
+end Conditionally_Set_Solos;
+
+/*	TOGGLE.TRACK.SOLO.STATE HANDLES THE SOLO/UNSOLO FOR A SINGLE TRACK.  IF THE TRACK IS	*/
+/*	A GROUP TRACK, THAN ALL MEMBERS OF THE GROUP WILL BE SOLOED OR UNSOLOED AS	NEEDED.		*/
+
+TOGGLE.TRACK.SOLO.STATE: PROC (THE_TRACK) PUBLIC SWAPABLE;	/*	TOGGLE SOLO STATE OF TRACK	*/
+	DCL THE_TRACK			FIXED;
+	DCL RECOMPUTE.FLAG	BOOLEAN;
+	DCL GRPLIST				FIXED;
+	DCL (I,J)				FIXED;
+
+	CLEAR.ERAS.BUTTON();												/*	CLEAR ERASE SETTING					*/
+
+	RECOMPUTE.FLAG	= FALSE;
+	GRPLIST			= TRK.HEAD.LOOKUP(THE_TRACK, THD.GROUPLIST);	/*	GET POSSIBLE GROUP LIST		*/
+
+	IF (GRPLIST != 0)													/*	IF IS GROUP TRACK, SOLO/UNSOLO	*/
+	{																		/*	AS GROUP									*/
+		WRITE(MAM) = TBUT.PTR;
+		WRITE(MAL) = THE_TRACK;
+
+		I = READ(MD) & B.SOLOED.TRK;								/*	SEE IF GROUP IS NOW SOLOED			*/
+
+		CLEAR.GRP.SEL.BITS();										/*	CLEAR GROUP SELECT BITS				*/
+		RECURS.TRACK.GROUP(THE_TRACK);							/*	EXPAND TO GET ALL TRACKS			*/
+
+		WRITE(MAM) = TBUT.PTR;									/*	CHECK INFO FOR THIS TRACK			*/
+
+		DO J = NUM.KBD.TRACKS TO 255;								/*	AND SET SOLO STATE FOR GROUP		*/
+
+			WRITE(MAL) = J;
+
+			IF ((READ(MD) & B.GRPSEL.TRK) != 0)					/*	IF IS GROUP OR MEMBER, CHECK		*/
+			{
+				IF
+				(	(RECD == 0)											/*	NOT RECORDING							*/
+				||	(	(J != RECD.TRK)								/*	NOT ON THIS SYNCLAVIER TRACK		*/
+					&&	(	(RECD.TRK == 0)							/*	SYNCLAVIER NOT RECORDING			*/
+						||	((READ(MD)&B.READY.TRK) == 0)			/*	THIS TRACK IS UNARMED				*/
+						)
+					)
+				)
+				{
+					IF ((READ(MD) & B.SOLOED.TRK) == I)			/*	IF SAME STATE AS GROUP WAS, MUST TOGGLE	*/
+					{
+						WRITE(MD) = READ(MD) XOR B.SOLOED.TRK;	/*	TOGGLE												*/
+
+						IF (I == 0)										/*	IF THE GROUP HAD BEEN UNSOLOED...			*/
+						{
+							NUM.OF.SOLOED.TRACKS = NUM.OF.SOLOED.TRACKS + 1;
+
+							IF
+							(	(J						== THE_TRACK)	/*	IF PRESSING THE MASTER TRACK OF THE GROUP	*/
+							&&	(RECD					== 0)
+							&&	(LOD.RECD.TRACKS	== 0)
+							&&	((J ilt FIRST.LOD.TRACK) || (J ige LAST.LOD.TRACK))
+							)
+							RECD.TRK = J;								/*	THEN ARM IT FOR RECORDING						*/
+						}
+						ELSE												/*	IF GROUP HAD BEEN SOLOED...					*/
+						{
+							NUM.OF.SOLOED.TRACKS = NUM.OF.SOLOED.TRACKS - 1;
+
+							IF (J == RECD.TRK)						/*	DISABLE RECORD TRACK WHEN GROUP OR TRACK	*/
+							RECD.TRK = 0;								/*	IS UNSOLOED											*/
+						}
+
+						RECOMPUTE.FLAG = TRUE;						/*	NEED NEW COMPUTATION								*/
+					}
+				}
+			}
+		END;
+	}
+
+	/*	ELSE IF IS NOT A GROUP TRACK, HANDLE RECORD BUTTON SLIGHTLY DIFFERENTLY	*/
+
+	ELSE
+	{
+		WRITE(MAM)=TBUT.PTR;								/*	SET/CLEAR SOLOED BIT IN			*/
+		WRITE(MAL)=THE_TRACK;							/*	SOLOED TRK LOOKUP TABLE			*/
+
+		IF
+		(	(RECD == 0)										/*	NOT RECORDING						*/
+		||	(	(THE_TRACK != RECD.TRK)					/*	NOT ON THIS SYNCLAVIER TRACK	*/
+			&&	(	(RECD.TRK == 0)						/*	SYNCLAVIER NOT RECORDING		*/
+				||	((READ(MD)&B.READY.TRK) == 0)		/*	THIS TRACK IS UNARMED			*/
+				)
+			)
+		)
+		{
+			IF ((READ(MD)&B.SOLOED.TRK) == 0)		/*	PRESSED BUTTON WAS UNSOLOED...	*/
+			{
+				NUM.OF.SOLOED.TRACKS=NUM.OF.SOLOED.TRACKS+1;
+
+				IF  (RECD=0)
+				AND (LOD.RECD.TRACKS=0)
+				AND ((THE_TRACK ilt FIRST.LOD.TRACK) || (THE_TRACK ige LAST.LOD.TRACK))
+				THEN RECD.TRK	= THE_TRACK;			/*	ARM FOR RECORD				*/
+			}
+			ELSE												/*	PRESSED BUTTON WAS SOLOED...		*/
+			{
+				NUM.OF.SOLOED.TRACKS=NUM.OF.SOLOED.TRACKS-1;
+
+				IF THE_TRACK=RECD.TRK					/*	IF TRACK WAS BLINKING,	*/
+				THEN RECD.TRK	= 0;						/*	TURN IT OFF					*/
+			}
+
+			WRITE(MD) = READ(MD) XOR B.SOLOED.TRK;	/*	TOGGLE THE SOLO BIT		*/
+			RECOMPUTE.FLAG=TRUE;
+		}
+	}
+
+	IF (RECOMPUTE.FLAG != false)
+	{
+		CALL COMPUTE.ACTIVE.TRKS;		/*	RECOMPUTE ACTIVE.TRACKS	*/
+		CALL DISPLAY.TRACK.BUTTONS;	/*	DISPLAY NEW TRACK BUTTONS	*/
+	}
+
+END TOGGLE.TRACK.SOLO.STATE;
+
+/*	USED FOR SOLOING/UNSOLOING FROM PROTOCOL, AND FROM S PAGE	*/
+
+SET.TRACK.SOLO.STATE: PROC (FIRST.TRK#,LAST.TRK#,STATE) PUBLIC SWAPABLE;	/*	SET SOLO STATE OF TRACK	*/
+	DCL (FIRST.TRK#,LAST.TRK#)	FIXED;
+	DCL STATE						FIXED;		/*	0=>OFF, 1=>ON	*/
+	DCL ABS.TRK#					FIXED;
+
+	IF LAST.TRK# ilt FIRST.TRK# THEN DO;	/*	SWAP OUT OF ORDER TRK RANGE	*/
+		write("313") = FIRST.TRK#; FIRST.TRK# = LAST.TRK#; LAST.TRK# = read("313");
+	END;
+
+	IF (STATE != 0) STATE = B.SOLOED.TRK;
+
+	DO ABS.TRK# = FIRST.TRK# TO LAST.TRK#;
+		WRITE(MAM)=TBUT.PTR;
+		WRITE(MAL)=ABS.TRK#;
+
+		IF ((READ(MD) & B.SOLOED.TRK) == STATE)	/*	IF IS DESIRED STATE, TOGGLE ONCE	*/
+			TOGGLE.TRACK.SOLO.STATE(ABS.TRK#);
+
+		TOGGLE.TRACK.SOLO.STATE(ABS.TRK#);			/*	SET TO DESIRED STATE; GETS GROUP MEMBERS CORRECT	*/
+	END;
+
+	RETURN(1);
+
+END SET.TRACK.SOLO.STATE;
+
+TRACK.BUTTON:PROC(TRK.BUT,VALUE) PUBLIC SWAPABLE;	/*	PROCESS PRESS/RELEASE OF TRACK BUTTON	*/
+	DCL (TRK.BUT,VALUE)     FIXED;	/*	PHYSICAL TRACK BUTTON AND STATE (0=RELEASE, 1=PRESS)	*/
+	DCL (ABS.TRK#)          FIXED;	/*	ABSOLUTE TRACK # CORRESPONDING TO TRK.BUT	*/
+	DCL (I,J,K,L,M,N,O,P)	FIXED;
+	DCL GRPLIST             FIXED;
+	DCL NUMENTS             FIXED;
+	DCL WHERE               FIXED;
+
+
+	WRITE(MAM)=TBUT.PTR;						/*	SET UP PTR TO TRACK BUTTON ARRAY	*/
+	WRITE(MAL)=TRK.BUT;						/*	SELECT DESIRED BUTTON	*/
+	IF VALUE=0
+	THEN WRITE(MD)=READ(MD)&(NOT B.HELD.TRK);	/*	CLEAR HELD BIT	*/
+	ELSE WRITE(MD)=READ(MD)\B.HELD.TRK;	/*	SET HELD BIT	*/
+
+	ABS.TRK#=READ(MD)&255;					/*	GET ABS TRACK # CORRESPONDING TO BUTTON	*/
+
+	/*	NOTE: ABS.TRK# HAS NUM.KBD.TRACKS ALREADY ADDED IN (I.E NKT<=ABS.TRK#<=255)	*/
+
+	NUM.OF.HELD.TRACK.BUTTONS = NUM.OF.HELD.TRACK.BUTTONS - 1 + VALUE + VALUE;
+
+	IF VALUE=0 THEN DO;						/*	RELEASE - CHECK FOR NOTE TERMINATION	*/
+
+		WRITE(MAM)=TRK.HEAD;					/*	GET SECTOR OF TRACK HEADER	*/
+		WRITE(MAL)=ABS.TRK#;					/*	FOR THIS TRACK					*/
+		WRITE(MAM)=READ(MD);					/*	THEN READ INFO.TRIGGER.KEY	*/
+		WRITE(MAL)=THD.INFO.TRIGGER.KEY;	/*	VALUE								*/
+
+		IF READ(MD)<>0 THEN DO;				/*	STOP INFO NOTE TRIGGER NOTE	*/
+			CALL STOP.INFO.NOTE(ABS.TRK#);
+		END;
+
+		IF ABS.TRK#=DISPLAY.TRACK.#		/*	BUTTON RELEASED - DO NOT DISPLAY START TIME IF NOT DESIRED	*/
+		THEN DISPLAY.TRACK.INFO=0;
+
+		ALLOW.TRACK.GROUP.DEFINE = 0;		/*	DISABLE GROUP DEFINE ON RELEASE OF ANY TRACK BUTTON...		*/
+	END;
+
+	IF (NEW.PAN<>0)&(INFO.MODE<>0) THEN DO;	/*	INFO MODE - GIVE TRACK STATUS INFO	*/
+		IF VALUE=0 THEN RETURN;						/*	NOTHING ELSE TO DO ON KEY RELEASE	*/
+		CALL CLEAR.DISPLAY;
+		IF  (ABS.TRK# ige FIRST.LOD.TRACK)
+		AND (ABS.TRK# ilt LAST.LOD.TRACK )
+		THEN DO;
+			CALL EMIT.STRING(0, 'LIVE TRACK');
+			CALL EMIT.NUMBER(11, ABS.TRK#-FIRST.LOD.TRACK+1, 0, LEFT.JUST);
+		END;
+		ELSE DO;
+			CALL EMIT.NUMBER(0, ABS.TRK#+(1-NUM.KBD.TRACKS), 0, LEFT.JUST);
+			CALL EMIT.STRING(3, '-');
+
+			WRITE(MAM)=TRK.HEAD;						/*	GET PTR TO TRACK HEADER	*/
+			WRITE(MAL)=ABS.TRK#;						/*	FOR THIS TRACK				*/
+
+			IF READ(MD)<>0 THEN DO;					/*	TRACK HEAD EXISTS			*/
+
+				/*	DISPLAY NUMBER OF NOTES ON THIS TRACK	*/
+				CALL TRK.HEAD.LOOKUP(ABS.TRK#,THD.NN.MSB);	/*	PTR TO NUMBER OF NOTES ON TRACK	*/
+				I=READ(MDI);									/*	GET MSB AND LSB OF 32-BIT NOTE COUNT	*/
+				J=READ(MD);										/*	I,J FORM 32-BIT NOTE COUNT	*/
+				IF  (I=0)										/*	NUMBER OF NOTES IS LESS	*/
+				AND (J ILT 32768)								/*	THAN 32768					*/
+				THEN DO;											/*	PRINT MORE READABLE MESSAGE	*/
+					CALL EMIT.NUMBER(4,J,0,RIGHT.JUST);
+					CALL EMIT.STRING(11,'NOTES');			/*	WE HAVE ROOM FOR LABEL	*/
+				END;
+				ELSE CALL EMIT.LARGE.NUMBER(4,I,J);		/*	PRINT BIG NUMBER RIGHT-JUSTIFIED	*/
+
+				CALL LOOKUP.TRACK.TIMBRE.NAME(ABS.TRK#,MISC.BUF);
+				CALL EMIT.STRING(16,MISC.BUF);
+				CALL INFO.NOTE.TRIGGER(ABS.TRK#);		/*	PLAY NOTE FROM THIS TRACK	*/
+			END;
+			ELSE CALL EMIT.STRING(4,'EMPTY TRACK');
+		END;
+		BOTH.DISPLAY=1;
+		RETURN;
+	END;
+
+	IF (HELD.RTE.BUTTONS<>0)&(HELD.KCV.BUTTON=0) THEN RETURN;	/*	DO NOTHING IF IN RTE MODE	*/
+
+	IF (PRESSURE.CALIBRATION.MODE<>0)
+	THEN DO;													/*	HANDLE PRESSURE SATURATION CONSTANT CHANGE	*/
+		IF VALUE<>0 THEN DO;								/*	ONLY ON THE PRESS	*/
+			PRESSURE.CALIBRATION.KEY = -1;			/*	CHANGE SATURATION CONSTANT	*/
+			PRESSURE.CALIBRATION.VALUE = TRK.BUT*5;
+			IF PRESSURE.CALIBRATION.VALUE IGT 100	/*	LIMIT VALUE	*/
+			THEN PRESSURE.CALIBRATION.VALUE = 100;	/*	TO VALID RANGE	*/
+
+			CALL PRESSURE.CALIBRATION.DISPLAY(PRESSURE.CALIBRATION.KEY,PRESSURE.CALIBRATION.VALUE);
+		END;
+		RETURN;
+	END;
+
+	IF (HELD.MIDI.BUTTON<>0)
+	THEN DO;
+		IF (RECD<>0) AND (RECD.TRK<>0)			/*	DON'T ALLOW ARMING	*/
+		THEN RETURN;									/*	DURING RECORD			*/
+		IF VALUE=0 THEN DO;
+			CALL CLEAR.UPPER;
+			RETURN;
+		END;
+		IF  (ABS.TRK# ige FIRST.LOD.TRACK)
+		AND (ABS.TRK# ilt LAST.LOD.TRACK )
+		THEN DO;
+			CALL DISPLAY.ERR(49);					/*	NOT AVAILABLE FOR LIVE TRACKS	*/
+			RETURN;
+		END;
+
+		WRITE(MAM)=TBUT.PTR;
+		WRITE(MAL)=ABS.TRK#;
+		WRITE(MD) =READ(MD) XOR B.READY.TRK;	/*	TOGGLE BIT	*/
+
+		/*	CREATE A SYSTEM EVENT WHEN CHANGING THE SYNCLAVIER SAFE/READY	*/
+		/*	STATUS:																			*/
+
+		NEW.SEQ.INFO = NEW.SEQ.INFO \ 4096;
+
+		IF (READ(MD)&B.READY.TRK)=0
+		THEN NUM.ENABLED.TRKS=NUM.ENABLED.TRKS-1;	/*	UPDATE NUMBER OF TRACKS THAT	*/
+		ELSE NUM.ENABLED.TRKS=NUM.ENABLED.TRKS+1;	/*	ARE READY - FOR WINDOW MESSAGE	*/
+
+		CALL DISPLAY.TRACK.BUTTONS;					/*	BLINK CORRECT BUTTONS	*/
+		IF NEW.PAN THEN DO;
+			CALL CLEAR.DISPLAY;
+			CALL EMIT.STRING(0,'TRACK               Trks Ready');
+			CALL EMIT.NUMBER(6,ABS.TRK#-1,0,LEFT.JUST);
+			CALL EMIT.NUMBER(16,NUM.ENABLED.TRKS,0,LEFT.JUST);
+			SUPRESS.BEAT.DISPLAY=1;						/*	STOP BEAT DISPLAYS MOMENTARILY	*/
+			BEAT.DISPLAY.TIME=REAL.MILLISECONDS;	/*	HOLD DISPLAY FOR 5 SECONDS	*/
+		END;
+		RETURN;
+	END;
+
+	IF (HELD.TRINF.BUTTON    <>0)			/*	SELECT TRK VOL OR ROUTING	*/
+	THEN DO;
+		IF VALUE=0 THEN RETURN;				/*	BUTTON RELEASE				*/
+		IF HELD.TRINF.BUTTON=3 THEN DO;	/*	BOTH TRK VOLUME & TRK ROUTING HELD	*/
+			TROUT.TRK#=(-1);					/*	DEFAULT TO KEYBOARD		*/
+			IF  (MULTI.THERE<>0)				/*	MULTI DISTRIBUTOR EXISTS	*/
+			AND ((TRK.BUT+1)<MULTI.MAX)	/*	DESIRED ROUTING IN RANGE	*/
+			THEN DO;								/*	SET UP NEW KBD ROUTING QUICKLY	*/
+				CALL TRK.HEAD.STORE(0,THD.TROU,
+					  SHL(64+TRK.BUT,8)\(TRK.BUT+(64+1)));
+			END;
+			CALL SELECT.PARAMETER(TRROUT.L-PAR.L);
+			RESET.BITS=RESET.BITS\R.MULTI;	/*	CAUSE SYNTH UPDATE TO OCCUR	*/
+		END;
+		ELSE DO;
+			TROUT.TRK#=TRK.BUT;				/*	SET TO THIS BUTTON		*/
+		END;
+		CALL DISPLAY.PAR;						/*	PRESENT NEW TROUT/VOL	*/
+		CALL DISPLAY.TRACK.BUTTONS;		/*	CLEAR/SET TRACK BUTTONS	*/
+		RETURN;									/*	DONE							*/
+	END;
+
+	IF HELD.STARTLOOP.BUTTON<>0			/*	LOAD ILP INFO INTO LOOP PARMS	*/
+	THEN DO;
+		IF VALUE=0 THEN DO;
+			CALL DISPLAY.SEQUENCER.STATUS;
+			RETURN;
+		END;
+		TROUT.TRK#=TRK.BUT;					/*	SELECT THIS TRK	*/
+		CALL SET.LOOP.PARMS.TO.ILP;		/*	COPY ILP TIMES INTO LOOP PARMS	*/
+		CALL DISPLAY.SEQUENCER.STATUS;
+		CALL DISPLAY.TRACK.BUTTONS;		/*	DISPLAY WHICH TRK IS SELECTED	*/
+		CALL DISPLAY.PAR;						/*	REDISPLAY LOOP PARM	*/
+		RETURN;
+	END;
+
+	IF (HELD.CLIK.BUTTON<>0) THEN DO;			/*	CLICK RATE HELD - ASSIGN CLICK TO THIS TRACK	*/
+		IF VALUE=0 THEN DO;
+			CALL DISPLAY.TRACK.BUTTONS;			/*	RELIGHT TRACK BUTTS	*/
+			CALL DISPLAY.SEQUENCER.STATUS;		/*	CLEAR LOOP BUTTON	*/
+			RETURN;										/*	BUTTON RELEASE		*/
+		END;
+		IF  (ABS.TRK# ige FIRST.LOD.TRACK)
+		AND (ABS.TRK# ilt LAST.LOD.TRACK )
+		THEN CALL DISPLAY.ERR(49);
+		ELSE DO;
+			/*	Step CLICK.TRACK.FUNCTION if the track pressed this time is the same as last time, or if the last selection was 0 (abort)	*/
+			IF (ABS.TRK# = shr(CLICK.TRACK.FUNCTION,8)) OR ((CLICK.TRACK.FUNCTION & 255) = 0)
+			THEN DO;
+				CLICK.TRACK.FUNCTION = CLICK.TRACK.FUNCTION + 1;
+				/*	Reset to zero if necessary	*/
+				IF (CLICK.TRACK.FUNCTION & 255) = 4 THEN CLICK.TRACK.FUNCTION = (CLICK.TRACK.FUNCTION xor 4);
+			END;
+			/*	Plug in current track number	*/
+			CLICK.TRACK.FUNCTION = (SHL(ABS.TRK#,8)\(CLICK.TRACK.FUNCTION & 255));
+			/*	Present options to the user	*/
+			CALL STOP.RECD.MOVE.PLAY.XPOS.CONT.ERAS;	/*	stop any performance	*/
+			CALL CLEAR.DISPLAY;
+			CALL EMIT.NUMBER(0,ABS.TRK#-NUM.KBD.TRACKS+1,0,LEFT.JUST);
+			DO CASE (CLICK.TRACK.FUNCTION & 255);
+				CALL EMIT.STRING(4,'Abort?');									/*	CASE 0:	*/
+				{																		/*	CASE 1:	*/
+					/*	If the track being pressed is already the current click track,	*/
+					/*	then the option should be to deselect it,								*/
+					/*	else the option should be to select it.								*/
+					IF	(CLICK.TRACK.MODE igt 3) AND (ABS.TRK# = CLICK.TRACK.MODE+NUM.KBD.TRACKS-4)
+					THEN CALL EMIT.STRING(4,'Revert To   Internal Click?');
+					ELSE CALL EMIT.STRING(4,'Use For     Live Click?');
+				}
+				CALL EMIT.STRING(4,'Generate MapPreserve Times?');		/*	CASE 2:	*/
+				CALL EMIT.STRING(4,'Generate MapPreserve Beats?');		/*	CASE 3:	*/
+			END;
+			BOTH.DISPLAY=1;
+			TOGGLE.CLICKON=FALSE;	/*	Don't toggle the click's on/off status on release of click button if we've been here.	*/
+		END;
+		RETURN;							/*	DONE	*/
+	END;
+
+	IF (HELD.MARK.BUTTON<>0) THEN DO;	/*	MARK BUTTON + TRACK #	*/
+		IF VALUE=0 THEN RETURN;				/*	BUTTON RELEASE				*/
+		IF  (ABS.TRK# ige FIRST.LOD.TRACK)
+		AND (ABS.TRK# ilt LAST.LOD.TRACK )
+		THEN CALL DISPLAY.ERR(49);
+		ELSE DO;										/*	SET FIRST NOTE TIME TO MARK START	*/
+
+			CALL FIND.FIRST.NOTE(ABS.TRK#);	/*	FIND TIME OF FIRST NOTE	*/
+
+			IF (TRACK.FIRST.TIME.MSB=0)&(TRACK.FIRST.TIME.LSB ILT ZERO.TIME)
+			THEN DO;
+				MARK.BUTTON.MSB=0; MARK.BUTTON.LSB=0;	/*	CLEAR MARK IF EMPTY TRACK	*/
+			END;
+
+			ELSE IF CLICK.TRACK.MODE=3			/*	EXTERNAL CLICK		*/
+			THEN DO;									/*	NO JUSTIFICATION	*/
+				MARK.BUTTON.MSB=TRACK.FIRST.TIME.MSB;
+				MARK.BUTTON.LSB=TRACK.FIRST.TIME.LSB;
+			END;
+
+			ELSE DO;	/*	ROUND DOWN TO EVEN BEAT # FOR INTERNAL AND LIVE CLICKS	*/
+
+				IF CLICK.TRACK.MODE igt 3 THEN DO;				/*	CLICK TRACK	*/
+					CALL REMAP.WITH.LIVE.CLICK(TRACK.FIRST.TIME.MSB,TRACK.FIRST.TIME.LSB,0,0,1);
+					IF  (REMAPPED.TIME.MSB	=  0)					/*	CHECK AGAIN AFTER	*/
+					AND (REMAPPED.TIME.LSB ILT ZERO.TIME)		/*	REMAP IN CASE		*/
+					THEN DO;												/*	CLICK TRACK WAS	*/
+						MARK.BUTTON.MSB=0; MARK.BUTTON.LSB=0;	/*	PLAYED BY F.Z.		*/
+					END;
+					ELSE DO;
+						call sub16(zero.time,loc(addr(REMAPPED.TIME.MSB)));
+						/*	THE 16 BIT QUOTIENT OF THE FOLLOWING D4567 DIVISION SHOULD			*/
+						/*	SUFFICE BECAUSE NO CLICK TRACK COULD CONTAIN MORE THAN 64K NOTES?	*/
+						load REMAPPED.TIME.LSB; uload REMAPPED.TIME.MSB; div 1000; mwait;
+						uload 0;	/*	CLEAR THE REMAINDER	*/
+						mul 1000;
+						REMAPPED.TIME.LSB=res; REMAPPED.TIME.MSB=ures;
+						call add16(zero.time,loc(addr(REMAPPED.TIME.MSB)));
+						CALL REMAP.WITH.LIVE.CLICK(REMAPPED.TIME.MSB,REMAPPED.TIME.LSB,0,0,0);
+						MARK.BUTTON.MSB=REMAPPED.TIME.MSB;		/*	JUSTIFIED MARK START	*/
+						MARK.BUTTON.LSB=REMAPPED.TIME.LSB;		/*	POSITION					*/
+					END;
+				END;
+				ELSE DO;													/*	INTERNAL CLICK	*/
+					call Map.Sequence.Time.To.Nearest.Beats(loc(addr(TRACK.FIRST.TIME.MSB)),
+																		 loc(addr(PRIOR.BEAT.MSB)),
+																		 loc(addr(NEXT.BEAT.MSB)));
+					MARK.BUTTON.MSB=PRIOR.BEAT.MSB;				/*	JUSTIFIED MARK START	*/
+					MARK.BUTTON.LSB=PRIOR.BEAT.LSB;				/*	POSITION					*/
+				END;
+			END;
+
+			WRITE(MAM)=BAS.PTR;
+			WRITE(MAL)=SEQ.MARK.MSB;		/*	AND RE-WRITE TO SEQUENCE AREA	*/
+			WRITE(MDI)=MARK.BUTTON.MSB;
+			WRITE(MD )=MARK.BUTTON.LSB;
+
+			//	The following three lines are unnecessary because the subsequent call to DISPLAY.PAR
+			//	will indirectly cause the same thing to be executed.
+			//
+			//	NEW.MOTION =1;						/*	TELL LOD ABOUT IT	*/
+			//	/*	Create a system event when the mark start time changes:	*/
+			//	NEW.SEQ.INFO=NEW.SEQ.INFO \ 128;
+
+			/*	Turn Mark on for ergonomics (user probably wouldn't change mark unless intending to use it)	*/
+			MARK.BUTTON.DISABLED = False;
+			CALL DISPLAY.PAR;
+			CALL DISPLAY.PARAMETER.BUTTONS;
+
+		END;
+		RETURN;
+	END;
+
+	IF HELD.KCV.BUTTON<>0 THEN DO;		/*	SET OUTPUT DAC ROUTING	*/
+		IF VALUE=0 THEN RETURN;
+		IF  (ABS.TRK# ige FIRST.LOD.TRACK)
+		AND (ABS.TRK# ilt LAST.LOD.TRACK )
+		THEN CALL DISPLAY.ERR(49);
+		ELSE DO;
+			CALL  CLEAR.PARAMETERS;
+			IF   KCV.TRACK=(ABS.TRK#+NUM.KBD.TRACKS)
+			THEN DO;
+				KCV.TRACK=0;
+				IF NEW.PAN<>0 THEN DO;
+					CALL CLEAR.UPPER;
+					CALL EMIT.STRING(0,'CV OUTPUT:KEYB ');
+				END;
+			END;
+			ELSE DO;
+				KCV.TRACK=(ABS.TRK#+NUM.KBD.TRACKS);
+				IF NEW.PAN<>0 THEN DO;
+					CALL CLEAR.UPPER;
+					CALL EMIT.STRING( 0,'CV OUTPUT:TRK   ');
+					CALL EMIT.NUMBER(14,ABS.TRK#-NUM.KBD.TRACKS+1,0,LEFT.JUST );
+				END;
+			END;
+		END;
+		RETURN;
+	END;
+
+	IF VALUE<>0 THEN DO;							/*	INDICATES PRESS OF TRACK BUTTON	*/
+
+		DO CASE (TRACK.STATE);					/*	PERFORM DESIRED FUNCTION ON TRACK BUTTON PRESS	*/
+
+		{												/*	STATE TRACK.STATE.NORMAL - PERFORM NORMAL TRACK TOGGLE OPERATION,	*/
+			TOGGLE.TRACK.SOLO.STATE(ABS.TRK#);
+
+			IF ((NEW.PAN= 0)&(PLAY=0)			/*	IF OLD KEYBOARD AND NOT PLAYING			*/
+			OR  (NEW.PAN<>0)&(RECD=0))			/*	OR IF NEW KEYBOARD AND NOT RECORDING	*/
+			{											/*	ALLOW TRACK START DISPLAY/CHANGE			*/
+				IF PLAY<>0							/*	DO NOT CALL CLEAR PARAMETERS HERE (TOO SLOW!!)	*/
+				THEN ACTIVE.PARMS(0)=0;			/*	EMPTY OUT PARAMETER LIST - LIGHT WILL BE LEFT ON, BUT AT LEAST THE TRACK BUTTONS WILL BE FAST	*/
+				ELSE IF ACTIVE.PARMS(0)<>0
+				THEN CALL CLEAR.PARAMETERS;
+
+				IF (NUM.OF.HELD.TRACK.BUTTONS == 1)			/*	ONE TRACK BUTTON IS PRESSED				*/
+				{
+					IF (UPPER.DISP == START.DISP)				/*	REMOVE PRIOR DISPLAY FOR OTHER TRACK	*/
+						REMOVE.TRACK.START.DISPLAY();
+
+					IF (HELD.SEQNAME.BUTTON != 0)				/*	IF SEQNAME BUTTON HELD, THEN GO			*/
+					{													/*	DIRECTLY TO TRACK GROUPING					*/
+						ALLOW.TRACK.GROUP.DEFINE = TRUE;		/*	NOW CHECK FOR A TRACK GROUP DEFINITION	*/
+						TRACK.BUTTON.PRESS.TIME	 = REAL.MILLISECONDS-2001;
+						TGRP.TRACK.SELECT			 = ABS.TRK#;
+						DISPLAY.TRACK.INFO		 = 0;
+						ANY.MISC.FUNCTIONS		 = TRUE;
+					}
+
+					ELSE
+					{
+						DISPLAY.TRACK.INFO = REAL.MILLISECONDS;	/*	START PROCESS TO DISPLAY TRACK START	*/
+
+						IF (DISPLAY.TRACK.INFO == 0)
+							DISPLAY.TRACK.INFO = 5;						/*	MAKE SURE IS NONZERO							*/
+
+						ANY.MISC.FUNCTIONS = TRUE;
+						DISPLAY.TRACK.#	 = ABS.TRK#;				/*	WHICH ONE										*/
+					}
+				}
+
+				ELSE													/*	ELSE IF MULTIPLE TRACK BUTTONS HELD, DISABLE	*/
+				{														/*	GROUP DEFINE AND START DISPLAY; MOST LIKELY	*/
+					ALLOW.TRACK.GROUP.DEFINE = FALSE;		/*	USER IS GETTING READY TO ERASE SOME TRACKS	*/
+					DISPLAY.TRACK.INFO		 = 0;				/*	OR DO A SELECTIVE RECALL...						*/
+				}
+
+				#if (inc.voice.output)
+					IF D42.OUTPUT.HAPPENING=0 THEN DO;		/*	MARK BUSY FOR A MOMENT		*/
+						D42.OUTPUT.HAPPENING=1;					/*	MUST HOLD TRACK FOR			*/
+						SPEAK.TIME=REAL.MILLISECONDS-1700;	/*	300 MS TO GET START TIME	*/
+					END;
+				#endif
+			}
+		}
+
+		/*	$PAGE - CHECK SMT, SKT	*/
+
+		{											/*	STATE TRACK.STATE.TIMBRE.RECALL - MOVE TIMBRE TO KEYBOARD OR OTHER TRACK	*/
+			IF TIMB.DEST<0  THEN DO;		/*	SPLIT BUTTON - MOVE TIMBRE TO UPPER HALF ONLY	*/
+				IF SPLIT.KEYBOARD<>0			/*	ALREADY SPLIT	*/
+				THEN TIMB.DEST=0;				/*	JUST MOVE TIMBRE TO UPPER HALF	*/
+				ELSE DO;
+					CALL COPY.KBD.TIMBRES(0,1);	/*	MOVE CURRENT KEYBOARD TIMBRE TO LOWER HALF	*/
+					IF (LENGTH.OVERFLOW=0)
+					THEN DO;						/*	OK MOVE	*/
+						SPLIT.KEYBOARD=1;		/*	INDICATE SPLIT	*/
+						TIMB.DEST	  =0;		/*	MOVE TO LOWER KEYBOARD ONLY	*/
+					END;
+				END;
+			END;
+
+			ELSE IF TIMB.DEST=0				/*	SKT BUTTON	*/
+			THEN DO;								/*	STOP KEYBOARD SPLIT WHEN MOVING FROM TRACK TO UPPER	*/
+				IF SPLIT.KEYBOARD<>0
+				THEN CALL ERASE.TIMBRE(1);	/*	FREE UP MEMORIES	*/
+				SPLIT.KEYBOARD=0;
+			END;
+
+			IF TIMB.DEST>=0 THEN DO;		/*	IF NO ERROR 11 ABOVE, THEN PROCEED	*/
+
+				IF (TIMB.DEST<NUM.KBD.TRACKS) THEN DO;	/*	COPY TO KEYBOARD - EASY	*/
+
+					IF KEYBOARD.TIMBRE.CONTROL<>0 THEN DO;
+						CALL RESET.KEYBOARD.TIMBRE.CONTROL(1);	/*	RELEASE KBD TIMBRE TO APPROPRIATE TRACK	*/
+					END;
+					CALL DISPLAY.SMT.SKT.BUTTONS;					/*	DISPLAY CHANGES	*/
+
+					WRITE(MAM)=TRK.HEAD;				/*	GET PTR TO TRACK HEADER	*/
+					WRITE(MAL)=ABS.TRK#;				/*	FOR THIS TRACK				*/
+
+					IF READ(MD)=0 THEN DO;			/*	EMTPY TRACK - GET NULL	*/
+						CALL ERASE.TIMBRE(TIMB.DEST);
+						IF TIMB.DEST=1 THEN SPLIT.KEYBOARD=1;
+						CALL DISPLAY.TIMBRE.RECALL.INFO(0,0,0);	/*	NULL TIMBRE	*/
+					END;
+
+					ELSE DO;
+
+						WRITE(MAM)=READ(MD);			/*	POINT TO TRACK HEAD	*/
+						WRITE(MAL)=THD.STIMB;		/*	CURRENT TIMBRE			*/
+						I = READ(MD);					/*	SAVE IN TEMP VAR		*/
+
+						CALL SETUP.FLOPPY.CACHE;	/*	SET UP TO USE FLOPPY IN CASE WE NEED TO	*/
+						CALL MOUNT.OPTICAL.VOLUME;	/*	ALSO CACHE OPT DISK IF NEEDED	*/
+
+						CALL COPY.KBD.TIMBRES(I,TIMB.DEST);
+
+						FLOPPY.CACHE.VALID=0;		/*	ALL DONE WITH CACHE FOR NOW	*/
+						CALL DISABLE_CACHE(FLOPPY.CACHE.NUM);
+						OPTICAL.DISK.READY=0;
+
+						IF  (LENGTH.OVERFLOW=0)		/*	NO ERROR	*/
+						AND (TIMB.DEST		  =0)		/*	KEYBOARD	*/
+						THEN DO;
+							WRITE(MAM)=TRK.HEAD;		/*	POINT TO TRACK'S TRK.HEAD	*/
+							WRITE(MAL)=ABS.TRK#;
+							WRITE(MAM)=READ(MD);
+
+							IF (HELD.SKT.BUTTON=1) THEN DO;	/*	SET THIS TRACK UP TO TEMPORARILY SHARE KBD TIMBRE	*/
+								KEYBOARD.TIMBRE.CONTROL=ABS.TRK#;
+								WRITE(MAL)=THD.STIMB;			/*	SET STARTING TIMBRE # TO 0 (KEYBOARD)	*/
+								WRITE(MD )=0;
+								WRITE(MAL)=THD.CTIMB;			/*	SET CURRENT TIMBRE # TO 0 (KEYBOARD)	*/
+								WRITE(MD )=0;
+								WRITE(MAL)=THD.LP.CTIMB;		/*	SET LOOP TIMBRE # TO 0 (KEYBOARD)	*/
+								WRITE(MD )=0;
+								WRITE(MAL)=THD.ILS.CTIMB;		/*	SET ILS TIMBRE # TO 0 (KEYBOARD)	*/
+								WRITE(MD )=0;
+								WRITE(MAL)=THD.ILE.CTIMB;		/*	SET ILE TIMBRE # TO 0 (KEYBOARD)	*/
+								WRITE(MD )=0;
+							END;
+
+							WRITE(MAL)=THD.MIDI;					/*	GET TRACK'S MIDI ROUTING	*/
+							I=READ(MD);
+							WRITE(MAL)=THD.TVOL;					/*	GET TRACK'S VOLUME	*/
+							J=READ(MD);
+							WRITE(MAL)=THD.TROU;					/*	GET TRACK'S MULTICHANNEL ROUTING	*/
+							K=READ(MD);
+							WRITE(MAL)=THD.ACTIVE.MIDI.RTES;	/*	GET TRACK'S MIDI RTES	*/
+							L=READ(MD);
+							WRITE(MAL)=THD.POLY;					/*	GET TRACK'S PREFERRED POLY BIN	*/
+							M=READ(MD);
+							WRITE(MAL)=THD.CUE.OUT;				/*	GET TRACK'S CUE ROUTING	*/
+							N=READ(MD);
+							WRITE(MAL)=THD.MIDI.PATH;			/*	GET TRACK'S MIDINET ROUTING	*/
+							O=READ(MD);
+							WRITE(MAL)=THD.MIDX;             /*	GET TRACK'S MIDI OUT XPOS   	*/
+							P=READ(MD);
+
+							WRITE(MAM)=TRK.HEAD;			/*	POINT TO KEYBOARD'S TRK.HEAD	*/
+							WRITE(MAM)=READ(MD);
+
+							IF (HELD.PSEL.BUTTONS=0)	/*	ONLY OVERWRITE THE KEYBOARD'S TRK.HEAD	*/
+							THEN DO;							/*	IF A PARTIAL BUTTON ISN'T BEING HELD.	*/
+								WRITE(MAL)=THD.MIDI;					/*	OVERWRITE KEYBOARD'S MIDI ROUTING	*/
+								WRITE(MD )=I;
+								WRITE(MAL)=THD.TVOL;					/*	OVERWRITE KEYBOARD'S VOLUME	*/
+								WRITE(MD )=J;
+								WRITE(MAL)=THD.TROU;					/*	OVERWRITE KEYBOARD'S MULTICHANNEL ROUTING	*/
+								WRITE(MD )=K;
+								WRITE(MAL)=THD.ACTIVE.MIDI.RTES;	/*	OVERWRITE KEYBOARD'S MIDI RTES	*/
+								WRITE(MD )=L;
+								WRITE(MAL)=THD.POLY;					/*	OVERWRITE KEYBOARD'S PREFERRED POLY BIN	*/
+								WRITE(MD )=M;
+								WRITE(MAL)=THD.CUE.OUT;				/*	OVERWRITE KEYBOARD'S CUE ROUTING	*/
+								WRITE(MD )=N;
+								WRITE(MAL)=THD.MIDI.PATH;			/*	OVERWRITE KEYBOARD'S MIDINET ROUTING	*/
+								WRITE(MD )=O;
+								WRITE(MAL)=THD.MIDX;             /*	OVERWRITE KEYBOARD'S MIDI OUT XPOS  	*/
+								WRITE(MD )=P;
+
+								IF I<>0
+								THEN CALL SET.MIDI.OUT.CONTROLLERS  (0);
+								ELSE CALL CLEAR.MIDI.OUT.CONTROLLERS(0);
+							END;
+
+							/*	IF MIDI IS ROUTED SOMEWHERE AND "PROGRAM CHANGE	*/
+							/*	ON SKT" IS ON, THEN SEND PROGRAM CHANGE			*/
+							IF (I<>0 AND MIPGM.ON.SKT.CONTROL<>0) THEN DO;
+								WRITE(MAL)=THD.CPROGRAM;
+								IF ((READ(MD)&128)<>0)	/*	PROGRAM# IS VALID	*/
+								THEN CALL MIDI.PROGRAM.CHANGE(READ(MD)&127);
+							END;
+
+							NEW.PRM.INFO=NEW.PRM.INFO\16;
+
+							NEW.MOTION				  = 1;	/*	SEND NEW CUE TRACK CONSTANTS		*/
+							NEW.CUE.TRACK.SETTINGS = 1;	/*	OVER AFTER TRACK HEAD ALLOCATE	*/
+						END;
+					END;
+				END;
+
+				ELSE DO;									/*	DEST IS TRACK (SMT)		*/
+					IF TIMB.DEST=KEYBOARD.TIMBRE.CONTROL THEN DO;
+						CALL RESET.KEYBOARD.TIMBRE.CONTROL(0);		/*	RELEASE KBD TIMBRE TO APPROPRIATE TRACK	*/
+					END;
+					IF  (TIMB.DEST ige FIRST.LOD.TRACK)
+					AND (TIMB.DEST ilt LAST.LOD.TRACK )
+					THEN CALL DISPLAY.ERR(48);
+					ELSE CALL COPY.TIMBRE(ABS.TRK#,TIMB.DEST);	/*	PUT TIMBRE FROM ABS.TRK# ONTO TRACK TIMB.DEST	*/
+				END;
+
+				CALL COMPUTE.MISC.INFO;						/*	IN ANY CASE	*/
+
+			END;
+
+			CALL ABORT.BOUNCE.SMT.SKT;		/*	AND WE ARE DONE WITH OPERATION	*/
+
+			CALL DISPLAY.TRACK.BUTTONS;	/*	DISPLAY POSSIBLY NEW TRACK BUTTONS	*/
+		}
+
+		{	/*	STATE TRACK.STATE.SELECT.SMT.DEST - SET UP FIRST TIMBRE FOR SMT	*/
+			TIMB.DEST	= ABS.TRK#;							/*	INDICATE MOVE HERE	*/
+			TRACK.STATE	= TRACK.STATE.TIMBRE.RECALL;	/*	NEXT STATE IS 1 - MOVE TIMBRE	*/
+			RECALL.STATE= 3;									/*	IF RECALL, USE STATE 3	*/
+			SKT			= 1;									/*	LIGHT THE SKT LIGHT	*/
+			CALL DISPLAY.TIMBRE.RECALL.BUTTONS;			/*	BLINK TIMBRE RECALL BUTTONS	*/
+			CALL DISPLAY.SMT.SKT.BUTTONS;					/*	BLINK THE SKT BUTTON	*/
+			CALL DISPLAY.TRACK.BUTTONS;					/*	DISPLAY POSSIBLY NEW TRACK BUTTONS	*/
+		}
+
+		{	/*	STATE TRACK.STATE.SELECT.BOUNCE.SOURCE - SET SOURCE TRK FOR BOUNCE/CHAIN	*/
+			TRACK.ONE  =ABS.TRK#;							/*	INDICATE FIRST TRACK	*/
+			TRACK.STATE=TRACK.STATE.BOUNCE.CHAIN;		/*	DO A BOUNCE OR CHAIN NEXT	*/
+			CALL DISPLAY.TRACK.BUTTONS;					/*	DISPLAY POSSIBLY NEW TRACK BUTTONS	*/
+		}
+
+		{	/*	STATE TRACK.STATE.BOUNCE.CHAIN - BOUNCE/CHAIN IT	*/
+
+			IF  (CHAIN<>0)							/*	IN MIDDLE OF CHAIN	*/
+			AND (ABS.TRK#=TRACK.ONE)			/*	SOURCE=DEST				*/
+			THEN DO;
+				CALL STOP.RECD.MOVE.PLAY.XPOS.CONT.ERAS;	/*	STOP ANY PERFORMANCE	*/
+				IF ((TRACK.ONE ige FIRST.LOD.TRACK) & (TRACK.ONE ilt LAST.LOD.TRACK))
+				THEN CALL DISPLAY.ERR(52);		/*	CANNOT CHAIN LIVE TRACKS	*/
+				ELSE DO;
+					I=CHAIN.TRACKS(TRACK.ONE,TRACK.ONE);	/*	CHAIN TRACK TO ITSELF	*/
+
+					IF (I=0) AND (UPPER.DISP<>ERR.DISP)		/*	HAD AN ERROR BUT NO MESSAGE YET	*/
+					THEN DO;
+						CALL DISPLAY.ERR(0);						/*	PRESUMABLY OUT OF MEMORY	*/
+					END;
+				END;
+				CALL ABORT.BOUNCE.SMT.SKT;						/*	AND TERMINATE THE OPERATION	*/
+			END;
+
+			ELSE IF (ABS.TRK#=TRACK.ONE)&(REPLICATE.BOUNCE=0)	/*	THIS IS SECOND PRESS OF TRK BUTTON	*/
+			THEN REPLICATE.BOUNCE=1;							/*	SET TO REPLICATE BOUNCE	*/
+
+			ELSE DO;													/*	ACTUALLY PERFORM BOUNCE	*/
+				CALL STOP.RECD.MOVE.PLAY.XPOS.CONT.ERAS;	/*	STOP ANY PERFORMANCE		*/
+				IF ((TRACK.ONE ige FIRST.LOD.TRACK) & (TRACK.ONE ilt LAST.LOD.TRACK))
+				OR ((ABS.TRK#  ige FIRST.LOD.TRACK) & (ABS.TRK#  ilt LAST.LOD.TRACK))
+				THEN DO;
+					IF		  BOUNCE<>0 THEN CALL DISPLAY.ERR(45);
+					ELSE IF CHAIN <>0 THEN CALL DISPLAY.ERR(52);
+				END;
+				ELSE DO;
+					I=1;	/*	ASSUME NO ERRORS WILL OCCUR	*/
+
+					IF		  BOUNCE<>0 THEN I=BOUNCE.DOWN (TRACK.ONE,ABS.TRK#,0,REPLICATE.BOUNCE);	/*	BOUNCE DOWN TRACK.ONE TO ABS.TRK#	*/
+					ELSE IF CHAIN <>0 THEN I=CHAIN.TRACKS(TRACK.ONE,ABS.TRK#);	/*	CHAIN TRACK TRACK.ONE TO ABS.TRK#	*/
+
+					IF (I=0) AND (UPPER.DISP<>ERR.DISP)	/*	HAD AN ERROR BUT NO MESSAGE YET	*/
+					THEN DO;
+						CALL DISPLAY.ERR(0);					/*	PRESUMABLY OUT OF MEMORY	*/
+					END;
+				END;
+				CALL ABORT.BOUNCE.SMT.SKT;					/*	AND TERMINATE THE OPERATION	*/
+			END;
+
+			CALL DISPLAY.TRACK.BUTTONS;	/*	DISPLAY POSSIBLY NEW TRACK BUTTONS	*/
+		}
+
+		{	/*	STATE TRACK.STATE.SELECT.TPAN.ROW - SET UP DESTINATION FOR TRACK PAN	*/
+
+			IF ((TRK.BUT == 0 )
+			||  (TRK.BUT == 8 )
+			||  (TRK.BUT == 16)
+			||  (TRK.BUT == 24))
+			{
+				TPAN.ROW.SELECT = TRK.BUT;						/*	INDICATE MOVE HERE	*/
+
+				IF (TPAN == 1)
+					TRACK.STATE = TRACK.STATE.PERFORM.TPAN.ASSIGN;
+				ELSE
+					TRACK.STATE = TRACK.STATE.RECALL.GROUP.TRACKS;
+
+				CALL DISPLAY.SMT.SKT.BUTTONS;					/*	BLINK THE TPAN BUTTON						*/
+				CALL DISPLAY.TRACK.BUTTONS;					/*	DISPLAY POSSIBLY NEW TRACK BUTTONS		*/
+
+				PRESENT.TPAN.DISPLAY();
+			}
+		}
+
+		{	/*	STATE TRACK.STATE.PERFORM.TPAN.ASSIGN - PERFORM TRACK BUTTON ROW ASSIGN	*/
+
+			IF (TRK.BUT ilt ((LAST.LOD.TRACK - NUM.KBD.TRACKS) / 8) )
+			{
+				I = TRK.BUT*8 + NUM.KBD.TRACKS;				/*	COMPUTE APPROPRIATE ABS TRACK #			*/
+
+				DO J=0 TO 7;										/*	CHANGE MAPPING FOR ENTIRE ROW				*/
+					WRITE(MAM) = TBUT.PTR;						/*	ACCESS BUTTON INDEX LIST					*/
+					WRITE(MAL) = TPAN.ROW.SELECT + J;
+					WRITE(MD ) = (READ(MD)&"177400") | (I + J);
+				END;
+
+				NEW.SEQ.INFO = NEW.SEQ.INFO \ 2;				/*	TREAT AS NEW TIMBRE NAME UPDATE...		*/
+
+				ABORT.BOUNCE.SMT.SKT();							/*	AND TERMINATE THE OPERATION				*/
+				PRESENT.TPAN.DISPLAY();							/*	AND SHOW NEW SETTING							*/
+			}
+		}
+
+		{	/*	STATE TRACK.STATE.DEFINE.GROUP - DEFINE MEMBERS OF GROUP	*/
+
+			IF (ABS.TRK# == TGRP.TRACK.SELECT)				/*	PRESSING THE MASTER BUTTON AGAIN,		*/
+				ABORT.BOUNCE.SMT.SKT();							/*	AND CLEAN UP...								*/
+
+			ELSE														/*	ADD OR DELETE TRACK FROM GROUP			*/
+			{
+				WRITE(MAM) = TRK.HEAD;
+				WRITE(MAL) = TGRP.TRACK.SELECT;
+
+				IF (READ(MD) == 0)								/*	IF TRACK HEAD DOES EXIST, CREATE ONE	*/
+				{
+					IF (ALLOCATE.TRK.HEADER(TGRP.TRACK.SELECT) == 0)
+					{
+						CALL DISPLAY.ERR(14);					/*	NOT ENOUGH ROOM IN EXT MEMORY				*/
+						CALL NOMEM.ERROR;							/*	NOT ENOUGH EXTERNAL MEMORY					*/
+					}
+				}
+
+				WRITE(MAM) = TRK.HEAD;
+				WRITE(MAL) = TGRP.TRACK.SELECT;
+
+				IF (READ(MD) != 0)								/*	SHOULD HAVE TRK HEAD BY  NOW				*/
+				{
+					I = TRK.HEAD.LOOKUP(TGRP.TRACK.SELECT, THD.GROUPLIST);
+
+					IF (I == 0)										/*	CREATE GROUP LIST IF NON AVAILABLE		*/
+					{
+						dcl Allocate.Map.Block proc(fixed,	fixed,	fixed) external;
+
+						I = Allocate.Map.Block(0, 0, THD.GROUPLIST);
+
+						IF (I != 0)									/*	IF GOT ONE										*/
+						{
+							TRK.HEAD.STORE(TGRP.TRACK.SELECT, THD.GROUPLIST, I);
+
+							WRITE(MAM) = NAH.PTR + I;
+							WRITE(MAL) = GRPAUX.TRK;
+							WRITE(MD ) = (READ(MD) & 0xFF00) | TGRP.TRACK.SELECT;
+						}
+					}
+
+					GRPLIST = TRK.HEAD.LOOKUP(TGRP.TRACK.SELECT, THD.GROUPLIST);
+
+					IF (GRPLIST != 0)
+					{
+						GRPLIST = NAH.PTR + GRPLIST;			/*	COMPUTE ABSOLUTE POINTER					*/
+
+						/*	STORE CURRENT BUTTON SETTINGS IN GROUP	*/
+
+						DO I = 0 TO 3;								/*	COPY 4 STARTING BUTTON TRACK NUMBERS	*/
+							WRITE(MAM) = TBUT.PTR;				/*	INTO GROUP BLOCK								*/
+							WRITE(MAL) = SHL(I,3);
+							J = READ(MD) & 0xFF;
+							WRITE(MAM) = GRPLIST;
+							WRITE(MAL) = GRPAUX.BUT + I;
+							WRITE(MD ) = J;
+						END;
+
+						/*	ADD OR REMOVE THIS TRACK FROM LIST	*/
+
+						WRITE(MAM) = GRPLIST;
+						WRITE(MAL) = GRPAUX.NUM;
+						NUMENTS	  = READ(MD);
+
+						I = FALSE;									/*	ASSUME NOT FOUND	*/
+
+						DO J = 0 TO NUMENTS - 1;				/*	SEE IF IN LIST	*/
+							WRITE(MAM) = GRPLIST;
+							WRITE(MAL) = GRPAUX.LST + J;
+
+							IF (READ(MD) == ABS.TRK#)
+							{
+								I		= TRUE;
+								WHERE	= J;
+							}
+						END;
+
+						/*	REMOVE FROM LIST IF FOUND	*/
+
+						IF (I == TRUE)								/*	IF TRACK IS IN LIST			*/
+						{												/*	THEN REMOVE IT					*/
+							IF (NUMENTS <= 1)						/*	IF WAS LAST ONE ON LIST		*/
+							{											/*	THEN CLEAN UP...				*/
+								WRITE(MAM) = GRPLIST;
+								WRITE(MAL) = GRPAUX.NUM;
+								WRITE(MD ) = 0;
+								WRITE(MAL) = GRPAUX.LST + WHERE;
+								WRITE(MD ) = 0;
+
+								GRPLIST = TRK.HEAD.LOOKUP(TGRP.TRACK.SELECT, THD.GROUPLIST);
+
+								WHILE (GRPLIST != 0)
+								{
+									WRITE(MAM) = NAH.PTR + GRPLIST;
+									J			  = READ(MD);
+									Deallocate.NAH.Block(GRPLIST);
+									GRPLIST	  = J;
+								}
+
+								TRK.HEAD.STORE(TGRP.TRACK.SELECT, THD.GROUPLIST, 0);
+							}
+
+							ELSE												/*	ELSE REMOVE ONE FROM LIST	*/
+							{
+								WRITE(MAM) = GRPLIST;
+								WRITE(MAL) = GRPAUX.NUM;				/*	REDUCE NUMBER ON LIST BY 1	*/
+								WRITE(MD ) = NUMENTS-1;					/*	REDUCE LIST LENGTH BY 1		*/
+
+								IF (WHERE == NUMENTS-1)					/*	IF AT END OF LIST				*/
+								{
+									WRITE(MAL) = GRPAUX.LST + WHERE;	/*	JUST ZERO IT					*/
+									WRITE(MD ) = 0;
+								}
+								ELSE											/*	ELSE SHUFFLE					*/
+								{
+									WRITE(MAL) = GRPAUX.LST + (NUMENTS-1);
+									J			  = READ(MD);					/*	GET LAST ENTRY FROM LIST	*/
+									WRITE(MD)  = 0;						/*	AND CLEAN IT					*/
+
+									WRITE(MAL) = GRPAUX.LST + WHERE;	/*	INDEX TO WHERE TRACK 1 IS	*/
+									WRITE(MD ) = J;
+								}
+							}
+						}
+
+						ELSE													/*	ELSE ADD TO LIST				*/
+						{
+							IF (NUMENTS < GRPAUX.MAX)					/*	IF ROOM ON LIST				*/
+							{
+								WRITE(MAM) = GRPLIST;
+								WRITE(MAL) = GRPAUX.NUM;
+								WRITE(MD ) = NUMENTS+1;
+
+								WRITE(MAL) = GRPAUX.LST + NUMENTS;
+								WRITE(MD ) = ABS.TRK#;
+							}
+						}
+					}
+				}
+
+				DISPLAY.TRACK.BUTTONS();								/*	DISPLAY NEW MEMBERS			*/
+			}
+		}
+
+		{	/*	STATE TRACK.STATE.RECALL.GROUP.TRACKS - RECALL BUTTON SETTINGS FROM GROUP	*/
+
+			GRPLIST = TRK.HEAD.LOOKUP(ABS.TRK#, THD.GROUPLIST);
+
+			IF (GRPLIST != 0)										/*	IF GROUPLIST EXISTS					*/
+			{
+				DO I = 0 TO 3;
+					WRITE(MAM) = NAH.PTR + GRPLIST;			/*	ACCESS GROUP LIST						*/
+					WRITE(MAL) = GRPAUX.BUT + I;				/*	SEE IF BUTTON ASSIGNED FOR ROW	*/
+					J = READ(MD) & 0xFF;							/*	GET STARTING TRACK NUM				*/
+
+					IF (J != 0)										/*	MUST BE NONZERO...					*/
+					{
+						DO K = 0 TO 7;								/*	ASSIGN 8 BUTTONS						*/
+							WRITE(MAM) = TBUT.PTR;
+							WRITE(MAL) = SHL(I, 3) + K;
+							WRITE(MD ) = (READ(MD) & 0xFF00) + J + K;
+						END;
+					}
+				END;
+
+				NEW.SEQ.INFO = NEW.SEQ.INFO \ 2;				/*	TREAT AS NEW TIMBRE NAME UPDATE...	*/
+
+				ABORT.BOUNCE.SMT.SKT();							/*	AND TERMINATE THE OPERATION			*/
+				PRESENT.TPAN.DISPLAY();							/*	AND SHOW NEW SETTING						*/
+			}
+		}
+
+		END;	/*	OF DO CASE	*/
+
+	END;
+
+	ELSE DO;											/*	INDICATES RELEASE OF TRACK BUTTON	*/
+		IF (UPPER.DISP == START.DISP)			/*	IF START TIME IS DISPLAYED				*/
+			SUPRESS.BEAT.DISPLAY = 0;			/*	ALLOW IMMEDIATE PRESENTATION OF PLAY TIME IF PLAYING	*/
+	END;
+
+	CALL DISPLAY.SEQUENCER.STATUS;		/*	UPDATE 'LOOP' BUTTON	*/
+END TRACK.BUTTON;
+
+/*	$SUBTITLE  PROCESS REAL TIME EFFECTS BUTTONS	*/
+
+RTE.BUTTON:PROC(BUT,VALUE) PUBLIC SWAPABLE;	/*	PRESS OF RTE BUTTON	*/
+	DCL (BUT,VALUE,LAST,PTR)	FIXED;
+	DCL (M,L)						FIXED;
+	DCL OVERWRITE.MAP DATA (B.VELOCITY,B.PRESSURE,B.PEDAL1,B.PEDAL2,
+									B.MWHEEL  ,B.RIBBON	,0			,B.BREATH);	/*	MAPS BUT #S TO BIT POSITIONS FOR RTE.OVERWRITE.BITS & THD.ACTIVE.MIDI.RTES	*/
+
+	BUT=BUT-16;						/*	MAP TO 0-15 FOR NOW	*/
+	LAST=HELD.RTE.BUTTONS;		/*	SAVE LAST FOR LATER CHECK	*/
+
+	IF (BUT<8) THEN DO;			/*	KEEP TRACK OF HELD BUTTONS FOR SOURCES	*/
+		HELD.RTE.BUTTONS=HELD.RTE.BUTTONS XOR BITS(BUT);
+		IF BUT=6 THEN HELD.KCV.BUTTON=VALUE;	/*	KCV BUTTON	*/
+	END;
+	ELSE IF (BUT=10) THEN HELD.RTE.BUTTONS=HELD.RTE.BUTTONS XOR 512;	/*	USE 512 FOR OVERWRITE	*/
+	ELSE IF (BUT=11) THEN HELD.RTE.BUTTONS=HELD.RTE.BUTTONS XOR 256;	/*	USE 256 FOR CLEAR	*/
+
+	IF (NEW.PAN<>0)&(INFO.MODE<>0) THEN DO;	/*	INFO MODE					*/
+		CALL INFO.BUTTON.PRESS;						/*	GET OUT OF IT FOR NOW	*/
+	END;
+
+	IF (NEW.PAN<>0) AND (PRESSURE.CALIBRATION.MODE<>0)
+	THEN DO;												/*	SEE IF WE WANT TO WRITE DATA TO DISK OR LATCH NEW VALUE	*/
+		IF  (MAP.THERE	<>0)							/*	MAP FILE EXISTS				*/
+		AND (VALUE		<>0)							/*	AND THIS IS A PRESS			*/
+		AND (BUT			= 10)							/*	OVERWRITE BUTTON PRESSED	*/
+		THEN DO;
+			IF PRESSURE.CALIBRATION.KEY>0 THEN DO;
+				WRITE(MAM) = PMAP.PTR;
+				WRITE(MAL) = PRESSURE.CALIBRATION.KEY;
+				WRITE(MD ) = PRESSURE.CALIBRATION.VALUE;		/*	SAVE NEW PRESSURE VALUE	*/
+				WRITE(MAL) = 128 + PRESSURE.CALIBRATION.KEY;
+				WRITE(MD ) = 1;										/*	MARK KEY AS 'CALIBRATED'	*/
+			END;
+			ELSE IF PRESSURE.CALIBRATION.KEY=(-1) THEN DO;	/*	SAVE PRESSURE SATURATION CHANGE	*/
+				WRITE(MAM) = PMAP.PTR;
+				WRITE(MAL) = LOC.PRESSURE.SATURATION;
+				WRITE(MD ) = PRESSURE.CALIBRATION.VALUE;		/*	SAVE NEW SATURATION VALUE	*/
+				WRITE(MAL) = 128 + NUM.KEYS;
+				WRITE(MD ) = 1;										/*	MARK AS 'CHANGED'	*/
+			END;
+
+			M=MAPDEV; L=MAPSEC;						/*	BASE OF MAP FILE	*/
+			L=L+PRESSURE.CAL.DATA;					/*	OFFSET TO CALIBRATION DATA	*/
+			IF L ILT PRESSURE.CAL.DATA THEN M=M+1;
+
+			CALL EXT.WRITEDATA(M,L,PMAP.PTR,0,0,256);	/*	WRITE OUT CALIBRATION DATA	*/
+
+			CALL PRESSURE.CALIBRATION.DISPLAY(PRESSURE.CALIBRATION.KEY,PRESSURE.CALIBRATION.VALUE);
+		END;
+
+		CALL COMPUTE.RTE.BUTTONS;			/*	COMPUTE NEW RTE BUTTON DISPLAY ON PRESS OR RELEASE	*/
+		IF HELD.RTE.BUTTONS=0 THEN DO;	/*	CLEAR FLAGS ON BUTTON RELEASE	*/
+			PERFORM.FLICKER=0;				/*	RESET FLAG ON RELEASE OF ALL BUTTONS	*/
+			FLICKER.PARAMS=0;
+		END;
+		RETURN;
+	END;
+
+	IF HELD.MIDI.BUTTON<>0 THEN DO;				/*	SETTING ACTIVE MIDI RTE BITS OR CHANGING SUSTAIN MODE	*/
+
+		IF VALUE<>0 THEN DO;							/*	NEW PRESS	*/
+			IF (BUT=8) THEN DO;						/*	vkper.l HOLDING MIDI PRESSING PERFORM - TOGGLE SUSTAIN MODE	*/
+				IF UPPER.DISP=MIDISUST.DISP		/*	TOGGLE IF DISPLAYED	*/
+				THEN DO;
+					MIDISUST.MODE=MIDISUST.MODE XOR 1;
+				END;
+				IF NEW.PAN THEN DO;					/*	MAKES SENSE HERE ONLY	*/
+					CALL CLEAR.UPPER;
+					IF MIDISUST.MODE=0 THEN DO;
+						CALL EMIT.STRING(0,'MIDI Sustain:Off');
+					END;
+					ELSE DO;
+						CALL EMIT.STRING(0,'MIDI Sustain:On ');
+					END;
+					UPPER.DISP=MIDISUST.DISP;
+				END;
+				RETURN;
+			END;
+
+			ELSE IF (BUT<8) & (BUT<>6)				/*	AN EXPRESSION INPUT OTHER THAN KBD CONTROL VOLTAGE	*/
+			THEN DO;
+				PTR=TRK.HEAD.LOOKUP(0,THD.ACTIVE.MIDI.RTES);	/*	GET CURRENT BITS	*/
+				PTR=PTR XOR OVERWRITE.MAP(BUT);			/*	TOGGLE NEW BIT	*/
+				WRITE(MD)=PTR;									/*	REWRITE NEW INFO TO TRK HEAD	*/
+				IF BUT=1 THEN DO;								/*	CHANGING PRESSURE BIT	*/
+					WRITE(MAL)=THD.MIDI;						/*	SEE IF MIDI OUTPUT IS ENABLED	*/
+					IF READ(MD)<>0 THEN DO;					/*	IF SO, FIX UP PRESSURE BITS IN ROUTING FIELD	*/
+						CALL CLEANUP.MIDI.PRESSURE(0);	/*	turn off current pressure before changing modes	*/
+						WRITE(MAM)=TRK.HEAD;					/*	RESTORE PTR TO MIDI FIELD	*/
+						WRITE(MAM)=READ(MD);
+						WRITE(MAL)=THD.MIDI;
+						WRITE(MD)=READ(MD) & (not(THD.MIDI.PRESURE));		/*	MASK OFF PRESSURE FIELD	*/
+						IF (PTR&B.PRESSURE)<>0
+						THEN WRITE(MD)=READ(MD)\"020000";
+						CALL COMPUTE.MISC.INFO;				/*	RECOMPUTE CHANNEL PRESSURE LIST	*/
+					END;
+				END;
+				NEW.PRM.INFO=NEW.PRM.INFO\16;				/*	SET BIT TO INDICATE OVERALL CHANGE	*/
+			END;
+		END;
+
+		CALL COMPUTE.RTE.BUTTONS;					/*	COMPUTE NEW RTE BUTTON DISPLAY ON PRESS OR RELEASE	*/
+		RETURN;
+	END;
+
+	IF VALUE<>0 THEN DO;									/*	PRESS BUTTON - POSSIBLE CHANGE OF RTE	*/
+		IF (BUT<8) OR (BUT=11) THEN DO;				/*	0 - 7 = RTE EXPRESSION, 11 = CLEAR	*/
+			ACTIVE.PARMS(0)=0;							/*	EMPTY OUT PARAMETER LIST	*/
+			TB.ENABLED=0; TB.POS=0; VB.POS=1000;	/*	CLEAR OUT TONE BEND INFO	*/
+			IF SOLOED.PARTIALS=15						/*	INDICATES ACCESS OF POLYPHONY CONTROL - CLEAR IT	*/
+			THEN SOLOED.PARTIALS=0;						/*	REMOVE KEYBOARD POLYPHONY	*/
+			//	Don't clear the upper display yet.  It's needed to enable reset on double-press.
+
+			PTR=TIM.HEAD.LOOKUP(0,TIM.TINFO.POINTER);	/*	READ TINFO.POINTER FOR KBD TIMBRE	*/
+
+			IF PTR=0 THEN DO;									/*	CREATE TINFO BLOCK ON BUTTON PRESS	*/
+				IF CREATE.TINFO.FRAME=0 THEN DO;			/*	TRY TO CREATE IT - CHECK FOR ERROR	*/
+					CALL DISPLAY.ERR(11);					//	This calls CLEAR.DISPLAY()
+				END;
+				ELSE PTR=TIM.HEAD.LOOKUP(0,TIM.TINFO.POINTER);	/*	READ TINFO.POINTER FOR KBD TIMBRE	*/
+			END;
+
+			IF PTR<>0 THEN DO;								/*	EMIT PROMPT IF TINFO BLOCK WAS THERE OR JUST CREATED	*/
+				IF (HELD.RTE.BUTTONS&256)<>0 THEN DO;	/*	PRESSING CLEAR, OR PRESSING OTHER BUTTON WITH CLEAR HELD	*/
+					IF NEW.PAN<>0 THEN DO;
+						CLEAR.DISPLAY(); EMIT.STRING(0,'PRESS BUTTONS TOCLEAR EFFECTS');
+						BOTH.DISPLAY=1;
+					END;
+					CALL ON(VKCLR.L);						/*	TURN ON CLEAR BUTTON	*/
+					IF BUT<8 THEN DO;						/*	CLEAR HELD, PRESSING OTHERS - CLEAR THAT EXPRESSION	*/
+						PTR=PTR+TI.RTE+BUT*5;			/*	COMPUTE POINTER TO WORD PAIR	*/
+						CALL P.STORE(PTR,"17");			/*	INITIALIZE TO ALL PARTIALS	*/
+						WRITE(MDI)=0; WRITE(MDI)=0;	/*	CLEAR RTE WORDS FOR	*/
+						WRITE(MDI)=0; WRITE(MDI)=0;	/*	THAT EXPRESSION	*/
+						CALL COMPUTE.RBITS(0);			/*	MUST RECOMPUTE LOOKUP TABLE	*/
+						NEW.PRM.INFO=NEW.PRM.INFO\16;	/*	SET BIT TO INDICATE OVERALL CHANGE	*/
+					END;
+				END;
+				ELSE DO;										/*	NOT A CLEAR FUNCTION	*/
+					IF (BUT==1)\(BUT==4)\(BUT==5) THEN DO;		/*	PRESSURE/MWHEEL/RIBBON	*/
+						ACTIVE.PARMS(0)=1;
+						IF		  (BUT == 4)
+						{	ACTIVE.PARMS(1)=(MWPROX.L-PAR.L)\SHL(MWPROX.L-PAR.L,8);					//	SET UP MOD WHEEL PROXY AS THE PARAMETER
+							IF (UPPER.DISP == MWPROX.L-PAR.L) RESET.INFO = MWPROX.L-PAR.L;			//	enable reset on double-press
+						}
+						ELSE IF (BUT == 1) ACTIVE.PARMS(1)=(PFIL.L-PAR.L)\SHL(PFIL.L-PAR.L,8);	//	SET UP PRESSURE FILTER AS THE PARAMETER
+						ELSE					 ACTIVE.PARMS(1)=(RFIL.L-PAR.L)\SHL(RFIL.L-PAR.L,8);	//	SET UP RIBBON FILTER AS THE PARAMETER
+						CALL DISPLAY.PAR;
+						IF NEW.PAN<>0 THEN DO;
+							CLEAR.LOWER(); EMIT.STRING(16,'SELECT PATCHING');
+						END;
+					END;
+					ELSE IF NEW.PAN<>0 THEN DO;
+						CLEAR.DISPLAY(); EMIT.STRING(0,'PRESS BUTTONS   FOR RTE PATCHING');
+						BOTH.DISPLAY=1;
+					END;
+				END;
+			END;
+
+			IF LAST=0 THEN FLICKER.PARAMS=1;	/*	PRESSING FIRST BUTTON - SET UP FOR FLICKER DISPLAY	*/
+		END;
+
+		IF (HELD.RTE.BUTTONS&512)<>0 THEN DO;	/*	PRESSING OVERWRITE, OR PRESSING ANOTHER BUTTON WITH OVERWRITE HELD	*/
+			IF (NEW.PAN<>0) THEN DO;
+				CALL CLEAR.DISPLAY;
+				CALL EMIT.STRING(0,'PRESS BUTTONS TOOVERDUB EFFECTS');
+				BOTH.DISPLAY=1;
+			END;
+			CALL ON(VKOVE.L);							/*	TURN ON OVERWRITE BUTTON	*/
+
+			IF (HELD.RTE.BUTTONS&256)<>0			/*	CLEAR PRESSED OR HELD	*/
+			THEN RTE.OVERWRITE.BITS=0;				/*	RESET OVERWRITE BITS	*/
+
+			ELSE IF (BUT>1) & (BUT<8) & (BUT<>6)
+			THEN DO;										/*	OVERWRITE HELD - PRESSING OTHERS TOO (BUT NOT KCV)	*/
+				RTE.OVERWRITE.BITS=RTE.OVERWRITE.BITS XOR OVERWRITE.MAP(BUT);	/*	TOGGLE APPROPRIATE BIT	*/
+			END;
+
+			ELSE IF (BUT=10)&(HELD.PTUN.BUTTON<>0)	/*	PRESSED OVERWRITE WHILE HOLDING PTUNING	*/
+			THEN RTE.OVERWRITE.BITS=RTE.OVERWRITE.BITS XOR B.PWHEEL;	/*	TOGGLE APPROPRIATE BIT	*/
+
+			NEW.PRM.INFO=NEW.PRM.INFO\16;			/*	SET BIT TO INDICATE OVERALL CHANGE	*/
+			IF LAST=0 THEN FLICKER.PARAMS=1;		/*	PRESSING FIRST BUTTON - SET UP FOR FLICKER DISPLAY	*/
+		END;
+
+	END;											/*	OF BUTTON PRESSED - POSSIBLE CHANGE OF RTE	*/
+
+	/*	$PAGE - PROCESS BUTTON RELEASE	*/
+
+	ELSE DO;							/*	BUTTON RELEASE	*/
+		IF (BUT<8)&(HELD.RTE.BUTTONS=0) THEN DO;
+			IF (BUT==1)\(BUT==4)\(BUT==5)		/*	PRESSURE/MWHEEL/RIBBON	*/
+			THEN DO;
+				IF NEW.PAN<>0 THEN CALL CLEAR.LOWER;	/*	LEAVE PARAMETER THERE	*/
+			END;
+			ELSE CALL CLEAR.DISPLAY;		/*	REMOVE PROMPT IF NO FILTER OR PROXY PARAM	*/
+		END;
+		ELSE DO CASE(BUT-8);		/*	SPECIAL CASES	*/
+			;	/*	PERFORM   BUTTON	*/
+			;	/*	RECORDER  BUTTON	*/
+			DO; CALL CLEAR.DISPLAY; CALL OFF(VKOVE.L); END;	/*	TURN OFF OVERWRITE BUTTON	*/
+			DO; CALL CLEAR.DISPLAY; CALL OFF(VKCLR.L); END;	/*	TURN OFF CLEAR BUTTON		*/
+		END;
+
+		IF PLAY<>0 THEN NEW.BEAT.NUMBER=1;	/*	CAUSE BEAT DISPLAY TO REFRESH ASAP	*/
+
+		IF HELD.RTE.BUTTONS=0 THEN DO;	/*	CLEAR FLAGS ON BUTTON RELEASE	*/
+			PERFORM.FLICKER=0;				/*	RESET FLAG ON RELEASE OF ALL BUTTONS	*/
+			FLICKER.PARAMS=0;
+		END;
+	END;
+	CALL COMPUTE.RTE.BUTTONS;	/*	COMPUTE NEW RTE BUTTON DISPLAY ON PRESS OR RELEASE	*/
+END RTE.BUTTON;

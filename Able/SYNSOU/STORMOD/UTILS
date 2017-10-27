@@ -1,0 +1,878 @@
+/*	:SYNSOU:STORMOD:UTILS  $TITLE  Some Basic Routines
+
+Modified:
+2000/03/08 - TY  - Prevented long window titles from plotting over buttons
+2000/02/26 - TY  - Modified Build.Window.Title() to accommodate display of sound file loops
+1999/10/16 - TY  - Modified "<filename> Active on Keyboard" message to include patch info
+1991/08/13 - pf  - Added "noio" argument to PS.AUDITION
+1990/10/29 - cj  - expanded recall.sound.file to do more functions
+1990/10/15 - cj  - fixed bug in recall.s.f to allow audition of SF using
+						 DTD if sf is in poly memory
+1989/06/16 - TSS - Made change to be able to force DTD audition in RECALL.SOUND.FILE
+1989/06/09 - TSS - Added code to display Sample Rate and Stereo/Mono info
+1989/05/17 - SGS - Fixed title bar refresh bug
+1989/05/02 - TSS - Merged changes for Optical disk to DTD transfer project
+1989/03/08 - CWJ - Added call to Audition.SF.Using.DTD call from Recall.Sound.File
+1988/03/08 - LSS - inc.poly check in RECALL.S.F return for mono samp bug
+1987/11/16 - EEG - treename support changes in RECALL.SOUND.FILE
+1987/11/12 - MWH - Make timer comparisons unsigned to fix "30 sec hang"
+*/
+
+DCL BUILD.TDS.PATCH.STR	PROC	EXTERNAL;	//	Builds the 14-character patch assignment string
+DCL TDS.PATCH.STR			ARRAY	EXTERNAL;	//	The 14-character patch assignment string
+dcl Set.DirTable.Position proc (fixed,fixed) recursive;
+
+Get.Next.Optical.Event: proc	fixed public swapable;	/*	routine to look at events coming through	*/
+	dcl Id			fixed;
+	dcl EventCount	fixed;	/*	make this var STATIC to actually count events	*/
+	dcl col			fixed;
+	dcl row			fixed;
+
+	dcl Debug		fixed;
+
+	/*	make sure dirtable is highlighted if	*/
+	/*	it is the curr obj							*/
+
+	if  (Cur.Obj.Id = GID(DirTable))
+	and (GID(DirTableYpos)=(-1))
+	then do;
+		call FETCH.TABLE.CUR.CELL(GID(DirTable),loc(addr(col)));
+		call Set.DirTable.Position(row,col);
+	end;
+
+	if (Exit.My.Screen<>0)						/*	user wants to quit	*/
+	then do;
+		Screen.Event.Group=GID(SFDMiscGrp);			/*	remap an exit to misc group	*/
+/*		Screen.Event.Code	=Get.Screen.Event;	*/	/*	so that we leave whatever		*/
+/*		Screen.Event.Info	=S#NulEvent;			*/	/*	event loop we're in and			*/
+/*		Screen.Event.Id	=GID(MouseHole);		*/	/*	return to main loop				*/
+	end;
+	else call Get.Next.Screen.Event;	/*	get a real event	*/
+
+	if (Err.Displayed != 0)
+	{
+		if (((Screen.Event.Code == Get.Screen.Event)		/*	remove errors after screen events	*/
+		&&   (Screen.Event.Info != S#ArrowSelect	 ))	/*	but not after mouse clicks (we get an arrow select after that each mouse click)	*/
+		||  ( Screen.Event.Code == Get.In.Char		  ))	/*	or if character typed	*/
+		{
+			Set.Term.Attr(ATTR#Normal);
+			Erase.Message();	/*	get rid of error message & restore current cat info	*/
+		}
+	}
+
+	Id=GID(DirTable);	/*	get object id of current directory table	*/
+
+	if  (Screen.Event.Code=Get.Screen.Event)
+	and (Prev.Obj.Id=Id) and (Cur.Obj.Id<>Id)
+	then do;
+		call Set.DirTable.Position(-1,-1);	/*	un-highlight last position	*/
+	end;
+
+/*	Debug=3;
+	if Debug=0 then	*/
+
+	return Screen.Event.Code;	/*	normal operation	*/
+/****************************************************************/
+	EventCount=EventCount+1;
+
+	/*	give a debug display of screen events	*/
+
+	call Scroll.Screen(7,8,1);
+	call Save.Cursor;
+
+	call cpos(8,0);
+	call ps('['); call pnum(EventCount,0); call ps(']');
+	call ps(' Grp:');		call pnum(Screen.Event.Group,0);
+	call ps(' Code:');	call pnum(Screen.Event.Code,0);
+	call ps(' Info:');	call pnum(Screen.Event.Info,0);
+	call ps(' SE.Id:');	call pnum(Screen.Event.Id,0);
+	call ps(' Cur.Id:');	call pnum(Cur.Obj.Id,0);
+	call ps(' TCol:');	call pnum(Screen.Event.Table.Col,0);
+	call ps(' TRow:');	call pnum(Screen.Event.Table.Row,0);
+	call ps(' OCode:');	call pnum(Screen.Event.Obj.Code,0);
+	call ps(' OInfo:');	call pnum(Screen.Event.Obj.Info,0);
+
+	if Debug IGT 2 then begin;	/*	SINGLE STEP MODE	*/
+		dcl x	fixed;
+		call tty_wait; disable; input x; enable;
+	end;
+
+	call Restore.Cursor;
+	call tty_wait;
+
+
+	return Screen.Event.Code;
+end Get.Next.Optical.Event;
+
+/*	$SUBTITLE	*/
+
+Build.Window.Title: proc (Info,Title) public swapable;	/*	create title of INFO attributes	*/
+	dcl Info		fixed;	/*	bit information about what is set in INFO panel	*/
+	dcl Title	array;	/*	string to hold title	*/
+
+	call Copy.String('  Filename',Title);
+
+	if (Info&(INFO$Second|INFO$MByte|INFO$Sector|INFO$Bin|INFO$Loops|INFO$Caption))<>0
+	then call AppendC(Title,SP);
+
+	if (Info&INFO$Second)<>0
+	then call Append.To.Str(Title,'Seconds ');
+
+	if (Info&INFO$MByte)<>0
+	then call Append.To.Str(Title,'  MB   ');
+
+	if (Info&INFO$Sector)<>0
+	then call Append.To.Str(Title,'Sectors ');
+
+	if (Info&(INFO$Second|INFO$MByte|INFO$Sector))<>0
+	then call Append.To.Str(Title,' Rate S/M');
+
+	if (Info&INFO$Bin)<>0
+	AND DirDevice = PolyMemDev					/*	Only show bin when looking at poly	*/
+	then call Append.To.Str(Title,' Bin');
+
+	if (Info&INFO$Loops)<>0
+	then call Append.To.Str(Title,'  LoopStart LoopEnd LoopLength');
+
+	if (Info&INFO$Caption)<>0
+	then call Append.To.Str(Title,' Caption');
+
+end Build.Window.Title;
+
+/*	$SUBTITLE	*/
+
+Get.Window.Title: proc(Device,Title) public swapable;
+	dcl Device	fixed;
+	dcl Title	array;
+	dcl Str (8)	fixed;
+
+	call Copy.String('Contents of ',Title);
+	call Get.Device.Name(Device,Str);
+	call Append.To.Str(Title,Str);
+
+end Get.Window.Title;
+
+/*	$SUBTITLE	*/
+
+dcl Select.Active.Window proc (fixed) recursive;
+
+Refresh.OptWindow.Title: proc (WindowId) public swapable;
+	dcl WindowId	fixed;
+	dcl Title (32)	fixed;
+
+	if ActiveWindowId<>WindowId
+	then call Select.Active.Window(WindowId);
+
+	/*	Get proper title for INFO fields displayed */
+	if (ShowInfo&(INFO$Caption|INFO$Second|INFO$Sector|INFO$MByte|INFO$Bin|INFO$Names))<>0
+	then do;
+		call Build.Window.Title(ShowInfo,Title);	/*	show the INFO labels in the title area		*/
+
+		if (goto.this.screen == s.optical) {
+			//	On the R-page, if the title exceeds MaxLen-1, it will plot over the buttons
+			write("313") = GID(DirTableCols)-1;
+			if (Title(0) igt read("313")) Title(0) = read("313");
+		}
+		else if (goto.this.screen == s.audio.event) {
+			//	On the Q-page OPT XFER panel, if the title exceeds MaxLen-5, it will plot over the buttons
+			write("313") = GID(DirTableCols)-5;
+			if (Title(0) igt read("313")) Title(0) = read("313");
+		}
+	end;
+	else call Get.Window.Title(DirDevice,Title);	/*	otherwise show the vol name in the window	*/
+
+	Disable.Deposits=true;
+		call Deposit.Label(GID(DirTableTitle),Title);
+	Disable.Deposits=false;
+
+end Refresh.OptWindow.Title;
+
+/*	formats category strings	*/
+Clean.Category.Strings: proc (InStr,OutStr) public swapable;
+	dcl (InStr,OutStr)	array;
+	dcl (I,J,Ch,Go)		fixed;
+
+	do I=0 to InStr(0)-1;		/*	loop over bytes in input string	*/
+		Ch=Byte(InStr,I);			/*	get next char from input string	*/
+		if Ch IGT SP then Go=1;	/*	strip leading spaces	*/
+		if Go<>0 then do;
+			if Ch=SP then Ch=A.SCORE;	/*	map space chars to underscore chars	*/
+			if Ch IGT SP then do;		/*	want to keep this char					*/
+				call PByte(OutStr,J,Ch);
+				J=J+1;
+			end;
+		end;
+	end;
+	OutStr(0)=J;			/*	save final length of cleaned up string	*/
+
+end Clean.Category.Strings;
+/*	$SUBTITLE	*/
+
+/*	Calculates how much of optical disk is left and puts statistics	*/
+/*	in output array OutBuf, which had better be of size 16 or bigger	*/
+/*	NOTE: Before calling routine, make sure Optical is all ready		*/
+Display.Optical.Statistics: proc (OutBuf) public swapable;
+	dcl OutBuf								array;	/*	output buffer	*/
+	dcl StatStr(20)						fixed;	/*	temp buffer to build string	*/
+	dcl InfoBuf (Stat#Rec_Length-1)	fixed;
+	dcl (DirFree,DataFree)				fixed;
+	dcl (Msb,Lsb,I,J,K)					fixed;
+
+	if Get_Statistics(LaserDev,InfoBuf) then do;
+
+		I=InfoBuf(Stat$Dir_Used)+InfoBuf(Stat$Dir_Free);	/*	total dir entries	*/
+
+		load InfoBuf(Stat$Dir_Free); mul 100; mwait; div I;
+		DirFree=res+(rem ige shr(I,1));	/*	percent of directory available	*/
+
+		Msb=InfoBuf(Stat$MS_Used)+InfoBuf(Stat$MS_Free);	/*	compute total data sectors	*/
+		Lsb=InfoBuf(Stat$LS_Used)+InfoBuf(Stat$LS_Free);
+		if Lsb ilt InfoBuf(Stat$LS_Used) then Msb=Msb+1;
+
+		if (Msb|Lsb)<>0 then do;
+			do while Msb<>0;
+				call Shr32(Loc(Addr(Msb)),1);
+				K=K+1;
+			end;
+
+			I=InfoBuf(Stat$MS_Free); J=InfoBuf(Stat$LS_Free);
+
+			call Shr32(Loc(Addr(I)),K);
+
+			load J; mul 100; mwait; div Lsb;
+			DataFree=res+(rem ige shr(Lsb,1));
+		end;
+
+		call Copy.String('Free space: Dir ',StatStr);
+		call Conv.Fixed.To.Str(DirFree,0,cf#default,cf#unsigned|cf#append|cf#left|cf#nofill,StatStr);
+		call Append.To.Str(StatStr,'%  Data ');
+		call Conv.Fixed.To.Str(DataFree,0,cf#default,cf#unsigned|cf#append|cf#left|cf#nofill,StatStr);
+		call Append.To.Str(StatStr,'%');
+	end;
+	else call Copy.String('No Statistics Available',StatStr);
+
+	call Copy.String(StatStr,OutBuf);
+
+end Display.Optical.Statistics;
+
+/*	$SUBTITLE	*/
+
+dcl Activate.Optical proc (fixed) returns(fixed) recursive;
+
+dcl DESTINATION.PARTIAL.#	fixed public;	/*	arguments passed to sound file	*/
+dcl DESTINATION.FRAME.#		fixed public;	/*	screen								*/
+dcl DESTINATION.SKEY.#     fixed public;
+dcl DESTINATION.EKEY.#     fixed public;
+dcl DESTINATION.XPOS.#     fixed public;
+dcl RETURN.IMMEDIATELY		fixed public;
+
+/*	Control bits for recall.sound.file:
+	bit 0 - set true if should perform audition while loading
+	bit 1 - set true if force audition to direct-to-disk
+	bit 2 - set to ignore destination.partial.#, destination.frame.#, etc
+	bit 3 - set to suppress all terminal i/o
+	bit 4 - set to suppress header rechecks
+*/
+
+dcl RSF#Audition	lit '  1';
+dcl RSF#UseDTD		lit '  2';
+dcl RSF#Partial0	lit '  4';
+dcl RSF#NoIO		lit '  8';
+dcl RSF#NoCheck	lit ' 16';
+dcl RSF#LongName	lit ' 32';
+dcl RSF#EraseTimb	lit ' 64';
+dcl RSF#ErasePrtl	lit '128';
+dcl RSF#UseDest 	lit '256';
+
+Recall.Sound.File: proc (name,device,fileaddr,filelen,controls,revision) boolean public swapable;	/*	recall specified filename	*/
+	dcl name				array;	/*	name (or treename) of sound file to recall	*/
+	dcl device			fixed;	/*	device from which name was gotten (i.e., poly cache, laser disk, poly mem, other disk drive	*/
+	dcl fileaddr		array;	/*	32-bit absolute address of file	*/
+	dcl filelen			array;	/*	32-bit length of file				*/
+	dcl controls		fixed;	/*	control word described above		*/
+   dcl revision      fixed;   /* if nonzero disk revision of file */
+
+	dcl audition		fixed;
+	dcl usedtd			fixed;
+	dcl partial0		fixed;
+	dcl noio				fixed;
+   dcl nocheck			fixed;
+   dcl longname		fixed;
+   dcl eraseTimb		fixed;
+   dcl erasePrtl		fixed;
+   dcl useDest 		fixed;
+
+	dcl hdev				fixed;	/*	will hold header sector#'s			*/
+	dcl hsec				fixed;
+	dcl temp.base (1)	fixed;
+	dcl reload			fixed;
+	dcl dname	  (5)	fixed;	/*	will hold filename to be displayed in window	*/
+	dcl (our.par)		fixed;
+	dcl (our.fra)		fixed;
+	dcl (i,j,k,l)		fixed;
+	dcl (msb,lsb)		fixed;
+
+	dcl erase.keyboard.timbre		proc                       external;
+	DCL ERASE.TIMBRE				   PROC(FIXED)                EXTERNAL;
+	dcl held.psel.buttons			fixed                      external;
+	dcl select.partial				proc (fixed)               external;
+   dcl create.patch.frame   		proc (fixed,fixed,fixed)   external;
+   dcl create.patch.partial		proc (fixed,array)         external;
+   dcl expand.patch.partial		proc (fixed,fixed,fixed)   external;
+	dcl ertyp							fixed                      external;
+	dcl find.frame						proc (fixed,fixed)         external;
+	dcl p.lookup						proc (fixed)		         external;
+	dcl dealloc							proc (fixed)		         external;
+	dcl alloc.timbre					proc (FIXED)		         external;
+	dcl count.timbre.frames			proc (fixed)		         external;
+	dcl tim.head.lookup				proc (fixed,fixed)         external;
+	dcl p.store							proc (fixed,fixed)         external;
+	dcl ps.search						proc					         external;
+	dcl ps.deallocate					proc (array)		         external;
+	dcl display.par					proc					         external;
+	dcl compute.env.params			proc (fixed)		         external;
+	dcl clear.parameters				proc					         external;
+	dcl clear.display					proc					         external;
+	dcl emit.string					proc (fixed,array)         external;
+	dcl both.display					fixed					         external;
+	dcl supress.beat.display		fixed					         external;
+	dcl beat.display.time			fixed					         external;
+	dcl ps.load							proc (fixed,fixed,fixed,fixed,fixed) external;
+	dcl ps.audition					proc (array,fixed)         external;
+	dcl ps.update						proc (array,array)         external;
+	dcl extract.filename				proc (array,array)         external;
+	dcl show.file.loading.message	fixed					         external;
+	dcl Audition.SF.Using.DTD		proc (fixed,fixed,fixed,fixed,fixed) external;
+   DCL PATCH.SCREEN.BASE.LINE    FIXED EXTERNAL;
+   DCL PATCH.SCREEN.YPOS         FIXED EXTERNAL;
+   dcl patch.screen.active  		fixed 		external;
+   dcl patch.screen.partial 		fixed 		external;
+   dcl patch.screen.frame   		fixed 		external;
+
+	insert ':synlits:prmlits';
+	insert ':synlits:timlits';
+
+	/*	Set up control bits	*/
+	if (controls & RSF#Audition ) <> 0 then audition  = 1;
+	if (controls & RSF#UseDTD	 ) <> 0 then usedtd	  = 1;
+	if (controls & RSF#Partial0 ) <> 0 then partial0  = 1;
+	if (controls & RSF#NoIO		 ) <> 0 then noio		  = 1;
+   if (controls & RSF#NoCheck	 ) <> 0 then nocheck	  = 1;
+   if (controls & RSF#LongName ) <> 0 then longname  = 1;
+   if (controls & RSF#EraseTimb) <> 0 then eraseTimb = 1;
+   if (controls & RSF#ErasePrtl) <> 0 then erasePrtl = 1;
+   if (controls & RSF#UseDest  ) <> 0 then useDest   = 1;
+
+   // Some older software handles long names but does not set the longname bit
+   if (name(0) > 8)
+      longname = 1;
+
+	ertyp = 0;	/*	Have dump any pending errors at this point */
+
+   // Handle recall from asset library where information is known
+   if (useDest != 0) {
+      
+      // Erase keyboard timbre
+      if (eraseTimb != 0) {
+         call ERASE.KEYBOARD.TIMBRE;		/*	get rid of timbre #0						*/
+      }
+      
+      our.par = DESTINATION.PARTIAL.#;	   /*	get working copy of	*/
+      our.fra = DESTINATION.FRAME.#;	   /*	passed arguments		*/
+      
+      call SELECT.PARTIAL(our.par);	/*	select the first partial	*/
+
+      // Erase partial if desired
+      if (erasePrtl != 0) {
+         call CREATE.PATCH.PARTIAL(our.par,'');
+         
+         if (ertyp == err.oom) then do;   /*	error encountered?		*/
+            return false;                 /*	no room for patch frame	*/
+         end;
+      }
+      
+      // Make sure we have a patch partial
+      k=find.frame(our.par,0);	      /*	find pointer to it   */
+      
+      if (p.lookup(k)==sup)            /* if sup, must bail    */
+      return false;
+      
+      // Handle adding to a partial
+      l=COUNT.TIMBRE.FRAMES(our.par);
+      
+      // Handle adding line to frame
+      if (our.fra == l+1) {
+         dcl extra fixed;
+         
+         extra = 0;
+         
+         // Compute extra words likely needed for a long name
+         // we are about to plop in here
+         if (longname != 0 && (name(0) > 8)) {
+            extra = name(0);     // Bytes
+            
+            if (extra > sf.file.handle.bl-1) // Limit
+               extra = sf.file.handle.bl-1;
+         
+            extra = shr(extra+3, 1);   // Data words needed including length word
+         }
+      
+         if create.patch.frame(our.par,our.fra, extra) == 0 then do; /*	out of room          */
+            call nomem.error;                                        /*	no re allocation needed on create of empty record	*/
+            return false;
+         end;
+         
+         // If adding to end of I screen get cursor to go down one
+         if (patch.screen.active != 0 && patch.screen.partial == our.par && patch.screen.frame == l && l != 0) {
+            PATCH.SCREEN.YPOS = PATCH.SCREEN.YPOS + 1;
+            
+            if (PATCH.SCREEN.YPOS == 10) {
+               PATCH.SCREEN.YPOS = PATCH.SCREEN.YPOS - 5;
+               PATCH.SCREEN.BASE.LINE = PATCH.SCREEN.BASE.LINE + 5;
+            }
+         }
+      }
+      
+      k=find.frame(our.par,our.fra);	/*	find pointer to it   */
+      
+      if (p.lookup(k)<>mor)				/*	make sure patch list	*/
+      or (p.lookup(k+type)<>pt.type) {
+         call CREATE.PATCH.PARTIAL(our.par,'');
+         
+         if (ertyp == err.oom) then do;   /*	error encountered?		*/
+            return false;                 /*	no room for patch frame	*/
+         end;
+      }
+      
+      // Set key range
+      CALL P.STORE(k+PT.SKEY,DESTINATION.SKEY.#);						/*	STARTING KEY	*/
+      CALL P.STORE(k+PT.EKEY,DESTINATION.EKEY.#);						/*	ENDING KEY     */
+      CALL P.STORE(k+PT.TRA ,DESTINATION.XPOS.# | 256);           /*	XPOS KEY       */
+   }
+
+   // Else look at a confusing set of flags and state variables
+   // and take a guess what to do
+   else {
+      if partial0 then do;						/*	if we should recall to partial 0	*/
+         our.par = 0;							/*	then do so								*/
+         our.fra = 0;
+      end;
+      else do;
+         our.par = DESTINATION.PARTIAL.#;	/*	get working copy of	*/
+         our.fra = DESTINATION.FRAME.#;	/*	passed arguments		*/
+      end;
+
+      /*	begin by erasing current keyboard	*/
+      /*	timbre to make room in poly mem	*/
+
+      if  (our.fra=0) then do;				/*	sound file recall to timbre desired	*/
+         call ERASE.KEYBOARD.TIMBRE;		/*	get rid of timbre #0						*/
+
+         if held.psel.buttons<>0 then do;	/*	partial button held - select it		*/
+            i=0;
+            do while (held.psel.buttons&bits(i))=0; i=i+1; end;
+            our.par=i;
+         end;
+
+         our.fra=1;
+
+         call SELECT.PARTIAL(our.par);    /*	select the first partial	*/
+         call CREATE.PATCH.PARTIAL(our.par,'');
+
+         if (ertyp == err.oom) then do;   /*	error encountered?		*/
+            return false;                 /*	no room for patch frame	*/
+         end;
+      end;
+
+      // Else make sure partial is a patch partial if recall to frame 1
+      else if (our.fra == 1) then do;
+         k=find.frame(our.par,0);	      /*	find pointer to it   */
+         
+         if (p.lookup(k)==sup)            /* if sup, must bail    */
+            return false;
+
+         k=find.frame(our.par,our.fra);	/*	find pointer to it   */
+
+         if (p.lookup(k)<>mor)				/*	make sure patch list	*/
+         or (p.lookup(k+type)<>pt.type) {
+            call SELECT.PARTIAL(our.par); /* create a patch timbre */
+            call CREATE.PATCH.PARTIAL(our.par,'');
+
+            if (ertyp == err.oom) then do;   /*	error encountered?		*/
+               return false;                 /*	no room for patch frame	*/
+            end;
+         }
+         
+         else
+            call SELECT.PARTIAL(our.par);
+      end;
+   }
+
+	/*	$PAGE	*/
+
+	/*	now construct new file name with some error	*/
+	/*	checks													*/
+
+   if longname then do;                               /* long name - display first 8      */
+      // Limit name to what will fit in the sound file header for the handle name
+      // and also to what will fit in the management block at the front of the sound file
+      // in poly ram.
+      // This check is redundant; the file handle was trimmed of UTF characters
+      // so that it fit in the buffer when the handle was computed.
+      if (name(0) > sf.file.handle.bl-1)
+         name(0) = sf.file.handle.bl-1;
+
+      // Expand the partial for a longer name
+      if (name(0) > 8) {
+         k=find.frame(our.par,our.fra);               /*	and pointer to it		*/
+
+         if (p.lookup(k)<>mor)                        /*	make sure patch list	*/
+         or (p.lookup(k+type)<>pt.type)
+         then return false;                           /*	system error of sorts	*/
+
+         i = shr(name(0)+3, 1);                       // Get number of words to hold long name
+         expand.patch.partial(our.par,our.fra,i);     /*	expand a patch list partial	*/
+      }
+
+      // Set up lnbuf for complete name match.
+      // lnbuf is utf-8, 127 valid characters
+      i = name(0);
+
+      lnbuf(0) = i;
+
+      do j = 0 to i-1;
+         pbyte(lnbuf,j,byte(name,j));
+      end;
+
+      if ((i&1)!=0)
+         pbyte(lnbuf,i,0);
+
+      if (i > 8)
+         i = 8;
+         
+      do j = 0 to i-1;
+         pbyte(fnbuf,j,byte(name,j));
+      end;
+      
+      fnbuf(0) = i;
+   end;
+
+   else {
+      call extract.filename(name, fnbuf);          /*	put just the filename in fnbuf	*/
+      
+      i = fnbuf(0);
+      
+      lnbuf(0) = i;
+      
+      do j = 0 to i-1;
+         pbyte(lnbuf,j,byte(fnbuf,j));
+      end;
+      
+      if ((i&1)!=0)
+         pbyte(lnbuf,i,0);
+   }
+
+   call copy.string					 (fnbuf,dname);	/*	for display purposes	*/
+	call remove.spaces.from.string (fnbuf,fnbuf);	/*	dump any spaces from string	*/
+	call uppercase.string			 (fnbuf,fnbuf);	/*	map chars to uppercase	*/
+
+	do i=fnbuf(0) to 7; call pbyte(fnbuf,i,0); end;	/*	zero fill file name	*/
+
+	if fnbuf(0)=0 then return false;
+
+	/*	now load sound file into poly memory	*/
+	/*	directly											*/
+
+	if nocheck then do;						/*	if no check needed, then	*/
+		hdev = FileAddr(0);					/*	use passed data				*/
+		hsec = FileAddr(1);
+		F#MS_Sector = hdev;
+		F#LS_Sector = hsec;
+	end;
+
+	else if device<LaserDev then do;		/*	re-locate file for consistency check	*/
+
+		/*	NOTE: For regular disk drives (i.e., W0:, F0:), do the	*/
+		/*	consistency check on the file address of the FULL passed	*/
+		/*	file name, so we can pass a full treename  for the file	*/
+		/*	to recall.																*/
+
+		if Locate(name,device) then do;	/*	see if file is on the disk	*/
+			if (F#MS_Sector<>FileAddr(0))	/*	found addr must match passed addr	*/
+			or (F#LS_Sector<>FileAddr(1))
+			then do;
+				return false;
+			end;
+		end;
+		else do;	/*	ERROR: should have found file	*/
+			return false;
+		end;
+
+		hdev = F#MS_Sector;		/*	get location of header sector handy	*/
+		hsec = F#LS_Sector;
+	end;
+
+	else if device = LaserDev then do;
+
+		if Activate.Optical(O#NoErrors) then do;	/*	make sure optical is up & running	*/
+
+			if Index_Locate(fnbuf,Misc.Buf,LaserDev)
+			then do;	/*	locate file to get addr in directory of latest header	*/
+
+				if (F#MS_Sector<>FileAddr(0))	/*	found addr must match passed addr	*/
+				or (F#LS_Sector<>FileAddr(1))
+				then do;
+					return false;
+				end;
+
+				/*	Compute absolute address of directory entry for	*/
+				/*	our sound file so we can directly call READDATA	*/
+				/*	in PS.LOAD (simplifies creation of Non-Optical	*/
+				/*	compilations)												*/
+
+				call EntryToSec(Misc.Buf(L$Dir_Entry));	/*	convert entry # to abs addr	*/
+
+				F#MS_Sector=F#MS_Sector|shl(LaserDev,8);	/*	put device number into addr	*/
+				F#LS_Sector=F#LS_Sector+1;						/*	sound header is in 2nd sector of dir entry	*/
+				if F#LS_Sector=0 then F#MS_Sector=F#MS_Sector+1;
+
+				hdev = F#MS_Sector;		/*	get location of header sector handy	*/
+				hsec = F#LS_Sector;
+
+			end;
+			else do;
+				return false;
+			end;
+		end;
+		else do;
+			return false;
+		end;
+	end;
+
+	else if device=PolyCacheDev then do;
+		f#ms_sector = fileaddr(0);
+		f#ls_sector = fileaddr(1);
+		hdev = F#MS_Sector;
+		hsec = F#LS_Sector;
+
+		/*	must assume passed info is correct	*/
+	end;
+
+	/*	$PAGE	*/
+
+   // This search will require an exact match since we
+   // have (presumably) been passed in the full long file name.
+	if (inc.poly) & (usedtd = 0)		/*	look for file in poly unless we	*/
+	then i = ps.search;					/*	are auditioning from Q page		*/
+	else i = 0;
+
+	if (device=PolyMemDev) and (i=0)	/*	device is poly but file not there	*/
+	then return (false);			/*	can't find file	*/
+
+	if  (device<>PolyMemDev)	/*	if not recalling sound from poly	*/
+	and (i<>0)						/*	and is in poly already				*/
+	then do;							/*	name in poly - check device and sector	*/
+
+		call psmread(sfile.base,0,bl.dev);
+
+		if (read(psd)<>hdev)		/*	if file in poly came from different place	*/
+		or (read(psd)<>hsec)
+		or (device=2)				/*	or device we are looking at	*/
+		or (device=3)				/*	is a removeable media			*/
+		or (device=4)				/*	that needs frequent				*/
+		or (device=5)				/*	error checking						*/
+		then do;
+			i=0;						/*	force reload						*/
+			reload=1;				/*	move pointers to random #'s	*/
+
+			/*	move file pointers to this file to point to -1,-1	*/
+			/*	this way they can be moved back to the new file	*/
+			/*	if it is loaded successfully							*/
+
+			call psmread(sfile.base,0,bl.users);	/*	get # of users for this file	*/
+			call PS.USERS(sfile.base,-read(psd));	/*	set to 0. account this space as free storage now if users had been nonzero	*/
+
+			/*	construct base address pointer to -1,-1:	*/
+
+			call COPY32(Sfile.Base,Temp.Base);
+			Temp.Base(lw#lsb) = (-1);
+			Temp.Base(lw#msb) = Temp.Base(lw#msb) \ BASE#Page_B;
+			call PS.UPDATE(Sfile.Base,Temp.Base);
+
+			call psmwrite(Sfile.Base,0,BL.USERS);	/*	zero out name because is free block now	*/
+			do j=BL.USERS to BL.SEC;
+				write(psd)=0;
+			end;
+		end;
+	end;
+
+	if i<>0 then do;							/*	sound file already in memory	*/
+		if  (inc.poly) and (Audition)		/*	if audition requested			*/
+		then call PS.AUDITION(sfile.base,noio);	/*	then audition poly sf	*/
+	end;
+
+	else if device <> PolyMemDev	/*	now actually load the sound file		*/
+	then do;								/*	but not if dev = poly mem				*/
+
+		if  (inc.mono		=	0)		/*	if not compiling for mono sompling	*/
+		and (inc.dtd		<>	0)		/*	and including DTD code					*/
+		and (audition			 )		/*	and we want to audition					*/
+		and ((polynums		=	0)		/*	if no poly systems present				*/
+		or   (usedtd)			 )		/*	or bit is set to force dtd audition	*/
+		and (Lod.running	<>	0)		/*	and direct to disk is running			*/
+		and (dtd.max.secs	<>	0)		/*	with initialization complete			*/
+		and (lod.version	>=	7)		/*	and includes audition software		*/
+		then do;							/*	then audition via direct-to-disk		*/
+
+			if noio = 0 then do;		/*	set up for messages						*/
+				run.syn = 0;			/*	keep file from re-appearing during button press	*/
+				call set.term.attr(ATTR#Normal);
+				run.syn = 1;
+				SHOW.FILE.LOADING.MESSAGE = shl(GID(SFDErrRow),8);
+			end;
+
+			call Audition.SF.Using.DTD(FileAddr(0),FileAddr(1),F#MS_Sector,F#LS_Sector,0);
+			SHOW.FILE.LOADING.MESSAGE = 0;
+
+			i = 0;						/*	indicate was not loaded					*/
+		end;
+
+		else if usedtd = 0 then do;
+
+			if noio = 0 then do;		/*	show message if we should				*/
+				run.syn = 0;			/*	keep file from re-appearing during button press	*/
+				call set.term.attr(ATTR#Normal);
+				run.syn = 1;
+				/*	show file loading messages in row 23, column 0	*/
+				SHOW.FILE.LOADING.MESSAGE = shl(GID(SFDErrRow),8);
+			end;
+
+			if inc.poly then	i=ps.load(FileAddr(0),FileAddr(1),F#MS_Sector,F#LS_Sector,Audition);
+			else					i=0;
+			SHOW.FILE.LOADING.MESSAGE = 0;
+		end;
+
+		if reload then do;				/*	update file pointers						*/
+			if i=0 then do;				/*	serious problems here.  original sf	*/
+				call PS.DEALLOCATE(temp.base);	/*	remove all pointers to non-existent sound files from keyboard patch tables	*/
+			end;
+			else do;
+				call PS.UPDATE(temp.base,sfile.base);	/*	move pointers back to the reloaded sound file	*/
+			end;
+		end;
+
+		if noio = 0
+		then do;								/*	then remove message	*/
+			call ERASE.REST.OF.LINE(GID(SFDErrRow),0);
+		end;
+
+		if ((inc.poly) and (i=0)) then return false;	/*	abort here if ps.load fails	*/
+
+	end;
+
+	/*	now assign name to timbre	*/
+	k=find.frame(our.par,our.fra);	/*	and pointer to it		*/
+
+	if (p.lookup(k)<>mor)				/*	make sure patch list	*/
+	or (p.lookup(k+type)<>pt.type)
+	then return false;					/*	system error of sorts	*/
+
+	call dealloc(0);						/*	free up buffers, etc. for old files	*/
+
+	k=find.frame(our.par,our.fra);	/*	recompute in case memory moved		*/
+
+	do i=0 to 3; call p.store(k+pt.name+i,fnbuf(i+1)); end;	/*	copy name into patch frame	*/
+
+   // Store long name file name in timbre frame
+   if (longname != 0 && name(0) > 8) {
+      // Provide clean last byte
+      if ((name(0)&1) != 0)
+         pbyte(name, name(0), 0);
+      
+      i = shr(name(0)+3,1);         // Get number of words required for name
+      
+      if (p.lookup(k+clen)>=(pt.len+i)) {
+         do j = 0 to i-1;
+            p.store(k+pt.len+j,name(j));
+         end;
+      }
+   }
+
+   // Else erase possible long name
+   else if (p.lookup(k+clen) > pt.len) {
+      do i = pt.len to p.lookup(k+clen) - 1;
+         p.store(k+i, 0);
+      end;
+   }
+
+	l=alloc.timbre(0);					/*	reinitialize stuff for new file names, starting keys, etc	*/
+
+	if (COUNT.TIMBRE.FRAMES(our.par)=1) then do;				/*	initialize parameters from sound file if only one	*/
+		i=TIM.HEAD.LOOKUP(0,tim.partial.pointers+our.par);	/*	get pointer to base frame	*/
+		if p.lookup(i+p.efdecay)=0
+		then call p.store(i+p.efdecay  ,p.lookup(k+pt.keytc ));
+		if p.lookup(i+p.vibrate)=0
+		then call p.store(i+p.vibrate  ,p.lookup(k+pt.vrate ));
+		if p.lookup(i+p.vibdepth)=0
+		then call p.store(i+p.vibdepth ,p.lookup(k+pt.vdepth));
+		if p.lookup(i+p.vibattack)=0
+		then call p.store(i+p.vibattack,p.lookup(k+pt.vat	 ));
+
+		if (l=0) and (ertyp=0)
+		then call display.par;			/*	present new parameter if no errors	*/
+
+		call compute.env.params(0);	/*	set up for final decay usage	*/
+	end;
+
+	if  (new.pan<>0)
+	and (ertyp=0)
+	and (held.psel.buttons=0)
+	then do;
+		call BUILD.TDS.PATCH.STR;
+		call CLEAR.PARAMETERS;	/*	get rid of active parms	*/
+		call CLEAR.DISPLAY;
+		call EMIT.STRING(0,dname);
+		call EMIT.STRING(9,'Active on ');
+		call EMIT.STRING(19,TDS.PATCH.STR);
+		both.display=1;
+		supress.beat.display=1;
+		beat.display.time=real.milliseconds;
+	end;
+
+	if	(partial0				=	0)
+	&	(RETURN.IMMEDIATELY	<>	0)
+	then Exit.My.Screen = true;
+
+	return true;
+end Recall.Sound.File;
+
+Toggle.Box.HighLight: proc (Ptr,NewState) public swapable;
+	dcl Ptr				fixed;	/*	ptr to box icon to highlight	*/
+	dcl NewState		fixed;	/*	0=>off, 1=>on	*/
+	dcl (X1,Y1,X2,Y2)	fixed;
+
+	if mg600<>0 then do;
+		X1=Read.Object(Ptr+O#ULX)+1;	/*	don't touch	*/
+		Y1=Read.Object(Ptr+O#ULY)-1;	/*	border of box	*/
+		X2=Read.Object(Ptr+O#LRX)-1;
+		Y2=Read.Object(Ptr+O#LRY)+1;
+
+		call Area.Fill(X1,Y1,X2,Y2,#dots.comp,0);	/*	complement fill	*/
+	end;
+
+	else do;
+		X1=Read.Object(Ptr+O#ICON.X);
+		Y1=Read.Object(Ptr+O#ICON.Y);
+
+		load X1; div 100; X1=res;
+		load Y1; div 100; Y1=res;
+
+		call cpos(Y1,X1);
+
+		if NewState<>0
+		then call Set.Term.Attr(ATTR#Normal\ATTR#Reverse);
+		else call Set.Term.Attr(ATTR#Normal);
+		call ps('  ');
+	end;
+
+end Toggle.Box.HighLight;

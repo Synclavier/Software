@@ -1,0 +1,932 @@
+/*	$TITLE :SYNSOU:WELCMOD:WELCSOU  - Module for:  Main and Welcome Menus
+
+Modified:
+2000/12/01 - TY  - Fixed bug: clicking the mouse on an already selected table entry didn't activate it
+1999/10/15 - TY  - For consistency with the other screens, clicking on Current Timbre links to A-Page and back.
+						 Clicking on Current Catalog links to D-Page and back.
+1999/10/10 - TY  - Added conductor screen and rebound capability (screen history)
+						 Enabled compiler to optimize out the old welcome screen code (DRAW.WELCOME.MENU from :SYNSOU:WELCMOD:560-MAIN)
+1991/10/21 - PF  - Bypassed Welcome screen at Bootup
+1991/01/09 - PF  - removed debugging code
+1989/06/05 - TSS - Added code to support new Kbd Mapping screen
+1989/02/27 - TSS - Allow system to pause if Music Printing on screen
+1988/05/26 - TSS - turn on mouse cursor every time menus are activated
+1988/05/25 - LSS - added code to deal with Mac II screen refresh
+1988/01/13 - MWH - Enable get.program.exit so "ENTER" key works
+1987/12/17 - MWH - Merge poly updates with N-Final plus AEE sources
+1987/10/20 - LPG - Fixed 'Name Keyboard Timbre' Bug, and awaiting Screen Mgr. fix
+1987/08/27 - MWH - Merge with other release-N edits
+1987/02/14 - cj  - created this file
+*/
+
+module welcmod;
+
+	insert ':-xpl/reldat';
+
+	insert ':synlits/comlits';
+	insert ':synlits/globlits';
+	insert ':synlits/asciilit';
+	insert ':synlits/syslits';
+	insert ':synlits/statelit';
+	insert ':synlits/timlits';
+	insert ':synauxs/dtdlits';
+
+	insert ':synmods/ttydcl';
+	insert ':synmods/globdcl';
+	insert ':synmods/tprimdcl';
+	insert ':synmods/scrndcl';
+	insert ':synmods/plotdcl';
+	insert ':synmods/mathdcl';
+	insert ':synmods/polydcl';
+	insert ':synmods/getdcl';
+	insert ':synmods/smgrdcl';
+	insert ':synmods/tformdcl';
+	insert ':synmods/moussdcl';	/*	for REBOOT.TERMINAL & MOUSE.SWITCH	*/
+
+	insert ':synrdcls/05-bdcls';
+	insert ':synlits/lpnlits';
+
+	insert ':synsou/welcmod/560-main';
+
+	/*	$page - external declarations for welcome screen	*/
+
+	dcl sequencer.control.reg		fixed external;
+	dcl call.convert					fixed external;
+	dcl call.terminate				fixed external;
+	dcl cnv.sta							fixed external;
+	dcl leave.synclavier.program	proc external;
+	dcl store.new.timbre.name		proc (array) external;
+	dcl lookup.timbre.name			proc (fixed, array) external;
+	DCL TIM.HEAD.LOOKUP				PROC(FIXED,FIXED) EXTERNAL;	/*	LOOK UP SINGLE WORD FROM SPECIFIED TIMBRE INFO AREA	*/
+
+	/*	synclavier screens  -  declare here so debug version	*/
+	/*	does not need all real time screens							*/
+
+	dcl TIMBRE.DIRECTORY.SCREEN	proc (fixed) external;
+	dcl RECALL.SOUND.FILE.SCREEN	proc (fixed,fixed,fixed) external;
+	dcl SEQUENCE.DIRECTORY.SCREEN	proc (fixed) external;
+	dcl SUBCAT.DIRECTORY.SCREEN	proc (fixed) external;
+
+	dcl TDS.NUMERIC.DISPLAY			PROC(fixed) external;
+	dcl TDS.TIMBRE.FRAME.DISPLAY	proc(fixed) external;
+	dcl TDS.GRAPHIC.DISPLAY			proc(fixed) external;
+	dcl TDS.3D.DISPLAY				proc(fixed) external;
+	dcl TDS.PARTIAL.DISPLAY			proc(fixed) external;
+
+	dcl RECORDER.SCREEN				proc(fixed) external;
+
+	dcl MULTICHANNEL.DISPLAY		proc(fixed) external;
+	dcl MIDI.DISPLAY					proc(fixed) external;
+
+	dcl DIRECT.TO.DISK.SONG.DIRECTORY	proc(fixed) external;
+	dcl DIRECT.TO.DISK.TRACK.DISPLAY		proc(fixed) external;
+
+	dcl PATCH.ASSIGNMENT.SCREEN			proc (fixed) external;	/*	S.ASSIGN.PATCH	*/
+	dcl KBD.PATCH.ASSIGNMENT.SCREEN		proc (fixed) external;	/*	S.PATCH			*/
+	dcl ASSIGNMENT.HELP.SCREEN				proc (fixed) external;	/*	S.ASSIGN.INSTR	*/
+
+	dcl MISSING.SOUND.FILE.SCREEN	proc (fixed) external;
+
+	dcl MUSIC.NOTATION.SCREEN		proc (fixed) external;
+
+	DCL STM.SCREEN						proc (fixed) external;	/*	call to activate stm screen	*/
+
+	dcl DBUG.SCREEN					proc (fixed) external;
+
+	dcl SYSTEM.SCREEN					proc (fixed) external;
+
+	dcl SEQ.EDIT.SCREEN				proc (fixed) external;
+	dcl AUDIO.EVENT.EDITOR.SCREEN	proc (fixed) external;
+	dcl LaserDisk.Archive.Screen	proc (fixed) external;
+
+	dcl Keyboard.Mapping.Screen	proc (fixed) external;
+	dcl CONDUCTOR.SCREEN				proc (fixed) external;
+
+	/*	$page - main welcome screen	*/
+
+#if (false)
+	//	Note: In 1991 the old welcome menu was bypassed by setting the value of the variable "main" to 1.
+	//	Unfortunately, this method does not allow the compiler to optimize out the 12 sectors of code which would never execute.
+	//	This can be achieved by declaring "main" as a literal for 1 rather than as a variable assigned the value of 1.
+	//	In any case, assuming that we'll never go back to using the old welcome screen, I've replaced this with
+	//	a further simplified version and added my new enhancements to that.  This original version is kept here in case we ever
+	//	want to reinstate it or reference it.  -TY 1999/10/10
+	WELCOME.SCREEN:proc (arg) public swapable;
+		dcl (arg)	fixed;			/*	argument - must pass 0 for now		*/
+		dcl (code)	fixed;
+		dcl (main)	fixed static;	/*	set to 1 for main menu					*/
+		dcl (refresh)	boolean;		/*	TRUE if refresh received from Mac	*/
+		dcl (ncol,nrow)	fixed;
+		dcl (ocol,orow)	fixed;
+		dcl (col,row)		fixed;
+		dcl (most.recent.table.id)	fixed;
+		dcl (most.recent.row		 )	fixed;
+		dcl (prior.active.screen )	fixed;
+
+		dcl command.letter.lookup data (	/*	map letter to screen code	*/
+		s.timbre.dir,		/*	A	*/				s.recall.snd,		/*	B	*/
+		s.recall.seq,		/*	C	*/				s.enter,				/*	D	*/
+		s.system,			/*	E	*/				s.tds.main,			/*	F	*/
+		s.record,			/*	G	*/				s.multi.out,		/*	H	*/
+		s.assign.patch,	/*	I	*/				s.midi,				/*	J	*/
+		s.seqed,				/*	K	*/				s.stm.editor,		/*	L	*/
+		s.library,			/*	M	*/				s.timbre.name,		/*	N	*/
+		s.song.directory,	/*	O	*/				s.track.display,	/*	P	*/
+		s.audio.event,		/*	Q	*/				s.optical,			/*	R	*/
+		s.mr.editor,		/*	S	*/				s.conductor,		/*	T	*/
+		0,						/*	U	*/				0,						/*	V	*/
+		0,						/*	W	*/				0,						/*	X	*/
+		s.kbd.map,			/*	Y	*/				s.debug);			/*	Z	*/
+
+		dcl command.table.lookup data (	/*	map command table activation to screen	*/
+
+		/*	main command table - welcome menu	*/
+
+		command.table+0+shl(0,8)+shl(0,12), s.timbre.dir,	/*	two word entries:		*/
+		command.table+0+shl(1,8)+shl(0,12), s.recall.snd,	/*		table id + row*256 + main*4096	*/
+		command.table+0+shl(2,8)+shl(0,12), s.recall.seq,	/*		screen code			*/
+		command.table+0+shl(3,8)+shl(0,12), s.enter,
+		command.table+0+shl(4,8)+shl(0,12), s.system,
+		command.table+0+shl(5,8)+shl(0,12), s.tds.main,
+
+		/*	command tables - main menu	*/
+
+		command.table+0+shl(0,8)+shl(1,12), s.timbre.dir,
+		command.table+0+shl(1,8)+shl(1,12), s.recall.snd,
+		command.table+0+shl(2,8)+shl(1,12), s.recall.seq,
+		command.table+0+shl(3,8)+shl(1,12), s.enter,
+		command.table+0+shl(4,8)+shl(1,12), s.library,
+
+		command.table+1+shl(0,8)+shl(1,12), s.mr.editor,
+		command.table+1+shl(1,8)+shl(1,12), s.record,
+		command.table+1+shl(2,8)+shl(1,12), s.multi.out,
+		command.table+1+shl(3,8)+shl(1,12), s.midi,
+		command.table+1+shl(4,8)+shl(1,12), s.seqed,
+		command.table+1+shl(5,8)+shl(1,12), s.conductor,
+
+		command.table+2+shl(0,8)+shl(1,12), s.stm.editor,
+		command.table+2+shl(1,8)+shl(1,12), s.tds.main,
+		command.table+2+shl(2,8)+shl(1,12), s.assign.patch,
+		command.table+2+shl(3,8)+shl(1,12), s.timbre.name,
+
+		command.table+3+shl(0,8)+shl(1,12), s.song.directory,
+		command.table+3+shl(1,8)+shl(1,12), s.track.display,
+		command.table+3+shl(2,8)+shl(1,12), s.audio.event,
+
+		command.table+4+shl(0,8)+shl(1,12), s.optical,
+
+		command.table+5+shl(0,8)+shl(1,12), s.system,
+
+		command.table+6+shl(0,8)+shl(1,12), s.pf1,
+		command.table+6+shl(1,8)+shl(1,12), s.pf3,
+		command.table+6+shl(2,8)+shl(1,12), s.pf4,
+		command.table+6+shl(3,8)+shl(1,12), s.break,
+		0,0);
+
+		/*	$page - look up screen from mouse selection	*/
+
+		lookup.screen.from.id.and.row:proc(id,row,main);
+			dcl id	fixed;
+			dcl row	fixed;
+			dcl main	fixed;
+			dcl i		fixed;
+			dcl j		fixed;
+
+			i=0;
+			j=command.table.lookup(i);
+
+			do while	(j<>0)
+			and		(j<>(id+shl(row,8)+shl(main,12)));
+				i=i+2;
+				j=command.table.lookup(i);
+			end;
+
+			if j <> 0 then	return command.table.lookup(i+1);
+			else				return 0;
+		end lookup.screen.from.id.and.row;
+
+
+		/*	$page - main welcome screen loop	*/
+
+		main = 1;						/*	for now always bypass welcome screen, go straight to main menu	*/
+
+		most.recent.table.id = command.table;	/*	welcome screen initializes to first line	*/
+
+		do while 1;						/*	loop									*/
+
+			if GOTO.THIS.SCREEN=0	/*	draw frame if no screen to go	*/
+			then do;						/*	to and status <> -1				*/
+				/*	draw first menu, either welcome or main	*/
+				if (main == 0) {
+					DRAW.WELCOME.MENU();
+					/*	limit selection on welcom menu	*/
+					if ((most.recent.table.id <> command.table) || (most.recent.row > 5)) {
+						most.recent.table.id = command.table;
+						most.recent.row = 5;
+					}
+				}
+				else DRAW.MAIN.MENU();
+
+				call SELECT.NEW.CUR.OBJ(most.recent.table.id,0,most.recent.row);
+
+			end;
+
+			if GOTO.THIS.SCREEN <= 0		/*	get a screen to activate			*/
+			then do;
+
+				GOTO.THIS.SCREEN = 0;		/*	clear these flags before loop		*/
+				refresh			  = false;	/*	no refresh signal received yet	*/
+
+				do while ((GOTO.THIS.SCREEN = 0) and (not refresh));	/*	wait for exit condition			*/
+
+					call ENABLE_SEVERAL_GETS(get.ertyp,
+													 get.screen.event,
+													 get.new.timbre.info,0);
+
+					if most.recent.table.id <> enter.name.string
+					then call GET_ENABLE(get.in.char);
+					else call GET_ENABLE(get.program.exit);		/*	so we can break out of name timbre	*/
+
+					code = GET.NEXT.SCREEN.EVENT;
+
+					call DISABLE_SEVERAL_GETS(get.ertyp,
+													  get.screen.event,
+													  get.new.timbre.info,0);
+
+					if most.recent.table.id <> enter.name.string
+					then call GET_DISABLE(get.in.char);
+					else call GET_DISABLE(get.program.exit);
+
+
+					if code=get.in.char then do;						/*	input character received	*/
+
+						next.event.info = UCASE (next.event.info);
+
+						if next.event.info=asc.call.terminate then do;	/*	break received	*/
+							call.terminate=1;
+							call LEAVE.SYNCLAVIER.PROGRAM;	/*	try to terminate	*/
+							call.terminate=0;
+						end;
+
+						else if next.event.info=asc.screen.refresh then do;	/*	Termulator restart - need to reinit	*/
+							call reboot.terminal;	/*	reinit terminal and mouse		*/
+							goto.this.screen = 0;	/*	make sure menu is redrawn		*/
+							refresh = true;			/*	set flag so we exit this loop	*/
+						end;
+
+						else if (next.event.info>=asc.call.convert)
+						and (next.event.info<=asc.call.convert+9)
+						then do;
+							call.convert=1;
+							cnv.sta = next.event.info-asc.call.convert;
+							call LEAVE.SYNCLAVIER.PROGRAM;	/*	try to terminate	*/
+							call.convert=0;
+						end;
+
+						else if (next.event.info = esc)
+						and	  (main				 =   0)
+						then do;
+							GOTO.THIS.SCREEN = s.tds.main;
+						end;
+
+						else if (next.event.info = cret)
+						then do;
+							goto.this.screen = lookup.screen.from.id.and.row(most.recent.table.id,most.recent.row,main);
+						end;
+
+						else if (next.event.info >= asc.a)
+						and	  (next.event.info <= asc.z)
+						then do;
+							goto.this.screen = command.letter.lookup(next.event.info - asc.a);
+							if main=0 then do;
+								most.recent.table.id	= command.table;
+								most.recent.row		= next.event.info - asc.a;
+							end;
+							else do;			/*	map letter to table	*/
+								code = 0;	/*	set most recent table id here for return	*/
+								do while	(command.table.lookup(code  )<>0)
+								and		((command.table.lookup(code+1)<>goto.this.screen)
+								or			 (shr(command.table.lookup(code),12)=0));
+									code=code+2;
+								end;
+								if command.table.lookup(code)<>0	/*	if letter makes sense	*/
+								then do;									/*	then move cursor here upon return from screen	*/
+									most.recent.table.id	= command.table.lookup(code)&255;
+									most.recent.row		= shr(command.table.lookup(code),8)&15;
+								end;
+							end;
+						end;
+					end;
+
+					else if code=get.new.timbre.info then do;
+						if (next.event.info&5)<>0 then do;	/*	new timbre/new timbre name	*/
+							call PRINT.CURRENT.TIMBRE.NAME;
+						end;
+					end;
+
+					else if code=get.ertyp then do;
+						call Handle.System.Error.Codes(Screen.Event.Info);
+					end;
+
+					else if (code=get.screen.event) then do;
+						if  (screen.event.id	 = enter.name.string)
+						and ((screen.event.info = S#Deposit)			/*	something changed		*/
+						or   (screen.event.info = S#KeyActivate))		/*	... or blank return	*/
+						then do;
+							if (screen.event.info = S#Deposit)	/*	true only if value changed, NOT true for blank <return>	*/
+							then do;
+								call fetch.string(enter.name.string,token);
+								call STORE.NEW.TIMBRE.NAME(token);
+								token(0)=0;
+							end;
+							disable.deposits = 1;
+							call deposit.string(enter.name.string,'');
+							call deposit.label (enter.name.label,'');
+							disable.deposits = 0;
+							most.recent.table.id	= command.table+2;	/*	return to name entry	*/
+							most.recent.row		= 3;
+							call SELECT.NEW.CUR.OBJ(most.recent.table.id,0,most.recent.row);
+							call CLEAR.PARAMETERS;
+							CALL CLEAR.LOWER;
+							CALL DISPLAY.TIMBRE.NAME(TIM.HEAD.LOOKUP(0,TIM.TINFO.POINTER),16);
+						end;
+
+						else if (screen.event.id>=command.table)
+						and     (screen.event.id<=command.table+6)
+						then do;
+							most.recent.table.id	= screen.event.id;
+							most.recent.row		= screen.event.table.row;
+							if ((screen.event.info=S#MouseSelect) || (screen.event.info=S#KeyActivate)) {
+								goto.this.screen	= lookup.screen.from.id.and.row(most.recent.table.id,most.recent.row,main);
+							}
+						end;
+					end;						/*	end of screen event code	*/
+
+					else if (Screen.Event.Code = get.program.exit) then do;
+						/*	if we are here, must want to cancel entering timbre name	*/
+						if most.recent.table.id = enter.name.string
+						then do;						/*	restore original name	*/
+							token(0)=0;				/*	flush any user typing	*/
+							call lookup.timbre.name(0, misc.buf);
+							call deposit.string(enter.name.string, misc.buf);	/*	deposit name of current kbd timbre into name field	*/
+							/*	A deposit event will likely not happen, since we're keeping	*/
+							/*	the original string.  Therefore, we must simulate it here:	*/
+							disable.deposits = 1;
+							call deposit.string(enter.name.string,'');
+							call deposit.label (enter.name.label,'');
+							disable.deposits = 0;
+							most.recent.table.id	= command.table+2;	/*	return to name entry	*/
+							most.recent.row		= 3;
+							call SELECT.NEW.CUR.OBJ(most.recent.table.id,0,most.recent.row);
+							call CLEAR.PARAMETERS;
+							CALL CLEAR.LOWER;
+							CALL DISPLAY.TIMBRE.NAME(TIM.HEAD.LOOKUP(0,TIM.TINFO.POINTER),16);
+						end;
+					end;
+
+				end;							/*	of wait for exit			*/
+			end;
+
+			if (GOTO.THIS.SCREEN = s.tds.main)	/*	F							*/
+			then do;
+				if (main = 0)							/*	from welcome screen	*/
+				then do;									/*	display main menu		*/
+					goto.this.screen		= 0;
+					main						= 1;
+					most.recent.table.id	= command.table;
+					most.recent.row		= 0;
+				end;
+				if gtype<>0 then GOTO.THIS.SCREEN = s.tds.gcomp;	/*	graphics	*/
+				else				  GOTO.THIS.SCREEN = s.tds.acomp;	/*	alpha		*/
+			end;
+
+			call set.term.attr(ATTR#Normal);
+			call initialize.graphics.terminal;
+			if MG600<>0 then do;						/*	reset charsize			*/
+				vector_mode;
+				alpha_mode;
+				call pc(27);
+				call ps('8');
+				transparent_mode;
+			end;
+			if gtype<>0 then call mouse.switch(1);	/*	make sure mouse cursor is on	*/
+
+			prior.active.screen = goto.this.screen;
+
+			do case (goto.this.screen);
+/*	0	*/		;
+/*	1	*/		;
+/*	2	*/		;
+/*	3	*/		goto.this.screen = TIMBRE.DIRECTORY.SCREEN			(0);
+/*	4	*/		goto.this.screen = RECALL.SOUND.FILE.SCREEN			(0,0,0);
+/*	5	*/		goto.this.screen = SEQUENCE.DIRECTORY.SCREEN			(0);
+/*	6	*/		goto.this.screen = SUBCAT.DIRECTORY.SCREEN			(0);
+/*	7	*/		goto.this.screen = SYSTEM.SCREEN							(0);
+/*	8	*/		goto.this.screen = TDS.NUMERIC.DISPLAY					(0);
+/*	9	*/		goto.this.screen = TDS.GRAPHIC.DISPLAY					(0);
+/*	10	*/		goto.this.screen = TDS.PARTIAL.DISPLAY					(0);
+/*	11	*/		goto.this.screen = TDS.3D.DISPLAY						(0);
+/*	12	*/		goto.this.screen = TDS.TIMBRE.FRAME.DISPLAY			(0);
+/*	13	*/		;
+/*	14	*/		goto.this.screen = RECORDER.SCREEN						(0);
+/*	15	*/		goto.this.screen = MULTICHANNEL.DISPLAY				(0);
+/*	16	*/		goto.this.screen = PATCH.ASSIGNMENT.SCREEN			(0);
+/*	17	*/		goto.this.screen = PATCH.ASSIGNMENT.SCREEN			(0);
+/*	18	*/		goto.this.screen = ASSIGNMENT.HELP.SCREEN				(0);
+/*	19	*/		goto.this.screen = KBD.PATCH.ASSIGNMENT.SCREEN		(0);
+/*	20	*/		do;									/*	timbre name entry			*/
+					if main=0 then do;			/*	go to main menu first	*/
+						call DRAW.MAIN.MENU;
+						main = 1;
+					end;
+					call select.new.cur.obj(enter.name.string, 0, 0);
+					disable.deposits = 1;
+					call deposit.label	(enter.name.label,'Enter Name -->');
+					call lookup.timbre.name(0, misc.buf);
+					call deposit.string(enter.name.string, misc.buf);	/*	deposit name of current kbd timbre into name field	*/
+					disable.deposits = 0;
+					call update.object(enter.name.string);
+					most.recent.table.id	= enter.name.string;
+					most.recent.row		= 0;
+					goto.this.screen		= (-1);
+					call SELECT.PARAMETER(TNAME.L-PAR.L);
+				end;
+/*	21	*/		goto.this.screen = MISSING.SOUND.FILE.SCREEN			(0);
+/*	22	*/		goto.this.screen = MIDI.DISPLAY							(0);
+/*	23	*/		goto.this.screen = MUSIC.NOTATION.SCREEN				(0);
+/*	24	*/		goto.this.screen = STM.SCREEN								(0);
+/*	25	*/		goto.this.screen = DBUG.SCREEN							(0);
+/*	26	*/		goto.this.screen = DIRECT.TO.DISK.SONG.DIRECTORY	(0);
+/*	27	*/		goto.this.screen = DIRECT.TO.DISK.TRACK.DISPLAY		(0);
+/*	28	*/		goto.this.screen = MULTICHANNEL.DISPLAY				(1);
+/*	29	*/		goto.this.screen = MIDI.DISPLAY							(1);
+/*	30	*/		goto.this.screen = SEQ.EDIT.SCREEN						(0);
+/*	31	*/		goto.this.screen = AUDIO.EVENT.EDITOR.SCREEN			(0);
+/*	32	*/		goto.this.screen = LaserDisk.Archive.Screen			(0);
+/*	33	*/		do;					/*	pf1	*/
+					call.convert=1;
+					cnv.sta = 1;
+					call LEAVE.SYNCLAVIER.PROGRAM;	/*	try to terminate	*/
+					call.convert=0;
+					goto.this.screen = (-1);
+				end;
+/*	34	*/		do;					/*	pf2	*/
+					call.convert=1;
+					cnv.sta = 2;
+					call LEAVE.SYNCLAVIER.PROGRAM;	/*	try to terminate	*/
+					call.convert=0;
+					goto.this.screen = (-1);
+				end;
+/*	35	*/		do;					/*	pf3	*/
+					call.convert=1;
+					cnv.sta = 3;
+					call LEAVE.SYNCLAVIER.PROGRAM;	/*	try to terminate	*/
+					call.convert=0;
+					goto.this.screen = (-1);
+				end;
+/*	36	*/		do;					/*	pf4	*/
+					call.convert=1;
+					cnv.sta = 4;
+					call LEAVE.SYNCLAVIER.PROGRAM;	/*	try to terminate	*/
+					call.convert=0;
+					goto.this.screen = (-1);
+				end;
+/*	37	*/		do;					/*	break	*/
+					call.terminate=1;
+					call LEAVE.SYNCLAVIER.PROGRAM;	/*	try to terminate	*/
+					call.terminate=0;
+					goto.this.screen = (-1);
+				end;
+/*	38	*/		;						/*	meta state for f/tds	*/
+/*	39	*/		do;					/*	enter WAIT state	(S.WAIT)	*/
+					call ps('Press any key to continue....');
+					call tty_wait;
+					call GET_ENABLE(get.in.char);
+						code = GET.NEXT.EVENT;
+					call GET_DISABLE(get.in.char);
+
+					if code=get.in.char			/*	input character received	*/
+					then goto.this.screen = 0;
+				end;
+/*	40	*/		if inc.kbd.maps
+				then goto.this.screen = Keyboard.Mapping.Screen		(0);
+/*	41	*/		goto.this.screen = CONDUCTOR.SCREEN						(0);
+			end;
+
+			/*	Might have returned to here because of refresh code received
+				from Termulator - in this case, get out and restart.	*/
+
+			//	If we get a screen refresh, return to the most recent active screen
+
+			if ((goto.this.screen == 0)
+			&&  (last.event.code == get.program.exit || last.event.code == get.in.char)
+			&&  (next.event.info == asc.screen.refresh))
+			{
+				reboot.terminal();
+				goto.this.screen = prior.active.screen;
+			}
+		end;	/*	of DO WHILE 1	*/
+
+	end WELCOME.SCREEN;
+
+#else
+	WELCOME.SCREEN:proc (arg) public swapable;
+		dcl (arg)	fixed;			/*	argument - must pass 0 for now		*/
+		dcl (code)	fixed;
+		dcl (refresh)	boolean;		/*	TRUE if refresh received from Mac	*/
+		dcl (ncol,nrow)	fixed;
+		dcl (ocol,orow)	fixed;
+		dcl (col,row)		fixed;
+		dcl (most.recent.table.id)	fixed;
+		dcl (most.recent.row		 )	fixed;
+		dcl screenstack(1)	fixed static;	//	a short screen history stack for rebounding
+
+		dcl command.letter.lookup data (	/*	map letter to screen code	*/
+		s.timbre.dir,		/*	A	*/				s.recall.snd,		/*	B	*/
+		s.recall.seq,		/*	C	*/				s.enter,				/*	D	*/
+		s.system,			/*	E	*/				s.tds.main,			/*	F	*/
+		s.record,			/*	G	*/				s.multi.out,		/*	H	*/
+		s.assign.patch,	/*	I	*/				s.midi,				/*	J	*/
+		s.seqed,				/*	K	*/				s.stm.editor,		/*	L	*/
+		s.library,			/*	M	*/				s.timbre.name,		/*	N	*/
+		s.song.directory,	/*	O	*/				s.track.display,	/*	P	*/
+		s.audio.event,		/*	Q	*/				s.optical,			/*	R	*/
+		s.mr.editor,		/*	S	*/				s.conductor,		/*	T	*/
+		0,						/*	U	*/				0,						/*	V	*/
+		0,						/*	W	*/				0,						/*	X	*/
+		s.kbd.map,			/*	Y	*/				s.debug);			/*	Z	*/
+
+		dcl command.table.lookup data (	/*	map command table activation to screen	*/
+
+		/*	command table - main menu	*/
+
+		command.table+0+shl(0,8)+shl(0,12), s.timbre.dir,	//	two word entries:
+		command.table+0+shl(1,8)+shl(0,12), s.recall.snd,	//		table id + row*256 + main*4096
+		command.table+0+shl(2,8)+shl(0,12), s.recall.seq,	//		screen code
+		command.table+0+shl(3,8)+shl(0,12), s.enter,
+		command.table+0+shl(4,8)+shl(0,12), s.library,
+
+		command.table+1+shl(0,8)+shl(0,12), s.mr.editor,
+		command.table+1+shl(1,8)+shl(0,12), s.record,
+		command.table+1+shl(2,8)+shl(0,12), s.multi.out,
+		command.table+1+shl(3,8)+shl(0,12), s.midi,
+		command.table+1+shl(4,8)+shl(0,12), s.seqed,
+		command.table+1+shl(5,8)+shl(0,12), s.conductor,
+
+		command.table+2+shl(0,8)+shl(0,12), s.stm.editor,
+		command.table+2+shl(1,8)+shl(0,12), s.tds.main,
+		command.table+2+shl(2,8)+shl(0,12), s.assign.patch,
+		command.table+2+shl(3,8)+shl(0,12), s.timbre.name,
+
+		command.table+3+shl(0,8)+shl(0,12), s.song.directory,
+		command.table+3+shl(1,8)+shl(0,12), s.track.display,
+		command.table+3+shl(2,8)+shl(0,12), s.audio.event,
+
+		command.table+4+shl(0,8)+shl(0,12), s.optical,
+
+		command.table+5+shl(0,8)+shl(0,12), s.system,
+
+		command.table+6+shl(0,8)+shl(0,12), s.pf1,
+		command.table+6+shl(1,8)+shl(0,12), s.pf3,
+		command.table+6+shl(2,8)+shl(0,12), s.pf4,
+		command.table+6+shl(3,8)+shl(0,12), s.break,
+		0,0);
+
+		/*	$page - look up screen from mouse selection	*/
+
+		lookup.screen.from.id.and.row:proc(id,row);
+			dcl id	fixed;
+			dcl row	fixed;
+			dcl i		fixed;
+			dcl j		fixed;
+
+			i=0;
+			j=command.table.lookup(i);
+
+			do while	(j<>0)
+			and		(j<>(id+shl(row,8)));
+				i=i+2;
+				j=command.table.lookup(i);
+			end;
+
+			if j <> 0 then	return command.table.lookup(i+1);
+			else				return 0;
+		end lookup.screen.from.id.and.row;
+
+		/*	$page - main welcome screen loop	*/
+
+		most.recent.table.id = command.table;	/*	welcome screen initializes to first line	*/
+
+		do while 1;						/*	loop									*/
+
+			if GOTO.THIS.SCREEN=0	/*	draw frame if no screen to go	*/
+			then do;						/*	to and status <> -1				*/
+				/*	draw main menu	*/
+				DRAW.MAIN.MENU();
+				SELECT.NEW.CUR.OBJ(most.recent.table.id,0,most.recent.row);
+			end;
+
+			if GOTO.THIS.SCREEN <= 0		/*	get a screen to activate			*/
+			then do;
+
+				GOTO.THIS.SCREEN = 0;		/*	clear these flags before loop		*/
+				refresh			  = false;	/*	no refresh signal received yet	*/
+
+				do while ((GOTO.THIS.SCREEN = 0) and (not refresh));	/*	wait for exit condition			*/
+
+					call ENABLE_SEVERAL_GETS(get.ertyp,
+													 get.screen.event,
+													 get.new.timbre.info,
+													 get.mouse.button);
+
+					if most.recent.table.id <> enter.name.string
+					then call GET_ENABLE(get.in.char);
+					else call GET_ENABLE(get.program.exit);		/*	so we can break out of name timbre	*/
+
+					code = GET.NEXT.SCREEN.EVENT;
+					
+					call DISABLE_SEVERAL_GETS(get.ertyp,
+													  get.screen.event,
+													  get.new.timbre.info,
+													  get.mouse.button);
+
+					if most.recent.table.id <> enter.name.string
+					then call GET_DISABLE(get.in.char);
+					else call GET_DISABLE(get.program.exit);
+
+
+					if code=get.in.char then do;						/*	input character received	*/
+
+						next.event.info = UCASE (next.event.info);
+
+						if next.event.info=asc.call.terminate then do;	/*	break received	*/
+							call.terminate=1;
+							call LEAVE.SYNCLAVIER.PROGRAM;	/*	try to terminate	*/
+							call.terminate=0;
+						end;
+
+						else if next.event.info=asc.screen.refresh then do;	/*	Termulator restart - need to reinit	*/
+							call reboot.terminal;	/*	reinit terminal and mouse		*/
+							goto.this.screen = 0;	/*	make sure menu is redrawn		*/
+							refresh = true;			/*	set flag so we exit this loop	*/
+						end;
+
+						else if (next.event.info>=asc.call.convert)
+						and (next.event.info<=asc.call.convert+9)
+						then do;
+							call.convert=1;
+							cnv.sta = next.event.info-asc.call.convert;
+							call LEAVE.SYNCLAVIER.PROGRAM;	/*	try to terminate	*/
+							call.convert=0;
+						end;
+
+						else if (next.event.info = esc)
+						then do;
+							//	rebound to the screen visited prior to the last one
+							goto.this.screen = screenstack(1);
+							//	if only one screen has been visited, then rebound there
+							if (goto.this.screen == 0) goto.this.screen = screenstack(0);
+						end;
+
+						else if (next.event.info = cret)
+						then do;
+							goto.this.screen = lookup.screen.from.id.and.row(most.recent.table.id,most.recent.row);
+						end;
+
+						else if (next.event.info >= asc.a)
+						and	  (next.event.info <= asc.z)
+						then do;
+							goto.this.screen = command.letter.lookup(next.event.info - asc.a);
+							/*	map letter to table	*/
+							code = 0;	/*	set most recent table id here for return	*/
+							do while	(command.table.lookup(code  )<>0)
+							and		((command.table.lookup(code+1)<>goto.this.screen)
+							or			 (shr(command.table.lookup(code),12)=0));
+								code=code+2;
+							end;
+							if command.table.lookup(code)<>0	/*	if letter makes sense	*/
+							then do;									/*	then move cursor here upon return from screen	*/
+								most.recent.table.id	= command.table.lookup(code)&255;
+								most.recent.row		= shr(command.table.lookup(code),8)&15;
+							end;
+						end;
+					end;	/*	of input character received	*/
+
+					else if code=get.new.timbre.info then do;
+						if (next.event.info&5)<>0 then do;	/*	new timbre/new timbre name	*/
+							call PRINT.CURRENT.TIMBRE.NAME;
+						end;
+					end;
+
+					else if code=get.ertyp then do;
+						call Handle.System.Error.Codes(Screen.Event.Info);
+					end;
+
+					else if (code=get.screen.event) then do;
+						if  (screen.event.id	 = enter.name.string)
+						and ((screen.event.info = S#Deposit)		/*	something changed		*/
+						or   (screen.event.info = S#KeyActivate))	/*	... or blank return	*/
+						then do;
+							if (screen.event.info = S#Deposit)	/*	true only if value changed, NOT true for blank <return>	*/
+							then do;
+								call fetch.string(enter.name.string,token);
+								call STORE.NEW.TIMBRE.NAME(token);
+								token(0)=0;
+							end;
+							disable.deposits = 1;
+							call deposit.string(enter.name.string,'');
+							call deposit.label (enter.name.label,'');
+							disable.deposits = 0;
+							most.recent.table.id	= command.table+2;	/*	return to name entry	*/
+							most.recent.row		= 3;
+							call SELECT.NEW.CUR.OBJ(most.recent.table.id,0,most.recent.row);
+							call CLEAR.PARAMETERS;
+							CALL CLEAR.LOWER;
+							CALL DISPLAY.TIMBRE.NAME(TIM.HEAD.LOOKUP(0,TIM.TINFO.POINTER),16);
+						end;
+
+						else if (screen.event.id>=command.table)
+						and     (screen.event.id<=command.table+6)
+						then do;
+							most.recent.table.id	= screen.event.id;
+							most.recent.row		= screen.event.table.row;
+							if ((screen.event.info == S#MouseSelect) || (screen.event.info == S#MouseActivate) || (screen.event.info == S#KeyActivate))
+								goto.this.screen	= lookup.screen.from.id.and.row(most.recent.table.id,most.recent.row);
+						end;
+					end;	/*	end of screen event code	*/
+
+					else if (Screen.Event.Code = get.program.exit) then do;
+						/*	if we are here, must want to cancel entering timbre name	*/
+						if most.recent.table.id = enter.name.string
+						then do;						/*	restore original name	*/
+							token(0)=0;				/*	flush any user typing	*/
+							call lookup.timbre.name(0, misc.buf);
+							call deposit.string(enter.name.string, misc.buf);	/*	deposit name of current kbd timbre into name field	*/
+							/*	A deposit event will likely not happen, since we're keeping	*/
+							/*	the original string.  Therefore, we must simulate it here:	*/
+							disable.deposits = 1;
+							call deposit.string(enter.name.string,'');
+							call deposit.label (enter.name.label,'');
+							disable.deposits = 0;
+							most.recent.table.id	= command.table+2;	/*	return to name entry	*/
+							most.recent.row		= 3;
+							call SELECT.NEW.CUR.OBJ(most.recent.table.id,0,most.recent.row);
+							call CLEAR.PARAMETERS;
+							CALL CLEAR.LOWER;
+							CALL DISPLAY.TIMBRE.NAME(TIM.HEAD.LOOKUP(0,TIM.TINFO.POINTER),16);
+						end;
+					end;
+
+					//	look for press of middle button since release is apparently hogged by "get.screen.event"
+					else if (code == get.mouse.button) && (next.event.info == mou#middle.down) {
+						dcl (x,y) fixed;
+						//	Convert the mouse pixel coordinates to screen coordinates
+						//	(Using release.x and release.y below allows the user to bail by moving mouse away before releasing)
+						x = TPOS.X(mouse(release.x));	//	column -2 to 81
+						y = TPOS.Y(mouse(release.y));	//	row -1 to 25
+						if			((y == 22) && (x >= 46)) goto.this.screen = s.timbre.dir;	//	if over Current Timbre, link to A-page
+						else if	((y == 23) && (x >= 46)) goto.this.screen = s.enter;			//	if over Current Catalog, link to D-page	
+					}
+
+				end;	/*	of wait for exit	*/
+			end;
+
+			if (GOTO.THIS.SCREEN = s.tds.main)	/*	F							*/
+			then do;
+				if gtype<>0 then GOTO.THIS.SCREEN = s.tds.gcomp;	/*	graphics	*/
+				else				  GOTO.THIS.SCREEN = s.tds.acomp;	/*	alpha		*/
+			end;
+
+			call set.term.attr(ATTR#Normal);
+			call initialize.graphics.terminal;
+			if MG600<>0 then do;						/*	reset charsize			*/
+				vector_mode;
+				alpha_mode;
+				call pc(27);
+				call ps('8');
+				transparent_mode;
+			end;
+			if gtype<>0 then call mouse.switch(1);	/*	make sure mouse cursor is on	*/
+
+			//	push the screen we're about to visit onto the screen history stack
+			//	but first substitute non-redrawing version of H or J page with redrawing version to avoid mayhem
+			write("313") = goto.this.screen;
+			if		  (read("313") == s.multi.tab) write("313") = s.multi.out;
+			else if (read("313") == s.midi.tab ) write("313") = s.midi;
+			screenstack(1) = screenstack(0);
+			screenstack(0) = read("313");
+
+			do case (goto.this.screen);
+/*	0	*/		;
+/*	1	*/		;
+/*	2	*/		;
+/*	3	*/		goto.this.screen = TIMBRE.DIRECTORY.SCREEN			(0);
+/*	4	*/		goto.this.screen = RECALL.SOUND.FILE.SCREEN			(0,0,0);
+/*	5	*/		goto.this.screen = SEQUENCE.DIRECTORY.SCREEN			(0);
+/*	6	*/		goto.this.screen = SUBCAT.DIRECTORY.SCREEN			(0);
+/*	7	*/		goto.this.screen = SYSTEM.SCREEN							(0);
+/*	8	*/		goto.this.screen = TDS.NUMERIC.DISPLAY					(0);
+/*	9	*/		goto.this.screen = TDS.GRAPHIC.DISPLAY					(0);
+/*	10	*/		goto.this.screen = TDS.PARTIAL.DISPLAY					(0);
+/*	11	*/		goto.this.screen = TDS.3D.DISPLAY						(0);
+/*	12	*/		goto.this.screen = TDS.TIMBRE.FRAME.DISPLAY			(0);
+/*	13	*/		;
+/*	14	*/		goto.this.screen = RECORDER.SCREEN						(0);
+/*	15	*/		goto.this.screen = MULTICHANNEL.DISPLAY				(0);
+/*	16	*/		goto.this.screen = PATCH.ASSIGNMENT.SCREEN			(0);	//	FM SYNTH PARTIAL
+/*	17	*/		goto.this.screen = PATCH.ASSIGNMENT.SCREEN			(0);	//	SOUND FILE PATCH PARTIAL
+/*	18	*/		goto.this.screen = ASSIGNMENT.HELP.SCREEN				(0);
+/*	19	*/		goto.this.screen = KBD.PATCH.ASSIGNMENT.SCREEN		(0);
+/*	20	*/		do;									/*	timbre name entry			*/
+					call select.new.cur.obj(enter.name.string, 0, 0);
+					disable.deposits = 1;
+					call deposit.label	(enter.name.label,'Enter Name -->');
+					call lookup.timbre.name(0, misc.buf);
+					call deposit.string(enter.name.string, misc.buf);	/*	deposit name of current kbd timbre into name field	*/
+					disable.deposits = 0;
+					call update.object(enter.name.string);
+					most.recent.table.id	= enter.name.string;
+					most.recent.row		= 0;
+					goto.this.screen		= (-1);
+					call SELECT.PARAMETER(TNAME.L-PAR.L);
+				end;
+/*	21	*/		goto.this.screen = MISSING.SOUND.FILE.SCREEN			(0);
+/*	22	*/		goto.this.screen = MIDI.DISPLAY							(0);
+/*	23	*/		goto.this.screen = MUSIC.NOTATION.SCREEN				(0);
+/*	24	*/		goto.this.screen = STM.SCREEN								(0);
+/*	25	*/		goto.this.screen = DBUG.SCREEN							(0);
+/*	26	*/		goto.this.screen = DIRECT.TO.DISK.SONG.DIRECTORY	(0);
+/*	27	*/		goto.this.screen = DIRECT.TO.DISK.TRACK.DISPLAY		(0);
+/*	28	*/		goto.this.screen = MULTICHANNEL.DISPLAY				(1);
+/*	29	*/		goto.this.screen = MIDI.DISPLAY							(1);
+/*	30	*/		goto.this.screen = SEQ.EDIT.SCREEN						(0);
+/*	31	*/		goto.this.screen = AUDIO.EVENT.EDITOR.SCREEN			(0);
+/*	32	*/		goto.this.screen = LaserDisk.Archive.Screen			(0);
+/*	33	*/		do;					/*	pf1	*/
+					call.convert=1;
+					cnv.sta = 1;
+					call LEAVE.SYNCLAVIER.PROGRAM;	/*	try to terminate	*/
+					call.convert=0;
+					goto.this.screen = (-1);
+				end;
+/*	34	*/		do;					/*	pf2	*/
+					call.convert=1;
+					cnv.sta = 2;
+					call LEAVE.SYNCLAVIER.PROGRAM;	/*	try to terminate	*/
+					call.convert=0;
+					goto.this.screen = (-1);
+				end;
+/*	35	*/		do;					/*	pf3	*/
+					call.convert=1;
+					cnv.sta = 3;
+					call LEAVE.SYNCLAVIER.PROGRAM;	/*	try to terminate	*/
+					call.convert=0;
+					goto.this.screen = (-1);
+				end;
+/*	36	*/		do;					/*	pf4	*/
+					call.convert=1;
+					cnv.sta = 4;
+					call LEAVE.SYNCLAVIER.PROGRAM;	/*	try to terminate	*/
+					call.convert=0;
+					goto.this.screen = (-1);
+				end;
+/*	37	*/		do;					/*	break	*/
+					call.terminate=1;
+					call LEAVE.SYNCLAVIER.PROGRAM;	/*	try to terminate	*/
+					call.terminate=0;
+					goto.this.screen = (-1);
+				end;
+/*	38	*/		;						/*	meta state for f/tds	*/
+/*	39	*/		do;					/*	enter WAIT state	(S.WAIT)	*/
+					call ps('Press any key to continue....');
+					call tty_wait;
+					call GET_ENABLE(get.in.char);
+						code = GET.NEXT.EVENT;
+					call GET_DISABLE(get.in.char);
+
+					if code=get.in.char			/*	input character received	*/
+					then goto.this.screen = 0;
+				end;
+/*	40	*/		if inc.kbd.maps
+				then goto.this.screen = Keyboard.Mapping.Screen		(0);
+/*	41	*/		goto.this.screen = CONDUCTOR.SCREEN						(0);
+			end;
+
+			/*	Might have returned to here because of refresh code received
+				from Termulator - in this case, get out and restart.	*/
+
+			//	If we get a screen refresh, return to the most recent active screen
+
+			if ((goto.this.screen == 0)
+			&&  (last.event.code == get.program.exit || last.event.code == get.in.char)
+			&&  (next.event.info == asc.screen.refresh))
+			{
+				reboot.terminal();
+				goto.this.screen = screenstack(0);
+			}
+		end;	/*	of DO WHILE 1	*/
+
+	end WELCOME.SCREEN;
+#endif
+
+end welcmod;

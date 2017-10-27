@@ -1,0 +1,1025 @@
+/* $page - 197-PAL2   ADDITIONAL CODE FOR 197-PAL */
+
+/*
+   02/09/92 - PF  - Increased poly cache file limit from 8k to 64k
+   02/09/92 - PF  - Speed up build of sound file cache
+   08/02/88 - cj,ag - referenced loc.Emarea from an internal memory
+                      procedure for model D
+   03/28/88 - LSS - renamed this file 197-PAL2, created new 197-PAL1
+   02/18/88 - TSS - moved PS.MAX.TIME here from 197-PAL
+   12/18/87 - MWH - Merge poly updates with N-Final plus AEE sources
+   10/15/87 - KJO - Allow file insert and delete from poly cache
+   08/27/87 - MWH - Merge with other release-N edits
+   07/14/87 - MWH - Update all to support max 4 poly bins, 512mb/bin
+   07/10/87 - KJO - Poly cache statistics in cache header
+   11/19/86 - MPB - Created because 197-PAL T O O   B I G !
+*/
+
+/*  PS.MAX.TIME IS CALLED TO MAKE ROOM IN POLY BIN 0 BY MOVING
+ *  FILES OUT TO OTHER BIN(S) (IF THERE ARE ANY).  IDEALLY, AFTER
+ *  CALLING THIS PROCEDURE, BIN-0 WOULD BE EMPTY AND OTHER BIN(S)
+ *  WOULD CONTAIN THE SOUND FILES FORMERLY IN BIN-0.  IF THERE IS
+ *  ONLY ONE POLY BIN IN THE SYSTEM, THIS DOES A SHUFFLE ONLY.
+ */
+
+dcl mr13i  lit 'write("373")';   /* used herein */
+
+PS.MAX.TIME: PROC PUBLIC SWAPABLE;
+   DCL BIN          FIXED;  /* WHICH POLY BIN             */
+   DCL MAXBIN       FIXED;  /* BIN HAVING MAX AMOUNT FREE */
+   DCL MAXFREE  (1) FIXED;  /* MAX AMOUNT FREE FOUND      */
+   DCL LEN          FIXED;  /* LENGTH OF SOUND FILE       */
+   DCL USERS        FIXED;  /* NUMBER OF USERS            */
+   DCL BASE     (1) FIXED;  /* POLY BASE (INCLUDING BIN)  */
+   DCL I        (1) FIXED;  /* POLY POINTER (BIN-0 BASE)  */
+
+   IF SAMPLE.TO.MEMORY<>0       /* CAN'T DO THIS DURING SAMPLE-TO-MEMORY             */
+   THEN RETURN;
+
+   CALL PS.SHUFFLE(0);          /* CLEAN UP SO FREE SPACE IS AT END OF EACH BIN      */
+
+   IF POLYNUMS <= 1             /* CAN WE DO MORE THAN A SHUFFLE?                    */
+   THEN RETURN;                 /* CAN'T MOVE FILES TO OTHER BINS UNLESS THEY EXIST  */
+
+   CALL PS.LOCK;                             /* LOCK OUT IN CASE OF CRASH/RELOAD     */
+
+   CALL SET.CUR.BIN(0);                      /* POINT DATA STRUCTURES AT BIN 0       */
+   CALL COPY32(PSFIRST,I);                   /* START HERE IN BIN-0                  */
+   DO WHILE COM32(I,PSLAST) <> LW#IEQ;       /* LOOK AT ALL SOUND FILES IN THIS BIN  */
+      CALL PSMREAD(I,0,BL.LEN);              /* (DON'T ADD BIN BITS SINCE 0)         */
+      LEN=READ(PSD);                         /* BL.LEN   - GET BLOCK LENGTH          */
+      USERS=READ(PSD);                       /* BL.USERS - GET USERS                 */
+      IF READ(PSD) > 1 THEN DO;              /* BL.FNAME - NOT EMPTY(0) OR CACHE(1)  */
+         CALL STR32(0,0,MAXFREE);            /* SEE WHICH BIN HAS THE MOST FREE ROOM */
+         MAXBIN=1;                           /* IF WE DON'T FIND ANYTHING BETTER     */
+         DO BIN=1 TO POLYNUMS - 1;           /* LOOK IN ALL BINS AFTER FIRST         */
+            CALL SET.CUR.BIN(BIN);           /* POINT VARIABLES AT THIS BIN          */
+            IF COM32(MAXFREE,PSFREE) = LW#ILT THEN DO;  /* MORE ROOM HERE?           */
+               MAXBIN = BIN;                 /* REMEMBER THIS BIN                    */
+               CALL COPY32(PSFREE,MAXFREE);  /* AND HOW MUCH IS FREE HERE            */
+            END;
+         END;
+         CALL SET.CUR.BIN(MAXBIN);           /* POINT VARIABLES AT BIN WITH MAX FREE */
+         CALL SUB32(PSMAX,PSLAST,BASE);      /* FIND ROOM AT THE END OF THE BIN      */
+         IF COM16(LEN,BASE) <> LW#IGT
+         THEN DO;                            /* IF THERE'S ENOUGH ROOM TO MOVE FILE  */
+            CALL COPY32(PSLAST,BASE);        /* PUT FILE AT THE END OF THE NEW BIN   */
+            BASE(LW#MSB) = BASE(LW#MSB) \ SHL(MAXBIN,BASE#BIN_P);
+            CALL COPY.POLY.MEM.SEC(I,0,BASE,0,LEN);
+            CALL ADD16(LEN,PSLAST);
+            CALL COPY32(PSLAST,PSHERE);
+            CALL PS.UPDATE(I,BASE);          /* UPDATE POINTERS FOR FILE MOVEMENT    */
+            IF USERS > 0 THEN DO;
+               CALL SET.CUR.BIN(MAXBIN);     /* POINT VARIABLES AT THIS BIN          */
+               CALL SUB16(LEN,PSFREE);       /* LESS ROOM NOW IN THIS BIN */
+               CALL SET.CUR.BIN(0);          /* POINT DATA STRUCTURES BACK AT BIN-0  */
+               CALL ADD16(LEN,PSFREE);       /* MORE ROOM NOW IN BIN-0               */
+            END;
+            CALL PSMWRITE(I,0,BL.USERS);     /* POINT BACK AT OLD FILE IN BIN-0      */
+            WRITE(PSD) = 0;                  /* BL.USERS - NO USERS OF THIS FILE     */
+            WRITE(PSD) = 0;                  /* BL.FNAME - NO FILE HERE ANYMORE      */
+         END;               /* OF ROOM TO MOVE FILE                 */
+      END;                  /* OF NOT EMPTY OR CACHE; MOVE FILE     */
+      CALL ADD16(LEN,I);    /* ADVANCE POINTER                      */
+      CALL SET.CUR.BIN(0);  /* POINT DATA STRUCTURES BACK AT BIN 0  */
+   END;                     /* OF LOOP THROUGH SOUND FILES IN BIN-0 */
+   CALL PS.SHUFFLE(0);      /* CLOSE UP ANY GAPS CREATED BY MOVING THINGS AROUND */
+   CALL PS.UNLOCK;
+END PS.MAX.TIME;
+
+/* $SUBTITLE  Main Routines to Set Up Sound File Cache */
+
+FIND.CACHE:  proc PUBLIC SWAPABLE;    /* look for sound file cache in polymem */
+   dcl (j,found) fixed;
+   dcl (i) (1)   fixed;  /* 32 bit poly pointer */
+
+   CALL SET.CUR.BIN(0);        /* CACHE IS ALWAYS IN POLY BIN 0 */
+
+   if (inc.poly=0) or (com16(0,polyamount)=lw#ieq)
+   then return 0;              /* no polymem, no cache */
+
+   FOUND=0;                    /* NOT YET    */
+   CALL COPY32(PSFIRST,I);     /* START HERE */
+   DO WHILE (COM32(I,PSLAST) <> LW#IEQ)  /* SEARCH EVERY BLOCK */
+   AND      (FOUND=0);                   /* WHILE WE HAVE NOT FOUND THE CACHE */
+      CALL PSMREAD(I,0,0);     /* SET UP FOR DATA */
+      J           =READ(PSD);  /* GET BLOCK LENGTH IN SECTORS */
+      WRITE("313")=READ(PSD);  /* AND SKIP OVER USERS FIELD */
+      IF  (READ(PSD)=1) AND (READ(PSD)=0)
+      AND (READ(PSD)=0) AND (READ(PSD)=0)
+      THEN FOUND=1;            /* HAVE A MATCH */
+      ELSE CALL ADD16(J,I);    /* STEP TO NEXT BLOCK */
+   END;
+
+   IF FOUND<>0 THEN DO;           /* CACHE FILE EXISTS */
+      CALL COPY32(I,CACHE.BASE);  /* SET BASE SECTOR (BIN BITS ALWAYS 0) */
+      CACHE.SECS=J;               /* LOOK UP CACHE LENGTH */
+      RETURN 1;
+   END;
+   RETURN 0;                      /* CACHE WAS NOT FOUND */
+end FIND.CACHE;
+
+ALLOCATE.MORE.CACHE:  proc(sectors) fixed swapable; /* allocate larger cache space in polymem */
+   dcl sectors            fixed;
+   dcl new.cache.base (1) fixed;
+
+   if (inc.poly=0) or (com16(sectors,polyamount) = lw#igt) then return 0; /* no polymem or not enough */
+
+   if PS.ALLOCATE(sectors,0,0)=0 then return 0;  /* not able to get enough space */
+  
+   call PS.LOCK;
+   call psmwrite(sfile.base,0,bl.len);
+   write(psd)=sectors;                      /* set block length */
+   write(psd)=0;                            /* and init users   */
+   write(psd)=0;                            /* no name for now  */
+   call copy32(sfile.base,new.cache.base);  /* save this base   */
+
+   fnbuf(1)=1; fnbuf(2)=0; fnbuf(3)=0; fnbuf(4)=0; /* set up special filename */
+   lnbuf(0)=0;
+
+   if PS.SEARCH=0 then do;      /* system error -- cache is supposed to exist */
+      call PS.UNLOCK; return 0;
+   end;
+   call copy32(sfile.base,cache.base);
+
+   /* copy info from previous cache area to new cache area */
+   call COPY.POLY.MEM.SEC(cache.base,0,new.cache.base,0,cache.secs);
+
+   call psmwrite(cache.base,0,bl.users);
+   write(psd)=0;                   /* set users to denote free */
+   write(psd)=0;                   /* and zero out first word of name */
+   call add16(cache.secs,psfree);  /* account for freed up space */
+
+   call psmwrite(new.cache.base,0,bl.len);
+   write(psd)=sectors;          /* set new block length field */
+   write(psd)=1;                /* set users to one */
+   write(psd)=1;                /* and name to (1,0,0,0) */
+   write(psd)=0; write(psd)=0; write(psd)=0;
+   call sub16(sectors,psfree);  /* account for new used space */
+   new.poly.contents = new.poly.contents \ 2; /* tell screen about it */
+
+   call copy32(new.cache.base,cache.base);
+   cache.secs=sectors;
+   call PS.UNLOCK;
+   return 1;                    /* allocate was successful */
+end ALLOCATE.MORE.CACHE;
+
+CHECK.CACHE: proc SWAPABLE; /* check cache contents and store various statistics */
+   dcl lines(BL.LINESMAX) fixed; /* stores the no. lines required for various files/line combinations */
+   dcl cat.count          fixed; /* no. catalogs in cache */
+   dcl file.count         fixed; /* no. files in cache */
+   dcl cat.file.count     fixed; /* no. files in a catalog */
+   dcl file.id            fixed; /* file name id number */
+   dcl (W0ptr,W1ptr)      fixed; /* pointers to start of winchester areas in cache */
+   dcl base (1)           fixed; /* 32 bit poly pointer */
+   dcl (i,j,k)            fixed;
+
+   CHECK.FILE.ID: proc returns (fixed); /* checks if name in MISC.BUF is in NEWFxxxx format and converts number */
+      dcl sum fixed; /* summation of numeric value of string */
+      dcl ch  fixed; /* string character */
+      dcl i   fixed;
+
+      if (misc.buf(0) = NEWFNAME(1)) and (misc.buf(1) = NEWFNAME(2)) then do;  /* if prefix of filename is NEWF */
+         i = 4; /* assume a valid number and convert left to right */
+         sum = 0; /* convert string into number to find largest */
+         do while i < 8;
+            ch = byte(misc.buf,i);
+            if (ch >= a.0) and (ch <= a.9) then do; /* within range of '0'..'9' */
+               load sum; mul 10; sum = res + (ch - a.0);  /* no overflow check */
+            end;
+            else return (0); /* die */
+            i = i + 1;
+         end;
+
+         if (sum < 0) or (sum > 9999) then sum = 0; /* limits size of number */
+         return (sum); /* return number */
+      end;
+      return (0); /* not in correct format */
+   end CHECK.FILE.ID;
+
+   SET.FILE.ID: proc(id); /* converts file id and sets the global filename to that number*/
+      dcl id    fixed; /* file id number */
+      dcl (i,j) fixed;
+
+      load id; div 1000; i = res; j = read("4");
+      call pbyte(NEWFNAME,4,a.0 + i);
+      load j; div 100; i = res; j = read("4");
+      call pbyte(NEWFNAME,5,a.0 + i);
+      load j; div 10; i = res; j = read("4");
+      call pbyte(NEWFNAME,6,a.0 + i);
+      call pbyte(NEWFNAME,7,a.0 + j);
+   end SET.FILE.ID;
+
+   COMPUTE.LINES: proc(lines,count); /* compute the no. lines required for various files/line combinations */
+      dcl lines fixed array; /* lines array */
+      dcl count fixed; /* no. files in this catalog */
+      dcl i     fixed;
+
+      do i = 1 to BL.LINESMAX; /* loop over all files/line combinations */
+         write("5") = count;
+         write("7") = i; /* divide no. files by no. files/line */
+         lines(i) = lines(i) + read("5") + (read("4") <> 0); /* store no. lines required */
+      end;
+   end COMPUTE.LINES;
+
+   cat.count = 0; /* no catalogs yet */
+   file.count = 0; /* no files yet */
+   cat.file.count = 0; /* not files in category yet */
+   W0ptr = -1; W1ptr = -1; /* no winchesters yet */
+   file.id = 1000; /* default file id number */
+
+   do i = 1 to BL.LINESMAX; /* clear out lines array */
+      lines(i) = 0;
+   end;
+
+   i = 0;
+   call psmread(cache.base,sf.hdr,0);   /* start at beginning of cache */
+   do while i ILT cache.ptr; /* loop over FCB's in cache */
+
+      write("313") = addr(misc.buf(0)); /* get 8 FCB words from cache */
+      mr13i=read(psd); mr13i=read(psd);
+      mr13i=read(psd); mr13i=read(psd);
+      mr13i=read(psd); mr13i=read(psd);
+      mr13i=read(psd); mr13i=read(psd);
+
+      if misc.buf(7) = -1 then do; /* found a sound file name */
+         file.count = file.count + 1; /* another file in cache */
+         cat.file.count = cat.file.count + 1; /* another file in this catalog */
+
+         k = CHECK.FILE.ID; /* check if file is in 'NEWFxxxx' format, return number if it is */
+         if k > file.id then file.id = k; /* store new file id number */
+      end;
+      else do; /* found a subcat name */
+         call COMPUTE.LINES(lines,cat.file.count); /* compute no. lines required for the previous catalog */
+         cat.file.count = 0; /* init for next catalog */
+         cat.count = cat.count + 1; /* another catalog in cache */
+
+         if (misc.buf(0) = (shl(a.0,8) or a.W)) /* is this a winchester name? */
+         or (misc.buf(0) = (shl(a.1,8) or a.W)) then do;
+            if (misc.buf(1) = 0) and (misc.buf(2) = 0) and (misc.buf(3) = 0) then do; /* it is a winchester */
+               if shr(misc.buf(0),8) = a.0
+               then W0ptr = i; /* found W0 */
+               else W1ptr = i; /* found W1 */
+            end;
+         end;
+      end;
+
+      i = i + 1; /* go to next FCB */
+   end;
+
+   call COMPUTE.LINES(lines,cat.file.count); /* compute no. lines required for the last catalog */
+
+   /* Search through poly memory for file names of the format 'NEWFxxxx' */
+   call set.cur.bin(0);         /* cache is always in poly bin 0 */
+   call copy32(psfirst,base);   /* point to the sector in poly memory where the blocks start */
+   do while com32(base,pslast) <> lw#ieq;    /* search every block */
+      /* Note, it is not necessary to add bin bits to "base" in this case since bin=0 always! */
+      call psmread(base,0,BL.LEN);   /* look at block length in sectors */
+      j=read(psd);                   /* save length */
+      call psmread(base,0,BL.FNAME); /* look at the sound filename */
+      do k = 0 to 3;
+         misc.buf(k) = read(psd);
+      end;
+      k = CHECK.FILE.ID; /* check if file is in 'NEWFxxxx' format, return number if it is */
+      if k > file.id then file.id = k; /* store new file id number */
+
+      call add16(j,base);       /* move ahead to the next block */
+   end;
+
+   /* if not default, we found largest 'NEWFxxxx' file in poly and cache, now save it in global name */
+   if file.id <> 1000 then call SET.FILE.ID(file.id);
+
+   /* store accumulated statistics in cache header */
+
+   call psmwrite(cache.base,0,BL.LINES); /* store this information in cache header sector */
+   do i = 1 to BL.LINESMAX;
+      write(psd) = lines(i);
+   end;
+
+   call psmwrite(cache.base,0,BL.FILECOUNT); /* store the total no. files in the cache */
+   write(psd) = file.count;
+   num.snds.in.cache = file.count; /* put in global as well */
+
+   call psmwrite(cache.base,0,BL.CATCOUNT); /* store the total no. catalogs in the cache */
+   write(psd) = cat.count;
+
+   call psmwrite(cache.base,0,BL.CACHEPTR); /* store the no. words in the cache */
+   write(psd) = cache.ptr;
+
+   call psmwrite(cache.base,0,BL.W0PTR); /* store pointer to W0 */
+   write(psd) = W0ptr;
+
+   call psmwrite(cache.base,0,BL.W1PTR); /* store pointer to W1 */
+   write(psd) = W1ptr;
+
+   /* zero out remainder of cache */
+
+   if cache.ptr ILT shl(cache.secs-1,5) then do; /* there is some unused memory in cache */
+      i = cache.ptr;
+      call psmwrite(cache.base,sf.hdr+shr(i,5),shl(i&"37",3)); /* set up write ptr */
+      do while i ILT shl(cache.secs-1,5); /* zero remaining words */
+         rpc(8);
+         write(psd) = 0;
+         i = i + 1;
+      end;
+   end;
+end CHECK.CACHE;
+
+/* $SUBTITLE  Routine to find all sound files and subcatalogs on a device */
+
+BEGIN;
+
+dcl depth        fixed;   /* recursion level */
+dcl cache.stkptr fixed;   /* ptr to next free spot on stack */
+
+TRAVERSE.DEVICE: proc (dev) returns (fixed) SWAPABLE; /* find all sound files and subcats on this device */
+   dcl dev fixed; /* device to traverse */
+   dcl d   fixed;
+	
+	dcl S$SenseKey      fixed external; /* Extended sense key from last SCSI read/write */
+
+   COMPRESS.CATALOG:  proc (fcb) returns (fixed);
+      dcl fcb         fixed array; /* fcb to use */
+      dcl len         fixed; /* no. files stored */
+      dcl i           fixed;
+
+      len = 0; /* no valid files found yet */
+      do i = 0 to (c#dir_size/c#len - 1); /* loop over all catalog entries */
+         call get_fcb(i,fcb); /* get fcb from catalog */
+         if fcb(f#nm) <> 0 then do; /* valid file name */
+            if (fcb(f#ty) = t#sound) /* sound file */
+            or (fcb(f#ty) = t#subc)  /* subcatalog */
+            or (fcb(f#ty) = t#lsubc) /* large subcatalog */
+            then do;
+               if ((fcb(f#nm)&0xff)!=a.period) {
+                  call put_fcb(len,fcb); /* store this fcb */
+                  len = len + 1; /* one more fcb stored */
+               }
+            end;
+         end;
+      end;
+      return (len); /* return no. files stored */
+   end COMPRESS.CATALOG;
+
+   SORT.CATALOG:  proc (fcb.index,fcb.count,fcb1,fcb2,key,order); /* sorts FCBS in catalog starting at given index */
+      dcl fcb.index   fixed; /* first fcb index to start sorting at */
+      dcl fcb.count   fixed; /* no. fcbs to sort */
+      dcl (fcb1,fcb2) fixed array; /* arrays for fcb's */
+      dcl key         fixed; /* 0 => by name, 1 => by type */
+      dcl order       fixed; /* 0 => alphabetic sort, 1 => reverse alphabetic sort */
+      dcl (i,j)       fixed;
+
+      COMPARE.FCBS: proc (index,key,fcb1,fcb2) returns (fixed); /* compares adjacent FCB names */
+         dcl index fixed;           /* fcb index in catalog */
+         dcl key   fixed;
+         dcl (fcb1, fcb2) fixed array;
+
+         call get_fcb(index - 1,fcb1); /* get fcb's needed from catalog */
+         call get_fcb(index,fcb2);
+
+         if key = 0 then do;          /* sorting FCB by name */
+            index = f#nm;             /* start at beginning of name */
+            do while (index < f#nm + f#name_len) and (fcb1(index) = fcb2(index)); /* loop over all equal characters in name */
+               index = index + 1;     /* next two characters in name */
+            end;
+            if index = f#nm + f#name_len then return (0); /* names are equal */
+            else if rot(fcb1(index),8) ilt rot(fcb2(index),8) then return (-1); /* fcb1 < fcb2 */
+            else return (1); /* fcb1 > fcb2 */
+         end;
+         else do;                     /* sorting by type */
+            if (fcb1(f#ty) = t#sound) and (fcb2(f#ty) <> t#sound) then return (-1); /* sound files < subcatalogs */
+
+            if  ( (fcb1(f#ty)  = t#subc) or  (fcb1(f#ty)  = t#lsubc) )
+            and ( (fcb2(f#ty) <> t#subc) and (fcb2(f#ty) <> t#lsubc) )
+            then return (1);
+            else return (0); /* fcb's are of same type */
+         end;
+      end COMPARE.FCBS;
+
+      if order = 0
+      then order = 1;  /* compare result for alphabetical sort */
+      else order = -1; /* compare result for reverse alphabetical sort */
+
+      do i = 1 to fcb.count - 1; /* insertion sort */
+         j = fcb.index + i; /* get fcb index in catalog */
+         do while (j <> fcb.index) and (COMPARE.FCBS(j,key,fcb1,fcb2) = order); /* loop until required order is not met */
+            call put_fcb(j - 1,fcb2); /* swap fcb's */
+            call put_fcb(j,fcb1);
+            j = j - 1;
+         end;
+      end;
+   end SORT.CATALOG;
+
+   /* $SUBTITLE  Routine to Create Sound File Cache Recursively in Poly Memory */
+
+   EXPAND.CATALOG:  proc (treename,fcb,device) returns (fixed);
+      dcl treename     fixed array; /* treename to expand       */
+      dcl fcb          fixed array; /* array space for two fcbs */
+      dcl device       fixed;       /* device to expand on */
+      dcl (num.cats,num.snds) fixed;
+      dcl (i,j)        fixed;
+
+      PUSH:  proc(n); /* push new value onto cache stack in external memory */
+         dcl n fixed;
+         if cache.stkptr=4096 then return;
+         write(mam)=trd.ptr+18+shr(cache.stkptr,8); /* do not overwrite sample to memory display in external memory */
+         write(mal)=cache.stkptr;
+         write(md) =n;
+         cache.stkptr=cache.stkptr+1;
+      end PUSH;
+
+      POP:  proc fixed;
+         if cache.stkptr=0 then return 0; /* no more values on stack */
+         cache.stkptr=cache.stkptr-1;
+         write(mam)=trd.ptr+18+shr(cache.stkptr,8);
+         write(mal)=cache.stkptr;
+         return read(md);
+      end POP;
+
+      /* make sure enough cache left for this whole catalog */
+      if (shl(cache.secs-1,5)-cache.ptr) ILT 128
+      then if allocate.more.cache(cache.secs+4+cache.secs)=0 then return (0);
+
+      if inc.mono<>0 then call stop.disk;  /* stop output so we can read disk */
+      if not read_catalog(treename,device) then return (0); /* could not read catalog, so die */
+
+      depth = depth + 1; /* keep track of recursion depth */
+
+      j = compress.catalog(fcb); /* get rid of non-essential info */
+
+      call sort.catalog(0,j,fcb,location(addr(fcb(f#len))),1,0); /* sort by type */
+
+      /* count number of sound files */
+      num.snds = 0;
+      i = 0;
+      do while i ilt j; /* loop over fcbs in catalog */
+         call get_fcb(i,fcb); /* get fcb from catalog */
+         if fcb(f#ty) = t#sound then do; /* sound file found */
+            num.snds = num.snds + 1; /* one more sound file */
+            i = i + 1; /* go to next fcb in catalog */
+         end;
+         else i = j; /* get out of loop */
+      end;
+
+      num.cats = j - num.snds; /* count number of subcatalogs */
+
+      if num.snds <> 0 then call sort.catalog(0,num.snds,fcb,location(addr(fcb(f#len))),0,0); /* sort in alphabetical order */
+      if num.cats <> 0 then call sort.catalog(num.snds,num.cats,fcb,location(addr(fcb(f#len))),0,1); /* sort in reverse alphabetical order */
+
+      call psmwrite(cache.base,sf.hdr+shr(cache.ptr,5),shl(cache.ptr&"37",3));  /* set up write ptr */
+      i = 0;
+      do while i ILT num.snds;                     /* loop over sound files */
+         call get_fcb(i,fcb);                      /* get fcb from catalog */
+         do j = f#nm to (f#nm + 4 - 1);
+            write(psd) = fcb(j);                   /* words 0-3: file name */
+         end;
+         if c#ls_sector + fcb(f#ls) ilt c#ls_sector then j = 1; else j = 0; /* deal with overflow */
+         write(psd) = c#ms_sector + fcb(f#ms) + j; /* word 4: device and ms starting sector */
+         write(psd) = c#ls_sector + fcb(f#ls);     /* word 5: ls starting sector */
+         write(psd) = fcb(f#ll);                   /* word 6: sector length of sound file */
+         write(psd) = -1;                          /* word 7: special value */
+         i = i + 1;
+      end;
+      cache.ptr = cache.ptr + num.snds;   /* advance cache.ptr beyond FCBs just written to cache */
+
+      /* $page */
+
+      do i = num.snds to (num.snds + num.cats - 1); /* loop over subcatalogs */
+         call get_fcb(i,fcb); /* get fcb from catalog */
+
+         if cache.stkptr ile (4096 - 9) then do; /* there is room on stack */
+            do j = f#nm to (f#nm + 4 - 1);
+               call push(fcb(j));         /* words 0-3: catalog name */
+            end;
+            if c#ls_sector + fcb(f#ls) ilt c#ls_sector then j = 1; else j = 0; /* deal with overflow */
+            call push( c#ms_sector + fcb(f#ms) + j ); /* word 4: device and ms starting sector */
+            call push( c#ls_sector + fcb(f#ls) );     /* word 5: ls starting sector */
+            call push( fcb(f#ll) );                   /* word 6: ls sector length */
+            call push( shl(depth,8) or shl(fcb(f#ml),4) or fcb(f#ty) ); /* word 7: depth, ms sector length, type */
+            call push( treename(0) );                 /* word 8: current length of treename */
+         end;
+         else num.cats = num.cats - 1;    /* one less cat stacked */
+      end;
+
+      i = 1;
+      do while i ile num.cats; /* loop over new subcats and expand recursively */
+         treename(0) = pop; /* reset length of tree name */
+         do j = 8 to 1 by -1; /* pop subcatalog info off stack */
+            fcb(j) = pop;
+         end;
+
+         call psmwrite(cache.base,sf.hdr+shr(cache.ptr,5),shl(cache.ptr&"37",3));   /* set up write ptr */
+         do j = 1 to 8; /* write subcatalog info to poly */
+            write(psd) = fcb(j);
+         end;
+         cache.ptr = cache.ptr + 1; /* advance cache ptr beyond this new FCB */
+
+         call pbyte(treename,treename(0),a.colon); /* put colon at end of treename */
+         treename(0) = treename(0) + 1; /* adjust length for colon */
+
+         do j = 0 to 7; /* add new subcatalog name to tree name */
+            if byte(fcb,j) <> 0 then do; /* valid character */
+               call pbyte(treename,treename(0),byte(fcb,j)); /* add character */
+               treename(0) = treename(0) + 1; /* adjust length for new character */
+            end;
+         end;
+
+         call push(i);                    /* store local variables on stack */
+         call push(num.snds);
+         call push(num.cats);
+
+         if depth ilt 10                  /* have not reached the recursion limit */
+         then j = expand.catalog(treename,fcb,device); /* expand recursively */
+         else j = 0;                      /* don't recurse any deeper than 10 depths */
+
+         num.cats = pop;                  /* pop values stacked previously */
+         num.snds = pop + j;
+         i        = pop;
+
+         if j = 0 then cache.ptr = cache.ptr - 1; /* get rid of this catalog if it has no sounds */
+         i = i + 1;
+      end;
+      depth = depth - 1; /* this level is done */
+
+      return (num.snds); /* pass number of sounds found at this depth and lower */
+   end EXPAND.CATALOG;
+
+   /* $page */
+
+   /* Main procedure */
+	
+	S$SenseKey = 0;
+	C#Status   = 0;
+
+   /* make sure enough cache left for this whole catalog */
+   if (shl(cache.secs-1,5)-cache.ptr) ilt 128
+   then if allocate.more.cache(cache.secs+4+cache.secs)=0 then return (0);
+
+   if not read_catalog('',dev) then return (0); /* could not read device catalog */
+
+   d = byte('FRW',shr(dev,1) - 1); 					/* get letter for this device */
+   d = (shl(a.0 + (dev and "1"),8) or d); 		/* add '0' or '1', depending on device */
+
+   call psmwrite(cache.base,sf.hdr+shr(cache.ptr,5),shl((cache.ptr&"37"),3));    /* set up write ptr */
+   write(psd) = d;                           	/* write out name of device */
+   write(psd) = 0; write(psd) = 0; write(psd) = 0; /* rest of name is nulls */
+   write(psd) = c#ms_sector;                 	/* device and MS starting sector */
+   write(psd) = c#ls_sector;                 	/* LS starting sector */
+   write(psd) = c#ls_length;                 	/* LS sector length */
+   if c#dir_size = 256 then d = t#subc; else d = t#lsubc;
+   write(psd) = (shl(c#ms_length,4) or d) & 0xFF;   	/* MS sector length and type; ignore upper bits of humongo device */
+   cache.ptr = cache.ptr + 1;     					/* advance cache pointer */
+
+   call cache_treename(true);     					/* turn treename caching on */
+   misc.buf(0) = 0;              					/* start out with null tree name */
+   d = expand.catalog(misc.buf,copy.buf,dev);
+   call cache_treename(false);    					/* turn treename caching off */
+
+   return (d); 											/* return no. sound files found */
+end TRAVERSE.DEVICE;
+
+/* $SUBTITLE  Routines to Initialize and Set Up Sound File Cache */
+
+dcl INITIAL.FNAME data public ('NEWF0999'); /* default name for a new sound file */
+
+SETUP.CACHE:  proc (allow_output) PUBLIC SWAPABLE; 	/* set up a cache of all sound files on winchester disk */
+	dcl allow_output									 fixed;	/* true if terminal output is allowed */
+	dcl SenseMes        (MESSAGE_BUF_SIZE/2  ) fixed;
+	dcl CatMes          (MESSAGE_BUF_SIZE/2  ) fixed;
+	
+	dcl S$SenseKey      fixed external; /* Extended sense key from last SCSI read/write */
+   
+	dcl i fixed;
+
+   call str32(0,0,cache.base);		/* initialize variables to no cache */
+	cache.secs = 0;
+	cache.ptr  = 0;
+   call set.cur.bin(0);
+
+   if (inc.poly=0) or (com16(0,polyamount)=lw#ieq) then return; /* no polymem, no cache */
+
+   // Only init once
+   if (NEWFNAME(0) == 0) {
+      do i=0 to 4;                      /* set up default name for sound file */
+         NEWFNAME(i)=INITIAL.FNAME(i);
+      end;
+   }
+
+   // No cache desired
+   if ((interp_real_time_prefs(SYNCLAVIER_PREF_CREATE_CACHE) & SYNCLAVIER_PREF_CREATE_CACHE) == 0)
+      return;
+
+   if FIND.CACHE then do;            /* there is a cache already present */
+      call psmread(cache.base,0,bl.users);
+      if read(psd)=0 then do;        /* not accounted for yet */
+         call psmwrite(cache.base,0,bl.users);
+         write(psd)=1;               /* set users to non-zero */
+         call sub16(cache.secs,psfree);  /* reduce memory available */
+         new.poly.contents = new.poly.contents \ 2; /* tell screen about it */
+      end;
+
+      /* if poly cache is valid, deal with it:  */
+      /* use IMPORT here in case we are running */
+      /* with model D processor                 */
+
+      call import(core(loc.emarea), em.polycache, loc(addr(i)), 1);
+      
+		if i then do; 
+         call psmread(cache.base,0,bl.cacheptr);
+         cache.ptr = read(psd);      /* get no. words in cache */
+         if cache.ptr <> 0           /* make sure prior setup  */
+         then do;                    /* completed              */
+            call CHECK.CACHE;        /* check cache contents   */
+            return;                  /* cache is ready to go, so return now */
+         end;
+      end;
+   end;
+   else do;                         /* need to allocate space for a cache */
+      if PS.ALLOCATE(5,0,0)=0 then return;  /* unable to get any space for cache in bin 0 */
+
+      call PS.LOCK;
+      call copy32(sfile.base,cache.base);
+      cache.secs=5;               /* first sector reserved for other info */
+      call psmwrite(cache.base,0,bl.len);
+      write(psd)=cache.secs;      /* block length */
+      write(psd)=1;               /* users */
+      write(psd)=1;               /* special filename */
+      write(psd)=0;
+      write(psd)=0;
+      write(psd)=0;
+      do i = 6 to 255;            /* zero out remaining header area */
+         write(psd) = 0;
+      end;
+      call sub16(cache.secs,psfree);  /* account for newly allocated space */
+      new.poly.contents = new.poly.contents \ 2; /* tell screen about it */
+      call PS.UNLOCK;
+   end;
+
+   /* build the cache for both W0: and W1: */
+
+	if (allow_output != 0)
+   	psr('Constructing sound file list - please wait...');
+
+   depth        = 0;
+   cache.stkptr = 0;
+
+   if (find_device(6) != 0)
+	{
+      if (allow_output != 0) {
+	   	psr('   Searching W0:');
+         tty_wait();
+      }
+      
+		i = TRAVERSE.DEVICE(6); 		/* W0: */
+		
+		if (allow_output != 0)
+		{
+			get_cat_code_message          (C#Status,   CatMes  );
+			get_sense_code_message        (S$SenseKey, SenseMes);
+			
+			if (C#Status != 0)
+				{ps('      Catalog Error: '); psr (CatMes  );}
+				
+			if (S$SenseKey != 0)
+				{ps('      SCSI Error:    '); psr (SenseMes);}
+				
+			ps('   '); pnum(i, 0); psr(' Sound Files found');
+		}
+	}
+	
+	if (find_device(7) != 0)
+	{
+      if (allow_output != 0) {
+		  	psr('   Searching W1:');
+         tty_wait();
+      }
+
+		i = TRAVERSE.DEVICE(7); 		/* W1: */
+		
+		if (allow_output != 0)
+		{
+			get_cat_code_message          (C#Status,   CatMes  );
+			get_sense_code_message        (S$SenseKey, SenseMes);
+			
+			if (C#Status != 0)
+				{ps('      Catalog Error: '); psr (CatMes  );}
+				
+			if (S$SenseKey != 0)
+				{ps('      SCSI Error:    '); psr (SenseMes);}
+			
+			ps('   '); pnum(i, 0); psr(' Sound Files found');
+		}
+	}
+   
+   call CHECK.CACHE; /* check cache contents */
+
+   /* Set bit using EXTSET in case we are in model D and */
+   /* we are executing out of external memory:           */
+
+   call extset (core(loc.emarea), em.polycache, 1, true);
+
+   if (allow_output != 0) {
+   	call psr('Sound file list constructed.');
+      tty_wait();
+   }
+end SETUP.CACHE;
+
+END;
+
+/* $SUBTITLE  Routine to Locate a Sound File in the Sound File Cache */
+
+FIND.SOUND:  proc(name) fixed PUBLIC SWAPABLE; /* looks for a sound file in the cache */
+   dcl name      fixed array;   /* sound file to locate */
+   dcl tname (3) fixed;
+   dcl (i,j)     fixed;
+
+   if  (FIND.CACHE<>0)          /* sound file cache exists */
+   and (num.snds.in.cache<>0)   /* and it has some sounds in it */
+   then do;
+
+      do i=0 to 3;              /* copy name over */
+         if name(0)>(i+i) then tname(i)=name(i+1);
+         else                  tname(i)=0;
+         if name(0)=(i+i+1) then tname(i)=tname(i)&255; /* clear unused byte */
+      end;
+
+      call psmread(cache.base,sf.hdr,0); /* load ptr to start of cache */
+      i=0;
+      do while i ILT cache.ptr; /* step through cache FCBs */
+         /* read 8 words into temp buffer */
+         write("313") = addr(misc.buf(0));
+         mr13i=read(psd); mr13i=read(psd);
+         mr13i=read(psd); mr13i=read(psd);
+         mr13i=read(psd); mr13i=read(psd);
+         mr13i=read(psd); mr13i=read(psd);
+
+         if  (misc.buf(7)=(-1)) /* is a sound file */
+         and (misc.buf(0)=tname(0)) /* has same name */
+         and (misc.buf(1)=tname(1))
+         and (misc.buf(2)=tname(2))
+         and (misc.buf(3)=tname(3)) then do; /* we found it */
+            f#ms_sector=misc.buf(4);
+            f#ls_sector=misc.buf(5);
+            f#ms_length=0;
+            f#ls_length=misc.buf(6);
+            f#words=shl(f#ls_length,8);
+            f#type=t#sound;
+            return 1;
+         end;
+         i=i+1;
+      end;
+   end;
+   return 0; /* file was not found */
+end FIND.SOUND;
+
+dcl search.ptr fixed; /* pointer into cache when search is done */
+
+SEARCH.CACHE: proc(str,startptr,findfile,target) returns (boolean) SWAPABLE; /* search cache for given file or subcat */
+   dcl str        fixed array; /* string to search for */
+   dcl startptr   fixed; /* point in cache to start search at */
+   dcl findfile   boolean; /* TRUE to search for files, FALSE to search for subcats */
+   dcl target     fixed array; /* space for formatted target string */
+   dcl (i,c)      fixed;
+
+   COMPARE.FCBS: proc (s1,s2) returns (fixed); /* compare FCBS */
+      dcl (s1,s2) fixed array; /* strings to compare */
+      dcl i       fixed;
+
+      i = 0; /* start at beginning of name */
+      do while (i < 4) and (s1(i) = s2(i)); /* loop over all equal characters in name */
+         i = i + 1; /* next two characters in name */
+      end;
+      if i = 4 then return (0); /* names are equal */
+      else if rot(s1(i),8) ilt rot(s2(i),8) then return (-1); /* s1 < s2 */
+      else return (1); /* s1 > s2 */
+   end COMPARE.FCBS;
+
+   do i = 0 to 7; /* convert string into FCB format */
+      if i < str(0)
+      then c = byte(str,i);
+      else c = 0;
+      call pbyte(loc(addr(target(0)) - 1),i,c);
+   end;
+
+   search.ptr = startptr; /* start at point given */
+   call psmread(cache.base,sf.hdr+shr(search.ptr,5),shl(search.ptr&"37",3)); /* load ptr to start of cache */
+   do while search.ptr ILT cache.ptr; /* loop over remaining FCB's in cache */
+
+      write("313") = addr(misc.buf(0)); /* get 8 FCB words from cache */
+      mr13i=read(psd); mr13i=read(psd);
+      mr13i=read(psd); mr13i=read(psd);
+      mr13i=read(psd); mr13i=read(psd);
+      mr13i=read(psd); mr13i=read(psd);
+
+      if findfile then do; /* searching for file */
+         if misc.buf(7) = -1 then do; /* this is a file */
+            c = COMPARE.FCBS(target,misc.buf);
+            if c = 0 then return (true); /* found file */
+            if c < 0 then return (false); /* found insertion point */
+         end;
+         else return (false); /* this is a subcat, so found insertion point */
+      end;
+      else if (misc.buf(7) <> -1) then do; /* searching for and found a subcat */
+         if COMPARE.FCBS(target,misc.buf) = 0 then return (true); /* found subcat */
+      end;
+
+      search.ptr = search.ptr + 1; /* go to next FCB */
+   end;
+   return (false); /* file not found */
+end SEARCH.CACHE;
+
+GET.NAMES: proc(tree.name,subcat.name,file.name) returns (boolean) SWAPABLE; /* get subcat and file names from treename string */
+   dcl tree.name   fixed array; /* treename of file */
+   dcl subcat.name fixed array; /* name of subcat file is stored in */
+   dcl file.name   fixed array; /* name of file */
+   dcl orig.len    fixed; /* original length of treename */
+   dcl (i,j)       fixed;
+
+   ubyte: proc(s,i) returns (fixed); /* get uppercased byte from string */
+      dcl s  fixed array;
+      dcl i  fixed;
+      dcl ch fixed;
+
+      ch = byte(s,i);
+      if (ch >= l.a) and (ch <= l.z) then ch = ch - "40"; /* uppercase it */
+      return (ch);
+   end ubyte;
+
+   Device.Name: proc(s); /* create device name from device number */
+      dcl s fixed array;
+      dcl i fixed;
+
+      i = byte('FRW',shr(c#ms_sector,8 + 1) - 1); /* get letter for this device */
+      i = (shl(a.0 + (shr(c#ms_sector,8) and "1"),8) or i); /* add '0' or '1', depending on device */
+      s(1) = i; /* store characters */
+      s(0) = 2;
+   end Device.Name;
+
+   orig.len = tree.name(0); /* get original length of treename string */
+
+   if locate(tree.name,1) then do; /* found file on disk */
+      do i = 0 to f#name_len; /* get file name */
+         file.name(i) = f#name(i);
+      end;
+
+      tree.name(0) = tree.name(0) - file.name(0); /* subtract off file name */
+
+      if tree.name(0) = 0 then do; /* nothing left, so use current catalog name */
+         do i = 0 to f#name_len; /* get name of current catalog */
+            subcat.name(i) = core(loc.ccnm + i);
+         end;
+         if subcat.name(0) = 0 /* no current cat name, so must be at top level */
+         then call Device.Name(subcat.name); /* use device name */
+      end;
+      else do; /* subcat or device left */
+         tree.name(0) = tree.name(0) - 1; /* get rid of colon */
+
+         if tree.name(0) = 0 then do; /* nothing left, so use top level of this device */
+            call Device.Name(subcat.name);
+         end;
+         else do; /* something left - find out what it is */
+            if  (tree.name(0) = 2) /* maybe a device name? */
+            and ((ubyte(tree.name,0) = a.F) or (ubyte(tree.name,0) = a.R) or (ubyte(tree.name,0) = a.W))
+            and ((ubyte(tree.name,1) = a.0) or (ubyte(tree.name,1) = a.1)) then do;
+               subcat.name(0) = 2; /* store device name */
+               subcat.name(1) = tree.name(1);
+            end;
+            else do; /* get subcat name */
+               i = tree.name(0) - 1;
+               do while (i >= 0) and (byte(tree.name,i) <> a.colon); /* find colon */
+                  i = i - 1;
+               end;
+               i = i + 1; /* skip over colon */
+               do j = i to tree.name(0) - 1; /* store subcat name */
+                  call pbyte(subcat.name,j - i,ubyte(tree.name,j));
+               end;
+               subcat.name(0) = tree.name(0) - i; /* store proper length */
+            end;
+         end;
+      end;
+   end;
+   else return (false); /* could not locate catalog */
+
+   tree.name(0) = orig.len; /* restore original length */
+   return (true); /* got the names */
+end GET.NAMES;
+
+ADD.FILE.TO.CACHE: proc(tree.name) returns (boolean) PUBLIC SWAPABLE; /* add file to cache */
+   dcl tree.name               fixed array; /* treename of file to add */
+   dcl subcat.name(f#name_len) fixed; /* room for path name */
+   dcl file.name(f#name_len)   fixed; /* name of file */
+   dcl target(7)               fixed; /* FCB array */
+   dcl found                   boolean; /* TRUE if file found in cache */
+   dcl i                       fixed;
+
+   ADD.FCB: proc(insertptr) returns (boolean); /* add space for new FCB at given point in cache */
+      dcl insertptr fixed; /* point in cache to add FCB */
+      dcl len         fixed;
+      dcl slen        fixed;
+      dcl wlen        fixed;
+
+      if (shl(cache.secs - 1,5) - cache.ptr) ilt 1 /* need more room in cache */
+      then if allocate.more.cache(cache.secs + 1 + cache.secs) = 0 then return (false); /* could not allocate more room */
+
+      len = cache.ptr - insertptr;
+      slen = shr(len,5);
+      wlen = shl(len&"37",3);
+
+      call copy.poly.mem(cache.base,sf.hdr+shr(insertptr,5),shl(insertptr&"37",3),cache.base,sf.hdr+shr(insertptr+1,5),shl((insertptr+1)&"37",3),slen,wlen); /* make room for new fcb */
+      cache.ptr = cache.ptr + 1; /* advance cache pointer */
+
+      return (true); /* space was made for FCB */
+   end ADD.FCB;
+
+   STORE.FCB: proc(fcb,insertptr);
+      dcl fcb       fixed array; /* FCB to store */
+      dcl insertptr fixed; /* point to store it in cache */
+      dcl i         fixed;
+
+      call psmwrite(cache.base,sf.hdr+shr(insertptr,5),shl(insertptr&"37",3));
+      do i = 0 to 7; /* write fcb out to cache */
+         write(psd) = fcb(i);
+      end;
+   end STORE.FCB;
+
+   call set.cur.bin(0);   /* cache is always in poly bin 0 */
+   if (inc.poly=0) or (com16(0,polyamount)=lw#ieq)
+   then return (false);   /* no polymem, no cache */
+   if not FIND.CACHE then return (false); /* cache not found */
+
+   if not GET.NAMES(tree.name,subcat.name,file.name) then return (false); /* get subcat and file name */
+   if (shr(c#ms_sector,8) <> 6) and (shr(c#ms_sector,8) <> 7) then return (false); /* can only add files to winchester cache */
+   
+   if not SEARCH.CACHE(subcat.name,0,false,target) then do; /* could not find subcat name in cache */
+      if ADD.FCB(search.ptr) then do; /* make room for new FCB here */
+         /* name is already in words 0-3 */
+         target(4) = c#ms_sector; /* starting sector of catalog */
+         target(5) = c#ls_sector;
+         target(6) = c#ls_length; /* LS length of catalog */
+         if c#dir_size igt 256 then i = t#lsubc; else i = t#subc;
+         target(7) = (shl(0,8) or shl(c#ms_length,4) or i); /* depth, MS length, type */
+
+         call STORE.FCB(target,search.ptr); /* store it */
+      end;
+      else return (false); /* no more room */
+   end;
+
+   found = SEARCH.CACHE(file.name,search.ptr + 1,true,target); /* see if file is already in cache */
+   /* name is already in words 0-3 */
+   target(4) = f#ms_sector; /* starting sector of file */
+   target(5) = f#ls_sector;
+   target(6) = f#ls_length; /* LS length of file */
+   target(7) = -1; /* this is a file, not a subcatalog */
+
+   if found then do; /* file already in cache */
+      call STORE.FCB(target,search.ptr); /* store new FCB info in same slot */
+   end;
+   else do; /* new file */
+      if ADD.FCB(search.ptr) then do; /* make room for new FCB here */
+         call STORE.FCB(target,search.ptr); /* store it */
+      end;
+      else return (false); /* no more room */
+   end;
+
+   call CHECK.CACHE; /* calculate and store cache statistics */
+   return (true); /* file added to cache */
+end ADD.FILE.TO.CACHE;
+
+REMOVE.FILE.FROM.CACHE: proc(tree.name) returns (boolean) PUBLIC SWAPABLE; /* remove file from cache */
+   dcl tree.name               fixed array; /* treename of file to remove */
+   dcl subcat.name(f#name_len) fixed; /* room for path name */
+   dcl file.name(f#name_len)   fixed; /* name of file */
+   dcl target(7)               fixed; /* FCB array */
+   dcl len                     fixed;
+   dcl slen                    fixed;
+   dcl wlen                    fixed;
+
+   call set.cur.bin(0);   /* cache is always in poly bin 0 */
+   if (inc.poly=0) or (com16(0,polyamount)=lw#ieq)
+   then return (false);   /* no polymem, no cache */
+   if not FIND.CACHE then return (false); /* cache not found */
+
+   if GET.NAMES(tree.name,subcat.name,file.name) then do; /* get subcat and file name */
+
+      if (shr(c#ms_sector,8) = 6) or (shr(c#ms_sector,8) = 7) then do; /* can only remove winchester files from cache */
+
+         if SEARCH.CACHE(subcat.name,0,false,target) then do; /* found subcat in cache */
+
+            if SEARCH.CACHE(file.name,search.ptr + 1,true,target) then do; /* found file in cache */
+
+               len = cache.ptr - search.ptr - 1;
+               slen = shr(len,5);
+               wlen = shl(len&"37",3);
+
+               call Copy.Poly.Mem(cache.base,sf.hdr+shr(search.ptr+1,5),shl((search.ptr+1)&"37",3),cache.base,sf.hdr+shr(search.ptr,5),shl(search.ptr&"37",3),slen,wlen); /* shuffle over unused slot */
+               cache.ptr = cache.ptr - 1; /* decrement cache pointer */
+
+               call CHECK.CACHE; /* calculate and store cache statistics */
+               return (true); /* file removed */
+            end;
+         end;
+      end;
+   end;
+
+   return (false); /* file not removed */
+end REMOVE.FILE.FROM.CACHE;

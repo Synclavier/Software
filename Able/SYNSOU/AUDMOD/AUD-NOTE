@@ -1,0 +1,703 @@
+/* AUD-NOTE   $TITLE  Notice Printing Routines
+
+   Modified:
+   06/14/89 - cj  - extra place messages.  changed display.place.error
+   05/23/89 - SGS - added NT#BadTracksSelected
+   05/18/89 - SGS - added NT#DuplicateCategory
+   05/02/89 - MWH - Support for multiple D115 boards & channels; timeouts
+   11/11/88 - LSS - changed wording of Must Set File Type message
+   10/31/88 - cj  - added Must Set File Type message
+   08/25/88 - MWH - Add "real" DSP user interface
+   08/22/88 - LSS - changed error message for PREVIEW SLIDE
+   07/14/88 - MWH - Remove date string from here (GLOBSOU is enough)
+   05/10/88 - MWH - Make messages consistent (Lee McDavid's edits)
+   05/06/88 - TSS - Moved display notices to 24th line for termulator
+   03/18/88 - MWH - Add LOD wave display data compression message
+   
+*/
+
+dcl NulStr				data	external;	/*	Used to pass empty strings without using internal memory	*/
+dcl Notice.Time		fixed public;		/* Time that last notice was displayed */
+dcl Notice.Displayed	fixed public;		/* Flag indicating a notice is displayed */
+
+DISPLAY.NOTICES.#1: proc (id,str1,arg1,arg2,arg3) swapable;
+   dcl id     fixed;
+   dcl str1   array;
+   dcl arg1   fixed;
+   dcl arg2   fixed;
+   dcl arg3   fixed;
+
+   do case id;
+      /* NT#Welcome                      */
+      call ps('Welcome to the Audio Event Editor');
+
+      /* NT#SystemError                  */
+      call ps('ERROR: System Error');
+
+      /* NT#CannotUndo                   */
+      call ps('NOTE: Cannot undo');
+
+      /* NT#NoDrivesSoloed               */
+      call ps('NOTE: No tracks are soloed.  Select a track to hear audio.');
+
+      /* NT#TopOfAlphaList               */
+      call ps('NOTE: You have reached the top of the alphabetic listing.');
+
+      /* NT#BottomOfAlphaList            */
+      call ps('NOTE: You have reached the bottom of the alphabetic listing.');
+
+      /* NT#InTimeEqualsOutTime          */
+      call ps('NOTE: Cue In time is greater than or equal to Out time.');
+
+      /* NT#CueSaved                     */
+      do;
+         call ps('OK: Cue "'); call ps(str1); call ps('" is saved.');
+      end;
+
+      /* NT#CueDeleted                   */
+      do;
+         call ps('OK: Cue "'); call ps(str1); call ps('" is deleted.');
+      end;
+
+      /* NT#TooManyCues                  */
+      call ps('ERROR: Too many cues');
+
+      /* NT#OutOfCueTableMemory          */
+      call ps('ERROR: Out of cue table memory');
+
+      /* NT#CueNameTooLong               */
+      call ps('ERROR: Cue name too long');
+
+      /* NT#CueNameAlreadyExists         */
+      call ps('ERROR: Cue name already exists; duplicates not allowed');
+
+      /* NT#CueRecordTooLong             */
+      call ps('ERROR: Cue record is too long for further editing');
+
+      /* NT#CueDoesNotExist              */
+      do;
+         call ps('ERROR: Cue "'); call ps(str1); call ps('" does not exist.');
+      end;
+
+      /* NT#CueIsInOtherProject          */
+      do;
+         call ps('NOTE: Cue "'); call ps(str1); call ps('" is in another project; cannot recall.');
+      end;
+
+      /* NT#NoSequencerMotion            */
+      call ps('NOTE: The Memory Recorder is stopped; cannot take sync time while stopped.');
+
+      /* NT#MustRespondToDialog          */
+      do;
+         call ps('NOTE: You must respond to the dialog bar before continuing (');
+         call pnum(arg1,0);
+         call ps(').');
+      end;
+
+      /* NT#SendingPlaceListToSequencer  */
+      call ps('OK: Placing real-time cues into the sequence.');
+
+      /* NT#CuesSavedToDisk              */
+      do;
+         call ps('OK: Cues are saved to file "'); call ps(str1); call ps('"; number of cues: '); call pnum(arg1,0);
+      end;
+
+      /* NT#FileNotFound                 */
+      do;
+         call ps('ERROR: File "'); call ps(str1); call ps('" not found.');
+      end;
+
+      /* NT#CuesRecalledFromDisk         */
+      do;
+         call ps('OK: Cues are recalled from file "'); call ps(str1); call ps('"; number of cues: '); call pnum(arg1,0);
+      end;
+
+      /* NT#NoMoreRoomOnScreen           */
+      call ps('NOTE: There is not enough room on the screen for the panel');
+
+      /* NT#OutOfNumericCueNames         */
+      call ps('NOTE: Cannot number above 9999; pick a new prefix.');
+
+      /* NT#RealTimePlaceActive          */
+      call ps('NOTE: Real-time place active');
+
+      /* NT#SyncTimePlaceActive          */
+      call ps('NOTE: Sync-time place active');
+
+      /* NT#EraseNotice                  */
+      ;  /* just erase the line */
+
+      /* NT#RealTimePlaceRequiresPlay */
+      call ps('NOTE: Cannot place cues if sequencer is stopped or recording.');
+
+      /* NT#CannotDeleteUnsavedCue       */
+      call ps('ERROR: Current cue is not saved; cannot delete.');
+
+      /* NT#RealTimeCuesPlaced           */
+      do;
+         call ps('OK: Real-time cues are placed on Memory Recorder track '); call pnum(arg1,0);
+      end;
+
+   end;
+end DISPLAY.NOTICES.#1;
+
+DISPLAY.NOTICES.#2: proc (id,str1,arg1,arg2,arg3) swapable;
+   dcl id     fixed;
+   dcl str1   array;
+   dcl arg1   fixed;
+   dcl arg2   fixed;
+   dcl arg3   fixed;
+
+   do case id;
+      /* NT#CueTimeIsLocked              */
+      call ps('NOTE: Time is locked to shuttle.');
+
+      /* NT#InIGEOutCannotSave           */
+      call ps('ERROR: Cannot save cue; In time is equal to Out time.');
+
+      /* NT#DeletingAllDisplayedCues     */
+      call ps('OK: Deleting all displayed cues.');
+
+      /* NT#DTDVersionError              */
+      call ps('ERROR: Audio Event Editor requires D-T-D Version 1.29 or later software.');
+
+      /* NT#MustSaveCueBeforeProtect     */
+      call ps('ERROR: Cue must be saved before protecting it.');
+
+      /* NT#UndefinedMenuBox */
+      call ps('NOTE: You have clicked on an undefined menu box.');
+
+      /* NT#TransferringCueToPoly */
+      call ps('Transferring cue to poly memory...');
+
+      /* NT#TransferComplete */
+      call ps('Transfer completed');
+
+      /* NT#TransferringPolyToDTD */
+      call ps('Transferring poly sound file to Direct-to-Disk...');
+
+      /* NT#NoSoundFileAvail     */
+      call ps('Must call up sound file before transfer (Sound file not available)');
+
+      /* NT#MustComputeOrExtract             */
+      call ps('Sound file is too long - Must COMPUTE END or select EXTRACT to transfer');
+
+      /* NT#MustComputeOrFill                */
+      call ps('Sound file is too short - Must COMPUTE END or select FILL TO END to transfer');
+
+      /* NT#SfIsShorter                      */
+      call ps('Note: Sound file is shorter than allocated space on track(s)');
+
+      /* NT#SfIsLonger                       */
+      call ps('Note: Sound file is longer than allocated space on track(s)');
+
+      /* NT#NoReadyTracks                    */
+      call ps('Must READY tracks before transferring sound file to Direct-to-Disk');
+
+      /* NT#TooManyReadyTracks               */
+      call ps('Must READY one track for mono, or two tracks for stereo sound file');
+
+      /* NT#MonoStereoMisMatch               */
+      call ps('Must READY two tracks to transfer stereo sound file');
+
+      /* NT#StereoMonoMisMatch               */
+      call ps('Must READY only one track to transfer mono sound file');
+
+      /* NT#SfXferPastEof                    */
+      call ps('End of project reached - cannot transfer sound file');
+
+      /* NT#SeqSaved                         */
+      do;
+         call ps('OK: Sequence "');
+         call ps(str1);
+         call ps('" has been saved.');
+      end;
+
+      /* NT#RetakeCueNotAvail                */
+      call ps('No prior cue for retake is available');
+
+      /* NT#InTimeError                      */
+      call ps('ERROR: Cannot set In or Out time before start of disk');
+
+      /* NT#SyncTimeError                    */
+      call ps('ERROR: Cannot trigger start of cue before start of sequence');
+
+      /* NT#BadPlaceTrack                    */
+      call Ps('NOTE:  Cannot place cues on this sequencer track');
+
+      /* NT#OffsetTimeError                  */
+      call ps('ERROR: Offset time must remain between In time and Out time');
+
+      /* NT#WaitingForBlock                  */
+      call ps('Cue blocking will begin at cue trigger time');
+
+      /* NT#BlockError                       */
+      call ps('Cannot BLOCK before cue In time');
+
+      /* NT#MustSaveCueBeforeRename     */
+      call ps('ERROR: Cue must be saved before rename');
+
+      /* NT#PleaseReadyTracks           */
+      call ps('NOTE: Must READY tracks before recording');
+
+      /* NT#MustSaveCueBeforePlace      */
+      call ps('Must SAVE cue before place');
+
+   end;
+end DISPLAY.NOTICES.#2;
+
+DISPLAY.NOTICES.#3: proc (id,str1,arg1,arg2,arg3) swapable;
+   dcl id     fixed;
+   dcl str1   array;
+   dcl arg1   fixed;
+   dcl arg2   fixed;
+   dcl arg3   fixed;
+
+   do case id;
+
+      /* NT#CuePlaced                   */
+      do;
+         call ps('OK: Cue placed on track '); call pnum(arg1,0);
+      end;
+
+      /* NT#EditTimeError                  */
+      call ps('ERROR: Edit times must remain between In time and Out time of cue');
+
+      /* NT#NoRoomForEdit                */
+      call ps('ERROR: No more room in cue record for edits.');
+
+      /* NT#CueTooShort                  */
+      call ps('ERROR: Source cue is too short for requested fill.');
+
+      /* NT#EditComplete                 */
+      call ps('OK: Cue edit completed.');
+
+      /* NT#CutNotAllowed                */
+      call ps('ERROR: Cue to CUT cannot be the same as your CLIPBOARD.');
+
+      /* NT#NoEditRegionSelected         */
+      call ps('ERROR: No region selected for edit operation.');
+
+      /* NT#ErrorWithCueFile             */
+      call ps('Unable to read cues from this cue file');
+
+      /* NT#RecdTrkTooLarge              */
+      call ps('Only tracks 1 to 200 are available for recording');
+
+      /* NT#NoRecdTrkChangeWhileRecording*/
+      call ps('Cannot change track while recording');
+
+      /* NT#NoRoomForPlace      */
+      call ps('There is no memory left for placing cues in this sequence');
+
+      /* NT#CueListIsFull       */
+      do;
+         call ps('No more cues can be placed on track '); call pnum(arg1,0);
+      end;
+
+      /* NT#WrongBlockButton    */
+      call ps('Use the RECORD button to block cues while recording');
+
+      /* NT#NotASyncFile        */
+      do;
+         call ps('"');
+         call ps(str1);
+         call ps('" is not a sequence and cannot be accessed');
+      end;
+
+      /* NT#SeqIsProtected      */
+      do;
+         call ps('"');
+         call ps(str1);
+         call ps('" is protected - STORE, DELETE, RENAME not allowed');
+      end;
+
+      /* NT#MustWriteToSyncFile */
+      do;
+         call ps('"');
+         call ps(str1);
+         call ps('" is not a sequence and cannot be written to');
+      end;
+
+      /* NT#DupSeqName          */
+      do;
+         call ps('There is already a sequence named "');
+         call ps(str1);
+         call ps('"');
+      end;
+
+      /* NT#MustSaveSeqToProt   */
+      do;
+         call ps('Must ');
+         if arg1 = 0 then call ps('SAVE');
+         else             call ps('REPLACE');
+         call ps(' sequence before protecting');
+      end;
+
+      /* NT#SeqDeleted          */
+      do;
+         call ps('"');
+         call ps(str1);
+         call ps('" has been deleted');
+      end;
+
+      /* NT#SeqRenamed          */
+      do;
+         call ps('Sequence is now named "');
+         call ps(str1);
+         call ps('"');
+      end;
+
+      /* NT#NoXferPunchIn       */
+      call ps('Set Mode to Cue Lock or Allocate for PolyXfer');
+
+      /* NT#CannotArmIfAllocate */
+      call ps('Cannot arm tracks during Allocate recording');
+
+      /* NT#MustReadyToRecord   */
+      call ps('Must click READY on Record panel to record');
+
+      /* NT#MustUseRecPan       */
+      call ps('Must activate Record panel to record from Audio Event Editor');
+
+      /* NT#BadSlideIn */
+      call ps('ERROR: Cannot SLIDE before beginning of cue');
+
+      /* NT#BadSlideOut */
+      call ps('ERROR: Cannot SLIDE past end of cue');
+
+      /* NT#CompressingCue      */
+      call ps('Calculating wave display...');
+
+      /* NT#NoEditToPreview  */
+      call ps('ERROR: PREVIEW SLIDE button active only during slide.');
+
+      /* NT#TurnOffPreview   */
+      call ps('Must turn off PREVIEW SLIDE to modify current edit region.');
+
+      /* NT#DefFileTooSmall  */
+      call ps('ERROR: Defaults file version does not match');
+
+   end;
+
+end DISPLAY.NOTICES.#3;
+
+DISPLAY.NOTICES.#4: proc (id,str1,arg1,arg2,arg3) swapable;
+   dcl id     fixed;
+   dcl str1   array;
+   dcl arg1   fixed;
+   dcl arg2   fixed;
+   dcl arg3   fixed;
+   dcl tmp(8) fixed;
+
+   do case id;
+
+      /* NT#NoFloppyInDrive  */
+      call ps('ERROR: No floppy in drive.');
+
+      /* NT#FeatureNotAvail */
+      call ps('Feature not available.');
+
+      /* NT#CannotSaveFile */
+      do;
+         call ps('ERROR: Cannot save file "'); call ps(str1); 
+         call Get.Device.Name(arg1,tmp);
+         call ps('" on '); call ps(tmp);
+      end;
+
+      /* NT#WrongDefVersion */
+      do;
+         call ps('ERROR: Defaults file on ');
+         call Get.Device.Name(arg1,tmp); call ps(tmp);
+         call ps(' is incorrect version.');
+      end;
+
+      /* NT#TSMAllocate      */
+      call ps('Set Mode to Allocate for TSM');
+
+      /* NT#TSMPerforming    */
+      call ps('Performing Time Scale Modification...');
+
+      do; /*  NT#NoRoomOnPanel  */
+         call ps('No more room on Event List Editor');
+      end;
+
+      do; /* NT#MustSetFileType */
+         call ps('Specified file is not of type DATA');
+      end;
+
+      do; /* NT#NoDDTHardware      */
+         call ps('Direct-Digital-Transfer hardware is not installed');
+      end;
+
+      do; /* NT#MitsuOnlyHardware  */
+         call ps('Only Mitsubishi ProDigi 2 track format is available');
+      end;
+
+      do; /* NT#CouldNotResizePanel */
+         call ps('Not enough room to resize panel to desired size');
+      end;
+
+      do; /* NT#SameDTDTracksSelected */
+         call ps('Same DTD track selected for both left and right channels');
+      end;
+
+      do; /* NT#CannotTransferCategory */
+         call ps('Cannot transfer a category to the DTD');
+      end;
+
+      do; /* NT#OptDtdXferComplete */
+         if arg1=1 then call ps('Transfer complete. Cue ');
+         else           call ps('Transfer complete. Sound file ');
+         if arg2 < 0 then do;
+            call ps('was NOT saved - ');
+            do case abs(arg2);
+               call ps('System error');
+               call ps('Cue name too long');
+               call ps('Cue name already exists');
+               call ps('Too many cues');
+               call ps('Out of cue table memory');
+               call ps('Cue record is too large');
+            end;
+         end;
+         else if arg2 > 0 then do;
+            call ps('saved as "');
+            call ps(str1);
+            call ps('"');
+         end;
+         else do;
+            call ps('NOT saved');
+         end;
+      end;
+
+      do; /* NT#OptDTDXferAborted */
+         if arg1=1 then call ps('Transfer aborted. Cue ');
+         else           call ps('Transfer aborted. Sound file ');
+         if arg2 < 0 then do;
+            call ps('was NOT saved - ');
+            do case abs(arg2);
+               call ps('System error');
+               call ps('Name too long');
+               call ps('Name already exists');
+               call ps('Too many cues');
+               call ps('Out of cue table memory');
+               call ps('Cue record is too large');
+            end;
+         end;
+         else if arg2 > 0 then do;
+            call ps('saved as "');
+            call ps(str1);
+            call ps('"');
+         end;
+         else do;
+            call ps('NOT saved');
+         end;
+      end;
+
+      do; /* NT#CannotBootDSP70   */
+         call ps('Cannot boot DSP70 algorithm');
+      end;
+
+      do; /* NT#RatesDifferNoDSP */
+         call ps('Warning: No DSP card found, but sf rate is ');
+         call pnum(arg1,1); call ps(' and DTD rate is ');
+         call pnum(arg2,1);
+      end;
+
+      do; /* NT#TooManyTracks */
+         call ps('This cue has ');
+         call pnum(arg1,0);
+         call ps(' tracks of audio - cannot transfer');
+      end;
+
+      do; /* NT#MustUnlockTracks */
+         if arg2=0 then do;
+            call ps('Must unlock track ');
+            call pnum(arg1,0); call ps(' to transfer');
+         end;
+         else do;
+            call ps('Must unlock tracks ');
+            call pnum(arg1,0); call ps(' and ');
+            call pnum(arg2,0); call ps(' to transfer');
+         end;
+      end;
+
+      do; /* NT#NoRoomForCatsAndCapt */
+         call ps('Not enough room to save caption and category strings');
+      end;
+
+      do; /* NT#EventPlaced       */
+         call ps('OK: An Event has been placed on track '); call pnum(arg1,0);
+      end;
+
+      do; /* NT#NoEventForReplace  */
+         call ps('Could not find Event to replace!');
+      end;
+
+      do; /* NT#EventTracksDontMatch */
+         call ps('Tracks do not match saved cue -- must SAVE cue before place');
+      end;
+
+      do; /* NT#DuplicateCategory */
+         call ps('Category already exists');
+      end;
+
+      do; /* NT#BadTracksSelected */
+         if (arg1<>0) and (arg2<>0) then do;
+            call ps('Both tracks are invalid - ');
+         end;
+         else if (arg1<>0) then do;
+            if (arg3<>0) then call ps('Left track is invalid - ');
+            else              call ps('Destination track is invalid - ');
+         end;
+         else if (arg2<>0) then call ps('Right track is invalid - ');
+         call ps('check track availability');
+      end;
+
+      do; /* NT#SoundFileTooBig */
+         call ps('Sound file will be larger than 32 MBytes - cannot store');
+      end;
+
+      do; /* NT#DTDTimeout      */
+         call ps('D-T-D System Timeout Error');
+      end;
+
+      do; /* NT#VersionDoesntMatch */
+         call ps('Edited version does not match saved cue -- must SAVE cue before place');
+      end;
+
+      do; /* NT#BouncingCue        */
+         call ps('Bouncing Cue...');
+      end;
+
+      do; /* NT#MovingCue          */
+         call ps('Moving Cue...');
+      end;
+
+	end;
+
+end DISPLAY.NOTICES.#4;
+
+
+DISPLAY.NOTICES.#5: proc (id,str1,arg1,arg2,arg3) swapable;
+   dcl id     fixed;
+   dcl str1   array;
+   dcl arg1   fixed;
+   dcl arg2   fixed;
+   dcl arg3   fixed;
+   dcl tmp(8) fixed;
+
+   do case id;
+
+      do; /* NT#OpCompleted        */
+         call ps('Operation Completed');
+      end;
+
+      do; /* NT#MustAllocate       */
+         call ps('Set Mode to Allocate for BOUNCE and MOVE');
+      end;
+
+      do; /* NT#EmtpyProblem       */
+         call ps('Empty cue cannot be copied');
+      end;
+
+      /* NT#ReadyMore              */
+      call ps('Must READY more tracks to copy this cue');
+
+      /* NT#ReadyFewer             */
+      call ps('Must READY fewer tracks to copy this cue');
+
+      /* NT#ReadyForBounce         */
+      call ps('Must READY for recording to copy a cue');
+
+      /* NT#NoRoomForBounce        */
+      call ps('Not enough room on READY tracks for this cue');
+      
+      /* NT#CantXferToLockedProj   */
+      call ps('Can''t copy to LOCKED project');
+
+      /* NT#NoDataPath */
+      call ps('Can''t copy - no data path');
+   end;
+
+end DISPLAY.NOTICES.#5;
+
+
+/* Basic driver routine to display error message on line 25: */
+
+/* This routine is called from all screens.  It should just  */
+/* display the error message on line 25:                     */
+
+DISPLAY.LINE.25.ERROR: proc (id,attr,str1,arg1,arg2,arg3) public swapable;
+   dcl id     fixed;
+   dcl attr   fixed;
+   dcl str1   array;
+   dcl arg1   fixed;
+   dcl arg2   fixed;
+   dcl arg3   fixed;
+
+   call cpos(24-termulator,0);  /* 24th or 25th line of Pericom */
+   call Set.Term.Attr(attr);
+
+   if id < 30
+   	call Display.Notices.#1(id    ,str1,arg1,arg2,arg3);
+   else if id < 60
+   	call Display.Notices.#2(id-30 ,str1,arg1,arg2,arg3);
+   else if id < 90
+   	call Display.Notices.#3(id-60 ,str1,arg1,arg2,arg3);
+   else if id < 120	
+   	call Display.Notices.#4(id-90 ,str1,arg1,arg2,arg3);
+   else
+   	call Display.Notices.#5(id-120,str1,arg1,arg2,arg3);
+
+   call pc(27); call ps('[K');
+
+   call Set.Term.Attr(ATTR#Normal);
+
+   notice.time = real.milliseconds;
+   notice.displayed = true;
+end DISPLAY.LINE.25.ERROR;
+
+/* Display Notice is called only from the Audio Event Editor.  It */
+/* broadcasts the notice message to other devices,  and then      */
+/* prints the error message on the screen.                        */
+
+DISPLAY.NOTICE: proc (id,attr,str1,arg1,arg2,arg3) public swapable;
+   dcl id     fixed;
+   dcl attr   fixed;
+   dcl str1   array;
+   dcl arg1   fixed;
+   dcl arg2   fixed;
+   dcl arg3   fixed;
+
+   call Broadcast.AEE.Notice(NN#Rbox,id,arg1,arg2,arg3); /* broadcast to RBox */
+
+   call DISPLAY.LINE.25.ERROR (id,attr,str1,arg1,arg2,arg3);
+
+end DISPLAY.NOTICE;
+
+/* $page - convenient error message routines */
+
+/* Display message for error code from 'place.event.in.sequence'      */
+
+Display.Place.Error:proc (i,j) PUBLIC swapable;
+   dcl i fixed;          /* status from call to place.cue.in.sequence */
+   dcl j fixed;          /* track # to print we placed it on          */
+
+   if  (i = Event.Noroom#1)
+   or  (i = Event.Noroom#2)
+   then call Display.Notice(NT#NoRoomForPlace,   ATTR#Reverse,NulStr,0,0,0);
+
+   else if (i  = Bad.Event.Track# )
+        or (i  = Event.Music.Track)
+   then call Display.Notice(NT#BadPlaceTrack,    ATTR#Reverse,NulStr,0,0,0);
+
+   else if (i  = Event.Noroom#3)
+   then call Display.Notice(NT#CueListIsFull,    ATTR#Reverse,NulStr,j,0,0);
+
+   else if (i  < ( 0))
+   then call Display.Notice(NT#SystemError,      ATTR#Reverse,NulStr,0,0,0);
+
+   else call Display.Notice(NT#CuePlaced,ATTR#Normal,NulStr,j,0,0);
+
+end Display.Place.Error;

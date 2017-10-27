@@ -1,0 +1,1037 @@
+/*	:SYNSOU:AUDMOD:AUD-OPT  Audio Event Editor/Optical Disk Transfer Routines	*/
+
+/*
+Modifications:
+2000/03/08 - TY  - Prevented long window titles from plotting over buttons
+2000/02/27 - TY  - Made changes to indirectly accommodate display of sound file loops
+1990/10/19 - cj  - enabled for new.poly.contents events to see laser disk volume changes
+1989/07/03 - SGS - Fixed bug in Get.Next.OptCtrl.Event
+1989/06/30 - SGS - Added Optical.Stats.Mode, made Optical.Stats.Label selectable
+1989/06/16 - TSS - Set bit in RECALL.SOUND.FILE calls to force DTD audition
+1989/05/23 - SGS - Added LastDestSector array
+1989/05/22 - TSS - STUFF.CATEGORY.INTO.TABLE no longer returns status
+1989/05/19 - SGS - Added O#RatesDiffer
+1989/05/18 - SGS - Get.Program.Exit event in a dialog should break out of AEE now
+1989/05/18 - SGS - Added calls to Stuff.Category.Into.Table
+1989/05/11 - SGS - More changes
+1989/04/29 - TSS - "Literalized" use of GET.CURRENT.FILENAME.AND.INFO
+1989/02/23 - SGS - author
+*/
+
+dcl Optical.Group					fixed public;
+dcl Optical.Window.Grp			fixed public;	/*	Group id of window	*/
+dcl Optical.Table					fixed;			/*	Obj id of table	*/
+dcl Optical.Fold.Out.But		fixed;			/*	Obj id of fold-out button	*/
+dcl Optical.SFAudition			fixed;			/*	Obj id of sound file audition button	*/
+dcl Opt.Caption.Locked			fixed public;	/*	1=caption field is locked	*/
+dcl Opt.Category.Locked			fixed public;	/*	1=category fields are locked	*/
+
+dcl Optical.Row					fixed public;	/*	starting row for panel	*/
+dcl Optical.Rows					fixed;			/*	number rows for directory window	*/
+dcl Optical.Size					fixed public;	/*	number rows for entire panel	*/
+dcl Optical.Screen.Space		fixed;
+
+dcl Optical.Move.Box				fixed;
+dcl Optical.Size.Box				fixed;
+
+/*	Full-Width objects	*/
+dcl Optical.Load.Vol.Button	fixed;	/*	the following objects are in	*/
+dcl Optical.Display.Button		fixed;	/*	the Optical.Group				*/
+dcl Optical.Copy.Button			fixed;
+dcl Optical.Retake.Button		fixed;
+
+dcl Optical.Cue.Stop.Button	fixed;
+dcl Optical.Cue.Play.Button	fixed;
+
+dcl Optical.Place.Button		fixed;
+dcl Optical.Place.Track.Num	fixed public;	/*	track number on which the cue will be placed	*/
+dcl Optical.Place.Take.Button	fixed;
+dcl Optical.Place.Time			fixed public;	/*	time at which the cue will be placed	*/
+dcl Optical.Audition.Button	fixed public;
+
+/*	Half-Width objects	*/
+dcl Optical.Store.Cue.Button	fixed;
+dcl Optical.Stats.Label			fixed;
+dcl Optical.Stats.Mode			fixed;
+dcl Optical.Cue.Name				fixed public;
+dcl Optical.Cue.ScrollBar		fixed;
+dcl Optical.Capt.Type.Obj		fixed public;
+dcl Optical.Caption.String		fixed public;
+dcl Optical.Caption.Lock		fixed;
+dcl Optical.Cat.Type.Obj		fixed public;
+dcl Optical.Category.Table		fixed public;
+dcl Optical.Category.Lock		fixed;
+
+dcl LastDestSector		(1)	fixed;	/*	stores the last sector written to	*/
+													/*	the destination device during xfer	*/
+
+dcl Get.Optical.Time.Left		proc (array) recursive;	/*	from AUD-OPT1	*/
+
+UPDATE.OPTICAL.PANEL: proc public swapable;
+	dcl TStr(20)	fixed;
+
+	if Optical.Group = 0 then return;
+
+	if (GID(AEE.Opt.Width.Mode)=0) then do;
+
+		/*	update audition button	*/
+		if Optical.Audition.Button<>0 then do;
+			if Current.Cue.Audition  <> 0 then do;
+				call Set.Object.Attr(Optical.Audition.Button,0,ATTR#Normal\ATTR#Reverse\ATTR#AltIntensity);
+				call Set.Object.Attr(Optical.Audition.Button,1,ATTR#Normal\ATTR#Reverse\ATTR#AltIntensity);
+			end;
+			else do;
+				call Set.Object.Attr(Optical.Audition.Button,0,ATTR#Normal\ATTR#AltIntensity);
+				call Set.Object.Attr(Optical.Audition.Button,1,ATTR#Normal\ATTR#AltIntensity);
+			end;
+			call Update.Object(Optical.Audition.Button);
+		end;
+
+		/*	set correct display format and time	*/
+		if Optical.Place.Time<>0 then do;
+			call Set.32Bit.Msec.Display.Format(Optical.Place.Time,AEE.Time.Format|O#MSEC.RealTime|O#MSEC.Allow.Minus,cf#time,cf#default,cf#default);
+			Disable.Deposits = true;
+			call Deposit.32Bit.Msec(Optical.Place.Time,Cue.Sync.Time,Zero.Zero);
+			Disable.Deposits = false;
+			call Update.Object(Optical.Place.Time);
+		end;
+
+		if Optical.Place.Track.Num<>0 then do;
+			Disable.Deposits = true;
+			call Deposit.Fixed.Point(Optical.Place.Track.Num,GID(Cue.Place.Track)-1);
+			Disable.Deposits = false;
+			call Update.Object(Optical.Place.Track.Num);
+		end;
+	end;
+
+	else do;	/*	in half-width mode	*/
+
+		if Optical.Stats.Label<>0 then do;
+			if Optical.Stats.Mode=0 then do;
+				call Display.Optical.Statistics(TStr);
+				Disable.Deposits=true;
+				call Deposit.Label(Optical.Stats.Label,TStr);
+				Disable.Deposits=false;
+			end;
+			else do;
+				if (LOD.Running <> 0 || simulate_dtd <> 0) then
+					call Get.Optical.Time.Left(TStr);
+				else call Display.Optical.Statistics(TStr);
+				Disable.Deposits=true;
+				call Deposit.Label(Optical.Stats.Label,TStr);
+				Disable.Deposits=false;
+			end;
+		end;
+
+		if Optical.Cue.Name<>0 then do;
+			/*	get current cue name displayed correctly:	*/
+			call Display.Cue.And.Shuttle.Displays;
+		end;
+
+	end;
+
+end UPDATE.OPTICAL.PANEL;
+
+DEFINE.OPTICAL.HALF.WIDTH:	proc(Title) swapable;
+	dcl Title					array;	/*	the optical disk's title	*/
+	dcl (i,j)					fixed;
+	dcl (FirstId,LastId)		fixed;
+	dcl Id						fixed;
+	dcl Buttons					fixed;
+	dcl (row,size)				fixed;
+	dcl lines(80)				fixed;
+	dcl TStr(20)				fixed;
+
+	row  = Optical.Row;
+	size = Optical.Size;
+
+	/*	draw the lines	*/
+	i = -((size-1)*100);
+	j = i-96;
+
+	write("313") = addr(lines(0));
+
+	MR13i = O#ICON.Connect;
+					MR13i = -10;
+					MR13i = j;
+					MR13i = 4300;
+					MR13i = j;
+	MR13i = O#ICON.Connect;
+					MR13i = -10;
+					MR13i = i;
+					MR13i = -10;
+					MR13i = j;
+	MR13i = O#ICON.Connect;
+					MR13i = 1050;
+					MR13i = i;
+					MR13i = 1050;
+					MR13i = j;
+	MR13i = O#ICON.Connect;
+					MR13i = 4300;
+					MR13i = i;
+					MR13i = 4300;
+					MR13i = j;
+	MR13i = O#ICON.End;
+
+	FirstId = Define.Graphics.Icon(S#AA,0,(row-1)*100,0,lines);
+
+	Id=Define.Graphics.Box(s#aa,	/*	frame of scrolling window	*/
+								  gpos.x(4300),gpos.y((row-1)*100),
+								  gpos.x(8010),gpos.y((row-1+size)*100),0);
+
+	call Set.Default.Attr  (0,ATTR#Normal);
+	call Set.Default.Attr  (1,ATTR#Reverse\ATTR#AltIntensity);
+	call Set.Default.Action(O#ACT.Middle.Press\O#ACT.Prev.Obj);
+
+	Optical.Store.Cue.Button=Define.Label(S#AA,row+size-1,0,0,' STORE CUE ');
+
+	Optical.Stats.Label=Define.Label(s#aa,row+size-1,11,31,'');
+	call Set.Object.Action(Optical.Stats.Label,O#ACT.Update.On.Dep,true);
+
+	Optical.Stats.Mode=0;
+	call Display.Optical.Statistics(TStr);
+	Disable.Deposits=true;
+	call Deposit.Label(Optical.Stats.Label,TStr);
+	Disable.Deposits=false;
+
+	call Set.Default.Action(O#ACT.Middle.Press);
+
+	Id=Define.Label(S#AA,row,44,0,'Name:');
+	call Set.Object.Mouse.Access(Id,0);
+	Id=Define.Graphics.Box(s#aa,	/*	frame of cue name window	*/
+								  gpos.x(4900),gpos.y((row-1)*100),
+								  gpos.x(7700),gpos.y((row-1)*100+95),0);
+	Optical.Cue.Name		  = Define.String(S#AA,row,50,27,O#STR.General);
+	call Set.Object.Mouse.Access(Optical.Cue.Name,0);
+
+	call Load.UpDown.Icon(Misc.Buf);
+	Optical.Cue.ScrollBar  = Define.Graphics.Icon(S#AA,7800,row*100,1,Misc.Buf);
+
+	Id							  = Define.Label(S#AA,row+1,44,0,'Caption:');
+	call Set.Object.Mouse.Access(Id,0);
+	Optical.Capt.Type.Obj  = Define.String(S#AA,row+2,44,35,O#STR.General);
+	Optical.Caption.String = Define.Table(S#AA,1,2,Optical.Capt.Type.Obj);
+	Id=Define.Graphics.Box(s#aa,	/*	frame of caption window	*/
+								  gpos.x(4400),gpos.y((row+1)*100),
+								  gpos.x(7900),gpos.y((row+3)*100-5),0);
+
+
+	Id							  = Define.Label(S#AA,row+4,44,0,'Categories:');
+	call Set.Object.Mouse.Access(Id,0);
+
+	call Set.Default.Action(O#ACT.Middle.Press|O#ACT.Update.On.Dep);
+	Optical.Cat.Type.Obj   = Define.String(S#AA,row+5,44,35,O#STR.General);
+	Optical.Category.Table = Define.Table(S#AA,1,4,Optical.Cat.Type.Obj);
+	call Set.Default.Action(O#ACT.Middle.Press);
+
+	/*	draw frame and lines of category table	*/
+	Id=Define.Graphics.Box(s#aa,
+								  gpos.x(4400),gpos.y((row+4)*100),
+								  gpos.x(7900),gpos.y((row+8)*100-5),0);
+	Id=Define.Grid.Icon(S#AA,row+5,44,1,4,35);
+
+	Optical.Caption.Lock   = Define.Device.Icon(S#AA,row+1,78,0,a.l);
+	Optical.Category.Lock  = Define.Device.Icon(S#AA,row+4,78,0,a.l);
+
+	LastId = Optical.Category.Lock;
+
+	call Activate.Object.Range(Optical.Alloc,LastId);
+	call Update.Object.Range(Optical.Alloc,LastId);
+
+	/**** Note: Do not define any Optical.Group objects after here ****/
+
+	Optical.Group = Group.Objects(Optical.Group.Id,Optical.Alloc,Optical.Alloc+999,Get#Screen.Event|Get#Poly.Contents);
+
+	Default.Activate.Optical.Control.Bits=O#AutoVolChange|O#UpdateDialog;
+
+	Buttons = (B#Search\B#Top\B#Audition\B#FoldOut);
+
+	//	On the Q-page OPT XFER panel, if the title exceeds CharWidth-5, it will plot over the buttons
+	call Open.Directory.Window(0,Title,40-5,Optical.Row,0,Optical.Rows,40,
+										O#ERAS.Start.Of.Line\O#ERAS.Null.Fill.On.Erase,
+										false,true,true,Buttons);
+
+	Default.Activate.Optical.Control.Bits=O#VolChangeDialog|O#UpdateDialog;
+
+	if Opt.Caption.Locked<>0 then
+	call Toggle.Box.Highlight(Optical.Caption.Lock,Opt.Caption.Locked);
+
+	if Opt.Category.Locked<>0 then
+	call Toggle.Box.Highlight(Optical.Category.Lock,Opt.Category.Locked);
+
+end DEFINE.OPTICAL.HALF.WIDTH;
+
+DEFINE.OPTICAL.FULL.WIDTH: proc(Title) swapable;
+	dcl Title		array;
+	dcl (i,j)		fixed;
+	dcl LastId		fixed;
+	dcl Buttons		fixed;
+	dcl (row,size)	fixed;
+	dcl lines(80)	fixed;
+
+	row  = Optical.Row;
+	size = Optical.Size;
+
+	/*	draw the lines	*/
+	i = -((size-1)*100);
+	j = i-96;
+
+	write("313") = addr(lines(0));
+
+	MR13i = O#ICON.Connect;
+					MR13i = -10;
+					MR13i = j;
+					MR13i = 8010;
+					MR13i = j;
+	MR13i = O#ICON.Connect;
+					MR13i = -10;
+					MR13i = i;
+					MR13i = -10;
+					MR13i = j;
+	MR13i = O#ICON.Connect;
+					MR13i = 1000;
+					MR13i = i;
+					MR13i = 1000;
+					MR13i = j;
+	MR13i = O#ICON.Connect;
+					MR13i = 1900;
+					MR13i = i;
+					MR13i = 1900;
+					MR13i = j;
+	MR13i = O#ICON.Connect;
+					MR13i = 2500;
+					MR13i = i;
+					MR13i = 2500;
+					MR13i = j;
+	MR13i = O#ICON.Connect;
+					MR13i = 3300;
+					MR13i = i;
+					MR13i = 3300;
+					MR13i = j;
+	MR13i = O#ICON.Connect;
+					MR13i = 3600;
+					MR13i = i;
+					MR13i = 3600;
+					MR13i = j;
+	MR13i = O#ICON.Connect;
+					MR13i = 3900;
+					MR13i = i;
+					MR13i = 3900;
+					MR13i = j;
+	MR13i = O#ICON.Connect;
+					MR13i = 7100;
+					MR13i = i;
+					MR13i = 7100;
+					MR13i = j;
+	MR13i = O#ICON.Connect;
+					MR13i = 8010;
+					MR13i = i;
+					MR13i = 8010;
+					MR13i = j;
+	MR13i = O#ICON.End;
+
+	call Define.Graphics.Icon(S#AA,0,(row*100)-100,0,lines);
+
+	call Set.Default.Attr  (0,ATTR#Normal);
+	call Set.Default.Attr  (1,ATTR#Reverse\ATTR#AltIntensity);
+	call Set.Default.Action(O#ACT.Middle.Press\O#ACT.Prev.Obj);
+
+	Optical.Load.Vol.Button=Define.Label(S#AA,row+size-1, 0, 0,' LOAD VOL ');
+	Optical.Display.Button =Define.Label(S#AA,row+size-1,10, 0,' DISPLAY ');
+	Optical.Copy.Button	  =Define.Label(S#AA,row+size-1,19, 0,' COPY ');
+	Optical.Retake.Button  =Define.Label(S#AA,row+size-1,25, 0,' RETAKE ');
+
+	call Load.Play.Icon(misc.buf);
+	Optical.Cue.Play.Button=Define.Graphics.Icon(S#AA,3300,(row+size-1)*100,2,misc.buf);
+	call Load.Stop.Icon(misc.buf);
+	Optical.Cue.Stop.Button=Define.Graphics.Icon(S#AA,3600,(row+size-1)*100,2,misc.buf);
+
+	Optical.Place.Button   =Define.Label(S#AA,row+size-1,40, 0,'PLACE');
+
+	call Set.Default.Action(O#ACT.Middle.Press);
+
+	i							  =Define.Label(S#AA,row+size-1,45, 0,' on ');
+	call Set.Object.Mouse.Access(i,0);
+	Optical.Place.Track.Num=Define.Fixed.Point(S#AA,row+size-1,48,3,0,cf#unsigned|cf#right);
+	i							  =Define.Label(S#AA,row+size-1,51, 0,' at ');
+	call Set.Object.Mouse.Access(i,0);
+
+	call Load.Take.Icon(Misc.Buf);
+	Optical.Place.Take.Button = Define.Graphics.Icon(S#AA,5400, (row+size-1)*100, 1, Misc.Buf);
+
+	Optical.Place.Time	  =Define.32Bit.Msec(S#AA,row+size-1,57,14,AEE.Time.Format|O#MSEC.RealTime|O#MSEC.Allow.Minus,cf#time,cf#default,cf#default);
+
+	Optical.Audition.Button=Define.Label(S#AA,row+size-1,72, 0,' Audit ');
+	call Set.Object.Action(Optical.Audition.Button,O#ACT.Prev.Obj,1);
+
+	LastId = Optical.Audition.Button;
+
+	call Activate.Object.Range(Optical.Alloc,LastId);
+	call Update.Object.Range(Optical.Alloc,LastId);
+
+	/**** Note: Do not define any Optical.Group objects after here ****/
+
+	Optical.Group = Group.Objects(Optical.Group.Id,Optical.Alloc,Optical.Alloc+999,Get#Screen.Event|Get#Poly.Contents);
+
+	Default.Activate.Optical.Control.Bits=O#AutoVolChange|O#UpdateDialog;
+
+	Buttons = (B#Search\B#Top\B#Audition\B#FoldOut);
+
+	//	On the Q-page OPT XFER panel, if the title exceeds CharWidth-5, it will plot over the buttons
+	call Open.Directory.Window(0,Title,80-5,Optical.Row,0,Optical.Rows,80,
+										O#ERAS.End.of.Line\O#ERAS.Null.Fill.On.Erase,
+										true,true,true,Buttons);
+
+	Default.Activate.Optical.Control.Bits=O#VolChangeDialog|O#UpdateDialog;
+
+	call PID(OptFullSize,Optical.Size+1);	/*	remember size of full-width panel	*/
+
+end DEFINE.OPTICAL.FULL.WIDTH;
+
+DEFINE.OPTICAL.PANEL: proc(row,size) swapable;
+	dcl row			fixed;	/*	Top row	*/
+	dcl size			fixed;	/*	Total rows including command bar	*/
+	dcl lines(64)	fixed;
+	dcl (i,j)		fixed;
+	dcl LastId		fixed;
+	dcl Title(40)	fixed;	/*	the optical disk title	*/
+	dcl (Sort,Function,Show,Filter)	fixed;		/*	display format vars	*/
+
+	Optical.Rows = size-1;
+
+	call Copy.String('OPTICAL TRANSFER',lines);
+	call Print.Panel.Title(row,lines);
+
+	call Set.Auto.Allocation.Id (Optical.Alloc);	/*	Reset autoallocation	*/
+	call Set.Default.Action(O#ACT.Middle.Press);
+
+	/*	KLUDGE:	*/
+	/*	windows defined by Open.Directory.Window() and panels defined		*/
+	/*	in the AEE are not the same size or position, so the close			*/
+	/*	box is positioned a little differently here to line up with top	*/
+	/*	left corner of SFD window														*/
+	call Load.Close.Box.Icon(lines);
+	Optical.Move.Box = Define.Graphics.Icon(S#AA,0,(row*100),16,lines);
+	call Set.Object.Mouse.Access(Optical.Move.Box, O#ACT.Middle.Press\O#ACT.Middle.Release);
+/*	Optical.Size.Box = Define.Graphics.Icon(S#AA,0,((row+size-1)*100),1,lines);	*/
+/*	call Set.Object.Mouse.Access(Optical.Size.Box, O#ACT.Middle.Press\O#ACT.Middle.Release);	*/
+
+	if not Mount.Optical.Volume	/*	try to mount volume	*/
+	then O$Volume_Name(0)=0;		/*	nothing there			*/
+	else Optical.Disk.Ready=0;		/*	just reset global		*/
+
+	Sort		= GID(SFR.SORTINFO );
+	Function	= GID(SFR.FUNCTIONINFO);
+	Show		= GID(SFR.SHOWINFO );
+	Filter	= GID(SFR.ITEMFILTER);
+
+	if GID(SFR.DIRDEVICE)=0 then do;	/*	first time we are opening a directory display	*/
+		Sort	=SORT$Filename;
+		Show	=INFO$Filename;
+		Filter=FILTER$None;
+	end;
+
+	/*	do not want to display mbyte, bin, sectors, loops or long names in this window	*/
+	Show = Show&(not(INFO$MByte|INFO$Bin|INFO$Sector|INFO$Loops|INFO$Names));
+
+	call Set.Display.Format(LaserDev,Sort,FunctionInfo,Show,Filter);
+
+	if ((ShowInfo)&(INFO$Caption|INFO$Second))<>0	/*	if any of these INFO options are currently selected	*/
+	then call Build.Window.Title(ShowInfo,Title);	/*	show the INFO labels in the title area	*/
+	else call Get.Window.Title(LaserDev,Title);		/*	otherwise show the name in the window	*/
+
+	call Set.SFD.Dialog.Row(Optical.Row+Optical.Size);	/*	dialogs such as search, print, etc. go on this row	*/
+
+	if GID(AEE.Opt.Width.Mode)<>0 then	/*	half-width mode	*/
+		call Define.Optical.Half.Width(Title);
+	else											/*	full-screen mode	*/
+		call Define.Optical.Full.Width(Title);
+
+	call Get.SFD.Ids(misc.buf);
+	Optical.Window.Grp  = misc.buf(1);
+	Optical.Table		  = misc.buf(2);
+	Optical.Fold.Out.But= misc.buf(3);
+	Optical.SFAudition  = misc.buf(4);
+
+	call Update.Optical.Panel;
+
+	if (FunctionInfo&INFO$Audition)<>0 then do;
+		call Locate.Object(Optical.SFAudition);
+		call Toggle.Box.Highlight(Object.Ptr,(FunctionInfo&INFO$Audition)<>0);
+	end;
+
+end DEFINE.OPTICAL.PANEL;
+
+/*	$SUBTITLE	*/
+
+OPEN.OPTICAL.PANEL: proc (NewSize) public swapable;
+	dcl NewSize				fixed;
+	dcl MaxSize				fixed;
+	dcl MinSize				fixed;
+	dcl (sid,row,size)	fixed;	/*** Declare in Order ***/
+
+	if Optical.Group <> 0 then return;
+
+	try.again:
+
+	if GID(AEE.Opt.Width.Mode)<>0 then do;	/*	user wants to be in half-width mode,	*/
+		MinSize = 10; MaxSize = 10;			/*	panel is fixed at 10 rows	*/
+	end;
+	else do;
+		MinSize = 7; MaxSize = 20;
+	end;
+
+	if NewSize = -1 then NewSize = 10;		/*	set to default size	*/
+
+	if NewSize > MaxSize then do;
+		NewSize = MaxSize;
+		call Display.Notice(NT#CouldNotResizePanel,ATTR#Reverse,NulStr,0,0,0);
+	end;
+	else if NewSize < MinSize then do;
+		NewSize = MinSize;
+		call Display.Notice(NT#CouldNotResizePanel,ATTR#Reverse,NulStr,0,0,0);
+	end;
+
+	if Allocate.Screen.Space(MinSize,NewSize,loc(addr(sid))) then do;
+		call Set.Panel.Menu.Highlight(10,1);
+		call Set.AEE.Panel.Info		  (10,row,size);	/*	find and set entry for panel	*/
+
+		Optical.Screen.Space	= sid;
+		Optical.Size			= size-1;
+		Optical.Row				= row+1;
+
+		call Define.Optical.Panel(Optical.Row,Optical.Size);
+	end;
+	else do;
+		if GID(AEE.Opt.Width.Mode)<>0 then do;	/*	user wanted half-width mode, but try	*/
+			call PID(AEE.Opt.Width.Mode,0);		/*	opening panel in full-width mode since	*/
+			NewSize = GID(OptFullSize);			/*	the panel can be shorter					*/
+			goto try.again;
+		end;
+		call Display.Notice(NT#NoMoreRoomOnScreen,ATTR#Normal,NulStr,0,0,0);
+	end;
+
+end OPEN.OPTICAL.PANEL;
+
+/*	$SUBTITLE	*/
+
+CLOSE.OPTICAL.PANEL: proc public swapable;
+	if Optical.Group <> 0 then do;		/*	Group is defined		*/
+		call Set.Panel.Menu.Highlight(10,0);
+		call Set.AEE.Panel.Info(10,0,0);	/*	mark entry as unused	*/
+      call Close.Directory.Window(0);
+		Optical.Screen.Space = Erase.Screen.Space(Optical.Screen.Space);
+
+		/*	save display position and formats	*/
+		call SaveDisplayPos(DirDevice,0);
+		call pid(sfr.sortinfo,		usersort );
+		call pid(sfr.functioninfo,	functioninfo);
+		call pid(sfr.showinfo,		showinfo );
+		call pid(sfr.itemfilter,	itemfilter);
+
+		/*	make sure these flags are cleared	*/
+		Opt.Caption.Locked  = 0;
+		Opt.Category.Locked = 0;
+
+		call Undefine.Object.Range(Optical.Alloc,Optical.Alloc+999);
+		Optical.Group = Ungroup.Objects(Optical.Group);
+
+		Optical.Window.Grp = -1;
+
+		call Select.New.Cur.Obj(Corner.Label,-1,-1);
+	end;
+end CLOSE.OPTICAL.PANEL;
+
+insert ':synsou:audmod:aud-opt1';	/*	DSP transfer routines	*/
+insert ':synsou:audmod:aud-opt2';	/*	dialog routines	*/
+insert ':synsou:audmod:aud-opt3';	/*	copy.file.to.dtd routine	*/
+
+/*	$page - Get.Next.OptCtrl.Event	*/
+
+GET.NEXT.OPTCTRL.EVENT: proc (event) returns (fixed) swapable;
+	dcl event		fixed;
+	dcl str (40)	fixed;
+	dcl time	(2)	fixed;
+	dcl doffs(1)	fixed;
+	dcl tmp	(3)	fixed;
+
+	clear.statuses:proc;
+		call DISPLAY.NOTICE (NT#EraseNotice,ATTR#Normal,NulStr,0,0,0);
+		call REMOVE.ERR;
+	end clear.statuses;
+
+	do while 1;
+
+		if event <> Get.Null.Event then do;
+			if Screen.Event.Group <> Optical.Group then return event;
+
+			if event = Get.Screen.Event then do;
+
+				if GID(AEE.Opt.Width.Mode)=0 then do;	//	full width mode
+
+					if Screen.Event.Id = Optical.Load.Vol.Button then do;
+						if (Screen.Event.Info=S#MouseSelect)
+						then do;
+							/*	blink the button to show it is working	*/
+							call Set.Object.Attr(Optical.Load.Vol.Button,0,ATTR#Normal\ATTR#Blink);
+							call Set.Object.Attr(Optical.Load.Vol.Button,1,ATTR#Normal\ATTR#Blink);
+
+							if Activate.Optical(O#UpdateDialog|O#AutoVolChange)
+							then do;
+								call Reset.DC.Pointers(LaserDev);
+								Optical.Disk.Ready=0;				/*	reset flag	*/
+								call Mount.New.Device(LaserDev);
+								call Refresh.OptWindow.Title(0);
+								call Fill.DirTable(true);
+							end;
+
+							/*	turn off blinking to show it is done	*/
+							call Set.Object.Attr(Optical.Load.Vol.Button,0,ATTR#Normal);
+							call Set.Object.Attr(Optical.Load.Vol.Button,1,ATTR#Normal);
+						end;
+					end;
+
+					else if Screen.Event.Id = Optical.Display.Button then do;
+						if Screen.Event.Info = S#MouseSelect then do;
+							if Activate.Optical(Default.Activate.Optical.Control.Bits)
+							then do;
+								call clear.statuses;
+								call Open.Optical.Xfer.Dialog(O#DisplayOptions,Optical.Row+Optical.Size);
+								if not Get.Display.Options.Event
+								then return Screen.Event.Code;	/*	pass program exit on up	*/
+							end;
+						end;
+					end;
+
+					else if Screen.Event.Id = Optical.Copy.Button then do;
+						if Screen.Event.Info = S#MouseSelect then do;
+							if Activate.Optical(Default.Activate.Optical.Control.Bits)
+							then do;
+								if (LOD.Running <> 0 || simulate_dtd <> 0) then do;
+									call clear.statuses;
+									if Open.Optical.Xfer.Dialog(O#CopyToDTD,Optical.Row+Optical.Size)<>0 then do;
+
+										/*	continue re-opening the dialog until satisfactory	*/
+										/*	response (a cancel or successful go)	*/
+										do while (Get.Copy.To.DTD.Event<>0);
+											call Open.Optical.Xfer.Dialog(O#CopyToDTD,Optical.Row+Optical.Size);
+										end;
+										if Screen.Event.Code=Get.Program.Exit
+										then return Screen.Event.Code;	/*	pass break on up	*/
+									end;
+								end;
+								else do;
+									if DTD.MAX.SECS = 0 then call No.Direct.To.Disk;
+								end;
+							end;
+						end;
+					end;
+
+					else if Screen.Event.Id = Optical.Retake.Button then do;
+						if Screen.Event.Info = S#MouseSelect then do;
+							call clear.statuses;
+							call Fetch.DTD.Auto.Allocate.Time(0, tmp, misc.buf);	/*	get auto allocate start and end times	*/
+							/*	use proc from AUD-REC2	*/
+							call PROCESS.CUE.RETAKE.DIALOG(Optical.Group,tmp,Record.Ready.Bits);
+						end;
+					end;
+
+					else if Screen.Event.Id = Optical.Cue.Stop.Button then do;
+						if Screen.Event.Info = S#MouseSelect then do;
+							if DTD.Play.State <> 0 then do;
+								call Stop.DTD.Playback;
+							end;
+						end;
+					end;
+
+					else if Screen.Event.Id = Optical.Cue.Play.Button then do;
+						if Screen.Event.Info = S#MouseSelect then do;
+							call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+							call Play.Current.Cue(1,0,0,Current.Cue.Drive.Bits,1);	/*	play entire cue	*/
+						end;
+					end;
+
+					else if Screen.Event.Id = Optical.Place.Button then do;
+						if Screen.Event.Info = S#MouseSelect then do;
+							call clear.statuses;
+							call Handle.AEE.Cue.Place(Recalled.Event.Spointer, 0);
+						end;
+					end;
+
+					else if Screen.Event.Id = Optical.Place.Track.Num then do;
+						call clear.statuses;
+						if Screen.Event.Info = S#Deposit then do;
+							call SET.PLACE.TRACK(Fetch.Fixed.Point(Optical.Place.Track.Num)+1);
+						end;
+						else if (Screen.Event.Info = S#MouseSelect)
+						or      (Screen.Event.Info = S#MouseActivate) then do;
+							if abs(Mouse(Button.Result)) = 1
+							then call Increment.Place.Track;
+							else if abs(Mouse(Button.Result)) = 3
+							then call Decrement.Place.Track;
+						end;
+					end;
+
+					else if Screen.Event.Id = Optical.Place.Take.Button then do;
+						if Screen.Event.Info = S#MouseSelect then do;
+							call clear.statuses;
+							call TAKE.SYSTEM.REAL.TIME(time);	/*	get sequencer or smpte time	*/
+							if (time(0) < 0) wrap_24_hours(time);
+							if (com16(zero.time,time) == lw#igt) STR32(0, zero.time, time);	//	THIS SHOULD NEVER HAPPEN
+							call Deposit.32Bit.MSEC(Optical.Place.Time,time,Zero.Zero);
+						end;
+					end;
+
+					else if Screen.Event.Id = Optical.Place.Time then do;
+						call clear.statuses;
+						if Screen.Event.Info = S#Deposit then do;
+							call Handle.New.Cue.Sync.Time(Optical.Place.Time);
+						end;
+						else if Screen.Event.Info = S#ObjectDrag then do;
+							call Perform.AEE.Drag.Function(Screen.Event.Id,Screen.Event.Obj.Info);
+						end;
+					end;
+
+					else if Screen.Event.Id = Optical.Audition.Button then do;
+						if Screen.Event.Info = S#MouseSelect then do;
+							call clear.statuses;
+							call ASSIGN.NEW.DTD.AUDITION(Current.Cue.Audition xor 1);
+							call DEPOSIT.AUDITION.BUTTON.DISPLAY;	/*	provide snappy response	*/
+						end;
+					end;
+
+				end;	/*	of Optical Panel in full width mode	*/
+
+				else do;	/*	GID(OptFullWidthMode)<>0	*/
+
+					if Screen.Event.Id = Optical.Store.Cue.Button then do;
+						if Screen.Event.Info = S#MouseSelect then do;
+							call clear.statuses;
+							if Activate.Optical(Default.Activate.Optical.Control.Bits)
+							then do;
+								if (LOD.Running <> 0 || simulate_dtd <> 0) then do;
+									call Fetch.String(Optical.Cue.Name,misc.buf);
+                           if (simulate_dtd) {
+                              call Copy.String('A Cue',misc.buf);
+                           }
+									if misc.buf(0)<>0 then do;
+										if Open.Optical.Xfer.Dialog(O#StoreToOptical,Optical.Row+Optical.Size)<>0 then do;
+
+											/*	continue re-opening the dialog until satisfactory	*/
+											/*	response (a cancel, fatal error, or successful go)	*/
+											do while (Get.Store.Cue.Event<>0);
+												call Open.Optical.Xfer.Dialog(O#StoreToOptical,Optical.Row+Optical.Size);
+											end;
+
+											if Screen.Event.Code=Get.Program.Exit
+											then return Screen.Event.Code;	/*	pass break on up	*/
+										end;
+									end;
+									else call Display.Notice(NT#NoSoundFileAvail,ATTR#Normal,NulStr,0,0,0);
+								end;
+								else do;
+									if DTD.MAX.SECS = 0 then call No.Direct.To.Disk;
+								end;
+							end;
+						end;
+					end;
+
+					else if Screen.Event.Id = Optical.Stats.Label then do;
+						if Screen.Event.Info = S#MouseSelect then do;
+							call clear.statuses;
+							Optical.Stats.Mode = Optical.Stats.Mode xor 1;
+							call Update.Optical.Panel;
+						end;
+					end;
+
+					else if Screen.Event.Id = Optical.Cue.ScrollBar then do;
+						if Screen.Event.Info = S#MouseSelect then do;
+							call clear.statuses;
+							call Switch.Current.Cue(Optical.Group);
+						end;
+					end;
+
+					else if Screen.Event.Id = Optical.Caption.String then do;
+						if Screen.Event.Info = S#Deposit then do;
+							call clear.statuses;
+							if (Screen.Event.Table.Row=0)
+							then do;	/*	if carriage return, advance to next line	*/
+								call Select.New.Cur.Obj(Optical.Caption.String,0,1);
+							end;
+						end;
+					end;
+
+					else if Screen.Event.Id = Optical.Category.Table then do;
+						if Screen.Event.Info = S#Deposit then do;
+							call clear.statuses;
+							call Fetch.Table(Optical.Category.Table,0,Screen.Event.Table.Row);
+							call Fetch.String(Optical.Cat.Type.Obj,str);
+							call Stuff.Category.Into.Table(str,Screen.Event.Table.Row);
+						end;
+					end;
+
+					else if Screen.Event.Id = Optical.Caption.Lock then do;
+						if Screen.Event.Info = S#MouseSelect then do;
+							Opt.Caption.Locked = ((Opt.Caption.Locked=0)&1);	/*	toggle	*/
+							call Locate.Object(Optical.Caption.Lock);
+							call Toggle.Box.Highlight(Object.Ptr,Opt.Caption.Locked);
+						end;
+					end;
+
+					else if Screen.Event.Id = Optical.Category.Lock then do;
+						if Screen.Event.Info = S#MouseSelect then do;
+							Opt.Category.Locked = ((Opt.Category.Locked=0)&1);
+							call Locate.Object(Optical.Category.Lock);
+							call Toggle.Box.Highlight(Object.Ptr,Opt.Category.Locked);
+						end;
+					end;
+				end;	/*	of Optical Panel in half width mode	*/
+
+			end;	/*	of event=Get.Screen.Event	*/
+
+			else if event = Get.Poly.Contents
+			then do;
+				if (Screen.Event.Info & (4\8)) <> 0
+				then do;
+					if Activate.Optical(O#UpdateDialog|O#AutoVolChange)
+					then do;
+						call Reset.DC.Pointers(LaserDev);
+						Optical.Disk.Ready=0;				/*	reset flag	*/
+						call Mount.New.Device(LaserDev);
+						call Refresh.OptWindow.Title(0);
+						call Fill.DirTable(true);
+					end;
+				end;
+			end;
+
+		end;	/*	of if event <> Get.Null.Event	*/
+
+		event = Get.Next.Screen.Event;
+
+	end;	//	of infinite loop
+end GET.NEXT.OPTCTRL.EVENT;
+
+/*	$SUBTITLE	*/
+
+dcl ArrowKey.Increment	lit 'Optical.Rows-1';	/*	number of lines to scroll at page top & bottom	*/
+
+GET.NEXT.OPTTABLE.EVENT: proc (event) returns (fixed) swapable;
+	dcl event				fixed;
+	dcl Name (SFNAME#Arr_Len)	fixed;
+	dcl Info (SFINFO#Arr_Len)	fixed;
+	dcl LineType			fixed;
+	dcl (Col,Row)			fixed;	/*	These must be kept in order	*/
+	dcl (MaxCol,X)			fixed;
+	dcl FileAddr (1)		fixed;
+	dcl FileLen  (1)		fixed;
+	dcl (mx,my)				fixed;
+	dcl ChosenItemType	fixed;
+	dcl old.mode			fixed;	/*	old optical disk window mode	*/
+	dcl str		(18)		fixed;
+
+	do while 1;
+
+		if Screen.Event.Group<>Optical.Window.Grp then return (event);
+
+		if event=Get.Screen.Event then do;
+
+			if (Screen.Event.Id=Optical.Table) then do;
+
+				if (Screen.Event.Info=S#MouseSelect)
+				or (Screen.Event.Info=S#MouseActivate)
+				or (Screen.Event.Info=S#KeyActivate)
+				then do;
+
+					LineType=Fetch.DirTable.Item.Type(Screen.Event.Table.Row,Screen.Event.Table.Col);
+
+					if (LineType<>ITEM$Eof)&(Screen.Event.Info<>S#KeyActivate) then do;	/*	mouse click	*/
+						if MaxRowItems(LineType) IGT 1 then do;	/*	more than 1 file per line	*/
+							X=Mouse(PRESS.X);								/*	get x coord of last click	*/
+							X=TPos.X(X);									/*	map to transparent char position	*/
+							X=X-Fetch.Object.Info(Optical.Table,O#Trans.Col);	/*	relative to left edge of table	*/
+							load X; div MaxItemChars(LineType);
+							X=res;											/*	map to logical column	*/
+						end;
+						else X=0;
+					end;
+					else X=Screen.Event.Table.Col;
+
+					if (Screen.Event.Info<>S#KeyActivate) then do;	/*	mouse click	*/
+						call Set.DirTable.Position(Screen.Event.Table.Row,X);	/*	new logical position	*/
+						call Update.Object(Screen.Event.Id);
+						/*	file is actually recalled after an S#ObjectDragAbort, below	*/
+					end;
+
+					else if ((FunctionInfo&INFO$Audition)<>0) then do;	/*	key activate and auditioning enabled	*/
+						ChosenItemType = Fetch.DirTable.Item.Type(Screen.Event.Table.Row,Screen.Event.Table.Col);
+						if (ChosenItemType = ITEM$Filename)
+						then do;								/*	load file into menu table	*/
+							/*	NOTE: Above line also repositions	*/
+							/*			index file vars to current item	*/
+
+							if Get.Current.FileName.And.Info(Name,Info)=ITEM$Filename
+							then do;
+								call Copy32(loc(addr(Info(SFINFO#F_Base  ))),FileAddr);
+								call Copy32(loc(addr(Info(SFINFO#F_SecLen))),FileLen);
+								call Recall.Sound.File(Name,DirDevice,FileAddr,FileLen,((FunctionInfo&INFO$Audition)<>0)|2,0);	/*	load sound file	*/
+							end;
+						end;
+						else if (ChosenItemType = ITEM$Category)
+						then do;								/*	what do we do ?	*/
+						end;
+					end;
+				end;
+
+				else if (Screen.Event.Info=S#ArrowSelect)
+				or      (Screen.Event.Info=S#ArrowSelectAttempt)
+				then do;
+
+					call Flush.Arrow.Keys.From.D50.Buf;
+
+					LineType=Fetch.DirTable.Item.Type(0,Screen.Event.Table.Row);
+
+					if (Screen.Event.Info=S#ArrowSelect) then do;
+						if ((LineType <> ITEM$Filename)
+						and (LineType <> ITEM$Category)) then
+							X = 0;			/*	user arrowed beyond end of data	*/
+						else X = Screen.Event.Table.Col;
+						call Set.DirTable.Position(Screen.Event.Table.Row,X);	/*	new logical position	*/
+					end;
+					else do;	/*	S#ArrowSelectAttempt (trying to leave table)	*/
+						if (Screen.Event.Obj.Info=U.ARR)
+						or (Screen.Event.Obj.Info=D.ARR)
+						then do;	/*	page up and page down	*/
+							if Screen.Event.Obj.Info=U.ARR
+							then call Scroll.DirTable.Backward(ArrowKey.Increment);
+							else call Scroll.DirTable.Forward (ArrowKey.Increment);
+
+							call Set.ScrollBar.Pos;	/*	keep scroll box in correct position	*/
+						end;
+						else do;	/*	somebody reselected table	*/
+							call Fetch.Table.Cur.Cell(Optical.Table,loc(addr(Col)));
+							call Set.DirTable.Position(Row,Col);
+						end;
+					end;
+				end;
+
+				/*	$PAGE	*/
+
+				else if (Screen.Event.Info=S#ObjectDragAbort) then do;
+
+					mx=Mouse(Release.x); my=Mouse(Release.y);
+
+					if POINT.IN.OBJECT(Optical.Table,mx,my)
+					then do;											/*	make sure release was in table	*/
+
+						call MAP.POINT.TO.TABLE.CELL(mx,my,Optical.Table,Loc(Addr(Col)));
+
+						if  (Col=Screen.Event.Table.Col)
+						and (Row=Screen.Event.Table.Row)
+						then do;						/*	on original position - recall sound file	*/
+
+							LineType=Fetch.DirTable.Item.Type(Screen.Event.Table.Row,Screen.Event.Table.Col);
+
+							/*	NOTE: Above line also repositions		*/
+							/*			index file vars to current item	*/
+
+							if (LineType=ITEM$Filename) and ((FunctionInfo&INFO$Audition)<>0)
+							then do;	/*	audition sound file	*/
+								if Get.Current.FileName.And.Info(Name,Info)=ITEM$Filename
+								then do;
+									call Copy32(loc(addr(Info(SFINFO#F_Base  ))),FileAddr);
+									call Copy32(loc(addr(Info(SFINFO#F_SecLen))),FileLen);
+									call Recall.Sound.File(Name,DirDevice,FileAddr,FileLen,((FunctionInfo&INFO$Audition)<>0)|2,0);	/*	load sound file	*/
+								end;
+							end;
+							else if (LineType=ITEM$Category) and (GID(AEE.Opt.Width.Mode)<>0)
+							then do;
+								/*	deposit in category table	*/
+								call GetListPos(Row);			/*	get full name	*/
+								str(0)=0;
+								call Append.Current.CatList.Item(str,Fetch.Object.Info(Optical.Cat.Type.Obj,O#STR.Max.Chars));
+								call Stuff.Category.Into.Table(str,-1);
+							end;
+						end;
+					end;
+				end;
+			end;
+
+			else if (Screen.Event.Id=Optical.SFAudition) then do;
+				if (Screen.Event.Info=S#MouseSelect)
+				or (Screen.Event.Info=S#MouseActivate)
+				then do;
+					FunctionInfo = FunctionInfo xor INFO$Audition;	//	toggle audition mode
+					Locate.Object(Optical.SFAudition);
+					Toggle.Box.Highlight(Object.Ptr,(FunctionInfo&INFO$Audition)<>0);
+				end;
+			end;
+
+			else if (Screen.Event.Id=Optical.Fold.Out.But) then do;
+				if (Screen.Event.Info=S#MouseSelect)
+				or (Screen.Event.Info=S#MouseActivate)
+				then do;
+					old.mode = GID(AEE.Opt.Width.Mode);
+					call PID(AEE.Opt.Width.Mode,(GID(AEE.Opt.Width.Mode)=0)&1);	/*	toggle mode	*/
+					call Close.Optical.Panel;
+					if GID(AEE.Opt.Width.Mode)=0 then
+						call Open.Optical.Panel(GID(OptFullSize));	/*	reopen panel to previous full-width size	*/
+					else call Open.Optical.Panel(10);
+
+					if GID(AEE.Opt.Width.Mode)=old.mode then do;	/*	couldn't change modes due to space problems	*/
+						call Display.Notice(NT#NoMoreRoomOnScreen,ATTR#Normal,NulStr,0,0,0);
+					end;
+
+					call Select.New.Cur.Obj(Corner.Label,-1,-1);
+				end;
+			end;
+
+			else return (event);	/*	wasn't one of the objects we deal with here	*/
+		end;
+
+		event = Get.Next.Screen.Event;	/*	get the next event to handle	*/
+	end;
+
+end GET.NEXT.OPTTABLE.EVENT;
+
+/*	$SUBTITLE	*/
+
+GET.OPTICAL.TRANSFER.EVENT: proc (event) returns (fixed) public swapable;
+	dcl event	fixed;
+
+	do while 1;
+		if event <> Get.Null.Event then do;
+
+			if Screen.Event.Group=Optical.Window.Grp then do;
+				/*	process with SFD window event handler	*/
+				if Get.Next.Window.Event then do;
+					event = Screen.Event.Code;
+
+					if (Screen.Event.Id=Optical.Table)
+					or (Screen.Event.Id=Optical.SFAudition)
+					or (Screen.Event.Id=Optical.Fold.Out.But)
+					then do;
+						/*	deal with a table event	*/
+						event = Get.Next.OptTable.Event(event);
+					end;
+					else event = Get.Next.Screen.Event;
+				end;
+				else do;
+					call Set.DirTable.Position(-1,-1);	/*	unhighlight current cell in Optical.Table	*/
+				end;
+			end;
+
+			else if Screen.Event.Group=Optical.Group then do;
+				event = Get.Next.OptCtrl.Event(event);	/*	deal with control events	*/
+			end;
+
+			else do;
+				if Screen.Event.Group<>0 then
+					call Set.DirTable.Position(-1,-1);	/*	unhighlight current cell in Optical.Table	*/
+				return (event);	/*	not an Optical-related event	*/
+			end;
+		end;
+
+		else event = Get.Next.Screen.Event;
+
+	end;
+end GET.OPTICAL.TRANSFER.EVENT;

@@ -1,0 +1,502 @@
+/* filesou - $TITLE  Search for name, Handle Drive Select Button */
+
+/*
+   11/04/91 - PF  - Added 'Quick Update' feature
+   06/05/89 - TSS - Added MAPSFILE dcl
+   11/16/88 - TSS - Added DEFSFILE dcl
+   11/17/87 - cj - snarfed sort.names from dirmod
+   11/13/87 - eg - extracted extract.filename from parse.treename.string
+   8/25/87 - eg - moved parse.treename.string here and made it public
+   1/16/87 - TS - FIXED CONFLICT BETWEEN DRIVE SELECT BUTTON AND DIRECTORY SCREENS
+   1/04/87 - CJ - SET UP CACHE ONLY READS FLOPPY CATALOGS
+  10/04/86 - KJO - updated for -7 catalog structure
+   5/15/86 - "official" creation of release-M modules
+   3/29/87 - cj - broke off separate module
+*/
+
+/* FIND.FILE SEARCHES THE DIRECTORY FOR A FILE NAME.  USED DURING SYSTEM
+STARTUP TO FIND .STAB-4;  ALSO USED FOR .BNKDATA, .NEWBANK, + SEQUENCES */
+
+MODULE FILEMOD;
+
+INSERT ':SYNLITS:ASCIILIT';     
+INSERT ':SYNLITS:COMLITS';   /* ALL MODULES MUST INSERT COMLITS    */
+INSERT ':SYNLITS:GLOBLITS';  /* PRACTICALLY ALL WILL WANT GLOBLITS */
+INSERT ':SYNLITS:SYSLITS';   
+
+INSERT ':SYNMODS:GLOBDCL';   /* FOR MAM/MAL                        */
+INSERT ':SYNMODS:TFORMDCL';  /* FOR COPY.STRING, ETC. */ 
+INSERT ':SYNMODS:XMEMDCL';
+
+INSERT ':-XPL:CATROUT';
+LIBRARY ':-XPL:LIBS:CATSWAP';
+
+DCL COMPUTE.DSEL.BUTTON   PROC    EXTERNAL;
+
+DCL BNKDATA  DATA PUBLIC ('.BNKDATA');
+DCL NEWDATA  DATA PUBLIC ('.NEWDATA');
+DCL PATDATA  DATA PUBLIC ('.PATDATA');
+DCL SQ0DATA  DATA PUBLIC ('.SQ0DATA');
+DCL DEFSFILE DATA PUBLIC ('.SDEF-7' );
+
+/* $PAGE - SEARCH DIRECTORY FOR FILE */
+
+FILE.SEARCH: PROC(NAME,NLEVELS,LEVEL1,LEVEL2,LEVEL3) RETURNS (BOOLEAN) PUBLIC SWAPABLE;
+   DCL NAME    FIXED ARRAY; /* NAME TO SEARCH FOR */
+   DCL NLEVELS FIXED; /* NO. LEVELS TO SEARCH */
+   DCL (LEVEL1,LEVEL2,LEVEL3) FIXED; /* LEVELS TO SEARCH */
+   DCL (FOUND,I) FIXED;
+
+   IF INC.MONO<>0 THEN CALL STOP.DISK;       /* STOP OUTPUT SO WE CAN READ DISK */
+
+   FOUND = FALSE; /* FILE NOT FOUND YET */
+   I = 0;
+   DO WHILE (NOT FOUND) AND (I ILT NLEVELS); /* LOOP OVER LEVELS GIVEN UNTIL FILE IS FOUND */
+      DO CASE I; /* GET LEVEL TO SEARCH */
+         FOUND = LOCATE(NAME,LEVEL1);
+         FOUND = LOCATE(NAME,LEVEL2);
+         FOUND = LOCATE(NAME,LEVEL3);
+      END;
+      I = I + 1; 
+   END;
+
+   RETURN (FOUND); /* RETURN TRUE IF FILE WAS FOUND */
+END FILE.SEARCH;
+
+/* MAP TO PHYSICAL LEVEL */
+
+MAP.LEVEL:  PROC(LEVEL) RETURNS (FIXED) PUBLIC SWAPABLE; /* MAP LEVEL NUMBER TO DEVICE */
+   DCL LEVEL FIXED; /* LEVEL NUMBER TO MAP */
+
+   IF      LEVEL = 0 THEN LEVEL = SHR(SDEV,8);  /* SYSTEM DEVICE */
+   ELSE IF LEVEL = 1 THEN LEVEL = SHR(UDEV,8);  /* CURRENT CATALOG DEVICE */
+   
+   RETURN (LEVEL);
+END MAP.LEVEL;
+
+/* SETS UP CACHE FOR ACTIVE LEVEL */
+
+DCL FLOPPY.CACHE.VALID FIXED PUBLIC;   /* TRUE IF FLOPPY CAT IS CACHED */
+DCL FLOPPY.CACHE.NUM   FIXED PUBLIC;   /* FLOPPY CACHE NUMBER */
+DCL FCACHE.PTR         FIXED PUBLIC;   /* ( 1) ONE SECTOR FOR FLOPPY CACHE         */
+DCL ACTIVE.LEVEL       FIXED PUBLIC;   /*  ACTIVE DIRECTORY LEVEL */
+
+SETUP.FLOPPY.CACHE:  PROC PUBLIC SWAPABLE;      /* SET UP CACHE FOR FLOPPY DIRECTORY */
+   DCL I FIXED;
+
+   I=MAP.LEVEL(ACTIVE.LEVEL);
+
+   IF (I>=2)&(I<=5)                             /* F0,F1, R0,R1 */
+   THEN DO;
+      IF READ_CATALOG('',I) THEN DO;            /* READ THIS CATALOG     */
+         CALL DISABLE_CACHE(FLOPPY.CACHE.NUM);  /* DISABLE CURRENT CACHE */
+         FLOPPY.CACHE.NUM = CACHE(FCACHE.PTR,1);/* CACHE THIS CATALOG IN EXTERNAL MEMORY */
+         FLOPPY.CACHE.VALID=1;                  /* FLOPPY CACHE NOW VALID */
+      END;
+   END;
+END SETUP.FLOPPY.CACHE;
+
+/* $SUBTITLE  DRIVE SELECT ROUTINES */
+
+DCL DRIVE.SELECT.ACTIVE         FIXED PUBLIC; /* TRUE WHEN DRIVE SELECT IS PRESSED */
+DCL DRIVE.SELECT.COUNT          FIXED PUBLIC; /* STACKS UP MULTIPLE DRIVE SELECT PRESSES */
+DCL RESTORE.LEVEL               FIXED PUBLIC;
+
+PRESS.DSEL.BUTTON:PROC PUBLIC SWAPABLE;    
+
+   IF DRIVE.SELECT.COUNT=0                /* THIS IS THE FIRST TIME */
+   THEN DO;
+      RESTORE.LEVEL=ACTIVE.LEVEL;         /* RESTORE ACTIVE.LEVEL TO THIS ON RELEASE */
+
+      IF SYSTYP=1  THEN ACTIVE.LEVEL=2;   /* USE F0 IF ON WINCHESTER */
+      ELSE              ACTIVE.LEVEL=3;   /* USE F1 IF ON FLOPPY     */
+
+      DRIVE.SELECT.ACTIVE=1;              /* BUTTON IS DOWN */
+      CALL COMPUTE.DSEL.BUTTON;           /* SET LIGHT      */
+   END;
+
+   DRIVE.SELECT.COUNT=DRIVE.SELECT.COUNT+1;
+END PRESS.DSEL.BUTTON;
+
+RELEASE.DRIVE.SELECT:PROC PUBLIC SWAPABLE; 
+
+   DRIVE.SELECT.COUNT=DRIVE.SELECT.COUNT-1;
+   IF DRIVE.SELECT.COUNT<0 THEN DRIVE.SELECT.COUNT=0; /* LIMIT */
+
+   IF DRIVE.SELECT.COUNT=0    /* HAVE RELEASED ORIGINAL PRESS */
+   THEN DO;
+
+      ACTIVE.LEVEL=RESTORE.LEVEL; /* RESTORE TO SAVED VALUE */
+
+      DRIVE.SELECT.ACTIVE=0;  /* BUTTON IS UP */
+
+      CALL COMPUTE.DSEL.BUTTON;
+   END;
+END RELEASE.DRIVE.SELECT;
+
+Extract.Filename: proc (FullTree, Filename) returns (fixed) public swapable;
+   dcl FullTree array; /* input  string, treename to parse   */
+   dcl FileName array; /* output string, extracted filename */
+   dcl (F, P)   fixed;
+
+   F=FullTree(0)-1;            /* byte ptr to last char in treename */
+   do while (F>=0) and (byte(FullTree,F)<>A.COLON); /* search for last colon */
+      F=F-1;
+   end;
+
+   FileName(0)=0;
+   do P=F+1 to FullTree(0)-1;  /* extract filename */
+      call pbyte(FileName,FileName(0),byte(FullTree,P));
+      FileName(0)=FileName(0)+1;
+   end;
+
+   return F;           /* byte ptr to last char before filename in FullTree */
+end Extract.Filename;
+
+Parse.Treename.String: proc (FullTree,PathTree,FileName) public swapable;
+   dcl FullTree array; /* input  string, treename to parse   */
+   dcl PathTree array; /* output string, extracted path treename */
+   dcl FileName array; /* output string, extracted filename */
+   dcl OrigLen  fixed;
+   dcl (F,P)    fixed;
+
+   OrigLen=FullTree(0);        /* save in temp, so we can change below */
+
+   F = Extract.Filename(Fulltree, Filename);
+
+   if F>0 then do;
+      FullTree(0)=F;         /* temporarily drop filename & trailing colon from treename */
+      call Copy.String(FullTree,PathTree); /* extract path treename */
+
+      if PathTree(0)=2 then do; /* check to see if this is a device name */
+         F=UCASE(Byte(PathTree,0)); P=Byte(PathTree,1);
+
+         if  (((F=A.W)  or (F=A.F) or (F=A.R) /** or (F=A.L) **/ ) /* this is a device name */
+         and  ((P=A.0)  or (P=A.1)))
+         /*** or  ( (F=A.P) and (P=A.0)) ***/ /* stands for poly memory */
+         then do;
+            call AppendC(PathTree,A.COLON); /* append colon for device name */
+         end;
+      end;
+   end;
+   else do;
+      PathTree(0)=0;       /* no path treename present */
+      if (OrigLen<>0) and (Byte(FullTree,0)=A.COLON)
+      then call AppendC(PathTree,A.COLON); /* append colon for device name */
+   end;
+
+   FullTree(0)=OrigLen;      /* restore treename to original state */
+
+   /* clean up both strings */
+
+end Parse.Treename.String;
+
+/* $page - handy routine to filter through cat buffer for file types */
+
+Filter.Cat.Buffer.By.Filetype:  proc (base, itemlen, items, bitinfo)  PUBLIC swapable; /* sorts filenames into alphabetical order */
+   dcl Base           fixed; /* ptr to start of list of items to sort */
+   dcl ItemLen        fixed; /* words per record                      */
+   dcl Items          fixed; /* total number of items to sort         */
+   dcl Bitinfo        fixed;
+   dcl (i,j)          fixed;
+
+   dcl FCB#1          lit 'Loc(Addr(Copy.Buf(0)))';
+   dcl FCB#2          lit 'Loc(Addr(Copy.Buf(ItemLen)))';
+
+   Get.Item: proc (Base, Itemlen, Item, FCB);
+      dcl Base    fixed;
+      dcl Itemlen fixed;
+      dcl Item    fixed;
+      dcl FCB     array;
+
+      load Item; mul ItemLen; Item=res;
+
+      write(mam)=Base+shr(Item,8);  /* point at destination record */
+      write(mal)=Item;
+
+      write("313")=Addr(FCB(0)); /* set up for fast copy */
+
+      if inc.poly or (modc<>0) then do;
+         rpc ItemLen;
+         write("373")=read(mdi);
+      end;
+      else do;
+         do Item=1 to ItemLen;
+            write("373")=read(mdi);
+         end;
+      end;
+   end Get.Item;
+
+   Put.Item: proc (Base, Itemlen, FCB, Item);
+      dcl Base      fixed;
+      dcl Itemlen   fixed;
+      dcl FCB       array;
+      dcl Item      fixed;
+
+      load Item; mul ItemLen; Item=res;
+
+      write(mam)=Base+shr(Item,8);  /* point at destination record */
+      write(mal)=Item;
+
+      write("313")=Addr(FCB(0)); /* set up for fast copy */
+
+      if inc.poly or (modc<>0) then do;
+         rpc ItemLen;
+         write(mdi)=read("373");
+      end;
+      else do;
+         do Item=1 to ItemLen;
+            write(mdi)=read("373");
+         end;
+      end;
+   end Put.Item;
+
+   /* extract desired items from list */
+
+   i = 0;
+
+   do j=0 to items-1; 
+
+      call Get.Item(Base, Itemlen, j ,FCB#1); 
+
+      if  (Copy.Buf(0)                       <> 0) /* if entry exists */
+      and ((bitinfo&bits(Copy.Buf(C#TY)&15)) <> 0) /* of this file    */
+      then do;
+         // Skip hidden sequence files
+         if (((Copy.Buf(C#TY)&15) == t#sync)
+         &&  (Copy.Buf(c#nm+0) == (shl(ASC.S,8)\DOT  ))    /*	look for ".S"	*/
+         &&  (Copy.Buf(c#nm+1) == (shl(ASC.Q,8)\ASC.E))    /*	look for "EQ"	*/
+         &&  (Copy.Buf(c#nm+2) == (shl(ASC.A,8)\ASC.D)))   /*	look for "DA"	*/
+            ;
+
+         else {
+            call Put.Item(Base, Itemlen, FCB#1, i);
+            i = i + 1;
+         }
+      end;
+   end;
+
+   return i;
+
+end Filter.Cat.Buffer.By.Filetype;
+
+/* $page - handy routine to sort catalog by file name */
+
+Sort.Cat.Buffer.By.Filename:  proc (xbase, xitemlen, items)  PUBLIC swapable; /* sorts filenames into alphabetical order */
+   dcl XBase          fixed; /* ptr to start of list of items to sort */
+   dcl XItemLen       fixed; /* words per record */
+   dcl Items          fixed; /* total number of items to sort */
+   dcl (i,j)          fixed;
+   dcl (Base,ItemLen) fixed static;
+
+   dcl FCB#1          lit 'Loc(Addr(Copy.Buf(0)))';
+   dcl FCB#2          lit 'Loc(Addr(Copy.Buf(ItemLen)))';
+
+   Get.Item: proc (Item,FCB);
+      dcl Item fixed;
+      dcl FCB  array;
+
+      load Item; mul ItemLen; Item=res;
+
+      write(mam)=Base+shr(Item,8);  /* point at destination record */
+      write(mal)=Item;
+
+      write("313")=Addr(FCB(0)); /* set up for fast copy */
+
+      if inc.poly or (modc<>0) then do;
+         rpc ItemLen;
+         write("373")=read(mdi);
+      end;
+      else do;
+         do Item=1 to ItemLen;
+            write("373")=read(mdi);
+         end;
+      end;
+   end Get.Item;
+
+   Put.Item: proc (FCB,Item);
+      dcl FCB  array;
+      dcl Item fixed;
+
+      load Item; mul ItemLen; Item=res;
+
+      write(mam)=Base+shr(Item,8);  /* point at destination record */
+      write(mal)=Item;
+
+      write("313")=Addr(FCB(0)); /* set up for fast copy */
+
+      if inc.poly or (modc<>0) then do;
+         rpc ItemLen;
+         write(mdi)=read("373");
+      end;
+      else do;
+         do Item=1 to ItemLen;
+            write(mdi)=read("373");
+         end;
+      end;
+   end Put.Item;
+
+   CompareFCBs: proc (FCB1,FCB2) fixed;
+      dcl (FCB1,FCB2) array;
+      dcl i             fixed;
+
+      /* Returns:  (+1) if FCB2>FCB1 */
+      /*           (-1) if FCB2<FCB1 */
+      /*           ( 0) if FCB1=FCB2 */
+
+      do i=0 to 3;
+         if         (FCB2(i)&255) <    (FCB1(i)&255) then return (-1);
+         else if    (FCB2(i)&255) >    (FCB1(i)&255) then return (+1);
+         if      shr(FCB2(i),8)   < shr(FCB1(i),8)   then return (-1);
+         else if shr(FCB2(i),8)   > shr(FCB1(i),8)   then return (+1);
+      end;
+
+      return 0; /* the two FCBs are the same */
+   end CompareFCBs;
+
+   /* $PAGE */
+
+   Base=XBase; ItemLen=XItemLen; /* compiler limitation */
+
+   /* do an Insertion Sort on the Items */
+
+   do I=1 to items-1; /* put filenames into alphabetical order using insertion sort */
+
+      call Get.Item(I  ,FCB#1); /* load the (  I)th into FCB #1 */
+      call Get.Item(I-1,FCB#2); /* load the (I-1)st into FCB #2 */
+
+      J=I;
+      do while (J>0)                          /* have not hit start of list */
+      and      (CompareFcbs(FCB#1,FCB#2)>0); /* FCB#1 goes before FCB#2 */
+
+         call Put.Item(FCB#2,J); /* swap the two fcbs */
+         J=J-1;
+         call Put.Item(FCB#1,J);
+
+         if J>0 then do; /* load the new (J-1)st record into FCB#2 */
+            call Get.Item(J-1,FCB#2);
+         end;
+      end;
+   end;
+
+end Sort.Cat.Buffer.By.Filename;
+
+/* $page - handle scrolling through catalog */
+
+/* return 1 if found */
+
+/* This routine is used to perform alphabetic scrolling through a */
+/* catalog buffer.   it is passed a file name and a pointer to    */
+/* a cached catalog buffer.   it looks through the catalog buffer */
+/* and finds the next file name (alphabetically) in the direction */
+/* indicated and returns it                                       */
+
+/* it is passed a bits word that can be used to select the        */
+/* file types                                                     */
+
+Find.Next.Sorted.Filename :proc (base, itemlen, items, dir, file, outfile, bitinfo) PUBLIC swapable;
+   dcl Base           fixed; /* base of data in ext mem       */
+   dcl ItemLen        fixed; /* words per record              */
+   dcl Items          fixed; /* total # of items in list      */
+   dcl Dir            fixed; /* -1 = backwards, +1 + forward  */
+   dcl File           array; /* current (original) name       */
+   dcl OutFile        array; /* new one (if found)            */
+   dcl Bitinfo        fixed; /* bits for OK file types        */
+   dcl (i,j)          fixed;
+
+   dcl FCB#1          lit 'Loc(Addr(Copy.Buf(0)))';
+   dcl FCB#2          lit 'Loc(Addr(Copy.Buf(ItemLen)))';
+
+   Get.Item: proc (Base, Item, Itemlen, FCB);
+      dcl Base    fixed;
+      dcl Item    fixed;
+      dcl Itemlen fixed;
+      dcl FCB     array;
+
+      load Item; mul ItemLen; Item=res;
+
+      write(mam)=Base+shr(Item,8);  /* point at destination record */
+      write(mal)=Item;
+
+      write("313")=Addr(FCB(0)); /* set up for fast copy */
+
+      if inc.poly or (modc<>0) then do;
+         rpc ItemLen;
+         write("373")=read(mdi);
+      end;
+      else do;
+         do Item=1 to ItemLen;
+            write("373")=read(mdi);
+         end;
+      end;
+   end Get.Item;
+
+   CompareFCBs: proc (FCB1,FCB2) fixed;
+      dcl (FCB1,FCB2) array;
+      dcl i             fixed;
+
+      /* Returns:  (+1) if FCB2>FCB1 */
+      /*           (-1) if FCB2<FCB1 */
+      /*           ( 0) if FCB1=FCB2 */
+
+      do i=0 to 3;
+         if         (FCB2(i)&255) <    (FCB1(i)&255) then return (-1);
+         else if    (FCB2(i)&255) >    (FCB1(i)&255) then return (+1);
+         if      shr(FCB2(i),8)   < shr(FCB1(i),8)   then return (-1);
+         else if shr(FCB2(i),8)   > shr(FCB1(i),8)   then return (+1);
+      end;
+
+      return 0; /* the two FCBs are the same */
+   end CompareFCBs;
+
+   /* $PAGE */
+
+   /* do an Insertion Sort on the Items */
+
+   call CLEAN_FILENAME(file, FCB#1);      /* get upper case, zero filled */
+
+   if dir = (+1) then do;                 /* forward - look for >        */
+
+      do i = 0 to items-1;
+         call Get.Item(base, i, itemlen, FCB#2);    /* get ith           */
+
+         if  (Copy.Buf(ItemLen) <> 0)     /* if entry exists             */
+         and ((bitinfo&bits(Copy.Buf(Itemlen+C#TY)&15))<>0) /* file typ  */
+         and (CompareFCBs(FCB#1, FCB#2) = (+1))
+         then do;                        /* large name found             */
+            call CLEAN_FCBNAME(fcb#2, OutFile);
+            return 1;
+         end;
+      end;
+
+   end;
+
+   else if dir = (-1) then do;                 /* backwards - look for < */
+
+      do i = 1 to items;
+         call Get.Item(base, items - i, itemlen, FCB#2);
+
+         if  (Copy.Buf(ItemLen) <> 0)     /* if entry exists             */
+         and ((bitinfo&bits(Copy.Buf(Itemlen+C#TY)&15))<>0) /* file typ  */
+         and (CompareFCBs(FCB#1, FCB#2) = (-1))
+         then do;                        /* smaller name found           */
+            call CLEAN_FCBNAME(fcb#2, OutFile);
+            return 1;
+         end;
+      end;
+
+   end;
+
+   return 0;
+
+end Find.Next.Sorted.Filename;
+
+file.init:proc swapable;
+   FCACHE.PTR=ALLOC.EXAMOUNT(1);    /* FLOPPY CACHE */
+   CALL SET_CATBUF(EXTBUF.PTR,1);   /* SET CATALOG BUFFER AREA IN EXTERNAL MEMORY */
+   ACTIVE.LEVEL=1;                  /* DEFAULT IS USER CATALOG (DRIVE 1) */
+end file.init;
+
+call file.init;
+
+END FILEMOD;

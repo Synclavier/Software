@@ -1,0 +1,826 @@
+/* $TITLE  Configuration Program */
+
+/* This program updates the configuration of the program called MONITOR on
+.  the current device.  The configuration layout is detailed (more or less)
+.  in :-XPL:SYSLITS.  A more detailed treatment of the configuration area
+.  can be found in the "Systems Programming Compendium" dated January 1985.
+*/
+
+/* DLM history:
+. 20 Aug 1991: DSP Interface (DDSAD) [MWH]
+. 07 Feb 1991: Poly voice type and D164 [MWH]
+. 11 Jul 1990: Magneto optical devices [LSS]
+. 26 Sep 1988: Model D [LSS]
+. 04 May 1988: added Macintosh support [KJC]
+. 25 Feb 1987: added support for optical disks [KJO]
+. 05 Nov 1986: device structure changed for -7 [KJO, LSS]
+. 01 Apr 1986: revised for -7 catalog structure [KJO]
+. 05 Mar 1986: added extended tape configuration to include SCSI tapes [KJO]
+. 17 Jan 1986: added D24 interface number to winchester configuration [KJC]
+. 10 Oct 1985: added 85 MByte winchester to configuration [KJC]
+. 08 Aug 1985: added Monterey MG600 to configuration [KJC]
+. 16 Jan 1985: revised for -6 configuration [KJC]
+. 13 Jun 1985: removed configuration prompts, expanded Winchester menu [KJC]
+. 07 Dec 1984: updated for -6 configuration/rewrote user interface [JSR and KJC]
+. 01 May 1984: added DQ640 and velocity keyboard to configuration [KJC]
+. 08 Dec 1983: changed Winchester config entry to apply 1680 size limit [JSR]
+*/
+
+configuration modelC, MULDIV;
+
+insert ':-xpl:reldat';	 		/* get releasae date */
+insert ':-xpl:literals'; 		/* general literals */
+insert ':-xpl:asciilit'; 		/* ASCII literals */
+insert ':-xpl:termut';   		/* terminal management utilities */
+insert ':-xpl:catrtns';  		/* catalog routines */
+insert ':-xpl:devutil';  		/* device utilities */
+insert ':-xpl:strings';  		/* string processing */
+insert ':-xpl:plotlib';	 		/* plotting library */
+insert ':-xpl:intrprtr';		/* interpreter interface */
+
+dcl px lit 'pstring';    dcl pxr lit 'pstringr';
+dcl monitor data ('MONITOR');
+
+dcl columns    lit '6'; dcl rows       lit '15'; /* columns and rows supported */
+dcl column_one lit '0'; dcl column_two lit '2'; /* column numbers of the first and second columns (primary information) */
+dcl #_wins     lit '8'; /* total number of winchesters supported */
+dcl win_row    lit '0'; /* number of first winchester row */
+dcl first_imi  lit '2'; /* index of first IMI-type winchester */
+dcl unknown    lit '"377"'; /* flag for unknown device type */
+
+dcl contab        fixed; /* pointer to configuration table in buffer */
+dcl sysdev        fixed; /* system device */
+dcl curdev        fixed; /* current device */
+dcl (row, column) fixed; /* menu rows and columns */
+
+dcl buf (255)                    fixed; /* buffer for configuration sector */
+dcl catalog (c#dir_max - 1)      fixed; /* catalog buffer */
+
+dcl used_controllers (5*8*8 - 1) boolean; /* TRUE if the given interface/controller/drive is in use */
+														/* room for imi + 4 scsi boards (e.g 5) */
+														/* room for 8 targets (e.g. 8) */
+														/* room for 8 LUN's (e.g. 8) */
+														
+dcl valid (rows*columns - 1)     boolean; /* valid screen fields array */
+
+dcl W1_Not_Set boolean; 						/* true when W1 is NOT configured upon entry to program */
+dcl using_interpreters_device_list fixed;
+
+
+/* $subtitle Device Information Storage
+
+   Information about each device is stored in a 5-word record with 
+   the following structure:
+
+              |15            8|7            0|
+      word 0: | SCSI/IMI Flag | Device Type  |
+      word 1: |      Sectors/Cylinder        |
+      word 2: |      Total Cylinders         |
+      word 3: |      IMI Device Address      |
+      word 4: |     SCSI Device Address      |
+
+   The array DEV_INFO is made of up these records, with a separate entry
+   for each device that can be configured.
+*/
+
+/* Record offsets: */
+
+dcl i#dev_type   lit '0'; /* word location of device type */
+dcl i#sec_cyl    lit '1'; /* word location of sectors/cylinder */
+dcl i#tot_cyl    lit '2'; /* word location of total cylinders */
+dcl i#imi_adr    lit '3'; /* word location of IMI drive address */
+dcl i#scsi_adr   lit '4'; /* word location of SCSI drive address */
+
+dcl i#entry_size lit '5'; /* size in words of each record */
+
+/* Valid devices: */
+
+dcl i#F0         lit '2';  /* index to start of F0 in DEV_INFO */
+dcl i#F1         lit '3';  /* index to start of F1 */
+dcl i#R0         lit '4';  /* index to start of R0 */
+dcl i#R1         lit '5';  /* index to start of R1 */
+dcl i#W0         lit '6';  /* index to start of W0 */
+dcl i#W1         lit '7';  /* index to start of W1 */
+dcl i#T0         lit '8';  /* index to start of T0 */
+dcl i#T1         lit '9';  /* index to start of T1 */
+dcl i#O0         lit '10'; /* index to start of O0 */
+dcl i#O1         lit '11'; /* index to start of O1 */
+
+dcl i#entry_max  lit '16'; /* maximum entries in DEV_INFO array */
+dcl i#num_wins   lit '4'; /* number of possible physical Winchesters on each device */
+
+dcl dev_info (i#entry_size * i#entry_max - 1) fixed; /* device info array */
+
+/* Default Device Addresses */
+
+dcl W0_IMI_Adr       lit '( shl(0,4) or 0 )'; /* Device address required for first IMI on W0 */
+dcl W0_SCSI_Adr      lit '( shl(0,8) or shl(0,4) or 5 )'; /* Device address required for first SCSI on W0 */
+
+dcl W0_IMI_Defaults  data (  0,0,   0,1,   2,0,   2,1); /* IMI device address defaults */
+dcl W0_SCSI_Defaults data (0,5,0, 0,4,0, 0,3,0, 0,2,0); /* SCSI device address defaults */
+
+dcl W1_IMI_Defaults  data (  1,0,   1,1,   3,0,   3,1); /* IMI device address defaults */
+dcl W1_SCSI_Defaults data (0,4,0, 0,3,0, 0,2,0, 0,1,0); /* SCSI device address defaults */
+
+dcl T0_SCSI_Defaults data (0,0,0); /* Tape defaults */
+dcl T1_SCSI_Defaults data (1,0,0); /* Tape defaults */
+
+dcl O0_SCSI_Defaults data (0,1,0); /* Optical defaults */
+dcl O1_SCSI_Defaults data (0,2,0); /* Optical defaults */
+
+dcl type_to_IMI data (7,0,5,7,8,1,2,4); /* maps device type into WIN_SIZ and WIN_CYL indexes */
+
+/* $page */
+
+get_ptr: proc (dev) returns (fixed); /* returns an index into dev_info for a device */
+   dcl dev fixed; /* device to get pointer for */
+   dcl ptr fixed; /* index pointer into dev_info */
+
+   dcl W0Index lit 'i#entry_size*4'; /* index for W0 */
+   dcl W1Index lit 'W0Index + i#num_wins*i#entry_size'; /* index for W1 */
+   dcl T0Index lit 'W1Index + i#num_wins*i#entry_size'; /* index for T0 */
+   dcl T1Index lit 'T0Index + i#entry_size'; /* index for T1 */
+   dcl O0Index lit 'T1Index + i#entry_size'; /* index for O0 */
+   dcl O1Index lit 'O0Index + i#entry_size'; /* index for O1 */
+
+   do case dev - 2; /* does not use device literals - be careful if they change */
+      ptr = (i#entry_size*0); /* F0 */
+      ptr = (i#entry_size*1); /* F1 */
+      ptr = (i#entry_size*2); /* R0 */
+      ptr = (i#entry_size*3); /* R1 */
+      ptr = (W0Index);        /* W0 */
+      ptr = (W1Index);        /* W1 */
+      ptr = (T0Index);        /* T0 */
+      ptr = (T1Index);        /* T1 */
+      ptr = (O0Index);        /* O0 */
+      ptr = (O1Index);        /* O1 */
+   end;
+   return (ptr); /* return pointer into dev_info */
+end get_ptr;
+
+get_info: proc (dev, drive, field) returns (fixed); /* returns a word from dev_info */
+   dcl dev   fixed; /* device to get info about */
+   dcl drive fixed; /* logical drive on that device */
+   dcl field fixed; /* record field to return */
+   dcl p     fixed; /* index pointer into dev_info */
+
+   p = get_ptr(dev); /* find array index into dev_info for this device */
+   return (dev_info(p + drive*i#entry_size + field)); /* return the desired word from dev_info */
+end get_info;
+
+put_info: proc(dev,drive,field,value); /* replaces a word into dev_info */
+   dcl dev   fixed; /* device to get info about */
+   dcl drive fixed; /* logical drive on that device */
+   dcl field fixed; /* record field to return */
+   dcl value fixed; /* value to put into dev_info */
+   dcl p     fixed; /* index pointer into dev_info */
+
+   p = get_ptr(dev); /* find array index into dev_info for this device */
+   dev_info(p + drive*i#entry_size + field) = value; /* store the given value in dev_info */
+end put_info;
+
+/* $page */
+
+used_controller: proc(devadr, type) boolean; /* return used_controller (devadr) */
+   dcl devadr fixed; /* configuration format device address */
+   dcl type   fixed; /* winchester type (0: IMI, 1: SCSI) */
+	dcl index  fixed;
+	dcl d24    fixed;
+	dcl lun    fixed;
+	
+	/* compute (scsi_board + 1) * 64  +  scsi_target*8 + scsi_lun  */
+
+	if (type == 1)								/* if scsi...					*/	
+	{
+		d24 = shr(devadr, 4) and "17";	/* ... get board#				*/
+
+		if (d24 == 1)							/* if board 1, use lun		*/
+			lun = 0;								/* of 0, else get lun#		*/
+		else
+			lun = shr(devadr, 8) and "17";
+	}
+	else
+	{
+		d24 = 0;
+		lun = 0;
+	}
+		
+	index = (d24 + type)*8*8 + (devadr and "17")*8 + lun;
+	
+   return (used_controllers (index));
+end used_controller;
+
+set_controller: proc(devadr, type, value); /* set used_controller (devadr) to value */
+   dcl devadr fixed; /* configuration format device address */
+   dcl type   fixed; /* winchester type (0: IMI, 1: SCSI) */
+   dcl value  boolean; /* value to set used_controller to */
+	dcl index  fixed;
+	dcl d24    fixed;
+	dcl lun    fixed;
+	
+	/* compute (scsi_board + 1) * 64  +  scsi_target*8 + scsi_lun  */
+
+	if (type == 1)								/* if scsi...					*/	
+	{
+		d24 = shr(devadr, 4) and "17";	/* ... get board#				*/
+
+		if (d24 == 1)							/* if board 1, use lun		*/
+			lun = 0;								/* of 0, else get lun#		*/
+		else
+			lun = shr(devadr, 8) and "17";
+	}
+	else
+	{
+		d24 = 0;
+		lun = 0;
+	}
+		
+	index = (d24 + type)*8*8 + (devadr and "17")*8 + lun;
+
+   used_controllers (index) = value;
+end set_controller;
+
+dcl print_device proc(fixed);
+
+print_outline:  proc; /* put up the screen template */
+	clear_screen;
+    if (terminal.graphics <> 0) then clear;
+	
+	px  ('C O N F I G U R  Configuration Utility          version of '); pxr (rel.date); crlf;
+	pxr ('  To change an item, move the cursor over the item and press the space bar.');
+	pxr ('  Press Q to quit (exit to MONITOR) or RETURN to write configuration.');
+	pxr ('');
+	px  ('Configuration of:  '); call print_device (shr(core(loc.ucat + 1), 8)); if core(loc.ucat) <> 0 then do; px (':'); px (location(loc.ccnm)); end; crlf;
+	pxr ('');
+	pxr ('Terminal:                                Storage Devices:             D T L');
+	pxr ('Printer:                                       W0: (1)');
+	pxr ('System Device:                                     (2)');
+	pxr ('Current Device:                                    (3)');
+	pxr ('Interfaces & Options:                              (4)');
+	pxr ('   NED Keyboard  (D164):                       W1: (1)');
+	pxr ('   RTP Interface (D130):                           (2)');
+	pxr ('   RTP Interface (D160):                           (3)');
+	pxr ('   Sample-to-Disk (D66):                           (4)');
+	pxr ('   DSP Interface (DDSAD):                      F0:');
+	pxr ('   Memory Size:                                F1:');
+	pxr ('   Processor Type:                             R0:');
+	pxr ('   Poly Voice Type:                            R1:');
+	pxr ('   Printer Interface:                          T0:');
+	pxr ('   Mouse Interface:                            O0:');
+	pxr ('                                               O1:');
+	
+	if (terminal.graphics <> 0) then do;
+		vector_mode;
+		iconnect(gposx (0   ), gposy(  500), gposx( 7800), gposy(  500));
+		iconnect(gposx (0   ), gposy( 2200), gposx( 7800), gposy( 2200));
+		iconnect(gposx (3900), gposy(  500), gposx( 3900), gposy( 2200));
+		transparent_mode;
+	end;
+end print_outline;
+
+go_to:  proc(row, col); /* move to position for field on menu */
+   dcl (row, col) fixed;
+
+   if col = 0 then do; /* column zero */
+      if      row >= 4 then pos (12 + (row - 4), 26); /* interfaces & options */
+      else if row >= 2 then pos (9 + (row - 2), 17);  /* system, current device */
+      else                  pos (7 + row, 11);        /* terminal, printer */
+   end;
+   else if col = 1 then do; /* column one (supplementary column zero info) */
+      if      row >= 8 then pos (16 + (row - 7), 34); 
+      else if row >= 4 then pos (12 + (row - 4), 34); 
+      else if row >= 2 then pos (10 + (row - 2), 34); 
+      else                  pos (7 + row, 34);        
+   end;
+   else if col = 2 then do; /* column two */
+      if row >= 0 then pos (8 + row, 58);
+   end;
+   else if col = 3 then do; /* column three (supplementary column two info) */
+      if row >= 0 then pos (8 + row, 70);
+   end;
+   else if col = 4 then do; /* column four  (supplementary column two info) */
+      if row >= 0 then pos (8 + row, 72);
+   end;
+   else do;                 /* column five  (supplementary column two info) */
+      if row >= 0 then pos (8 + row, 74);
+   end;
+end go_to;
+
+/* $SUBTITLE Terminal Code */
+
+graph_nulls: proc(r, action); /* change graphics or nulls characteristics of terminal/printer */
+   dcl r      fixed; /* ROW that we're on */
+   dcl action boolean;
+   dcl (i, j) fixed;
+
+   if r = 0 then i = buf (contab + c#ptype); /* terminal */
+   else        i = buf (contab + c#stype); /* printer */
+   if (( (shr(i, 8) and "37") = t#unknown) or ((shr(i, 8) and "37") = p#unknown)) then do; /* adjust nulls */
+      if action then j = ((i + 1) and "377"); else j = (i and "377"); /* increment and extract nulls if requested */
+      pnum (j, 0); if j < 100 then px (' '); if j < 10 then px (' '); /* print out the new value */
+      i = ((i and (not "377")) or j); /* get new terminal/printer value */
+   end;
+   else do; /* adjust graphics */
+      j = shr(i, 13); /* extract graphics */
+      if action then do; /* if asked to change */
+         if j <> 0 then j = 0; /* toggle graphics */
+         else           j = shl(1, 13);
+      end;
+      if j = 0 then px ('No ');
+      else          px ('Yes');
+      i = ((i and (not shl(7, 13))) or j); /* get new terminal/printer value */
+   end;
+   if action then do; /* if requested, update fields */
+      if r = 0 then buf (contab + c#ptype) = i; /* update terminal */
+      else          buf (contab + c#stype) = i; /* update printer */
+   end;
+end graph_nulls;
+
+terminal:  proc(action); /* terminal type field */
+   dcl action    fixed; /* TRUE to bump and print */
+   dcl (i, j, k) fixed;
+
+   i = shr(buf (contab + c#ptype), 8);
+   j = (i and "37"); /* term type */
+   if j = t#z19 then j = t#unknown; /* remap Z-19 */
+   k = shr(i, 5); /* graphics type */
+   if (j = t#vt100) and (k = g#vt640)     then j = 5; /* remap the vt640 */
+   if (j = t#vt100) and (k = g#dq640)     then j = 6; /* remap the dq640 */
+   if (j = t#vt100) and (k = g#mg600)     then j = 7; /* remap the mg600 */
+   if (j = t#vt100) and (k = g#macintosh) then j = 8; /* remap the mac */
+   if action then j = ((j + 1) mod 9); /* bump */
+   do case j;
+      px ('Other         ');
+      px ('Hardcopy      ');
+      px ('ADM 3,5,11    ');
+      px ('VT100         ');
+      px ('Datamedia     ');
+      px ('VT640         ');
+      px ('DQ640         ');
+      px ('Monterey MG600');
+      px ('Macintosh     ');
+   end;
+   px (' '); valid (row*columns + column + 1) = false;
+   k = (buf (contab + c#ptype) and "377"); /* extract nulls */
+   do case j;
+      do; i = t#unknown;  px ('Nulls:  '); valid (row*columns + column + 1) = true; end;
+      do; i = t#hardcopy; px ('            '); end;
+      i = t#adm3;
+      i = t#vt100;
+      i = t#datamedia;
+      i = t#vt640;
+      i = t#dq640;
+      i = t#mg600;
+      i = t#macintosh;
+   end;
+   if action then buf (contab + c#ptype) = shl(i, 8); /* update config */
+   if valid (row*columns + column + 1) then call graph_nulls (row, false);
+   crlf; /* write a carriage return to help an incorrectly configured user find their way */
+end terminal;
+
+/* $SUBTITLE Computer Options */
+
+printer:  proc(action); /* printer type field */
+   dcl action    fixed; /* TRUE to bump and print */
+   dcl (i, j, k) fixed;
+
+   j = shr(buf (contab + c#stype), 8);
+   i = (j and "37"); /* printer type */
+   j = shr(j, 5); /* graphics */
+   i = i - 8; if i < 0 then i = p#unknown; /* remap */
+   if action then i = ((i + 1) mod 6); /* bump */
+   do case i;
+      px ('Other        ');
+      px ('DECwriter-III');
+      px ('LA-34        ');
+      px ('Printronix   ');
+      px ('IDS/Dataprods');
+      px ('Diablo       ');
+   end;
+   px ('  '); valid (row*columns + column + 1) = true;
+   k = (buf (contab + c#stype) and "377"); /* extract nulls */
+   do case i;
+      do; i = p#unknown;    px ('Nulls:  '); end;
+      do; i = p#decIII;     px ('            '); valid (row*columns + column + 1) = false; end;
+      do; i = p#la34;       px ('Graph:  '); end;
+      do; i = p#printronix; px ('Graph:  '); end;
+      do; i = p#prism;      px ('Graph:  '); end;
+      do; i = p#diablo;     px ('            '); valid (row*columns + column + 1) = false; end;
+   end;
+   if action then buf (contab + c#stype) = shl(i, 8); /* update config */
+   if valid (row*columns + column + 1) then call graph_nulls (row, false);
+end printer;
+
+memory:  proc(action); /* memory size field */
+   dcl action fixed; /* TRUE to bump and print */
+   dcl i      fixed;
+
+   i = buf (contab + c#memsiz); /* get current value */
+   if action then do; /* bump */
+      i = i + 32; /* bump by 8K */
+      if      i = 256 then i = 240; /* toggle to 60K */
+      else if i = 272 then i = 252; /* toggle to 63K */
+      else if i > 272 then i = 64;  /* wrap (start at 16K) */
+   end;
+   pnum (shr(i, 2), 2); px (' K words');
+   buf (contab + c#memsiz) = i; /* store new value */
+end memory;
+
+processor.type:  proc (action); /* processor type field */
+   dcl action fixed; /* TRUE to bump and print */
+   dcl i      fixed;
+
+   i = (shr(buf (contab + c#cmopt), 8) and "7"); /* extract processor type */
+   if action then i = ((i + 1) mod 4); /* bump */
+   px ('Model '); wchar (a.a + i); /* output the model */
+   buf (contab + c#cmopt) = ((buf (contab + c#cmopt) and (not shl("7", 8))) or shl(i, 8)); /* update bits */
+end processor.type;
+
+poly.voice.type:  proc (action); /* processor type field */
+   dcl action fixed; /* TRUE to bump and print */
+   dcl i      fixed;
+
+   i = (buf (contab + c#cmopt) and o#pvoice); /* extract bit */
+   if action then i = (i xor o#pvoice); /* toggle */
+   if i <> 0 then px ('Mono/3200');
+   else           px ('Standard ');
+   buf (contab + c#cmopt) = ((buf (contab + c#cmopt) and (not o#pvoice)) or i); /* store bit */
+end poly.voice.type;
+
+yes_no:  proc(action, mask);
+   dcl action fixed; /* TRUE to bump and print */
+   dcl mask   fixed;
+   dcl i      fixed;
+
+   i = (buf (contab + c#cmopt) and mask); /* extract bit */
+   if action == 1 then i = (i xor mask); /* toggle */
+   if action == 3 then i = (0);
+   if i <> 0 then px ('Yes');
+   else           px ('No ');
+   buf (contab + c#cmopt) = ((buf (contab + c#cmopt) and (not mask)) or i); /* store bit */
+end yes_no;
+
+/* $SUBTITLE  Update the Configuration Table */
+
+insert ':utilcat:condev'; /* get the device procedures */
+
+update_config:  proc returns (boolean); /* update the configuration table on disk */
+   dcl okay       boolean; /* TRUE if we can (and eventually do) update config */
+   dcl nbuf (255) fixed; /* new sector buffer */
+   dcl i          fixed;
+
+   okay = false; /* assume we can't update config */
+   i = count_devices; /* count number of devices currently configured */
+
+   if i igt (c#strlen/s#blklen) then do; /* too many devices are currently configured */
+      wchar (a.bel); /* ring bell */
+      pcmd ('Configuration table full.  Please unconfigure ');
+      pnum (i - c#strlen/s#blklen, 0); px (' devices.');
+   end;
+   else do; /* there is room */
+      i = check_winchesters; 	/* check for valid Winchester configuration */
+
+      if i <> 0 then do; 		/* an error occurred */
+         wchar (a.bel); 		/* ring bell */
+
+         do case i; /* print different error messages */
+            ; /* no error */
+            pcmd ('Cannot mix IMI and SCSI Winchester types on the same device.'); /* 1: IMI/SCSI drives are mixed on one device */
+            pcmd ('Duplicate Winchester device address specified.'); /* 2: duplicate device addresses specified in current configuration */
+            do; /* 3: incorrect configuration for first drive on W0 */
+               pcmd ('Winchester W0 (1) must be configured at address ');
+               if shr(get_info (i#W0, 0, i#dev_type), 8) = 0 /* IMI? */
+               then call print_win_adr (0, W0_IMI_Adr); /* print correct IMI address */
+               else call print_win_adr (1, W0_SCSI_Adr); /* print correct SCSI address */
+               wchar (a.period);
+            end;
+            pcmd ('All drives on a device must have the same D24 number.'); /* 4: D24 numbers must be the same */
+        		pcmd ('SCSI address of an Optical Disk conflicts with a W0 or W1 SCSI address.');
+        		pcmd ('O0 and O1 must have different SCSI addresses.');
+		  end; /* case */
+      end;
+      else do; /* okay to save configuration */
+         okay = true; /* assume we can update config */
+         call save_device_config; /* save current devices configured into config buffer */
+
+         // Look for write-protected W0
+         if ((interp_w0_write_protected(0) != 0) && (using_interpreters_device_list != 0))
+         {
+             pcmd ('Disk is write-protected.');
+             okay = false; /* don't update */
+         }
+
+         else if ((curtyp = 0) or (curtyp = 2)) then do; /* if on a floppy */
+            if locate (monitor, 1) then do; /* if MONITOR is found */
+               call readdata (f#ms_sector, f#ls_sector, nbuf, 256); /* read in */
+
+               if ((nbuf (0) <> "100377") or (nbuf (1) == "64")) then do; /* current version? */
+                  pcmd ('The version of MONITOR on this disk doesn''t match this version of CONFIGUR.');
+                  okay = false; /* don't update */
+               end;
+               else do; /* valid MONITOR, copy BUF's config to NBUF */
+						if (using_interpreters_device_list != 0)					// if using interpreter, only
+						{																		// copy up to the device list
+							do i = 0 to c#curdev - 1;
+	                     nbuf (nbuf (1) + i) = buf (contab + i);
+	                  end;
+						}
+						else do i = 0 to c#conlen - 1;								// else copy the whole shebang
+                     nbuf (nbuf (1) + i) = buf (contab + i);
+                  end;
+                  call blockmove (nbuf, buf, 256);
+               end;
+            end; /* of MONITOR's there */
+            else do; /* MONITOR not found */
+               pcmd ('No MONITOR program found on current device or current catalog.');
+               okay = false; /* don't update */
+            end;
+         end; /* of top level of floppy */
+         if okay /* if okey-dokey */
+         then call writedata (f#ms_sector, f#ls_sector, buf, 256); /* write out new config */
+      end; /* valid configuration */
+   end; /* room in config table */
+
+   return (okay); /* return whether or not we actually updated it */
+end update_config;
+
+/* $SUBTITLE  Change the Configuration Table */
+
+dcl dev  data (6, 6, 6, 6, 7, 7, 7, 7, 2, 3, 4, 5, 8, 10, 11); /* menu row -> device mapping */
+dcl drv  data (0, 1, 2, 3, 0, 1, 2, 3, 0, 0, 0, 0, 0,  0,  0); /* menu row -> drive number   */
+
+/* NOTE:  We MUST use the global ROW and COLUMN because some
+.         routines we call depend on these being correct. */
+
+display_menu:  proc; /* display configuration menu */
+   call print_outline; /* print screen outline */
+
+   column = 0; /* do column zero first */
+   do row = 0 to 13; /* print values for column 0 */
+      call go_to (row, column); valid (row*columns + column) = true; /* we've printed something here */
+      do case row;
+         call terminal (false);
+         call printer (false);
+         call system.device (false);
+         call current.device (false);
+         call yes_no (false, o#d164); /* d164 */
+         call yes_no (false, o#d130); /* d130 */
+         call yes_no (false, o#d160); /* d160 */
+         call yes_no (false, o#d66);  /* d66  */
+         call yes_no (false, o#dsp);  /* ddsad interface on DTD */
+         call memory (false);
+         call processor.type (false);
+         call poly.voice.type (false);
+         call yes_no (false, o#d40);  /* d40  */
+         call yes_no (false, o#d44);  /* d44  */
+      end;
+   end;
+
+   column = 2; /* now skip to column 2 */
+   do row = 0 to 14; /* we can move to all the rows at first */
+      valid (row*columns + column) = true; /* can move to this device */
+   end;
+   do row = 0 to 14; /* print values for column 2 */
+      call go_to (row, column); /* go to that location */
+      call storage_device (dev(row), drv(row), false, row); /* print what the device is */
+   end;
+end display_menu;
+
+update_item:  proc(row, column, code); /* update configuration item */
+   dcl (row, column) fixed; /* position of item to update on menu */
+	dcl (code)        fixed; /* 1 (e.g. true) for increment, 3 for delete */
+   
+	if column = 0 /* toggle parameter */
+   then do case (row); /* branch according to location */
+      call terminal (true);
+      call printer (true);
+      call system.device (true);
+      call current.device (true);
+      call yes_no (code, o#d164); /* d164 */
+      call yes_no (code, o#d130); /* d130 */
+      call yes_no (code, o#d160); /* d160 */
+      call yes_no (code, o#d66);  /* d66  */
+      call yes_no (code, o#dsp);  /* ddsad interface on DTD */
+      call memory (true);
+      call processor.type (true);
+      call poly.voice.type (true);
+      call yes_no (code, o#d40);  /* d40  */
+      call yes_no (code, o#d44);  /* d44  */
+   end;
+   else if column = 1 then do; /* column zero modifiers */
+      call graph_nulls (row, true); /* change graphics/nulls characteristics */
+   end;
+   
+   else if (using_interpreters_device_list != 0)
+	{
+      wchar (a.bel); /* ring bell */
+      pcmd ('Use the Synclavier³ Preferences Window to set your device configuration.');
+	}
+	
+   else if column = 2 then do; /* toggle storage device */
+      call storage_device (dev(row), drv(row), code, row);
+   end;
+   else if column = 3 then do; /* toggle interface */
+      call win_interface (dev(row), drv(row), true);
+   end;
+   else if column = 4 then do; /* toggle controller */
+      call win_controller (dev(row), drv(row), true);
+   end;
+   else do; /* toggle drive */
+      call win_drive (dev(row), drv(row), true);
+   end;
+end update_item;
+
+configur:  proc; /* change the configuration table in core */
+   dcl updated    boolean; /* TRUE if we update the configuration */
+   dcl modified   boolean; /* TRUE if the buffered config has been modified, but not updated */
+   dcl okbuf (2)  fixed; /* array of OK string */
+   dcl (i, j, ch) fixed;
+
+   do j = 0 to 5*8*8 - 1; used_controllers (j) = false; end; /* no controllers have been assigned */
+   do j = 0 to rows*columns - 1; valid (j) = false; end; /* nothing is valid yet */
+
+   updated = false; /* haven't touched the configuration */
+   modified = false; /* haven't modified the configuration either */
+
+   call set_device_defaults; /* set up device defaults */
+   call get_device_config; /* get current device information */
+
+   if (get_info(i#W1, 0, i#dev_type) and "377") = 0 /* see if W1 is there */
+   then W1_Not_Set = true;  /* W1 is not configured */
+   else W1_Not_Set = false; /* W1 is configured */
+
+   sysdev = get.device (buf (contab + c#strdev)); /* get system device */
+   curdev = get.device (buf (contab + c#curdev)); /* get current device */
+
+   /* Always be sure the D4567 bit is set -- we MUST have it! */
+   buf (contab + c#cmopt) = buf (contab + c#cmopt) | o#d4567;
+
+   call display_menu; /* display the menu */
+
+   row = 0; column = 0;
+
+   do forever;
+      call go_to (row, column);
+      ch = rchar; /* get input character */
+      erase_command; /* clear command line here */
+      call go_to (row, column); /* and move back to where we were */
+
+      if ((ch = a.q) or (ch = l.q) or (ch = a.nul)) then do; /* exit */
+         if modified then do; /* if they changed the config, but didn't update it */
+            pcmd ('Configuration not saved; to exit, type ''OK'' followed by RETURN ->');
+            get_string('', false, okbuf, 2);
+            if compare (okbuf, 'OK') then return (updated); /* if OK, return update status */
+         end;
+         else return (updated); /* no modified, just return updated status */
+      end;
+      else if ch = a.sp then do; /* change config */
+         modified = true; /* we've now modified the config */
+         call update_item (row, column, true); /* update the item */
+      end; /* of change config */
+		else if ((ch == a.delete)
+		&&       ((column == 2)
+		||        ((column == 0) && (row == 4 || row == 5 || row == 6 || row == 7 || row == 8 || row == 12 || row == 13))))
+		{
+         modified = true; /* we've now modified the config */
+         call update_item (row, column, 3); /* delete the item */
+		}
+      else if ch = a.refresh then do; /* refresh display */
+         i = row; j = column; /* save current row and column (these are (ARGH!) global!) */
+         call display_menu; /* just redraw the menu */
+         row = i; column = j; /* restore current row and column */
+      end;
+      else if ch = a.cr then do; /* update config */
+         pcmd ('Please verify configuration, then type ''OK'' followed by RETURN ->');
+         get_string('', false, okbuf, 2);
+         if compare (okbuf, 'OK') then do; /* if OK */
+            if update_config then do; /* try to update configuration */
+               modified = false; /* the buffered config now matches the saved config */
+               updated = true; /* we updated the config */
+               pcmd ('Configuration updated.');
+            end; /* of updated configuration */
+         end; /* of OK to update coinfig */
+      end; /* of update config */
+      else if ((ch = cur.left) or (ch = a.bs)) then do; /* cursor left */
+         j = column; /* remember what column we're starting at */
+         row = row + 1; /* precompensate for the move up below */
+         do while ((j = column) and (row > 0)); /* make sure we move left - there are at least two columns */
+            if column = column_one then j = -1; /* make sure we get out if we're already in the first column */
+            row = row - 1; /* move up a row */
+            i = column - 1; /* test the waters - move left */
+            do while (i >= 0); /* look for the next valid column */
+               if valid (row*columns + i) then do; /* if this one's valid */
+                  column = i; /* move there */
+                  i = -1; /* and get out */
+               end;
+               else i = i - 1; /* else look at next column */
+            end;
+         end; /* of making sure we move left */
+      end; /* of cursor left */
+      else if ((ch = cur.right) or (ch = a.ff)) then do; /* cursor right */
+         j = column; /* remember what column we're starting at */
+         row = row - 1; /* precompensate for the move down below */
+         do while ((j = column) and (row < rows - 1)); /* make sure we move right - there are at least two columns */
+            if ((column = column_two) or (column = columns - 1)) then j = -1; /* make sure we get out if we're already in the second column or the end */
+            row = row + 1; /* move down a row */
+            i = column + 1; /* test the waters - move right */
+            do while (i < columns); /* look for the next valid column */
+               if valid (row*columns + i) then do; /* if this one's valid */
+                  column = i; /* move there */
+                  i = columns; /* and get out */
+               end;
+               else i = i + 1; /* else look at next column */
+            end;
+         end; /* of making sure we move right */
+      end; /* of cursor right */
+      else if ((ch = cur.up) or (ch = a.vt)) then do; /* cursor up */
+         i = row - 1; /* test the waters - move up */
+         do while (i >= 0); /* look for the next valid row */
+            if valid (i*columns + column) then do; /* if this one's valid */
+               row = i; /* move there */
+               i = -1; /* and get out */
+            end;
+            else i = i - 1; /* else look at next row */
+         end;
+      end; /* of cursor up */
+      else if ((ch = cur.down) or (ch = a.lf)) then do; /* cursor down */
+         i = row + 1; /* test the waters - move down */
+         do while (i < rows); /* look for the next valid row */
+            if valid (i*columns + column) then do; /* if this one's valid */
+               row = i; /* move there */
+               i = rows; /* and get out */
+            end;
+            else i = i + 1; /* else look at next row */
+         end;
+      end; /* of cursor down */
+      else if ((ch = cur.home) or (ch = c.r) or (ch = c.y) or (ch = a.rs) or (ch = pf.1)) then do; /* home */
+         row = 0; column = 0;
+      end;
+   end; /* of do while */
+end configur;
+
+/* $SUBTITLE  Main program code */
+
+dcl i fixed;
+
+if systyp = 0 then core(loc.strd) = 0; /* get rid of current file on floppy systems */
+call set_catbuf (addr(catalog (0)), 0); /* set the catalog buffer */
+
+if not locate (monitor, 1) then do; /* search for MONITOR */
+   clear_screen;
+   if (terminal.graphics <> 0) then clear;
+   crlf;
+   pxr('No MONITOR program was found on the current device and catalog.');
+
+   if ((core(loc.ucat) <> core(loc.scat)) or (core(loc.ucat + 1) <> core(loc.scat + 1))) then do; /* not in system catalog */
+      px('To configure your system, type ENTER ');
+      call print_device (shr(core(loc.scat + 1), 8));
+      pxr(': before running CONFIGUR again.');
+   end;
+   else if systyp = 0 then do; /* current catalog is the same as the system catalog; floppy system */
+      px('To configure your system, place a system disk in ');
+      call print_device (shr(core(loc.scat + 1), 8));
+      pxr(' before running CONFIGUR again.');
+   end;
+   else pxr('There doesn''t appear to be a MONITOR on your system at all.');
+   call exit(-1);
+end;
+
+call readdata (f#ms_sector, f#ls_sector, buf, 256); /* read in */
+
+if (buf (0) <> "100377") or (buf (1) == "64")
+then do; /* not current version */
+   clear_screen;
+   if (terminal.graphics <> 0) then clear;
+   crlf;
+   pxr ('The version of MONITOR that was found does not match');
+   pxr ('this version of CONFIGUR and cannot be reconfigured.');
+   call exit(-1);
+end; /* of not current version */
+
+contab = buf (1); /* locate the configuration table */
+cmdline = 23; /* set command line */
+do i = 0 to rows*columns - 1; valid (i) = false; end; /* nothing printed on the screen yet */
+
+/* Use the device config from our own run time environment if we are running */
+/* under the interpreter and the user is modifying w0:monitor					  */
+
+if ((interp_is_running != 0)					/* if running on interpreter, use our own config */
+&&  (c#ms_sector == shl(i#W0, 8))			/* that was set up by the interpreter				 */
+&&  (c#ls_sector == 0))
+{
+	blockmove (location(c#contab + c#memsiz), loc(addr(buf(contab + c#memsiz))), c#strend - c#memsiz);
+	using_interpreters_device_list = true;
+}
+
+if configur then do; /* update the configuration */
+   if core(loc.ucat) = 0 then core(loc.magic) = 0; /* force a reboot if not in subcatalog */
+   clear_screen;
+   if (terminal.graphics <> 0) then clear;
+   pxr ('Done with reconfiguration.');
+end;
+else do;
+   clear_screen;
+   if (terminal.graphics <> 0) then clear;
+	pxr ('Reconfiguration aborted.');
+end;

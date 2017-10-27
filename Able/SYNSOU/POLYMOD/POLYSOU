@@ -1,0 +1,1416 @@
+/* :SYNSOU:POLYMOD:POLYSOU - $TITLE MODULE FOR POLY MEMORY ACCESS
+
+Modified:
+   12/12/96 - cj  - Added stop checking in copy poly mem
+   04/09/90 - cj  - Fixed bug with copy.poly.mem if copying for more than 32767 sectors.
+   04/11/89 - TSS - Fixed bug which caused READ.STM.CONFIG to hang if no STM plugged in
+   04/03/89 - TSS - Get rid of D03 writes in READ.STM.CONFIG
+   01/20/89 - MWH/TSS - Fix extended poly addressing in READ & WRITE
+   12/01/88 - CJ  - Added POLYUSED
+   10/03/88 - CJ  - Added poly read/write for > 32 megs
+   09/06/88 - MWH - ADD16 is unsigned; fix bug in COPY.POLY.MEM
+   08/01/88 - MWH - Expand phase logic to all crossfades, not just > 0.5 sec
+   07/05/88 - MWH - Add phase cancellation logic to fades for Tim/Denny
+   04/14/88 - MWH - Add routine to do general fade-in or fade-out
+   03/02/88 - MWH - Allow POLY.CHECK to tell old vs new PS memory controller
+   02/08/88 - MWH - Fix bug in COPY.POLY.MEM with new PS memory controller
+   02/01/88 - MWH - Expand crossfade times to 65.535 seconds
+   07/30/87 - MWH - Add POLY.WRITEDATA
+   07/15/87 - MWH - Put args to POLY.READDATA in more sensible order
+   07/06/87 - MWH - Put # users in correct word during POLY.CHECK
+   06/19/87 - MWH - Added support for multiple poly bins
+*/
+
+MODULE POLYMOD;
+
+insert ':-xpl:syslits';
+insert ':-xpl:intrprtr';
+
+INSERT ':SYNLITS:COMLITS';   /* ALL MODULES MUST INSERT COMLITS    */
+INSERT ':SYNLITS:GLOBLITS';  /* PRACTICALLY ALL WILL WANT GLOBLITS */
+INSERT ':SYNLITS:FCODLITS';  /* FUNCTION CODE LITS                 */
+INSERT ':SYNLITS:SAMPLITS';  /* POLY SAMPLING MEMORY ALLOC BLOCK STRUCTURE LITERALS */
+
+INSERT ':SYNAUXS:LODLITS';   /* FOR POLY HISTORY FILE              */
+
+INSERT ':SYNLITS:SYNCLITS';  /* FOR MESSAGE TYPES				    	 */
+INSERT ':SYNLITS:ASCIILIT';  /* FOR CHARACTER DEFS						 */
+
+INSERT ':SYNMODS:GLOBDCL';   /* FOR MODC                           */
+INSERT ':SYNMODS:XMEMDCL';   /* GET COPY.BUF                       */
+INSERT ':SYNMODS:MATHDCL';   /* MULTIPLY, RATIO_MULTIPLY, 32-BIT   */
+INSERT ':SYNMODS:GETVDCL';   /* FOR NEW.POLY.CONTENTS              */
+INSERT ':SYNMODS:TTYDCL';    /* FOR TTY ROUTINES						 */
+
+INSERT ':SYNRDCLS:03-PDCLS'; /* FOR DISPLAY STUFF...			   	 */
+INSERT ':SYNRDCLS:05-BDCLS'; /* FOR DISPLAY STUFF...			   	 */
+
+/* GLOBAL VARIABLES */
+
+/* THIS FIRST BLOCK CONTAINS ARRAYS WHICH ARE PAIRS OF WORDS FORMING 32 BIT POINTERS:
+ *      LW#MSB } FOR FIRST POLY BIN
+ *      LW#LSB }
+ *      LW#MSB } FOR SECOND POLY BIN
+ *      LW#LSB }
+ *      ETC...
+ */
+DCL PSFIRSTS (PSMAXBINS*2-1)     FIXED PUBLIC;   /* POINTER TO START OF SOUND FILES IN POLY MEM */
+DCL PSLASTS (PSMAXBINS*2-1)      FIXED PUBLIC;   /* POINTER TO START OF FREE SPACE AFTER THE LAST SOUND FILE */
+DCL PSMAXS (PSMAXBINS*2-1)       FIXED PUBLIC;   /* POINTER TO THE END OF POLY MEMORY */
+DCL PSFREES (PSMAXBINS*2-1)      FIXED PUBLIC;   /* # SECTORS UNUSED (EVEN IF CONTAINING A SOUND FILE */
+DCL PSHERES (PSMAXBINS*2-1)      FIXED PUBLIC;   /* ROTARY POINTER TELLING WHERE TO START LOADING FILES-LRU OF UNUSED */
+DCL POLYAMOUNTS (PSMAXBINS*2-1)  FIXED PUBLIC;   /* HOW MUCH POLY MEMORY EXISTS IN EACH BIN */
+
+DCL POLYADCS (PSMAXBINS-1)       FIXED PUBLIC;   /* SET TO 1 IF POLY A/D CONTROLLER IS PRESENT */
+DCL ADCONFIGS (PSMAXBINS-1)      FIXED PUBLIC;   /* NUM BOXES A/D MAP */
+DCL POLYNUMVS (PSMAXBINS-1)      FIXED PUBLIC;   /* HOW MANY VOICES IN THIS POLY BIN */
+DCL POLYUSED  (PSMAXBINS-1)      FIXED PUBLIC;   /* USED TO KEEP TRACK OF CHANNEL USAGE */
+DCL POLYNUMS                     FIXED PUBLIC;   /* HOW MANY POLY BINS EXIST */
+DCL #CBINCODE                    FIXED PUBLIC;   /* WHICH BIN WE ARE ACCESSING */
+
+INSERT ':SYNAUXS:POLYLITS';  /* POLY SPECIFIC LITERALS             */
+
+
+/* ROUTINE TO SET UP BIN NUMBER FOR ACCESSING THE ABOVE VARIABLES */
+
+SET.CUR.BIN:PROC(BIN) PUBLIC;
+   DCL BIN FIXED;        /* WHICH POLY BIN */
+   #CBINCODE = SHL(BIN,1);
+END SET.CUR.BIN;
+
+
+SET.BIN.FROM.BASE:PROC(BASE) PUBLIC;
+   DCL BASE FIXED ARRAY;             /* WHICH POLY BIN IS MSB UPPER 2 BITS */
+
+   /* REALLY SHR(14) THEN SHL(1), BUT ONLY TOP 2 AND LOWEST 4 BITS ARE USED IN MSB */
+   #CBINCODE = SHR(BASE(LW#MSB),BASE#BIN_P-1);
+END SET.BIN.FROM.BASE;
+
+/* ROUTINES TO SET UP READ AND WRITE POINTERS */
+/* FOR READING/WRITING POLY MEMORY            */
+
+PSMREAD:PROC(BASE,SEC,WORD) PUBLIC;  		/* SET UP FOR POLY SYNTH MEMORY READ */
+   DCL BASE FIXED ARRAY;
+   DCL (SEC,WORD) FIXED;
+   DCL LW(1) FIXED;           				/* LOCAL PLACE TO CONSTRUCT LONG WORD SO WE DON'T CORRUPT CALLER'S "BASE" */
+   CALL COPY32(BASE,LW);
+   CALL ADD16(SHR(WORD,8),LW);     			/* IF WORD OFFSET CONTAINS SECTORS, GET THEM */
+   WORD = WORD & "377";
+   CALL ADD16(SEC,LW);           			/* ADD SECTOR TO BASE */
+   /* NOW WE HAVE:
+    *    LW(0)  =  POLY MEM PAGE # - 4 BITS (BIN # IN TOP 2 BITS)
+    *    LW(1)  =  POLY MEM SECTOR # IN THAT PAGE - 16 BITS
+    *    WORD   =  OFFSET IN SECTOR (0 TO 255) - 8 BITS
+    */
+   DISABLE;
+   WRITE(PSC)=SHR(LW(LW#MSB),8);      		/* CHANNEL IS REALLY (64 * BIN #) */
+   WRITE(PSF)=PSRMA;                    	/* READ MEMORY ADDRESS FC */
+   WRITE(PSD)=LW(LW#LSB);               	/* UPPER 16 BITS */
+   WRITE(PSD)=SHL(LW(LW#MSB),8) \ WORD; 	/* LOWER 8 BITS PLUS PAGE # IN UPPER BYTE */
+   ENABLE;
+END PSMREAD;
+
+PSMWRITE:PROC(BASE,SEC,WORD) PUBLIC;  /* SET UP FOR POLY SYNTH MEMORY WRITE */
+   DCL BASE FIXED ARRAY;
+   DCL (SEC,WORD) FIXED;
+   DCL LW(1) FIXED;           /* LOCAL PLACE TO CONSTRUCT LONG WORD SO WE DON'T CORRUPT CALLER'S "BASE" */
+   CALL COPY32(BASE,LW);
+   CALL ADD16(SHR(WORD,8),LW);     /* IF WORD OFFSET CONTAINS SECTORS, GET THEM */
+   WORD = WORD & "377";
+   CALL ADD16(SEC,LW);           /* ADD SECTOR TO BASE */
+   /* NOW WE HAVE:
+    *    LW(0)  =  POLY MEM PAGE # - 4 BITS (BIN # IN TOP 2 BITS)
+    *    LW(1)  =  POLY MEM SECTOR # IN THAT PAGE - 16 BITS
+    *    WORD   =  OFFSET IN SECTOR (0 TO 255) - 8 BITS
+    */
+   DISABLE;
+   WRITE(PSC)=SHR(LW(LW#MSB),8);         /* CHANNEL IS REALLY (64 * BIN #) */
+   WRITE(PSF)=PSWMA;                     /* WRITE MEMORY ADDRESS FC */
+   WRITE(PSD)=LW(LW#LSB);                /* UPPER 16 BITS */
+   WRITE(PSD)=SHL(LW(LW#MSB),8) \ WORD;  /* LOWER 8 BITS PLUS PAGE # IN UPPER BYTE */
+   ENABLE;
+END PSMWRITE;
+
+/* $subtitle  Determine the contents of currently configured STM boxes */
+
+// Note: Routine must leave interrupts off.
+READ.STM.CONFIG: PROC (CHANNEL) RETURNS (FIXED) PUBLIC SWAPABLE;
+   DCL CHANNEL       FIXED;    /* CHANNEL WE WANT INFO ABOUT       */
+
+   DCL PRM_THERE     FIXED;    /* 1=PRM PRESENT, 0=PRM NOT PRESENT */
+   DCL SAFE_TYPE     FIXED;    /* 1=SAFE II (NEW), O=SAFE I (OLD)  */
+   DCL NUM_BOXES     FIXED;    /* NUM STM BOXES CONNECTED TO THE BIN */
+                               /* CONTAINING CHANNEL */
+   DCL DATA1         FIXED;    /* VALUE RETURNED FROM PSADID */
+   DCL DATA2         FIXED;    /* TOP 4 BITS MASKED OFF OF DATA */
+	DCL DATA3			FIXED;
+
+   DCL INDEX_OFFSET  LIT '3';  /* OFFSET TO NEXT DATA BLOCK IN LOOK_UP TABLE */
+
+   /* THE FOLLOWING TABLE LISTS ALL CURRENT CONFIGURATIONS
+      OF AN STM BOX.  TO FIND WHAT CONFIGURATION IS BEING
+      USED ON A PARTICULAR CHANNEL, WE LOOK AT WHAT WAS RETURNED
+      FROM THE PSADID CALL AND USE THAT VALUE AS AN INDEX INTO
+      THE FOLLOWING TABLE.  THE THREE VALUES STORED IN EACH BLOCK
+      ARE:  IF PRM IS PRESENT IN BOX(ES), OLD OR NEW SAFES IN BOX(ES),
+      HOW MANY STM BOXES ARE OUT THERE.  */
+
+   DCL LOOK_UP  DATA
+	  (0, 0, 0,				/* 0 = 0 0 0 0 = NO STM AT ALL              */
+		0, 0, 1,				/* 1 = 0 0 0 1 = NO PRM, OLD SAFES, 1 BOX   */
+		0, 0, 2,				/* 2 = 0 0 1 0 = NO PRM, OLD SAFES, 2 BOXES */
+		0, 0, 3,				/* 3 = 0 0 1 1 = NO PRM, OLD SAFES, 3 BOXES */
+		0, 0, 4,				/* 4 = 0 1 0 0 = NO PRM, OLD SAFES, 4 BOXES */
+		0, 0, 0,				/* 5 = 0 1 0 1 = UNUSED                     */
+		0, 0, 0,				/* 6 = 0 1 1 0 = UNUSED                     */
+		0, 0, 0,				/* 7 = 0 1 1 1 = UNUSED                     */
+		1, 1, 4,				/* 8 = 1 0 0 0 =    PRM, NEW SAFES, 4 BOXES */
+		0, 1, 1,				/* 9 = 1 0 0 1 = NO PRM, NEW SAFES, 1 BOX   */
+		0, 1, 2,				/* 10= 1 0 1 0 = NO PRM, NEW SAFES, 2 BOXES */
+		0, 1, 3,				/* 11= 1 0 1 1 = NO PRM, NEW SAFES, 3 BOXES */
+		0, 1, 4,				/* 12= 1 1 0 0 = NO PRM, NEW SAFES, 4 BOXES */
+		1, 1, 1,				/* 13= 1 1 0 1 =    PRM, NEW SAFES, 1 BOX   */
+		1, 1, 2,				/* 14= 1 1 1 0 =    PRM, NEW SAFES, 2 BOXES */
+		1, 1, 3);			/* 15= 1 1 1 1 =    PRM, NEW SAFES, 3 BOXES */
+
+   WRITE(PSC) = CHANNEL;        /* 0=BIN 0, 64=BIN 1, 128=BIN 2, 192=BIN 3 */
+
+   IF (READ(PSC)&"377")<>CHANNEL THEN DO;
+      WRITE(PSC) = 0;                    // Restore likely usefull channel number to avoid possible shadow register problems
+      RETURN 0;                          /* BIN DOES NOT EXIST      */
+   END;
+
+   WRITE(PSF)=PSNUMV;                    /* LOOK UP VOICE & A/D CONFIG */
+
+   IF (READ(PSD)&"200")=0 THEN RETURN 0; /* NO SAMPLING UNITS */
+
+   WRITE(PSF) = PSADID;                  /* PASS IDENTIFICATION CODE */
+   WRITE(PSD) = 0;
+
+   DO DATA1=1 TO 100;
+		DATA3 = interp_usleep(1);        // DELAY FOR PPC
+	END;                                /* WAIT FOR A LITTLE BIT HERE TO LET HARDWARE CATCH UP */
+
+   DATA1 = READ(PSD);                    /* GET WHOLE WORD */
+   DATA2 = SHR( DATA1&"HF000", 12);      /* EXTRACT TOP 4 BITS */
+
+   PRM_THERE = LOOK_UP( INDEX_OFFSET*DATA2     )&"H0001";
+   SAFE_TYPE = LOOK_UP( INDEX_OFFSET*DATA2 + 1 )&"H0001";
+   NUM_BOXES = LOOK_UP( INDEX_OFFSET*DATA2 + 2 )&"H0007";
+
+   /* THE FORMAT OF THE RETURNED WORD IS AS FOLLOWS:
+      BIT  15:    1=NEW SAFES, 0=OLD SAFES
+      BIT  14:    1=PRM THERE, 0=PRM NOT THERE
+      BITS 13-11: NUMBER OF BOXES (0-4)
+      BITS 10-8:  UNUSED
+      BIT   7:    SET IF 2ND SAFE IN BOX 3 IS THERE
+      BIT   6:    SET IF 1ST SAFE IN BOX 3 IS THERE
+      BIT   5:    SET IF 2ND SAFE IN BOX 2 IS THERE
+      BIT   4:    SET IF 1ST SAFE IN BOX 2 IS THERE
+      BIT   3:    SET IF 2ND SAFE IN BOX 1 IS THERE
+      BIT   2:    SET IF 1ST SAFE IN BOX 1 IS THERE
+      BIT   1:    SET IF 2ND SAFE IN BOX 0 IS THERE
+      BIT   0:    SET IF 1ST SAFE IN BOX 0 IS THERE
+   */
+
+   RETURN ( SHL(SAFE_TYPE,15)+SHL(PRM_THERE,14)+SHL(NUM_BOXES,11)+(DATA1&"HFF") );
+
+END READ.STM.CONFIG;
+
+/* $PAGE - ROUTINES TO COPY/DISKREAD POLY SYNTH MEM */
+
+POLY.IN:PROC(DES,LEN) PUBLIC;                   /* COPY BLOCK INTO MAIN MEMORY FROM POLY SYNTH - SET UP READ POINTERS BEFORE CALLING */
+   DCL (DES,LEN) FIXED;
+   WRITE("313")=DES;                    /* SET UP CORE POINTER */
+   IF INC.POLY OR (MODC<>0) THEN DO;
+      DO WHILE LEN IGE 64;              /* COPY 64 WORD CHUNKS */
+         RPC 64;
+         WRITE("373")=READ(PSD);
+         LEN=LEN-64;
+      END;
+      IF LEN<>0 THEN DO;
+         RPC LEN;
+         WRITE("373")=READ(PSD);
+      END;
+   END;
+   ELSE DO;                             /* NON REPEAT CTR */
+      DO WHILE LEN IGE 16;                 /* COPY 16 WORD CHUNKS */
+         WRITE("373")=READ(PSD); WRITE("373")=READ(PSD); WRITE("373")=READ(PSD); WRITE("373")=READ(PSD);
+         WRITE("373")=READ(PSD); WRITE("373")=READ(PSD); WRITE("373")=READ(PSD); WRITE("373")=READ(PSD);
+         WRITE("373")=READ(PSD); WRITE("373")=READ(PSD); WRITE("373")=READ(PSD); WRITE("373")=READ(PSD);
+         WRITE("373")=READ(PSD); WRITE("373")=READ(PSD); WRITE("373")=READ(PSD); WRITE("373")=READ(PSD);
+         LEN=LEN-16;
+      END;
+      DO WHILE LEN<>0;
+         WRITE("373")=READ(PSD);
+         LEN=LEN-1;
+      END;
+   END;
+END POLY.IN;
+
+POLY.OUT:PROC(SOU,LEN) PUBLIC;          /* COPY BLOCK TO POLY MEM - SET UP WRITE ADDRESS BEFORE CALLING */
+   DCL (SOU,LEN) FIXED;
+   WRITE("313")=SOU;                    /* SET UP CORE POINTER */
+   IF INC.POLY OR (MODC<>0) THEN DO;    /* USE RPC             */
+      DO WHILE LEN IGE 64;              /* COPY 64 WORD CHUNKS */
+         RPC 64;
+         WRITE(PSD)=READ("373");
+         LEN=LEN-64;
+      END;
+      IF LEN<>0 THEN DO;
+         RPC LEN;
+         WRITE(PSD)=READ("373");
+      END;
+   END;
+   ELSE DO;                             /* NOT FSP */
+      DO WHILE LEN IGE 16;                 /* COPY 16 WORD CHUNKS */
+         WRITE(PSD)=READ("373"); WRITE(PSD)=READ("373"); WRITE(PSD)=READ("373"); WRITE(PSD)=READ("373");
+         WRITE(PSD)=READ("373"); WRITE(PSD)=READ("373"); WRITE(PSD)=READ("373"); WRITE(PSD)=READ("373");
+         WRITE(PSD)=READ("373"); WRITE(PSD)=READ("373"); WRITE(PSD)=READ("373"); WRITE(PSD)=READ("373");
+         WRITE(PSD)=READ("373"); WRITE(PSD)=READ("373"); WRITE(PSD)=READ("373"); WRITE(PSD)=READ("373");
+         LEN=LEN-16;
+      END;
+      DO WHILE LEN<>0;
+         WRITE(PSD)=READ("373");
+         LEN=LEN-1;
+      END;
+   END;
+END POLY.OUT;
+
+/* $page - copies poly memory from one address to another for a given sector and word length */
+
+DCL ALLOW.POLY.STOP FIXED PUBLIC;
+
+COPY.POLY.MEM:  proc (sbase,ssec,swrd,dbase,dsec,dwrd,slen,wlen) public swapable;
+   dcl sbase  fixed array;  /* source bin, page, sector base  */
+   dcl ssec   fixed;        /* source sector offset */
+   dcl swrd   fixed;        /* source word offset */
+   dcl dbase  fixed array;  /* destination bin, page, sector base  */
+   dcl dsec   fixed;        /* destination sector offset */
+   dcl dwrd   fixed;        /* destination word offset */
+   dcl slen   fixed;        /* sector length of copy */
+   dcl wlen   fixed;        /* word length of copy */
+   dcl slbase (1) fixed;    /* local place to build normalized offsets... */
+   dcl dlbase (1) fixed;    /* ...so we don't corrupt caller's base */
+   dcl saddr  (1) fixed;    /* source base without poly bin bits */
+   dcl daddr  (1) fixed;    /* destination base without poly bin bits */
+   dcl i      fixed;
+   dcl time   fixed;
+   dcl status fixed;
+
+   check.stop:proc;
+	   dcl lcl.status fixed;
+
+		lcl.status = 0;
+
+      if (STOP.HELD) then lcl.status = 1;
+
+		if (lcl.status != 0)
+		then do;
+			CALL CLEAR.DISPLAY;
+			CALL EMIT.STRING(0, 'STOPPING...     ONE MOMENT...');
+			UPPER.DISP=STOPPING.DISP;
+			BOTH.DISPLAY=1;
+
+			if (SHOW.FILE.LOADING.MESSAGE != 0)
+			then do;
+		  		CALL CPOS(SHR(SHOW.FILE.LOADING.MESSAGE,8), SHOW.FILE.LOADING.MESSAGE&255);
+      		call erase.to.end.of.line;
+      		CALL PS('Stopping...  One moment...');
+			end;
+	  end;
+
+	  return (lcl.status);
+
+	end;
+
+   /* sample time for good behavior */
+   time   = REAL.MILLISECONDS;
+   status = 0;
+
+   /* normalize things */
+   call copy32(sbase,slbase);        /* make local copy of base */
+   call add16(shr(swrd,8),slbase);   /* get any sectors from word offset */
+   swrd = swrd & "377";
+   call add16(ssec,slbase);          /* add in user's sector offset */
+
+   call copy32(dbase,dlbase);        /* make local copy of base */
+   call add16(shr(dwrd,8),dlbase);   /* get any sectors from word offset */
+   dwrd = dwrd & "377";
+   call add16(dsec,dlbase);          /* add in user's sector offset */
+
+   slen = slen + shr(wlen,8);
+   wlen = wlen & 255;
+
+   if ((com32(slbase,dlbase) = lw#ieq)
+   and (swrd=dwrd))                    /* if data is in place */
+   or ((slen=0) and (wlen=0))          /* or not moving anything */
+   then return (status);               /* nothing more to do */
+
+   call copy32(slbase,saddr);
+   call copy32(dlbase,daddr);
+   saddr(lw#msb) = saddr(lw#msb) & base#page_b;   /* mask off bin bits; get poly page only */
+   daddr(lw#msb) = daddr(lw#msb) & base#page_b;
+
+   if (com32(saddr,daddr) = lw#igt)        /* if copying down */
+   or ((com32(saddr,daddr) = lw#ieq) and (swrd igt dwrd))
+   then do;
+      do while slen<>0;   						/* copy for the sector length */
+			if (ALLOW.POLY.STOP != 0)			// if stop is allowed, check for it
+			{
+				interp_check_interrupts();		// check time
+				if ((real.milliseconds - time) >= 50)
+				{
+					status = status | check.stop;
+					time   = real.milliseconds;
+				}
+			}
+
+			if (slen IGE 100)						// long sound file to copy: do so at task time
+				timeshare_with_host();
+
+			else
+				interp_run_host_250();			// else short file: allow at dtask time.  Happens during mouse scrub on L page
+
+         do i=0 to 255 by alt.copy.blen;
+            call psmread(slbase,0,swrd+i);
+            call poly.in(addr(copy.buf(0)),alt.copy.blen);
+            call psmwrite(dlbase,0,dwrd+i);
+            call poly.out(addr(copy.buf(0)),alt.copy.blen);
+         end;
+         slen = slen - 1;        /* decrement length by a sector */
+         call add16(1,slbase);   /* increment pointer by a sector */
+         call add16(1,dlbase);
+      end;
+      do while wlen ige alt.copy.blen;
+         call psmread(slbase,0,swrd);        /* copy it */
+         call poly.in(addr(copy.buf(0)),alt.copy.blen);
+         call psmwrite(dlbase,0,dwrd);
+         call poly.out(addr(copy.buf(0)),alt.copy.blen);
+         wlen = wlen - alt.copy.blen;
+         swrd = swrd + alt.copy.blen;
+         dwrd = dwrd + alt.copy.blen;
+      end;
+      if wlen<>0 then do;             /* if word length */
+         call psmread(slbase,0,swrd);        /* copy it */
+         call poly.in(addr(copy.buf(0)),wlen);
+         call psmwrite(dlbase,0,dwrd);
+         call poly.out(addr(copy.buf(0)),wlen);
+      end;
+   end;
+   else do;    /* copy up from the top down */
+      swrd = swrd + wlen;                  /* compute pointers to the top */
+      call add16(shr(swrd,8),slbase);
+      call add16(slen,       slbase);
+      swrd = swrd & "377";
+      dwrd = dwrd + wlen;
+      call add16(shr(dwrd,8),dlbase);
+      call add16(slen,       dlbase);
+      dwrd = dwrd & "377";
+      do while slen <> 0;                  /* copy for the sector length */
+
+			if (ALLOW.POLY.STOP != 0)			// if stop is allowed, check for it
+			{
+				interp_check_interrupts();		// check time
+				if ((real.milliseconds - time) >= 50)
+				{
+					status = status | check.stop;
+					time   = real.milliseconds;
+				}
+			}
+
+			if (slen IGE 100)						// long sound file to copy: do so at task time
+				timeshare_with_host();
+
+			else
+				interp_run_host_250();			// else short file: allow at dtask time.  Happens during mouse scrub on L page
+
+         call sub16(1,slbase);             /* Subtract "1" from each base */
+         call sub16(1,dlbase);
+         do i=alt.copy.blen to 256 by alt.copy.blen;
+            call psmread(slbase,0,swrd+256-i);
+            call poly.in(addr(copy.buf(0)),alt.copy.blen);
+            call psmwrite(dlbase,0,dwrd+256-i);
+            call poly.out(addr(copy.buf(0)),alt.copy.blen);
+         end;
+         slen = slen - 1;
+      end;
+      do while wlen ige alt.copy.blen;     /* if a given word length */
+         swrd = swrd - alt.copy.blen;      /* backup for the number of words */
+         if swrd < 0 then do;
+            call sub16(1,slbase);          /* borrow a sector of words */
+            swrd = swrd + 256;
+         end;
+         dwrd = dwrd - alt.copy.blen;
+         if dwrd < 0 then do;
+            call sub16(1,dlbase);          /* borrow some words */
+            dwrd = dwrd + 256;
+         end;
+         call psmread(slbase,0,swrd);
+         call poly.in(addr(copy.buf(0)),alt.copy.blen);
+         call psmwrite(dlbase,0,dwrd);
+         call poly.out(addr(copy.buf(0)),alt.copy.blen);
+         wlen = wlen - alt.copy.blen;
+      end;
+      if wlen <> 0 then do;                /* if a given word length */
+         swrd = swrd - wlen;               /* backup for the number of words */
+         if swrd < 0 then do;
+            call sub16(1,slbase);          /* borrow a sector of words */
+            swrd = swrd + 256;
+         end;
+         dwrd = dwrd - wlen;
+         if dwrd < 0 then do;
+            call sub16(1,dlbase);          /* borrow some words */
+            dwrd = dwrd + 256;
+         end;
+         call psmread(slbase,0,swrd);
+         call poly.in(addr(copy.buf(0)),wlen);
+         call psmwrite(dlbase,0,dwrd);
+         call poly.out(addr(copy.buf(0)),wlen);
+      end;
+   end;
+
+	IF UPPER.DISP=STOPPING.DISP
+	THEN CALL CLEAR.DISPLAY;
+
+   return (status);
+
+end COPY.POLY.MEM;
+
+/* $PAGE - COPY POLY MEM AROUND */
+/* NOTE - COPY.BUF IS USED FOR CORE BUFFER */
+
+COPY.POLY.MEM.SEC:PROC(SBASE,SOU,DBASE,DES,SECL) PUBLIC SWAPABLE;  /* HIGH SPEED COPIES - COPIES UP OR DOWN, ANY LENGTH, IN POLY MEMORY - LENGTH IN SECTORS */
+	DCL SBASE	FIXED ARRAY;
+	DCL SOU		FIXED;
+	DCL DBASE	FIXED ARRAY;
+	DCL DES		FIXED;
+	DCL SECL		FIXED;
+
+   RETURN (COPY.POLY.MEM (SBASE,SOU,0,DBASE,DES,0,SECL,0));        /* USE FULL ROUTINE */
+END COPY.POLY.MEM.SEC;
+
+/* $PAGE - POLY MEMORY DISK IO */
+
+DCL POLY.READ.ABORTED FIXED PUBLIC; /* SET IF STOP BUTTON PRESSED */
+
+POLY.READDATA: PROC(MSB,LSB,BASE,PSEC,PWD,SECL) PUBLIC SWAPABLE; /* DISKREAD INTO POLY MEMORY */
+   DCL (MSB,LSB)  FIXED; /* DEVICE AND 24-BIT SECTOR SOURCE ADDRESS */
+   DCL (BASE)     ARRAY; /* 2 MSB'S OF FIRST WORD ARE POLY BIN NUMBER */
+   DCL (PSEC,PWD) FIXED; /* 16-BIT SECTOR, 8-BIT WORD POLY MEM OFFSET FROM BASE */
+   DCL (SECL)     FIXED; /* 16-BIT SECTOR LENGTH TO READ */
+   DCL (LW) (1)   FIXED; /* LOCAL PLACE TO CONSTRUCT LONG WORD SO WE DON'T CORRUPT CALLER'S "BASE" */
+
+   IF INC.MONO<>0  THEN CALL STOP.DISK;         /* STOP OUTPUT SO WE CAN READ DISK */
+
+   CALL COPY32(BASE,LW);                        /* GET USER'S BASE                 */
+   CALL ADD16(PSEC,LW);                         /* ADD IN SECTORS SO THEY ARE TOGETHER */
+   #START.SEC=LW(LW#LSB);                       /* PUT POLY MEM ADDR INTO SPECIAL VARS */
+   #START.WD =PWD;
+   #WD.LEN   =LW(LW#MSB)&"377";                 /* PAGE BITS GET PASSED HERE INSTEAD OF LENGTH */
+
+   DO WHILE SECL<>0;                            /* PROCESS EACH SECTOR FOR NOW     */
+      IF STOP.HELD<>0                           /* CHECK FOR ABORT                 */
+      THEN DO;
+         POLY.READ.ABORTED=1;                   /* SET FLAG                        */
+         RETURN;
+      END;
+
+      #SEC.LEN=200;                             /* READ TEN TRACKS AT A TIME FOR NOW */
+      IF #SEC.LEN IGT SECL THEN #SEC.LEN=SECL;  /* LIMIT IF FEWER SECS LEFT */
+
+      /* NOTE HERE LAST ARG IS CHANNEL NUMBER WHICH IS REALLY (64 * SHR(LW(LW#MSB),14)) */
+      CALL POLYREAD(MSB,LSB,DISKIO.INFO,SHR(LW(LW#MSB),8));     /* READ FROM DISK DIRECTLY TO POLY MEM */
+
+      SECL=SECL-#SEC.LEN;                       /* ACCOUNT FOR WORDS COPIED ABOVE */
+      LSB=LSB+#SEC.LEN;
+      IF LSB ILT #SEC.LEN THEN MSB=MSB+1;
+      #START.SEC=#START.SEC+#SEC.LEN;           /* ADVANCE POLY MEM ADDR */
+      IF #START.SEC ILT #SEC.LEN
+      THEN #WD.LEN = #WD.LEN + 1;
+   END;
+END POLY.READDATA;
+
+POLY.WRITEDATA: PROC(MSB,LSB,BASE,PSEC,PWD,SECL) PUBLIC SWAPABLE; /* DISK WRITE FROM POLY MEMORY */
+   DCL (MSB,LSB)  FIXED; /* DEVICE AND 24-BIT SECTOR ADDRESS OF DESTINATION */
+   DCL (BASE)     ARRAY; /* 2 MSB'S OF FIRST WORD ARE POLY BIN NUMBER */
+   DCL (PSEC,PWD) FIXED; /* 16-BIT SECTOR, 8-BIT WORD POLY MEM OFFSET FROM BASE */
+   DCL (SECL)     FIXED; /* 16-BIT SECTOR LENGTH TO WRITE */
+   DCL (LW) (1)   FIXED; /* LOCAL PLACE TO CONSTRUCT LONG WORD SO WE DON'T CORRUPT CALLER'S "BASE" */
+
+   IF INC.MONO<>0  THEN CALL STOP.DISK;         /* STOP OUTPUT SO WE CAN WRITE DISK */
+
+   CALL COPY32(BASE,LW);                        /* GET USER'S BASE                 */
+   CALL ADD16(PSEC,LW);                         /* ADD IN SECTORS SO THEY ARE TOGETHER */
+   #START.SEC=LW(LW#LSB);                       /* PUT POLY MEM ADDR INTO SPECIAL VARS */
+   #START.WD =PWD;
+   #WD.LEN   =LW(LW#MSB) & "377";               /* PAGE BITS GET PASSED HERE INSTEAD OF LENGTH */
+
+   DO WHILE SECL<>0;                            /* PROCESS EACH SECTOR FOR NOW     */
+      #SEC.LEN=2000;                            /* WRITE 100 TRACKS AT A TIME FOR NOW */
+      IF #SEC.LEN IGT SECL THEN #SEC.LEN=SECL;  /* LIMIT IF FEWER SECS LEFT */
+
+      /* NOTE HERE LAST ARG IS CHANNEL NUMBER WHICH IS REALLY (64 * SHR(LW(LW#MSB),14)) */
+      CALL POLYWRITE(MSB,LSB,DISKIO.INFO,SHR(LW(LW#MSB),8));     /* WRITE FROM POLY MEM DIRECTLY TO DISK */
+
+      SECL=SECL-#SEC.LEN;                       /* ACCOUNT FOR WORDS COPIED ABOVE */
+      LSB=LSB+#SEC.LEN;
+      IF LSB ILT #SEC.LEN THEN MSB=MSB+1;
+      #START.SEC=#START.SEC+#SEC.LEN;           /* ADVANCE POLY MEM ADDR */
+      IF #START.SEC ILT #SEC.LEN
+      THEN #WD.LEN = #WD.LEN + 1;
+   END;
+END POLY.WRITEDATA;
+
+/* $Subtitle Poly Crossfade Routines */
+
+dcl xfade.sec  fixed public;        /* Sectors in crossfade */
+dcl xfade.wrd  fixed public;        /* Words   in crossfade */
+
+GET.CROSSFADE.WRD.LEN:  proc(len,khz10,stereo) fixed public swapable;
+   /* Note: returns word length of crossfade in bitmsb and bitlsb */
+   /* Also: returns length in sectors/words in xfade.sec and xfade.wrd */
+   dcl len       fixed;  /* crossfade length in milliseconds */
+   dcl khz10     fixed;  /* sound file sampling rate  */
+   dcl stereo    fixed;  /* if sound file is in stereo */
+
+   bitmsb=0; bitlsb=len;            /* length in mseconds                 */
+   call ratio_multiply(khz10,10);   /* compute length (msec) * khz10 / 10 */
+
+   if stereo then do;          /* For stereo files length must be doubled */
+      bitmsb = shl(bitmsb,1);
+      if (bitlsb & "100000") <> 0
+      then bitmsb = bitmsb + 1;
+      bitlsb = shl(bitlsb,1);
+   end;
+
+   xfade.sec = shl(bitmsb,8) \ shr(bitlsb,8);
+   xfade.wrd = bitlsb & "377";
+
+   return;
+
+end GET.CROSSFADE.WRD.LEN;
+
+/*  POLY.CROSS.FADE COMPUTES A CROSS FADE FROM TWO SOURCES IN POLY MEMORY
+ *  AND PLACES THE RESULT AT A DESTINATION IN POLY MEMORY.  THE TWO SOURCES
+ *  ARE DESIGNATED IN (SBASE1,SSEC1,SWRD1) AND (SBASE2,SSEC2,SWRD2)
+ *  WHICH ARE (BASE,SECTOR,WORD) ADDRESSES IN POLY MEMORY.  THE DESTINATION
+ *  FOR THE CROSS FADE IS DESIGNATED IN (DBASE,DSEC,DWRD) WHICH HAS THE SAME
+ *  FORM AS DO THE SOURCES.
+ *
+ *  THE LENGTH OF THE FADE IS VARIABLE AND IS DEFINED BY THE PARAMETER, LEN,
+ *  IN MILLISECONDS.
+ *
+ *  KHZ10 CONTAINS THE SAMPLE RATE OF THE SOURCE AND DESTINATION FILES
+ *  IN KHZ*10 FORMAT (THEY MUST ALL BE THE SAME).  A VALUE OF 505 WOULD
+ *  MEAN 50.5 KHZ.
+ *
+ *  STEREO INDICATES WHETHER THE FILE IS MONO OR STEREO. A VALUE OF 0
+ *  MEANS MONO; 1 MEANS STEREO.
+ */
+
+POLY.CROSS.FADE: PROC(SBASE1,SSEC1,SWRD1,SBASE2,SSEC2,SWRD2,DBASE,DSEC,DWRD,LEN,KHZ10,STEREO) PUBLIC SWAPABLE;
+   DCL SBASE1    FIXED ARRAY; /* SOURCE BASE OF FADING OUT DATA         */
+   DCL (SSEC1,SWRD1)   FIXED; /* SOURCE SECTOR,WORD OF FADING OUT DATA  */
+   DCL SBASE2    FIXED ARRAY; /* SOURCE BASE OF FADING IN  DATA         */
+   DCL (SSEC2,SWRD2)   FIXED; /* SOURCE SECTOR,WORD OF FADING IN  DATA  */
+   DCL DBASE     FIXED ARRAY; /* DESTINATION BASE FOR CROSS FADE        */
+   DCL (DSEC,DWRD)     FIXED; /* DESTINATION SECTOR,WORD FOR CROSS FADE */
+   DCL LEN             FIXED; /* LENGTH OF CROSS FADE IN MILLISECONDS   */
+   DCL KHZ10           FIXED; /* RATE OF FILE IN KHZ*10 (I.E. 50KHZ=500)*/
+   DCL STEREO          FIXED; /* 0-MONO FILE  1-STEREO FILE             */
+   DCL LEN.MSB         FIXED; /* MSB OF SOUND FILE LENGTH IN WORDS      */
+   DCL LEN.LSB         FIXED; /* LSB OF SOUND FILE LENGTH IN WORDS      */
+   DCL (I,J,K,L,P,Q,R) FIXED; /* INTERNAL SCRATCH VARIABLES             */
+
+   DCL (MSB,LSB)           FIXED;
+   DCL DONE                FIXED;
+   DCL PASS                FIXED;
+   DCL DELTA.MAX           FIXED;
+   DCL FADE.MAX            FIXED;
+   DCL FADE.VAL            FIXED;
+   DCL FADE.MID            FIXED;
+   DCL FADE.ACCUM          FIXED;
+   DCL FADE.COUNT          FIXED;
+
+   DCL (AMP1,AMP2,AMP.SUM) FIXED;
+   DCL (AMP.PRED,AMP.ACT)  FIXED;
+   DCL (AMP.DELTA)         FIXED;
+   DCL (AMP.MODIFY)        FIXED;
+   DCL (SECTS.IN.MID)      FIXED;
+   DCL (S1,S2,W1,W2)       FIXED;
+
+   COMPUTE.AMPLITUDE: PROC (BUF,LEN) FIXED;
+      DCL BUF ARRAY;
+      DCL LEN FIXED;
+      DCL I   FIXED;
+
+      BITMSB=0; BITLSB=0;
+      DO I=0 TO LEN-1;
+         CALL ADD16(ABS(BUF(I)),BITMSBARRAY);
+      END;
+      LOAD BITLSB; ULOAD BITMSB; DIV LEN;
+
+      RETURN (RES + (REM IGE SHR(LEN,1)));
+   END COMPUTE.AMPLITUDE;
+
+   /**** USES REGISTER 13 ****/
+
+   CALL GET.CROSSFADE.WRD.LEN(LEN,KHZ10,STEREO);
+   LEN.MSB = BITMSB;
+   LEN.LSB = BITLSB;
+
+   IF  LEN.MSB = 0   /* BUTT SPLICE */
+   AND LEN.LSB = 0
+   THEN RETURN;      /* DON'T DO ANYTHING */
+
+   /* LOOK AT MIDDLE OF CROSSFADE FOR PHASE CANCELLATION */
+   /* WE WILL TRY TO MINIMIZE IT AS MUCH AS POSSIBLE     */
+
+   SECTS.IN.MID = SHR(5 * KHZ10,8);        /* 50 MSEC OF SECTORS */
+   IF SECTS.IN.MID IGT 20
+   THEN SECTS.IN.MID = 20;                 /* LIMIT TO MAX AT 100KHZ, MONO */
+   IF STEREO <> 0                          /* BUT (*2) IF STEREO */
+   THEN SECTS.IN.MID = SHL(SECTS.IN.MID,1);
+   IF LEN.MSB = 0 THEN DO;                 /* SMALL CROSSFADE */
+      J = SHR(LEN.LSB,8);                  /* WHOLE CROSSFADE SECTOR LENGTH */
+      IF SECTS.IN.MID > J                  /* SEE IF WHOLE CROSSFADE < 50 MSEC */
+      THEN SECTS.IN.MID = J;               /* IF SO, LIMIT CHECKING TO WHOLE LENGTH */
+   END;
+
+   IF J > 0 THEN DO;      /* IF WE'VE GOT AT LEAST ONE WHOLE SECTOR */
+
+      CALL COPY32(LOC(ADDR(LEN.MSB)),LOC(ADDR(MSB)));
+      CALL SHR32 (LOC(ADDR(MSB)),1);          /* HALF CROSSFADE LEN */
+      CALL SUB16 (SHL(SECTS.IN.MID,7),LOC(ADDR(MSB)));  /* SUBTRACT (128 * SECTORS IN MIDDLE) */
+
+      DO J=1 TO SECTS.IN.MID;               /* LOOP OVER SECTORS IN MIDDLE */
+
+         S1=SSEC1 + SHL(MSB,8) + SHR(LSB,8);     /* ADDR OF MIDDLE OF CROSSFADE */
+         W1=SWRD1 + (LSB & 255);
+         IF W1 ILT SWRD1 THEN DO;
+            S1=S1+1;
+         END;
+
+         /* COMPUTE FADE OUT AMPLITUDE */
+         CALL PSMREAD(SBASE1,S1,W1);
+         CALL POLY.IN(ADDR(MISC.BUF(0)),256);
+
+         LOAD COMPUTE.AMPLITUDE(MISC.BUF,256);   /* AVERAGE AMPLITUDE IN MIDDLE */
+         DIV SECTS.IN.MID;                       /* FOR THIS SECTOR OUT OF THE TOTAL */
+         AMP1 = AMP1 + RES + (REM IGE SHR(SECTS.IN.MID,1));
+
+         S2=SSEC2 + SHL(MSB,8) + SHR(LSB,8);     /* ADDR OF MIDDLE OF CROSSFADE */
+         W2=SWRD2 + (LSB & 255);
+         IF W2 ILT SWRD2 THEN DO;
+            S2=S2+1;
+         END;
+
+         /* COMPUTE FADE IN AMPLITUDE */
+         CALL PSMREAD(SBASE2,S2,W2);
+         CALL POLY.IN(ADDR(MISC.BUF(0)),256);
+
+         LOAD COMPUTE.AMPLITUDE(MISC.BUF,256);   /* AVERAGE AMPLITUDE IN MIDDLE */
+         DIV SECTS.IN.MID;                       /* FOR THIS SECTOR OUT OF THE TOTAL */
+         AMP2 = AMP2 + RES + (REM IGE SHR(SECTS.IN.MID,1));
+
+         CALL PSMREAD(SBASE1,S1,W1);
+         CALL POLY.IN(ADDR(MISC.BUF(0)),256);
+         CALL PSMREAD(SBASE2,S2,W2);
+         DO I = 0 TO 255;
+            MISC.BUF(I) = MISC.BUF(I)/2 + READ(PSD)/2;
+         END;
+
+         LOAD COMPUTE.AMPLITUDE(MISC.BUF,256);   /* AVERAGE AMPLITUDE IN MIDDLE */
+         DIV SECTS.IN.MID;                       /* FOR THIS SECTOR OUT OF THE TOTAL */
+         AMP.SUM = AMP.SUM + RES + (REM IGE SHR(SECTS.IN.MID,1));
+
+         CALL ADD16(256,LOC(ADDR(MSB)));
+
+      END;    /* OF LOOP OVER SECTORS IN MIDDLE */
+
+      AMP.PRED  = AMP1/2 + ((AMP1 & 1) <> 0) + AMP2/2 + ((AMP2 & 1) <> 0);
+      AMP.ACT = AMP.SUM;
+      IF AMP.PRED / AMP.ACT <= 2             /* ONLY ADJUST AMPLITUDE IF SENSIBLE */
+      THEN AMP.MODIFY = TRUE;
+      ELSE AMP.MODIFY = FALSE;
+   END;
+   ELSE AMP.MODIFY = FALSE;   /* TOO SHORT A CROSSFADE TO WORRY ABOUT PHASE CANCELLATION */
+
+   DONE = FALSE;
+   DO WHILE DONE = FALSE;
+      PASS = PASS + 1;                       /* REMEMBER WHICH TIME AROUND LOOP */
+      DONE = TRUE;                           /* ASSUME ONE PASS UNLESS TROUBLE LATER */
+
+      MSB = LEN.MSB; LSB = LEN.LSB;          /* SAVE COPY IN TEMPS */
+      FADE.ACCUM=1;
+      DO WHILE MSB <> 0;                     /* DIVIDE DOWN FADE LEN TO BE 16-BIT QUANTITY */
+         LSB = SHR(LSB,1);                   /* 32-BIT SHIFT RIGHT */
+         IF (MSB & 1) <> 0 THEN LSB = LSB | "100000";
+
+         MSB = SHR(MSB,1);
+         FADE.ACCUM = SHL(FADE.ACCUM,1);     /* GO UP BY POWERS OF TWO */
+      END;
+      FADE.MAX = LSB;
+      FADE.MID = SHR(FADE.MAX,1);
+
+      /* COMPUTE FADE LENGTH IN SECTORS - TREAT J UNSIGNED SINCE          */
+      /* MAXIMUM IS 51,200 SECTORS FOR 65,535 SAMPLES AT 100KHZ IN STEREO */
+
+      J = SHL(LEN.MSB,8) OR SHR(LEN.LSB,8);
+      IF (LEN.LSB & 255) <> 0                /* ROUND UP */
+      THEN J=J+1;                            /* J NOW CONTAINS SECTOR LENGTH OF CROSS FADE */
+
+      FADE.VAL = 0; FADE.COUNT = 0;          /* INIT VARS FOR CROSSFADE */
+
+      P = 0;                                 /* SECTOR COUNTER */
+      DO WHILE P ILT J;                      /* DO FOR TOTAL CROSS FADE SECTORS */
+
+         IF P = (J-1) THEN DO;               /* MOVING LAST SECTOR   */
+            Q = LEN.LSB & 255;               /* GET WORDS REMAINING IN LAST SECTOR */
+            IF Q=0 THEN Q=256;               /* 0 MEANS FULL SECTOR ACTUALLY (256) */
+         END;
+         ELSE           Q=256;               /* ELSE USE FULL SECTOR                        */
+
+         CALL PSMREAD(SBASE2,SSEC2+P,SWRD2); /* LOAD FADING IN DATA    */
+         CALL POLY.IN(ADDR(MISC.BUF(0)),Q);  /* INTO MISC.BUF          */
+         CALL PSMREAD(SBASE1,SSEC1+P,SWRD1); /* PREPARE POLY TO READ FADING OUT DATA */
+         WRITE("313")=ADDR(MISC.BUF(0));     /* SET R13 TO BEGINNING OF MISC.BUF */
+
+         DO I=0 to Q-1;                      /* PERFORM 1 SECTOR SECTION (OR LESS) OF CROSS FADE */
+
+            LOAD (READ("353") XOR "100000"); /* LOAD FADING IN SAMPLE */
+            MUL  FADE.VAL; MWAIT; DIV FADE.MAX;  /* SHIFT BY ACCUMULATOR */
+            L = RES;                         /* RESULT OF FRACTIONAL MUL */
+            LSB = REM;                       /* SAVE REMAINDER TOO */
+
+            LOAD (READ(PSD) XOR "100000");   /* LOAD FADING OUT SAMPLE */
+            MUL (FADE.MAX - FADE.VAL); MWAIT; DIV FADE.MAX; /* SHIFT BY -ACCUMULATOR */
+            LSB = LSB + REM;                 /* ACCUMULATE REMAINDER */
+
+
+            L = (L + RES + (LSB IGE FADE.MAX)) XOR "100000"; /* MAP BACK TO 2'S-COMPLEMENT */
+
+            /* ADJUST SIGNAL TO OFFSET PHASE CANCELLATION */
+            IF AMP.MODIFY = TRUE THEN DO;
+               /* WHAT WE'RE COMPUTING HERE IS: */
+               /* L = L +/-  (L) ((AMP.PRED/AMP.ACT) - 1) (FADE.VAL/FADE.MID) */
+               /* BUT RE-ORDERED ALGEBRAICALY (TO MAINTAIN PRECISION) AS: */
+               /* L = L +/-  (L * AMP.PRED * FADE.VAL) / (AMP.ACT * FADE.MID) */
+               /*         -  (L * FADE.VAL) / FADE.MID                        */
+               /* WHERE R IS INTERMEDIATE  (L * FADE.VAL) / FADE.MID          */
+
+               LOAD ABS(L);                  /* CURRENT DATA POINT (AS POSITIVE #) */
+               IF FADE.VAL ILE FADE.MID      /* RAMP UP IN FIRST HALF, DOWN IN SECOND HALF */
+               THEN K = FADE.VAL;            /* RAMP UP */
+               ELSE K = FADE.MAX - FADE.VAL; /* RAMP DOWN */
+               MUL K;                        /* TEMP USE K FOR SIDE OF MID POINT */
+               MWAIT;
+               DIV FADE.MID;
+               R = RES + (REM IGE SHR(FADE.MID,1));
+               LOAD R;                       /* GET INTERMEDIATE RESULT */
+               MUL AMP.PRED;                 /* PREDICTED LEVEL */
+               MWAIT;
+               DIV AMP.ACT;                  /* ACTUAL LEVEL */
+               AMP.DELTA = RES - R;          /* THE DELTA FOR THIS DATA POINT */
+               IF AMP.DELTA < 0 THEN AMP.DELTA = 0;
+
+               DELTA.MAX = 32767 - ABS(L);   /* MAX WE CAN ALTER THIS POINT W/O CLIPPING */
+               IF AMP.DELTA > DELTA.MAX      /* IF WE'RE CLIPPED... */
+               AND PASS <= 1                 /* ...AND THIS IS FIRST PASS... */
+               THEN DO;                      /* ...TRY TO FIX */
+                  /* THIS EQUATION IS SIMILAR TO THE ABOVE, BUT SOLVES FOR */
+                  /* MAX VALUE OF AMP.PRED THAT WOULD JUST AVOID CLIPPING: */
+                  /* AMP.MAX = [(DELTA.MAX) * (FADE.MID/FADE.VAL) *        */
+                  /*            (AMP.ACT/L)] + AMP.ACT                     */
+                  LOAD DELTA.MAX;
+                  MUL FADE.MID;
+                  MWAIT;
+                  DIV K;                     /* "FADE.VAL" AS ADJUSTED FOR RAMPING UP OR DOWN */
+                  LOAD RES;
+                  MUL AMP.ACT;
+                  MWAIT;
+                  DIV ABS(L);
+                  R = RES + AMP.ACT;
+                  IF R > 0                   /* NO MATH OVERFLOW */
+                  AND R < AMP.PRED           /* AND WE'RE LESS THAN CURRENT PREDICTED VALUE */
+                  THEN DO;
+                     AMP.PRED = R;           /* DECREASE PREDICTED VALUE */
+                     DONE = FALSE;           /* DO LOOP A SECOND TIME AROUND */
+                  END;
+               END;                          /* OF CLIPPED AND PASS = 1 */
+
+               IF L > 0 THEN DO;             /* ADD TO POSITIVE VALUE */
+                  L = L + AMP.DELTA;
+                  IF L < 0 THEN L = 32767;   /* LIMIT MAX POSITIVE VALUE (CLIP) */
+               END;
+               ELSE DO;                      /* SUBTRACT FROM NEGATIVE VALUE */
+                  L = L - AMP.DELTA;
+                  IF L > 0 THEN L = -32768;  /* LIMIT MAX NEGATIVE VALUE (CLIP) */
+               END;
+            END;        /* OF ADJUST SIGNAL TO OFFSET PHASE CANCELLATION */
+
+            WRITE("373") = L;                /* SAVE CROSS FADE RESULT IN MISC.BUF */
+
+            FADE.COUNT = FADE.COUNT + 1;
+            IF FADE.COUNT IGE FADE.ACCUM THEN DO;
+               FADE.COUNT = 0;
+               FADE.VAL = FADE.VAL + 1;
+            END;
+         END;
+
+         CALL PSMWRITE(DBASE,DSEC+P,DWRD);   /* SET POLY TO WRITE CROSS FADE TO DESTINATION */
+         CALL POLY.OUT(ADDR(MISC.BUF(0)),Q); /* WRITE DATA */
+         P = P + 1;                          /* NEXT SECTOR */
+      END;             /* OF WHILE P ILT J */
+   END;                /* OF WHILE DONE = FALSE */
+END POLY.CROSS.FADE;
+
+/* $SUBTITLE Fade in or out */
+/* This routine is similar to POLY.CROSS.FADE, except that it fades a */
+/* piece of a sound file in or out, rather than cross fading two pieces */
+
+POLY.FADE: PROC(SBASE,SSEC,SWRD,DBASE,DSEC,DWRD,LEN,KHZ10,STEREO,OUT) PUBLIC SWAPABLE;
+   DCL SBASE   FIXED ARRAY; /* SOURCE BASE OF FADING DATA             */
+   DCL (SSEC,SWRD)   FIXED; /* SOURCE SECTOR,WORD OF FADING DATA      */
+   DCL DBASE   FIXED ARRAY; /* DESTINATION BASE FOR FADE              */
+   DCL (DSEC,DWRD)   FIXED; /* DESTINATION SECTOR,WORD FOR FADE       */
+   DCL LEN           FIXED; /* LENGTH OF FADE IN MILLISECONDS         */
+   DCL KHZ10         FIXED; /* RATE OF FILE IN KHZ*10 (I.E. 50KHZ=500)*/
+   DCL STEREO        FIXED; /* 0-MONO FILE  1-STEREO FILE             */
+   DCL OUT           FIXED; /* 0 = FADE IN, 1 = FADE OUT              */
+   DCL LEN.MSB       FIXED; /* MSB OF SOUND FILE LENGTH IN WORDS      */
+   DCL LEN.LSB       FIXED; /* LSB OF SOUND FILE LENGTH IN WORDS      */
+   DCL (I,J,K,L,M,N,P,Q,S) FIXED; /* INTERNAL SCRATCH VARIABLES             */
+
+   DCL (MSB,LSB)      FIXED;
+   DCL FADE.MAX       FIXED;
+   DCL FADE.VAL       FIXED;
+   DCL FADE.ACCUM     FIXED;
+   DCL FADE.COUNT     FIXED;
+
+   /**** USES REGISTER 13 ****/
+
+   CALL GET.CROSSFADE.WRD.LEN(LEN,KHZ10,STEREO);
+   LEN.MSB = BITMSB;
+   LEN.LSB = BITLSB;
+
+   IF  LEN.MSB = 0   /* BUTT SPLICE */
+   AND LEN.LSB = 0
+   THEN RETURN;      /* DON'T DO ANYTHING */
+
+   MSB = LEN.MSB; LSB = LEN.LSB;             /* SAVE COPY IN TEMPS */
+   FADE.ACCUM=1;
+   DO WHILE MSB <> 0;                        /* DIVIDE DOWN FADE LEN TO BE 16-BIT QUANTITY */
+      LSB = SHR(LSB,1);                      /* 32-BIT SHIFT RIGHT */
+      IF (MSB & 1) <> 0 THEN LSB = LSB | "100000";
+
+      MSB = SHR(MSB,1);
+      FADE.ACCUM = SHL(FADE.ACCUM,1);        /* GO UP BY POWERS OF TWO */
+   END;
+   FADE.MAX = LSB;
+
+   /* COMPUTE FADE LENGTH IN SECTORS - TREAT J UNSIGNED SINCE          */
+   /* MAXIMUM IS 51,200 SECTORS FOR 65,535 SAMPLES AT 100KHZ IN STEREO */
+
+   J = SHL(LEN.MSB,8) OR SHR(LEN.LSB,8);
+   IF (LEN.LSB & 255) <> 0                    /* ROUND UP */
+   THEN J=J+1;       /* J NOW CONTAINS SECTOR LENGTH OF FADE */
+
+   FADE.VAL = 0; FADE.COUNT = 0;              /* INIT VARS FOR CROSSFADE */
+
+   P = 0;                                     /* SECTOR COUNTER */
+   DO WHILE P ILT J;                          /* DO FOR TOTAL FADE SECTORS */
+
+      IF P = (J-1) THEN DO;                   /* MOVING LAST SECTOR   */
+         Q = LEN.LSB & 255;                   /* GET WORDS REMAINING IN LAST SECTOR */
+         IF Q=0 THEN Q=256;                   /* 0 MEANS FULL SECTOR ACTUALLY (256) */
+      END;
+      ELSE           Q=256;                   /* ELSE USE FULL SECTOR                        */
+
+      CALL PSMREAD(SBASE,SSEC+P,SWRD);        /* PREPARE POLY TO READ FADING DATA */
+      WRITE("313")=ADDR(MISC.BUF(0));         /* SET R13 TO BEGINNING OF MISC.BUF */
+
+      DO I=0 to Q-1;                          /* PERFORM 1 SECTOR SECTION (OR LESS) OF FADE */
+         IF OUT = 0 THEN DO;                  /* FADING IN FROM ZERO */
+            LOAD (READ(PSD) XOR "100000");    /* LOAD FADING IN SAMPLE */
+            MUL  FADE.VAL; MWAIT; DIV FADE.MAX; /* SHIFT BY ACCUMULATOR */
+            L = RES;                          /* RESULT OF FRACTIONAL MUL */
+            LSB = REM;                        /* SAVE REMAINDER TOO */
+
+            LOAD (0 XOR "100000");
+            MUL (FADE.MAX - FADE.VAL); MWAIT; DIV FADE.MAX; /* SHIFT BY -ACCUMULATOR */
+            LSB = LSB + REM;                  /* ACCUMULATE REMAINDER */
+         END;
+         ELSE DO;
+            LOAD (0 XOR "100000");            /* FADE OUT TO ZERO */
+            MUL  FADE.VAL; MWAIT; DIV FADE.MAX; /* SHIFT BY ACCUMULATOR */
+            L = RES;                          /* RESULT OF FRACTIONAL MUL */
+            LSB = REM;                        /* SAVE REMAINDER TOO */
+
+            LOAD (READ(PSD) XOR "100000");    /* LOAD FADING OUT SAMPLE */
+            MUL (FADE.MAX - FADE.VAL); MWAIT; DIV FADE.MAX; /* SHIFT BY -ACCUMULATOR */
+            LSB = LSB + REM;                  /* ACCUMULATE REMAINDER */
+         END;
+         WRITE("373") = (L + RES + (LSB IGE FADE.MAX)) XOR "100000"; /* SAVE CROSS FADE RESULT IN MISC.BUF */
+
+         FADE.COUNT = FADE.COUNT + 1;
+         IF FADE.COUNT IGE FADE.ACCUM THEN DO;
+            FADE.COUNT = 0;
+            FADE.VAL = FADE.VAL + 1;
+         END;
+      END;
+
+      CALL PSMWRITE(DBASE,DSEC+P,DWRD);       /* SET POLY TO WRITE FADE TO DESTINATION */
+      CALL POLY.OUT(ADDR(MISC.BUF(0)),Q);     /* WRITE DATA */
+      P = P + 1;                              /* NEXT SECTOR */
+   END;
+END POLY.FADE;
+
+/* $Subtitle  Short fade routines */
+
+#if (false)
+
+/* construct a short poly ramp in */
+
+construct.short.fadein:proc(base,sec,wrd) public swapable;
+   dcl base      fixed array;
+   dcl (sec,wrd) fixed;
+   dcl (accum  ) fixed;
+   dcl (i,j    ) fixed;
+
+   dcl flen      lit '16';
+
+   accum = (1 fdiv shl(flen,1));     /* for 16 word fade in */
+
+   call psmread(base,sec,wrd);
+                                      /* into misc.buf             */
+   write("313")=addr(misc.buf(0));
+   rpc flen;                          /* read in data              */
+   write("373")=read(psd);            /* newly recorded data       */
+
+   call psmwrite(base,sec,wrd);
+   write("313")=addr(misc.buf(0));
+
+   do i=0 to flen-1;
+      load (read("373") xor "100000");   /* get orig data element    */
+      mul accum;                         /* fade in - start small    */
+      j=ures;
+      load "100000";                     /* get offset binary 0      */
+      mul -accum;
+      accum=accum+(1 fdiv flen);
+      write(psd) = (j+ures) xor "100000";
+   end;
+
+end construct.short.fadein;
+
+
+/* construct a ramp out in poly */
+
+/* note pass the address of 1 word beyond the last sample to be affected */
+/* (in other words,  pass a pointer to the point where you want the      */
+/* volume to reach 0 by)                                                 */
+
+construct.short.fadeout:proc(base,sec,wrd) public swapable;
+   dcl base      fixed array;
+   dcl (sec,wrd) fixed;
+   dcl (accum  ) fixed;
+   dcl (i,j    ) fixed;
+
+   dcl flen lit '16';
+
+   wrd = wrd - flen;             /* back up to point to word */
+   if wrd<0 then do;
+      wrd=wrd+256;
+      sec=sec-1;
+   end;
+
+   accum = - (1 fdiv shl(flen,1));
+
+   call psmread(base,sec,wrd);
+                                      /* into misc.buf             */
+   write("313")=addr(misc.buf(0));
+   rpc flen;                          /* read in data              */
+   write("373")=read(psd);            /* newly recorded data       */
+
+   call psmwrite(base,sec,wrd);
+   write("313")=addr(misc.buf(0));
+
+   do i=0 to flen-1;
+      load (read("373") xor "100000");   /* get orig data element    */
+      mul accum;                         /* fade out - start big     */
+      j=ures;
+      load "100000";                     /* get offset binary 0      */
+      mul -accum;
+      accum=accum-(1 fdiv flen);         /* decrement cross fade     */
+      write(psd) = (j+ures) xor "100000";
+   end;
+
+end construct.short.fadeout;
+
+#endif
+
+/* $SUBTITLE Initialization Routine */
+
+DCL RESET.POLY.HIST.FILE FIXED PUBLIC;
+
+POLY.CHECK: PROC SWAPABLE;
+
+   IF INC.POLY THEN BEGIN;                  /* PERFORM CHECKS FOR POLY SYNTH  */
+      DCL (I,J,K,L,BIN) FIXED;
+      IF (READ("51")&1024)<>0 THEN DO;      /* CHECK POLY SYNTH EXIST BIT     */
+         DISABLE;
+         DO I=0 TO 64 * (PSMAXBINS - 1) BY 64; /* ZERO EACH OF 4 POLY BINS    */
+            WRITE(PSC)=I+1;                    /* CHECK FOR SYSTEM EXISTS     */
+            WRITE(PSC)=I+1;                    /* CHECK FOR SYSTEM EXISTS     */
+            IF (READ(PSC)&"377")=I+1 THEN DO;  /* BIN EXISTS                  */
+               POLYNUMS=POLYNUMS+1;            /* COUNT SUBSYSTEMS            */
+               BIN=I/64;                       /* GET BIN NUMBER              */
+               WRITE(PSF)=PSRMA; WRITE(PSD)=0; /* RESET COMPUTER INTERFACE    */
+               WRITE(PSF)=PSNUMV;
+               K=(READ(PSD)&15)*4;                 /* NUMBER OF VOICES        */
+               IF (READ(PSD)&16)=0 THEN K=0;       /* NO VOICES IF NO ENV #0  */
+               IF ((READ(PSD)&32)=0)&(K>16)        /* LIMIT TO 16 VOICES IF   */
+               THEN K=16;                          /* NO SECOND ENV CARD      */
+               POLYNUMVS(BIN)=K;                   /* COUNT NUMBER OF VOICES  */
+               L=READ(PSD);                        /* SAVE NUMVOICES FOR A/D CHECKS (PRESERVE THIS!) */
+               IF (L&"100")<>0 THEN DO;            /* RESET A/D CONTROLLER    */
+                  POLYADCS(BIN) = 1;               /* A/D CONTROLLER PRESENT  */
+                  WRITE(PSF) = PSADMC;             /* NUM  SAMPLING CHANS = 0 */
+                  WRITE(PSD) = 0;
+                  WRITE(PSF) = PSADEVSM;           /* RESET STEREO MASTERS    */
+                  DO J = I TO I+30 BY 2;           /*  (EVEN CHANS 0-30)      */
+                     WRITE(PSC) = J;
+                     WRITE(PSD) = 0;
+                  END;
+               END;
+               IF (L&"200")<>0 THEN DO;            /* RESET SAMPLING UNITS    */
+                  ADCONFIGS(BIN) = READ.STM.CONFIG(I); /* GET NUM BOXES, A/D MAP  */
+                  WRITE(PSC) = I;                  // Explicitly set channel number to chan 0 of this bin
+                  WRITE(PSF) = PSADMODE;           /* STEREO MODE, NO AUTOGAIN */
+                  WRITE(PSD) = 0;
+                  DO J = I TO I+15;                /* INIT ALL 16 CHANS       */
+                     WRITE(PSC) = J;
+                     WRITE(PSF) = PSADVOL;         /* SET GAIN TO UNITY       */
+                     WRITE(PSD) = 0;
+                     WRITE(PSF) = PSADACT;         /* NO ACTIVE CHANNELS      */
+                     WRITE(PSD) = 0;
+                  END;
+               END;
+
+               DO J=0 TO 63;                       /* ZERO OUT EACH CHANNEL - INCLUDING GHOST/REFRESH CHANNEL(S) */
+                  WRITE(PSC)= I+J; WRITE(PSF)=PSWL;
+                  WRITE(PSD)=  -1; WRITE(PSD)=-1;   /* WAVE TABLE LENGTH OF 1 */
+                  WRITE(PSD)=   0; WRITE(PSD)=255;  /* BASE ADDRESS OF 255    */
+                  WRITE(PSD)=  -1; WRITE(PSD)=-1;   /* LOOP LENGTH OF 1       */
+                  WRITE(PSD)=   0; WRITE(PSD)=0;    /* PHASE INCR OF  0       */
+
+                  WRITE(PSD)= 255;                  /* INCR OF 256            */
+                  WRITE(PSD)=   0;                  /* MODULUS OF 256         */
+
+                  WRITE(PSD)=   0;                  /*  OFF NO LOOP           */
+
+                  IF J < K THEN DO;                 /* ZERO ENV/VOL ITEMS FOR EXISTING DACS */
+                     WRITE(PSF)=PSEMOD;               /* WRITE ENV INFO           */
+                     WRITE(PSD)=4095; WRITE(PSD)=4095;/* MODULUS 1, INCR 4096     */
+                     WRITE(PSD)=  64; WRITE(PSD)=4095;/* DELTA, COUNT             */
+                     WRITE(PSD)=4095;                 /* ENV ACCUMULATOR          */
+                     WRITE(PSD)=   0; WRITE(PSD)=0;   /* LIMIT, CVAL              */
+
+                     WRITE(PSF)=PSRCVOL;              /* WRITE VOL INFO           */
+                     WRITE(PSD)=   0; WRITE(PSD)=0;   /* R, L CVOL                */
+                     WRITE(PSD)=   0; WRITE(PSD)=0;   /* R, L DVOL                */
+                  END;
+               END;   /* OF CHANNEL LOOP         */
+
+               WRITE(PSC)=I;
+               WRITE(PSF)=PSNUMV;
+               IF (READ(PSC)&"400")<>0 THEN DO;       /* IF NEW D/A CONTROLLER */
+                  WRITE(PSC)=I;                       /* SELECT THIS SUBSYSTEM */
+                  WRITE(PSF)=PSMUTE;                  /* AND UNMUTE IT         */
+                  WRITE(PSX)=0;                       /* (I.E., TURN ON D/A)   */
+                  DO J = I TO I+31;                   /* SET INITIAL CHANNEL MAP */
+                     WRITE(PSC)=J;                    /* EACH OSCILLATOR TO */
+                     WRITE(PSF)=PSCMAP;               /* ITS OWN CHANNEL    */
+                     WRITE(PSX)=J;
+                  END;
+               END;                                   /* OF NEW D/A CONTROLLER */
+            END;      /* OF BIN EXISTS          */
+         END;         /* OF LOOP OVER POLY BINS */
+         WRITE(PSC) = 0;   // Set PSC to 0 to avoid shadow register problems after addressing non-existant bin
+         ENABLE;
+
+         /* $PAGE - SEE HOW MUCH POLY MEMORY IS AVAILABLE */
+
+         DO BIN=0 TO POLYNUMS - 1;                  /* LOOP OVER ALL POLY BINS    */
+            DCL (ZERO.BASE,TEMP.BASE,TEMP.PTR) (1) FIXED;
+            DCL NEW.MEM.CTRLR FIXED;                /* DOES NEW MEM CONTROLLER EXIST    */
+            CALL SET.CUR.BIN(BIN);                  /* POINT AT CURRENT BIN       */
+            CALL STR32(SHL(BIN,BASE#BIN_P),0,ZERO.BASE);  /* BASE ADDRESS FOR WHOLE BIN */
+
+            /* TEST FOR EXISTENCE OF NEW MEMORY CONTROLLER (FOR > 32 MEG CAPABILITY) */
+            NEW.MEM.CTRLR = FALSE;
+            CALL STR32(SHL(BIN,BASE#BIN_P),0,TEMP.BASE);
+            CALL PSMREAD(TEMP.BASE,0,0);            /* READ FIRST SECTOR          */
+            I=READ(PSD); J=READ(PSD);               /* SAVE MEMORY CONTENTS       */
+            CALL PSMWRITE(TEMP.BASE,0,0);
+            WRITE(PSD)="107070";                    /* UNIQUE PATTERN             */
+            WRITE(PSD)="070707";
+            TEMP.BASE(LW#MSB)=TEMP.BASE(LW#MSB)+1;  /* LOOK AT NEXT PAGE OF MEMORY */
+            CALL PSMREAD(TEMP.BASE,0,0);
+            K=READ(PSD); L=READ(PSD);               /* DO WE FIND SAME PATTERN IN NEXT PAGE? */
+            IF (K <> "107070") & (L <> "070707")    /* IF SO, OLD CONTROLLER      */
+            THEN NEW.MEM.CTRLR = TRUE;              /* ELSE, NEW CONTROLLER       */
+            CALL STR32(SHL(BIN,BASE#BIN_P),0,TEMP.BASE);
+            CALL PSMWRITE(TEMP.BASE,0,0);
+            WRITE(PSD)=I; WRITE(PSD)=J;             /* RESTORE MEMORY CONTENTS    */
+
+            K = TRUE;                               /* STILL FINDING MEMORY       */
+            DO WHILE K;                             /* COUNT HOW MUCH MEMORY      */
+               CALL COPY32(POLYAMOUNT,TEMP.BASE);
+               TEMP.BASE(LW#MSB) = TEMP.BASE(LW#MSB) \ SHL(BIN,BASE#BIN_P);
+               CALL PSMREAD(TEMP.BASE,0,0);
+               I=READ(PSD); J=READ(PSD);            /* SAVE MEMORY CONTENTS       */
+               CALL PSMWRITE(TEMP.BASE,0,0);
+               WRITE(PSD)=0; WRITE(PSD)=-1;         /* SEE IF IT HOLDS 0, -1      */
+               CALL PSMREAD(TEMP.BASE,0,0);
+               IF  (READ(PSD)=0)                    /* THANK YOU, KARIM           */
+               AND (READ(PSD)=(-1))
+               THEN DO;
+                  CALL PSMWRITE(TEMP.BASE,0,0);
+                  WRITE(PSD)=I; WRITE(PSD)=J;       /* RESTORE MEMORY CONTENTS    */
+                  CALL ADD16(256,POLYAMOUNT);       /* COUNT 256 MORE SECTORS     */
+                  IF NEW.MEM.CTRLR = TRUE
+                  AND POLYAMOUNT.MSB IGE PSMAXPAGES /* WRAP TO 512 MEGABYTES      */
+                  THEN DO;
+                     CALL STR32(PSMAXPAGES-1,-1,POLYAMOUNT);
+                     K=FALSE;                       /* BREAK LOOP                 */
+                  END;
+                  ELSE IF NEW.MEM.CTRLR = FALSE
+                  AND POLYAMOUNT.MSB <> 0           /* WRAP TO 32 MEGABYTES       */
+                  THEN DO;
+                     CALL STR32(0,-1,POLYAMOUNT);
+                     K=FALSE;                       /* BREAK LOOP                 */
+                  END;
+               END;
+               ELSE K=FALSE;                        /* BREAK LOOP                 */
+            END;      /* OF LOOP TO FIND MEMORY */
+
+            /**********************************************************************/
+
+            /* SEE IF MEMORY ALREADY */             /* SEE MULTI OUTPUT CODE      */
+            /* CONTAINS SOUND FILES   */            /* AS WELL                    */
+
+            CALL PSMREAD(ZERO.BASE,0,0);         /* SEE IF MEMORY ALREADY      */
+            IF  (READ(PSD)=POLY.MAGIC)           /* LOADED FROM PREVIOUS RUN   */
+            AND (READ(PSD)=POLY.REV)             /* CHECK MAGIC NUMBERS        */
+            AND (READ(PSD)=POLYAMOUNT.MSB)       /* AND SAME AMOUNT            */
+            AND (READ(PSD)=POLYAMOUNT.LSB)       /* OF POLY MEMORY             */
+            THEN DO;                             /* MEMORY IS INITIALIZED      */
+               PSFIRST.MSB=READ(PSD);            /* LOOK UP INFO FROM LAST RUN */
+               PSFIRST.LSB=READ(PSD);
+               PSLAST.MSB=READ(PSD);             /* TO SAVE SOUND FILES LOADED */
+               PSLAST.LSB=READ(PSD);
+               PSMAX.MSB=READ(PSD);              /* IN MEMORY                  */
+               PSMAX.LSB=READ(PSD);
+               PSFREE.MSB=READ(PSD);             /* LOOK UP INFO FROM PREVIOUS RUN */
+               PSFREE.LSB=READ(PSD);
+               PSHERE.MSB=READ(PSD);             /* WHERE TO LOAD              */
+               PSHERE.LSB=READ(PSD);
+               CALL COPY32(PSFIRST,TEMP.PTR);               /* GO THROUGH BLOCKS; ZERO USERS FIELD */
+               DO WHILE COM32(TEMP.PTR,PSLAST) <> LW#IEQ;   /* PROCESS EACH BLOCK                  */
+                  CALL COPY32(TEMP.PTR,TEMP.BASE);
+                  TEMP.BASE(LW#MSB) = TEMP.BASE(LW#MSB) \ SHL(BIN,BASE#BIN_P);
+                  CALL PSMREAD(TEMP.BASE,0,0);          /* SET UP FOR READ  */
+                  J=READ(PSD);                          /* GET BLOCK LENGTH */
+                  CALL PSMWRITE(TEMP.BASE,0,BL.USERS);  /* SET UP FOR USERS */
+                  WRITE(PSD)=0;                         /* ZERO USER FIELD  */
+                  CALL ADD16(J,TEMP.PTR);               /* ADVANCE TO NEXT  */
+                  IF (J=0)                              /* IF ZERO LENGTH?  */
+                  OR (TEMP.PTR(LW#MSB) >= PSMAXPAGES)   /* OR OVERFLOW?     */
+                  OR (COM32(TEMP.PTR,PSLAST) = LW#IGT)  /* OR OFF END?      */
+                  THEN DO;                              /* THEN MEM INVALID */
+                     CALL STR32(0,FIRST.BASE,PSFIRST);                 /* STARTS WITH SECTOR 1         */
+                     CALL COPY32(PSFIRST,PSLAST);                      /* NONE USED YET                */
+                     CALL COPY32(POLYAMOUNT,PSMAX);                    /* FIRST SECTOR NOT TO USE      */
+                     CALL SUB32(PSMAX,PSFIRST,PSFREE);                 /* SECTORS OF POLY SYNTH MEMORY */
+                     IF COM16(0,PSMAX) = LW#IEQ                        /* IF NO MEMORY                 */
+                     THEN DO;                                          /* MAKE SENSABLE                */
+                        CALL STR32(0,1,PSMAX);                         /* IF NO POLY MEMORY            */
+                        CALL STR32(0,0,PSFREE);
+                     END;
+                     CALL COPY32(PSFIRST,PSHERE);             /* INITIALIZE HERE   */
+                     CALL PSMWRITE(ZERO.BASE,0,0);            /* ZERO INFO IN CASE */
+                     WRITE(PSD)=0; WRITE(PSD)=0;              /* OF RESTART        */
+                     CALL COPY32(PSLAST,TEMP.PTR);            /* EXIST LOOP        */
+                  END;
+               END;
+
+               CALL SUB32(PSMAX,PSFIRST,PSFREE);              /* BUT WITH ZERO USERS, ALL ARE FREE */
+            END;
+
+            // Else must be cold boot - poly system does not contain magic #
+            ELSE DO;
+               IF COM16(0,POLYAMOUNT) <> LW#IEQ                 /* IF ANY POLY MEMORY AT ALL    */
+               THEN CALL STR32(0,FIRST.BASE,PSFIRST);           /* STARTS WITH SECTOR 1         */
+               ELSE CALL STR32(0,0,PSFIRST);                    /* NO MEMORY                    */
+               CALL COPY32(PSFIRST,PSLAST);                     /* NONE USED YET                */
+               CALL COPY32(POLYAMOUNT,PSMAX);                   /* FIRST SECTOR NOT TO USE      */
+               CALL SUB32(PSMAX,PSFIRST,PSFREE);                /* SECTORS OF POLY SYNTH MEMORY */
+               CALL COPY32(PSFIRST,PSHERE);                     /* INITIALIZE HERE              */
+
+               RESET.POLY.HIST.FILE = 1;
+            END;
+         END;                /* OF LOOP OVER BINS */
+      END;                   /* OF POLY SYNTH EXISTS */
+   END;                      /* OF INC.POLY TRUE */
+
+END POLY.CHECK;
+
+/* $SUBTITLE ROUTINES TO LOOK FOR FILES IN POLY MEMORY */
+
+   /* PS.SEARCH -  SEARCH THROUGH LIST OF SOUND FILES    */
+   /*              TO SEE IF THIS FILE ALREADY IN MEMORY */
+   /* PS.LOCK   -  LOCKS OUT A RE-BOOT                   */
+   /* PS.UNLOCK -  ALLOWS RE-BOOT WITH POLY MEM INTACT   */
+   /* PS.USERS  -  CHANGE NUMBER OF USERS                */
+
+/*  PS.SEARCH - FINDS SOUND FILE IN A POLY MEMORY BIN WHOSE NAME
+ *  (1-8 CHARACTERS) IS IN THE ARRAY FNBUF(4).  RETURNS TRUE IF
+ *  FOUND; FALSE OTHERWISE.  WHEN FOUND, THE TWO WORD ARRAY SFILE.BASE
+ *  TELLS WHERE THE SOUND FILE IS AS FOLLOWS:
+ *
+ *                  2    10     4         16          <-- NUMBER OF BITS
+ *               +----------------++----------------+
+ *               |BIN|UNUSED |PAGE||    SECTOR #    |
+ *               +----------------++----------------+
+ *              SFILE.BASE(LW#MSB)  SFILE.BASE(LW#LSB)
+ *
+ */
+   DCL SFILE.BASE(1)   FIXED PUBLIC;  /* RETURNS SECTOR OF POLY/EXT MEM IN GLOBAL VARIABLES */
+
+   PS.SEARCH:PROC PUBLIC SWAPABLE;    /* SEE IF FILE NAME IS IN MEMORY */
+      DCL (J,K,L,M,BIN) FIXED;
+      DCL (I,TEMP.BASE) (1) FIXED;
+      DO BIN=0 TO POLYNUMS - 1;           /* LOOP OVER ALL POLY BINS */
+         CALL SET.CUR.BIN(BIN);           /* POINT AT CURRENT BIN */
+         CALL COPY32(PSFIRST,I);          /* START AT FIRST SOUND FILE */
+         DO WHILE COM32(I,PSLAST) <> LW#IEQ;     /* SEARCH EVERY BLOCK */
+            CALL COPY32(I,TEMP.BASE);            /* GET BIN # IN TOP 2 BITS */
+            TEMP.BASE(LW#MSB) = TEMP.BASE(LW#MSB) \ SHL(BIN,BASE#BIN_P);
+            CALL PSMREAD(TEMP.BASE,0,0);         /* SET UP FOR DATA */
+            J=READ(PSD);             /* GET BLOCK LENGTH IN SECTORS */
+            K=READ(PSD);             /* AND USERS */
+
+            // FNBUF may be zero filled, with the zeroes included in the length byte.
+            // Lnbuf is clean. Maybe.
+            #if (0)
+               send 'PS.SEARCH FNBUF', fnbuf(0), ' ', string(fnbuf);
+               send 'PS.SEARCH LNBUF', lnbuf(0), ' ', string(lnbuf);
+            #endif
+
+            // If we are called from old software that does not have a long name available
+            // just match on the first 8 characters
+            if (lnbuf(0) <= 8) {
+               L=1;
+               
+               while ((l<5) && FNBUF(L)==READ(PSD))
+                  l = l + 1;
+
+               IF L == 5 THEN DO;                     /* COMPARE SUCCEEDED */
+                  // But if file name is longer, then fail
+                  CALL PSMREAD(TEMP.BASE,0,BL.LNAME);         /* SET UP FOR DATA */
+                 
+                  IF (READ(PSD) <= 8) THEN DO;
+                     CALL COPY32(TEMP.BASE,SFILE.BASE); /* RETURN POINTER */
+                     RETURN TRUE;                       /* WE FOUND IT */
+                  END;
+               END;
+            }
+
+            // For long name, probably means we are recalling a timbre and look for a complete match.
+            else {
+               // BL.FNAME zero means empty block, so skip it.
+               // Code that deletes file from ram only zeroes BL.FNAME, not bl.lname
+               if (read(psd) != 0) {
+                  CALL PSMREAD(TEMP.BASE,0,BL.LNAME);         /* SET UP FOR DATA */
+                  
+                  M=READ(PSD);                                /* GET NUMBER OF BYTES IN BL.NAME AREA */
+                  
+                  IF (M==LNBUF(0)) {                          // look further if length matches
+                     M=SHR(M+1,1);                            // Get number of words of characters to compare
+                     L=1;
+                     
+                     DO WHILE LNBUF(L)=READ(PSD);             /* COMPARE 2 CHARS OF FILENAME */
+                        IF L = M THEN DO;                     /* COMPARE SUCCEEDED */
+                           CALL COPY32(TEMP.BASE,SFILE.BASE); /* RETURN POINTER */
+                           RETURN TRUE;                       /* WE FOUND IT */
+                        END;
+                        L=L+1;    /* TRY NEXT PAIR OF CHARACTERS */
+                     END;
+                  }
+               }
+            }
+
+            CALL ADD16(J,I);        /* NO MATCH YET; POINT AT NEXT SOUND FILE */
+         END;                       /* OF LOOP OVER BLOCKS */
+      END;                          /* OF LOOP OVER BINS */
+      RETURN FALSE;
+   END PS.SEARCH;
+
+   PS.LOCK:PROC PUBLIC;                   /* LOCK POLY MEMORY WHEN CHANGING ITEMS */
+      DCL BIN FIXED;
+      DCL BASE (1) FIXED;
+      DO BIN=0 TO POLYNUMS - 1;           /* LOOP OVER ALL POLY BINS */
+         CALL STR32(SHL(BIN,BASE#BIN_P),0,BASE);  /* BASE ADDRESS FOR WHOLE BIN */
+         CALL PSMWRITE(BASE,0,0);
+         WRITE(PSD)=0; WRITE(PSD)=0;
+      END;
+   END PS.LOCK;
+
+   PS.UNLOCK:PROC PUBLIC SWAPABLE;        /* SAVE INFO IN POLY MEMORY */
+      DCL BIN FIXED;
+      DCL BASE (1) FIXED;
+      DO BIN=0 TO POLYNUMS - 1;           /* LOOP OVER ALL POLY BINS */
+         CALL SET.CUR.BIN(BIN);           /* POINT AT CURRENT BIN */
+         CALL STR32(SHL(BIN,BASE#BIN_P),0,BASE);  /* BASE ADDRESS FOR WHOLE BIN */
+         CALL PSMWRITE(BASE,0,0);         /* SO THAT NEXT TIME WE */
+         WRITE(PSD)=POLY.MAGIC;           /* LOAD MOST SOUND FILES */
+         WRITE(PSD)=POLY.REV;             /* ARE ALREADY THERE */
+         WRITE(PSD)=POLYAMOUNT.MSB;
+         WRITE(PSD)=POLYAMOUNT.LSB;
+         WRITE(PSD)=PSFIRST.MSB;
+         WRITE(PSD)=PSFIRST.LSB;
+         WRITE(PSD)=PSLAST.MSB;
+         WRITE(PSD)=PSLAST.LSB;
+         WRITE(PSD)=PSMAX.MSB;
+         WRITE(PSD)=PSMAX.LSB;
+         WRITE(PSD)=PSFREE.MSB;
+         WRITE(PSD)=PSFREE.LSB;
+         WRITE(PSD)=PSHERE.MSB;
+         WRITE(PSD)=PSHERE.LSB;
+      END;                            /* OF LOOP OVER POLY BINS */
+      NEW.POLY.CONTENTS = NEW.POLY.CONTENTS \ 1;
+   END PS.UNLOCK;
+
+   PS.USERS:PROC(BASE,DELTA) PUBLIC;   /* UPDATE USER FIELD FOR FILE RECORD IN EXT MEM */
+      DCL BASE FIXED ARRAY;
+      DCL (DELTA,I,J) FIXED;
+
+      IF DELTA=0 THEN RETURN;           /* NO CHANGE IN USERS IF NOT USED */
+      CALL SET.BIN.FROM.BASE(BASE);     /* SET WHICH POLY BIN THIS IS */
+      CALL PSMREAD(BASE,0,0);           /* SET UP FOR READ */
+      I=READ(PSD);                      /* GET BLOCK LENGTH (SECTORS), ADVANCE TO USERS FIELD */
+      J=READ(PSD);                      /* GET USERS */
+      IF J=0 THEN CALL SUB16(I,PSFREE); /* LESS FREE STORAGE IF USING A BLOCK THAT HAD NO USERS */
+      CALL PSMWRITE(BASE,0,BL.USERS);   /* RETURN POINTER TO USERS */
+      WRITE(PSD)=J+DELTA;               /* CHANGE USER FIELD */
+      IF (J+DELTA)=0
+      THEN CALL ADD16(I,PSFREE);        /* MORE FREE STORAGE IF DECREMENTING USERS TO ZERO */
+      NEW.POLY.CONTENTS = NEW.POLY.CONTENTS \ 2;  /* CHANGE IN AMOUNT OF */
+                                                  /* FREE POLY STORAGE   */
+   END PS.USERS;
+
+   IF INC.POLY THEN CALL POLY.CHECK;   /* INIT POLY */
+
+END POLYMOD;

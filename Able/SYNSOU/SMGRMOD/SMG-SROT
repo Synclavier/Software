@@ -1,0 +1,396 @@
+/*	:SYNSOU:SMGRMOD:SMG-SROT  $TITLE  General routines for Screen Manager
+
+Modified:
+1999/12/08 - TY  - Corrected error in DRAW.OBJ.BORDER().  It was using a dotted rather than
+						 normal line type as indicated in the documentation.
+1990/02/13 - MWH - Fix bug in write event queue that caused infinite loops
+1987/11/24 - MWH - Add editing of existing strings to token routine
+1987/11/17 - MWH - Split into 2 libraries; SMGR is too big
+1987/10/01 - MWH - Make unreferenced procedures NON-public
+1987/09/24 - MWH - New literals
+1987/02/26 - TSS - Made some changes here
+*/
+
+DCL DEBUG.ON	lit '0';
+
+DEBUG: PROC (INDENT,STRING,NUMBER) swapable;
+	DCL INDENT	FIXED;
+	DCL STRING	ARRAY;
+	DCL NUMBER	FIXED;
+	DCL COUNT	FIXED;
+	DCL I			FIXED;
+
+	IF DEBUG.ON <> 0 THEN DO;
+		COUNT = COUNT + 1;
+		CALL CPOS(23,0);
+		CALL PC(A.LF); CALL PC(A.CR);	/*	SCROLL UP A LINE	*/
+		CALL PS('['); CALL PNUM(COUNT,0); CALL PS('] ');
+		DO I = 1 TO SHL(INDENT,1);
+			CALL PC(A.SP);
+		END;
+		CALL PS(STRING); CALL PNUM(NUMBER,0);
+	END;
+END DEBUG;
+
+dcl (mammal.msw,mammal.lsw)	fixed;
+
+SAVE.MAMMAL: proc;
+	mammal.msw = read(mam);
+	mammal.lsw = read(mal);
+end SAVE.MAMMAL;
+
+RESTORE.MAMMAL: proc;
+	write(mam) = mammal.msw;
+	write(mal) = mammal.lsw;
+end RESTORE.MAMMAL;
+
+READ.OBJECT: proc(Ptr) returns (fixed) public recursive;
+	dcl ptr	fixed;
+
+	write(mam) = Screen.Base + shr(ptr,8);
+	write(mal) = ptr;
+	return read(md);
+end READ.OBJECT;
+
+WRITE.OBJECT: proc(Ptr,Arg) public recursive;
+	dcl Ptr	fixed;
+	dcl Arg	fixed;
+
+	write(mam) = Screen.Base + shr(Ptr,8);
+	write(mal) = Ptr;
+	write(mdi) = Arg;
+end WRITE.OBJECT;
+
+COPY.STRING.TO.EXMEM: proc (str,ptr) recursive;
+	dcl str	array;
+	dcl ptr	fixed;
+
+	write(mam) = Screen.Base + shr(ptr,8);
+	write(mal) = ptr;
+
+	do ptr=0 to shr(str(0)+1,1);
+		write(mdi)=str(ptr);
+	end;
+
+end COPY.STRING.TO.EXMEM;
+
+XMEM.STR.EQUALS.IMEM.STR: proc (ptr,str)	fixed recursive;
+	dcl ptr	fixed;	/*	ptr to xmem string		*/
+	dcl str	array;	/*	internal memory string	*/
+
+	write(mam) = Screen.Base + shr(ptr,8);
+	write(mal) = ptr;
+
+	if str(0) <> read(mdi)		/*	not equal if lengths		*/
+	then return false;			/*	are different				*/
+
+	do ptr=1 to shr(str(0),1);	/*	look at each word			*/
+		if read(mdi)<>str(ptr)	/*	these words differ		*/
+		then return false;		/*	strings are not the same	*/
+	end;
+	if (str(0)&1)<>0 then do;	/*	last character of odd byte len string	*/
+		if (read(mdi)&255)<>(str(shr(str(0),1)+1)&255)
+		then return false;
+	end;
+
+	return true;
+end XMEM.STR.EQUALS.IMEM.STR;
+
+dcl in.event	fixed public;	/*	Input  pointer (WRITE)	*/
+dcl out.event	fixed public;	/*	Output pointer (READ)	*/
+
+WRITE.EVENT.QUEUE: proc (event,info,id) public swapable;
+	dcl event		fixed;
+	dcl info			fixed;
+	dcl id			fixed;
+	dcl (col,row)	fixed;
+
+	if Locate.Object(id) then do;
+
+		if  ((event=Get.Screen.Event)		/*	we have a deposit event	*/
+		and  (info=S#Deposit))
+		and ((Disable.Deposits<>0)			/*	which should be ignored	*/
+		or  ((Read.Object(Object.Ptr+O#Action)&O#ACT.Deposit.Rept.Disabled)<>0))
+		then return;	/*	don't do deposits on this object	*/
+
+		if Read.Object(Object.Ptr+O#Type) = O$Table then do;
+			col = Read.Object(Object.Ptr+O#TABL.Cur.Col);
+			row = Read.Object(Object.Ptr+O#TABL.Cur.Row);
+		end;
+		else do;
+			col = 0;
+			row = 0;
+		end;
+	end;
+	else do;
+		if  (info=S#Deposit)					/*	we have a deposit event	*/
+		and (Disable.Deposits<>0)			/*	which should be ignored	*/
+		then return;
+	end;
+
+	write(mam) = Queue.Base;
+	write(mal) = shl(in.event,3);
+
+	write(mdi) = event;	/*	event.buf(in.event) = event;	*/
+	write(mdi) = info;	/*	info.buf (in.event) = info;	*/
+	write(mdi) = id;		/*	id.buf   (in.event) = id;	*/
+	write(mdi) = col;
+	write(mdi) = row;
+	write(mdi) = 0;		/*	Reserved 1	*/
+	write(mdi) = 0;		/*	Reseverd 2	*/
+
+	info=(in.event+1)&(queue.events-1);	/*	compute ptr if we advance	*/
+
+	if info<>out.event						/*	event queue is not full	*/
+	then in.event = info;					/*	actually advance ptr	*/
+	else do;										/*	give message for queue overrun	*/
+		call cpos(23,0);
+		call pc(7);
+		call ps('SYSTEM ERROR: SCREEN EVENT QUEUE OVERFLOW');
+		call tty_wait;
+	end;
+
+end WRITE.EVENT.QUEUE;
+
+READ.EVENT.QUEUE: proc (queue) returns (fixed) public swapable;
+	dcl i			fixed;
+	dcl queue	fixed;	/*	Which queue to read from	*/
+
+	write(mam) = Queue.Base;
+	write(mal) = shl(out.event,3)+queue-1;
+
+	if queue = 0
+	then out.event = (out.event + 1) & (queue.events-1);	/*	Advance queue	*/
+	else return read(mdi);
+end READ.EVENT.QUEUE;
+
+FLUSH.EVENT.QUEUE: proc swapable;
+	in.event  = 0;
+	out.event = 0;
+end FLUSH.EVENT.QUEUE;
+
+EVENTS.PENDING: proc returns (fixed) public swapable;
+	if in.event >= out.event then	return in.event-out.event;
+	else									return (queue.events-out.event)+in.event;
+end EVENTS.PENDING;
+
+dcl Max.Object.Id	fixed;					/*	highest allocated id so far	*/
+
+SET.AUTO.ALLOCATION.ID: proc (id) public swapable;
+	dcl id	fixed;
+
+	max.object.id = id-1;
+	if max.object.id < 0 then max.object.id = 0;
+end SET.AUTO.ALLOCATION.ID;
+
+SET.GROUP.AUTO.ALLOCATION.ID: proc (id) public swapable;
+	dcl id	fixed;
+
+	max.group.id = id-1;
+	if max.group.id < 0 then max.group.id = 0;
+end SET.GROUP.AUTO.ALLOCATION.ID;
+
+ALLOCATE.ID:  proc (id.code) returns (fixed) public swapable;	/*	does the object id allocation	*/
+	dcl id.code	fixed;							/*	desired id (code<0 means auto allocate)	*/
+
+	if id.code = S#AutoAllocate then do;	/*	compute next available id	*/
+		max.object.id = max.object.id + 1;	/*	we will use next higher id	*/
+		id.code = max.object.id;
+	end;
+	else do;											/*	user has selected an id	*/
+		if id.code > max.object.id				/*	keep max id up to date	*/
+		then max.object.id = id.code;
+	end;
+
+	return id.code;								/*	return allocated id	*/
+end ALLOCATE.ID;
+
+COMPUTE.MAX.OBJECT.ID:  proc swapable;		/*	keeps max.object.id up to date	*/
+	dcl (id,next.ptr,cur.ptr)	fixed;
+
+	/*	algorithm just looks for current max id in object list	*/
+
+	Max.Object.Id = 0;			/*	set to zero initially	*/
+	Next.Ptr		  = 0;			/*	Zero search ptr			*/
+
+	do while Read.Object(Next.Ptr) <> O#Len.End;	/*	Go until end of list	*/
+		Cur.Ptr	= Next.Ptr;					/*	Save where we are now	*/
+		Next.Ptr	= Next.Ptr + read(md);	/*	Get next ptr for next time around	*/
+
+		Id = Read.Object(Cur.Ptr+O#Id);		/*	Id # for this object	*/
+
+		if Id > Max.Object.Id then Max.Object.Id = Id;	/*	new max id	*/
+	end;
+
+end COMPUTE.MAX.OBJECT.ID;
+
+PRINT.EMSTRING: proc (ptr) swapable;	/*	Print External Memory String	*/
+	dcl ptr		fixed;	/*	xmem ptr (relative to Screen.Base) to string	*/
+	dcl (i,j,k)	fixed;
+
+	do i = 1 to Read.Object(ptr);							/*	loop over chars in string	*/
+		if i then j = Read.Object(ptr+shr(i+1,1));	/*	get next 2 bytes of string	*/
+
+		if i then k = j & 255;								/*	get low byte	*/
+		else      k = shr(j,8);								/*	get hi  byte	*/
+
+		if (k >= a.sp)
+		then call pc(k);										/*	good printable char	*/
+		else call pc(a.score);								/*	illegal character (programming/system error)	*/
+	end;
+end PRINT.EMSTRING;
+
+FETCH.EMSTRING: proc (ptr,string) swapable;	/*	Get External Memory String	*/
+	dcl ptr			fixed;			/*	xmem ptr (relative to Screen.Base) to string	*/
+	dcl string		fixed array;	/*	User-supplied place to return string	*/
+	dcl (i,j,k,l)	fixed;
+
+	do i = 1 to Read.Object(ptr);							/*	loop over chars in string	*/
+		if i then j = Read.Object(ptr+shr(i+1,1));	/*	get next 2 bytes of string	*/
+
+		if i then k = j & 255;								/*	get low byte	*/
+		else      k = shr(j,8);								/*	get hi  byte	*/
+
+		if (k >= a.sp) & (k <= a.tilde)
+		then call pbyte(string,l,k);						/*	good printable char	*/
+		else call pbyte(string,l,a.score);				/*	illegal character (programming/system error)	*/
+		l = l + 1;
+	end;
+	string(0) = l;												/*	Set length	*/
+end FETCH.EMSTRING;
+
+COPY.EMSTRING: proc (source,dest) swapable;	/*	Copy string at source to string at dest	*/
+	dcl source	fixed;	/*	Source      xmem ptr (relative to Screen.Base)	*/
+	dcl dest		fixed;	/*	Destination xmem ptr (relative to Screen.Base)	*/
+	dcl i			fixed;
+
+	call Copy.Ext.Mem (Screen.Base,source,Screen.Base,Dest,shr(Read.Object(source)+1,1)+1);	/*	Copy for as long as source	*/
+end COPY.EMSTRING;
+
+PAD.STRING: proc(string,char,length) swapable;	/*	pad string with chars out to length	*/
+	dcl string	fixed array;
+	dcl char		fixed;
+	dcl length	fixed;
+	dcl i			fixed;
+
+	do i = string(0) to length-1;
+		call pbyte(string,i,char);
+	end;
+	if length igt string(0) then string(0) = length;
+end PAD.STRING;
+
+DRAW.GBOX.AROUND.OBJECT: proc(id,level,linetype,offsetu,offsetl) public swapable;	/*	draw graphics box around object	*/
+	dcl id			fixed;
+	dcl level		fixed;	/*	data level to use	*/
+	dcl linetype	fixed;
+	dcl offsetu		fixed;	/*	offset				*/
+	dcl offsetl		fixed;	/*	offset				*/
+
+	if mg600 or vt640 then do;			/*	only works on graphics terminals	*/
+		if Locate.Object(id) then do;	/*	object exists	*/
+			vector_mode;
+			call data_level(level);
+			call line_type(linetype);
+			call gbox(Read.Object(Object.ptr+O#ULX)-offsetl,
+						 Read.Object(Object.ptr+O#ULY)+offsetu,
+						 Read.Object(Object.ptr+O#LRX)+offsetl,
+						 Read.Object(Object.ptr+O#LRY)-offsetl,0);
+			call line_type(0);
+			call data_level(0);
+			transparent_mode;
+		end;
+	end;
+end DRAW.GBOX.AROUND.OBJECT;
+
+DRAW.OBJ.BORDER: proc(id,level) public swapable;	/*	draw graphics box around object	*/
+	dcl id		fixed;
+	dcl level	fixed;	/*	data level to use	*/
+
+	call DRAW.GBOX.AROUND.OBJECT(id,level,0,0,0);
+end DRAW.OBJ.BORDER;
+
+FLASH.OBJECT: proc (Id) public swapable;	/*	briefly highlights an object	*/
+	dcl Id	fixed;
+	dcl Ptr	fixed;
+	dcl (x,y,rows,cols)	fixed;
+
+	fill.field: proc (x,y,rows,cols);
+		dcl (x,y,rows,cols,i)	fixed;
+		do rows=1 to rows;
+			call cpos(y+rows-1,x);
+			do i=1 to cols;
+				call pc(sp);
+			end;
+		end;
+	end fill.field;
+
+	if MG600 or vt640 then do;			/*	only works on graphics terminals	*/
+		if Locate.Object(id) then do;	/*	object exists	*/
+			Ptr=Object.Ptr;
+			x	 =tpos.x(Read.Object(Ptr+O#ULX)+1);
+			y	 =tpos.y(Read.Object(Ptr+O#ULY)-1);
+			rows=tpos.y(Read.Object(Ptr+O#LRY)+1)-y+1;
+			cols=tpos.x(Read.Object(Ptr+O#LRX)-1)-x+1;
+
+			if Read.Object(Ptr+O#Type)<0 then do;	/*	only use for graphics object	*/
+				call save.cursor;
+				call set.term.attr(ATTR#Normal\ATTR#Reverse\ATTR#AltIntensity);
+				call fill.field(x,y,rows,cols);
+				call set.term.attr(ATTR#Normal);
+				call fill.field(x,y,rows,cols);
+				call restore.cursor;
+			end;
+			else do;
+			end;
+		end;
+	end;
+
+end FLASH.OBJECT;
+
+HIGHLIGHT.OBJECT: proc (Id,Attrs) public swapable;	/*	highlights an object	*/
+	dcl Id		fixed;
+	dcl Attrs	fixed;
+	dcl (x,y,rows,cols)	fixed;
+
+	fill.field: proc (x,y,rows,cols);
+		dcl (x,y,rows,cols,i)	fixed;
+		do rows=1 to rows;
+			call cpos(y+rows-1,x);
+			do i=1 to cols;
+				call pc(sp);
+			end;
+		end;
+	end fill.field;
+
+	if MG600 or vt640 then do;			/*	only works on graphics terminals	*/
+		if Locate.Object(id) then do;	/*	object exists	*/
+			x	 =tpos.x(Read.Object(Object.Ptr+O#ULX)+1);
+			y	 =tpos.y(Read.Object(Object.Ptr+O#ULY)-1);
+			rows=tpos.y(Read.Object(Object.Ptr+O#LRY)+1)-y+1;
+			cols=tpos.x(Read.Object(Object.Ptr+O#LRX)-1)-x+1;
+
+			if Read.Object(Object.Ptr+O#Type)<0 then do;	/*	only use for graphics object	*/
+				if vt640 then do;
+					call save.cursor;
+					call set.term.attr(Attrs);
+					call fill.field(x,y,rows,cols);
+					call restore.cursor;
+				end;
+				else do;
+					vector_mode;							/*	set to graphics	*/
+					call pc(27); call ps('|P_');		/*	Set fill pattern to solid	*/
+					call Blockmode_On;
+					call Data_Level(2);					/*	Complement	*/
+					call connect(Read.Object(Object.Ptr+O#ULX)+1,Read.Object(Object.Ptr+O#ULY)-1,
+									 Read.Object(Object.Ptr+O#LRX)-1,Read.Object(Object.Ptr+O#LRY)+1);
+					call Blockmode_Off;
+					call Data_level(0);
+					transparent_mode;
+				end;
+			end;
+			else do;
+			end;
+		end;
+	end;
+
+end HIGHLIGHT.OBJECT;

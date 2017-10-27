@@ -1,0 +1,415 @@
+/* GETSOU   $TITLE  Source for get.next.event and other event handling code
+
+   Modified:
+   09/15/89 - PF  - Added check for MIDINET.TIMEOUT in examine.next.event
+   06/27/89 - cj  - Moved many events around for release 2.2
+   06/09/89 - TSS - Moved PERFORM call in EXAMINE.NEXT.EVENTS to RUN.SYN.LOOP
+   03/03/89 - TSS - Move init of NEW.CLAVIER.INFO to TTYSOU
+   01/17/89 - MWH - Send periodic time message in interrupt
+   10/14/88 - TSS - Moved all protocol processing to EXAMINE.NEXT.EVENTS
+   10/14/88 - TSS - Moved call to PERFORM from 300-MAIN to EXAMINE.NEXT.EVENTS
+   10/13/88 - MWH - Add RS422 driver
+   09/24/88 - TSS - Started using INC.PROTOCOL literal & added Clavier window updating
+   09/22/88 - TSS - Did some cleanup of code & fixed bugs in Clavier status xmit
+   09/21/88 - TSS - Changed references of TBUT.PTR to BSTAT.PTR
+   08/14/88 - TSS - Added code to transmit protocol messages when needed
+   05/18/88 - LSS - insert for -XPL:SYSLITS
+   12/15/87 - CJ  - made get.next.event check new seq info every time
+                   to speed up d34/d35 dtd remote control box
+                   interface
+   02/15/87 - MPB - Added Get.Arrow.Key event to Get.Next.Event
+*/
+
+/* literals for get.next.event */
+
+module getmod;
+
+insert ':-xpl:syslits';                /* to get mouse literals     */
+insert ':-xpl:intrprtr';            	/* interpreter interface     */
+
+insert ':synlits:comlits';             /* compilation lits          */
+insert ':synlits:globlits';            /* most items                */
+insert ':synlits:synclits';            /* many synclavier lits      */
+
+insert ':synmods:globdcl';             /* for real.milliseconds     */
+insert ':synmods:mousrdcl';            /* real-time mouse dcls      */
+insert ':synmods:mousfdcl';            /* basic mouse routine       */
+insert ':synmods:ttydcl';              /* d50 in char               */
+insert ':synmods:getvdcl';             /* need the get variables    */
+insert ':synmods:prodcl';              /* for termulator stuff      */
+insert ':synmods:trapdcl';             /* for interchange events    */
+
+insert ':synlits:asciilit';            /* for arrow keys            */
+insert ':synauxs:getlits';
+insert ':synauxs:mouselit';            /* mouse lits                */
+insert ':synauxs:errlits';
+
+/* routines for get.next.event: */
+
+dcl  get.item.enabled(num.of.get.events) fixed public;
+
+get_enable:proc(item) public;
+   dcl item fixed;
+   get.item.enabled(item)=get.item.enabled(item)+1;
+end;
+
+get_disable:proc(item) public;
+   dcl item fixed;
+   get.item.enabled(item)=get.item.enabled(item)-1;
+end;
+
+enable_several_gets:proc (arg1,arg2,arg3,arg4) public;
+   dcl (arg1,arg2,arg3,arg4) fixed;
+
+   if arg1<>0 then call get_enable(arg1);
+   if arg2<>0 then call get_enable(arg2);
+   if arg3<>0 then call get_enable(arg3);
+   if arg4<>0 then call get_enable(arg4);
+end enable_several_gets;
+
+disable_several_gets:proc (arg1,arg2,arg3,arg4) public;
+   dcl (arg1,arg2,arg3,arg4) fixed;
+
+   if arg1<>0 then call get_disable(arg1);
+   if arg2<>0 then call get_disable(arg2);
+   if arg3<>0 then call get_disable(arg3);
+   if arg4<>0 then call get_disable(arg4);
+end disable_several_gets;
+
+enable_bit_gets: proc (get.bits) public;
+   dcl get.bits fixed;
+   dcl i        fixed;
+
+   i=1;
+   do while get.bits<>0;
+      if get.bits then call get_enable(i);
+      get.bits=shr(get.bits,1);
+      i=i+1;
+   end;
+
+end enable_bit_gets;
+
+disable_bit_gets: proc (get.bits) public;
+   dcl get.bits fixed;
+   dcl i        fixed;
+
+   i=1;
+   do while get.bits<>0;
+      if get.bits then call get_disable(i);
+      get.bits=shr(get.bits,1);
+      i=i+1;
+   end;
+
+end disable_bit_gets;
+
+enable_all_gets:proc public swapable;
+   dcl i fixed;
+
+   do i=1 to num.of.get.events;
+      call get_enable(i);
+   end;
+end enable_all_gets;
+
+disable_all_gets:proc public swapable;
+   dcl i fixed;
+
+   do i=1 to num.of.get.events;
+      call get_disable(i);
+   end;
+end disable_all_gets;
+
+/* check screen boundaries:
+
+   1.  call only if play <> 0
+   2.  screen.scroll.begin, screen.scroll.end must be set up before calling
+   3.  cursor.scroll.begin, cursor.scroll.end must be set up before calling
+   4.  sets 32 in new.ABLE.seq.info if play time has moved out of cursor window
+   5.  sets 64 in new.ABLE.seq.info if play time has moved off of screen window */
+
+CHECK.SCREEN.BOUNDARIES:procedure;
+    dcl last.time fixed static;
+    
+   if sampled.actual.play.time.lsb<>last.time
+   then do;
+
+      last.time = sampled.actual.play.time.lsb;
+
+      /* Check cursor window */
+
+      if       SAMPLED.ACTUAL.PLAY.TIME.MSB ilt CURSOR.SCROLL.BEGIN(0)
+      or      (SAMPLED.ACTUAL.PLAY.TIME.MSB  =  CURSOR.SCROLL.BEGIN(0) and
+               SAMPLED.ACTUAL.PLAY.TIME.LSB ilt CURSOR.SCROLL.BEGIN(1))
+      then new.ABLE.seq.info = new.ABLE.seq.info \ 32;
+
+      else if  SAMPLED.ACTUAL.PLAY.TIME.MSB igt CURSOR.SCROLL.END(0)
+           or (SAMPLED.ACTUAL.PLAY.TIME.MSB  =  CURSOR.SCROLL.END(0) and
+               SAMPLED.ACTUAL.PLAY.TIME.LSB igt CURSOR.SCROLL.END(1))
+      then new.ABLE.seq.info = new.ABLE.seq.info \ 32;
+
+      /* Check screen window */
+
+      if       SAMPLED.ACTUAL.PLAY.TIME.MSB ilt SCREEN.SCROLL.BEGIN(0)
+      or      (SAMPLED.ACTUAL.PLAY.TIME.MSB  =  SCREEN.SCROLL.BEGIN(0) and
+               SAMPLED.ACTUAL.PLAY.TIME.LSB ilt SCREEN.SCROLL.BEGIN(1))
+      then new.ABLE.seq.info = new.ABLE.seq.info \ 64;
+
+      else if  SAMPLED.ACTUAL.PLAY.TIME.MSB igt SCREEN.SCROLL.END(0)
+           or (SAMPLED.ACTUAL.PLAY.TIME.MSB  =  SCREEN.SCROLL.END(0) and
+               SAMPLED.ACTUAL.PLAY.TIME.LSB igt SCREEN.SCROLL.END(1))
+      then new.ABLE.seq.info = new.ABLE.seq.info \ 64;
+   end;
+
+end CHECK.SCREEN.BOUNDARIES;
+
+/* $SUBTITLE */
+
+dcl mouse.cursor.update    proc  external;  /* user must insert mousemod or moussmod */
+dcl mouse.cursor.time      fixed external;
+dcl init.midi.subsystems   proc  external;
+
+
+// examine.next.events is the inards of check.next.event.  It runs the lower level
+// code (via run.syn.loop) and the macintosh (also by run.syn.loop) every 5
+// milliseconds.  It may return at DTask level.
+
+examine.next.events:  proc;
+   dcl (ctr)            fixed static; 
+   dcl last.smpte.time  fixed static;
+
+   call run.syn.loop;    							// check for running main loop and mac every 5 msecs
+
+   if run.syn<>0 then do;
+      if INC.PRO            						// update termulator at the check.next.event level
+      then call Send.Events.To.D50.Termulator;
+      
+      // Process messages from Interpreter
+      if (interp_poll_for_message(0) != 0)
+         Process.Interpreter.Message();
+   end;
+
+   /* Check here for special events that are only sent to     */
+   /* the ABLE screen software.                               */
+
+   if (num.of.d50.in.chars<>0) then do;      /* terminal character  */
+      new.ABLE.in.char = 1;                  /* tell get.next.event */
+   end;
+
+   if inc.mouse then do;
+      if new.ABLE.mouse.button = 0 then do; /* no presses stacked - check for one */
+         new.ABLE.mouse.button = mouse(button.check);
+      end;
+
+      if  (mouse.cursor.on)
+      and ((real.milliseconds - mouse.cursor.time) igt mouse.refresh.rate)
+      then do;                         /* check mouse again */
+         mouse.cursor.time = real.milliseconds;
+         if (D44_PRESENT) then do;
+            if MOUSE.CURSOR.UPDATE<>0 then do;  /* movement occurred   */
+               new.ABLE.mouse.movement = 1;     /* tell get.next.event */
+            end;
+         end;
+      end;
+   end;
+
+   ctr = ctr + 1;                      /* reduce work load            */
+
+   if ctr > 10                         /* perform work rarely         */
+   then do;
+
+      ctr=0;
+
+      if get.item.enabled(get.play.scrolling)<>0 then do;   /* check of scrolling desired */
+         if play <> 0
+         then call CHECK.SCREEN.BOUNDARIES;
+      end;
+
+      if inc.mono<>0                   /* mono only - check underrun, io */
+      then do;                         /* check underrun/disk error */
+         if (winchester.error\output.underrun)<>0 then call set.error(err.io,'');
+         winchester.error=0; output.underrun=0;
+      end;
+
+      if midinet.timeout<>0 then do;
+         midinet.timeout = 0;
+         call init.midi.subsystems;
+      end;
+
+   end;
+
+end examine.next.events;
+
+/* map.in.char : this routine sees what features are enabled (by  */
+/* looking at get.item.enabled) and then sees what character has  */
+/* been typed (next.d50.in.char) and maps the character to an     */
+/* arrow key return, a program exit return, or an in char         */
+/* return                                                         */
+
+map.in.char:proc swapable;
+
+   if (get.item.enabled(get.arrow.key)<>0)
+   &  ((next.d50.in.char = U.ARR) 
+   or  (next.d50.in.char = D.ARR)
+   or  (next.d50.in.char = L.ARR)
+   or  (next.d50.in.char = R.ARR)
+   or  (next.d50.in.char = HOME))
+   then return get.arrow.key;
+
+   if (get.item.enabled(get.program.exit)<>0)
+   &  (((next.d50.in.char >= ASC.CALL.CONVERT)
+   &    (next.d50.in.char <= ASC.CALL.TERMINATE))
+   or  ( next.d50.in.char  = ESC                ))
+   then return get.program.exit;
+
+   if (get.item.enabled(get.in.char)<>0)
+   then return get.in.char;
+
+   return 0;
+
+end map.in.char;
+
+check.next.event:proc public;
+   dcl (i,j) fixed;
+
+   call examine.next.events;        /* check system items            */
+	
+   do i=1 to num.of.get.events;     /* look for anything of interest */
+      if  (get.ABLE.array(i)<>0)    /* item occurred                 */
+      then do;
+         if i=get.in.char then do;  /* if it is in char              */
+			   if (num.of.d50.in.chars<>0) then do;      /* terminal character  */
+					j = map.in.char;        /* use swap procedure to do work */
+					if j<>0 then return j;
+				end;
+         end;
+         else if (get.item.enabled(i)<>0)
+         then return i;
+      end;
+   end;
+
+   return 0;
+end check.next.event;
+
+/* Note: next.event.info has a literal Last.Event.Info
+   which should be used instead of its real name              */
+
+dcl next.event.info  fixed public;   /* info returned         */
+dcl last.event.code  fixed public;   /* last code returned    */
+
+get.next.event:proc public swapable; /* get next system event */
+   dcl ctr  fixed;
+
+	ctr = 0;
+	
+	// Emergency hook in case higher level code did not process the event.  Run the mac at least
+	// every 250 msecs so user can (hopefully!) selectect 'Quit' !!!
+	interp_run_host_250();
+	
+   do while 1;
+
+      /* Check for special events here that are only applicable to         */
+      /* the ABLE screen code.                                             */
+
+      if new.ABLE.screen.event<>0 then do;
+         next.event.info  = new.ABLE.screen.event; /* get info                  */
+         new.ABLE.screen.event = 0;                /* clear synclav variable    */
+
+         if get.item.enabled(get.screen.event)<>0 /* return if user wants it   */
+         then do;
+            last.event.code = get.screen.event;
+            return get.screen.event;
+         end;
+      end;
+
+      if (new.ABLE.in.char<>0)
+		{
+			new.ABLE.in.char = 0;
+				
+			if (num.of.d50.in.chars != 0)      				/* terminal character  */
+			{
+				last.event.code = map.in.char();
+				next.event.info = get.next.d50.in.char();  /* get character      */
+				
+				if (last.event.code <> 0)
+				return (last.event.code);
+			}
+      }
+
+      if new.ABLE.mouse.button<>0 then do;
+         next.event.info=new.ABLE.mouse.button;  /* get operation       */
+         new.ABLE.mouse.button=0;
+         if get.item.enabled(get.mouse.button)<>0
+         then do;
+            last.event.code = get.mouse.button;
+            return get.mouse.button;
+         end;
+      end;
+
+      if new.ABLE.mouse.movement<>0 then do;
+         next.event.info    = 0;
+         new.ABLE.mouse.movement = 0;
+         if get.item.enabled(get.mouse.movement)<>0
+         then do;
+            last.event.code = get.mouse.movement;
+            return get.mouse.movement;
+         end;
+      end;
+
+      if new.ABLE.seq.info <> 0 then do;
+         next.event.info    = new.ABLE.seq.info;
+         new.ABLE.seq.info  = 0;
+         if get.item.enabled(get.new.seq.info)<>0
+         then do;
+            last.event.code = get.new.seq.info;
+            return get.new.seq.info;
+         end;
+      end;
+
+      if get.ABLE.array(ctr)<>0 then do;    	/* synclav event happened    */
+         next.event.info      = get.ABLE.array(ctr);
+         get.ABLE.array(ctr)  = 0;          	/* clear synclav variable    */
+
+         if get.item.enabled(ctr)<>0        	/* return if user wants it   */
+         then do;
+            last.event.code = ctr;
+            return ctr;
+         end;
+      end;
+
+      // Note: This is the normal point where the RTP returns control
+      // to the Macintosh (at least when the RTP is relatively idle).
+      // E.G. we are really out of things to do if we get here...
+
+      ctr=ctr+1;                          	    /* divide workload to simplify */
+
+      if (ctr IGT num.of.get.events) {
+         ctr=0;
+         RUN.HOST();
+      }
+
+      call examine.next.events;        		    /* check system items        	*/
+
+   end;
+
+end get.next.event;
+
+/* substitute event processor */
+
+debug.get.next.event:proc swapable; 			/* get next system event */
+	dcl i   fixed;
+	dcl j   fixed;
+	dcl ect fixed static;
+	
+	i = debug.get.next.event();
+	
+	call cpos(23,0); call pnum(ect, 6); call ps('  '); call pnum(i,6); call ps('   '); call pnum(next.event.info,6);
+	
+	ect = ect + 1;
+	
+	do j = 0 to 100;
+		write(3) = 0;
+	end;
+	
+	return (i);
+end debug.get.next.event;
+
+end getmod;

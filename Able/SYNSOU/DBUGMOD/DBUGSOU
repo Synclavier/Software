@@ -1,0 +1,1191 @@
+/* DBUGSOU   $TITLE  Debugging routines
+
+   08/05/91 - PF  - timbre head prints out items through tim.poly.event
+   01/17/90 - MWH - Allow memory zapping in OCTAL as well as DECIMAL
+   09/06/89 - MWH - Move DECAY.DELAY.MSEC to stop compiler warnings
+   06/21/89 - TSS - ADDED CODE TO ALLOW SETTING OF DECAY.DELAY.MSEC
+   06/06/89 - TSS - Added some new code to test Kbd Maps
+   05/04/89 - MWH - Add code to zap a memory location; octal input routine
+   08/19/87 - MWH - Clean out temp POLY testing code
+   08/17/87 - MWH - Remove temp audition code; add some to test ps.max.time
+   08/06/87 - MWH - SOME / *TEMP* / THINGS FOR TESTING AUDITION MODE
+   08/03/87 - MWH - Don't write out sound files after zero name word
+   07/20/87 - MWH - Better poly/xmem dumps, show poly sound files
+   07/01/87 - MWH - Split FRP.PTR into FP0-FP3.PTR for expanded poly
+   03/02/87 - tss - converted to run in new module scheme
+   
+*/
+
+
+
+Module seqdbug;
+
+   insert ':synlits:COMLITS';           /* get configuration and pdl size */
+   insert ':synlits:FCODLITS';
+   insert ':synlits:GLOBLITS';
+   insert ':synlits:THDLITS';
+   insert ':synlits:TIMLITS';
+   insert ':synlits:SYNCLITS';
+   insert ':synlits:ASCIILIT';
+
+   insert ':-xpl:catrout';
+   INSERT ':SYNRDCLS:03-PDCLS';
+   INSERT ':SYNRDCLS:04-SDCLS';
+   INSERT ':SYNRDCLS:05-BDCLS';
+   INSERT ':SYNRDCLS:06-MDCLS';
+   INSERT ':SYNRDCLS:08-IDCLS';
+   INSERT ':SYNRDCLS:10-INTDC';
+   INSERT ':SYNRDCLS:11-TDCLS';
+   INSERT ':SYNRDCLS:12-EDCLS';
+
+   INSERT ':SYNMODS:GLOBDCL';
+   INSERT ':SYNMODS:MATHDCL';
+   INSERT ':SYNMODS:POLYDCL';
+   INSERT ':SYNMODS:XMEMDCL';
+   INSERT ':SYNMODS:MONODCL';
+   INSERT ':SYNMODS:PARMDCL';
+   INSERT ':SYNMODS:TTYDCL';
+   INSERT ':SYNMODS:PLOTDCL';
+   INSERT ':SYNMODS:GETVDCL';  
+   insert ':synmods:GETDCL';
+   INSERT ':SYNMODS:TPRIMDCL';
+
+   DCL SEQDBUG (9) FIXED PUBLIC; /* 10 DEBUG FLAGS (0-9) */
+
+   PROMPT.FOR.DEBUG.COMMAND:  PROC PUBLIC SWAPABLE;
+      PRINT; PRINT 'ENTER COMMAND -->',;
+   END PROMPT.FOR.DEBUG.COMMAND;
+
+   INIT.SEQ.DEBUG.DISPLAY:  PROC PUBLIC SWAPABLE;
+      DCL SAVE FIXED;
+
+      CALL TTY_WAIT;
+      SAVE=READ("314");         /* SAVE INTERRUPT STATUS */
+      DISABLE;
+
+      PRINT 'COMMANDS:';
+      PRINT '  A - TST PASTE.MERGE.FILL ',; PRINT '  N - SHOW NLS HEADER      ';
+      PRINT '  B - SHOW BRIEF GLOBALS   ',; PRINT '  O -                      ';
+      PRINT '  C - SHOW CURRENT NOTE    ',; PRINT '  P - LOAD PLAY INFO       ';
+      PRINT '  D - DUMP SEC OF EXT MEM  ',; PRINT '  Q -                      ';
+      PRINT '  E - TEST CUT.COPY.MOVE   ',; PRINT '  R - INSERT REST NOTE     ';
+      PRINT '  F - CREATE 1ST TRK NLS   ',; PRINT '  S - SHOW POLY SND FILES  ';
+      PRINT '  G - SHOW CURRENT GLOBALS ',; PRINT '  T - SET ABS. TRK #       '; 
+      PRINT '  H - SHOW TRK HEAD INFO   ',; PRINT '  U -                      ';
+      PRINT '  I - SHOW GENERAL INFO    ',; PRINT '  V - SET DECAY DELAY TIME ';
+      PRINT '  J - DUMP CHANNEL LIST    ',; PRINT '  W - DUMP KBD MAPS        ';
+      PRINT '  K - DUMP INT. MEMORY     ',; PRINT '  X - DUMP SEC OF POLY MEM ';
+      PRINT '  L - LOAD LOOP INFO       ',; PRINT '  Y - DELETE NOTE          '; 
+      PRINT '  M - SHOW TIMBRE HEAD     ',; PRINT '  Z - RUN.SYN.LOOP LATENCY ';
+      PRINT '  0 TO 9 - TOGGLE SEQDBUG0 TO SEQDBUG9         ';
+      PRINT '  > - ADVANCE TO NEXT NOTE ',; PRINT '  < - BACKUP TO PRIOR NOTE';
+      PRINT '  / - ZAP MEMORY LOCATION  ',; PRINT '  \ - ZAP MEMORY IN OCTAL  ';
+
+      CALL PROMPT.FOR.DEBUG.COMMAND;
+
+      WRITE("314")=SAVE;        /* RESTORE ORIGINAL INTERRUPT STATUS */
+      WRITE("001")=SAVE;
+   END INIT.SEQ.DEBUG.DISPLAY;
+
+   SHOW.GENERAL.INFO: PROC PUBLIC SWAPABLE;
+      PRINT 'PLAY.TIME.MSB,PLAY.TIME.LSB:                    ',;
+      PRINT  PLAY.TIME.MSB,' ',PLAY.TIME.LSB;
+      PRINT 'ADVANCED.PLAY.TIME.MSB,ADVANCED.PLAY.TIME.LSB:  ',;
+      PRINT  ADVANCED.PLAY.TIME.MSB,' ',ADVANCED.PLAY.TIME.LSB;
+      PRINT 'NEXT.CLICK,BEAT.NUMBER:                         ',;
+      PRINT  NEXT.CLICK,' ',BEAT.NUMBER;
+      PRINT 'OVERALL.LOOP:                                   ',;
+      PRINT  OVERALL.LOOP;
+      PRINT 'GOBACK.PLAY.TIME.MSB,GOBACK.PLAY.TIME.LSB:      ',;
+      PRINT  GOBACK.PLAY.TIME.MSB,' ',GOBACK.PLAY.TIME.LSB;
+      PRINT 'NEXT.EVENT.MSB,NEXT.EVENT.LSB,NEXT.EVENT.QUEUE: ',;
+      PRINT  NEXT.EVENT.MSB,' ',NEXT.EVENT.LSB,' ',NEXT.EVENT.QUEUE;
+      PRINT 'BAS.PTR,BAS.LEN:    ',BAS.PTR,BAS.LEN;
+      PRINT 'NAH.PTR,NAH.LEN:    ',NAH.PTR,NAH.LEN;
+      PRINT 'BNK.PTR,BNK.LEN:    ',BNK.PTR,BNK.LEN;
+      PRINT 'INF.PTR,INF.LEN:    ',INF.PTR,INF.LEN;
+      PRINT 'TIM.PTR,TIM.LEN:    ',TIM.PTR,TIM.LEN;
+      PRINT 'TRD.PTR,TRD.LEN:    ',TRD.PTR,TRD.LEN;
+      PRINT 'NAH.FREE,NAH.#FREE: ',NAH.FREE,NAH.#FREE;
+      PRINT 'TIM.FREE,TIM.#FREE: ',TIM.FREE,TIM.#FREE;
+      PRINT 'PAR.PTR,PAR.LEN,PAR.NUMT: ',PAR.PTR,PAR.LEN,PAR.NUMT;
+      PRINT 'USE.PTR,TRK.HEAD,TIM.HEAD: ',USE.PTR,TRK.HEAD,TIM.HEAD;
+      PRINT 'RECD.TRK,TBUT.PTR: ',RECD.TRK,TBUT.PTR;
+      PRINT 'FP0.PTR: ',FP0.PTR;
+      PRINT 'FP1.PTR: ',FP1.PTR;
+      PRINT 'FP2.PTR: ',FP2.PTR;
+      PRINT 'FP3.PTR: ',FP3.PTR;
+   END SHOW.GENERAL.INFO;
+
+   SHOW.CHAN.LIST:  PROC SWAPABLE;
+      DCL (I,BIN) FIXED;
+      DCL  PTR    POINTER;
+
+      PTR = ADDR(FP0.PTR);
+      DO BIN=0 TO POLYNUMS-1;
+         PRINT 'CORE(FP',BIN,'.PTR)= ',CORE(CORE(PTR));
+         DO I=1 TO CORE(CORE(PTR));
+            PRINT 'I,CORE(FP',BIN,'.PTR+I): ',I,CORE(CORE(PTR)+I);
+         END;
+         PTR = PTR + 1;   /* POINT AT NEXT FPn.PTR */
+      END;
+   END SHOW.CHAN.LIST;
+
+   DCL VALID.OCTAL FIXED;        /* 0 = FAILURE, 1 = VALID OCTAL NUMBER */
+
+   INPUT.OCTAL: PROC SWAPABLE;   /* RETURNS OCTAL NUMBER, STATUS IN VALID.OCTAL */
+      DCL CH    FIXED;
+      DCL NUM   FIXED;
+      DCL SIGN  FIXED;
+      DCL FIRST BOOLEAN;
+      DCL ECHO  BOOLEAN;
+
+      SIGN = 1;
+      FIRST = TRUE;
+      CH = READ("050");                  /* GET A CHARACTER */
+
+      DO WHILE CH <> A.CR;
+         ECHO = TRUE;                    /* ASSUME WE ECHO IT */
+
+         IF      CH = A.MINUS AND FIRST = TRUE THEN SIGN = -1;
+         ELSE IF CH = A.PLUS  AND FIRST = TRUE THEN SIGN =  1;
+         ELSE IF CH >= A.0 AND CH <= A.7
+         THEN NUM = SHL(NUM,3) + (CH - A.0);
+         ELSE IF CH = A.DEL              /* DELETE A DIGIT */
+         AND NUM <> 0 THEN DO;
+            NUM = SHR(NUM,3);
+            WRITE("050") = A.BS;
+            WRITE("050") = A.SP;
+            WRITE("050") = A.BS;
+         END;
+         ELSE ECHO = FALSE;
+
+         FIRST = FALSE;
+         IF ECHO = TRUE
+         THEN WRITE("050") =CH;          /* ECHO CHARACTER */
+         CH = READ("050");               /* GET NEXT CHARACTER */
+      END;
+
+      PRINT;                             /* ECHO THE NEWLINE */
+
+      IF FIRST = TRUE
+      THEN VALID.OCTAL = FALSE;          /* WE NEVER GOT A NUMBER */
+      ELSE VALID.OCTAL = TRUE;           /* WE DID GET A NUMBER */
+
+      RETURN (NUM * SIGN);
+      
+   END INPUT.OCTAL;
+
+   DUMP.INT.MEMORY: PROC SWAPABLE;
+      DCL (I,J) FIXED;
+
+      PRINT 'NOTELIST,NPTR,PPTR: ',NOTELIST,' ',NPTR,' ',PPTR;
+      PRINT 'ADDR(8): ',; I = INPUT.OCTAL;
+
+      IF VALID.OCTAL = FALSE THEN RETURN;
+
+      J=I;
+      DO WHILE J<>(I+128);
+         IF ((J-I)&7)=0 THEN DO; PRINT; PRINT (J-I),' ',OCTAL(J),':  ',; END;
+         PRINT CORE(J),' ',;
+         J=J+1;
+      END;
+
+   END DUMP.INT.MEMORY;
+
+   ZAP.MEMORY: PROC (OCT) SWAPABLE;             /* CHANGE ABLE MEMORY */
+      DCL OCT FIXED;
+      DCL I   FIXED;
+      DCL VAL FIXED;
+
+      PRINT 'ADDR(8): ',; I = INPUT.OCTAL;
+      IF VALID.OCTAL = FALSE THEN RETURN;
+
+      PRINT OCTAL(I),' => ',;
+
+      IF OCT = 0 THEN DO;
+         PRINT CORE(I),'(10)',;
+         PRINT '  NEW VALUE(10): ',;
+         INPUT VAL;
+      END;
+
+      ELSE DO;
+         PRINT OCTAL(CORE(I)),'(8)',;
+         PRINT '  NEW VALUE(8): ',;
+         VAL = INPUT.OCTAL;
+         IF VALID.OCTAL = FALSE THEN RETURN;
+      END;
+      
+      CORE(I) = VAL;
+      PRINT OCTAL(I),' => ',CORE(I),'(10), ',OCTAL(CORE(I)),'(8)';
+
+   END ZAP.MEMORY;
+
+   SHOW.TIMBRE.HEAD: PROC PUBLIC SWAPABLE;
+      DCL TB FIXED;
+      DCL (I,J,BASE,FLAG) FIXED;
+
+      PRINT 'ENTER TIMBRE NUMBER TO VIEW',;
+      INPUT TB;
+
+      WRITE(MAM)=TIM.HEAD;
+      WRITE(MAL)=TB;
+
+      IF READ(MD)=0
+      THEN DO;                  /* TRACK DOES NOT EXIST */
+         PRINT 'TIMBRE',TB,' HAS NO TIMBRE HEAD';
+      END;
+      ELSE DO;
+         PRINT 'TIMBRE HEAD FOR TIMBRE',TB,':';
+
+         PRINT 'DECIMAL PRINTOUT.......';
+         WRITE(MAM)=READ(MD);   /* POINT TO TIM HEAD */
+         DO I=TIM.VOLUME.LEV TO TIM.POLY.EVENT;
+            IF (I&7)=0 THEN DO; PRINT; PRINT '   ',I,':  ',; END;
+            PRINT READ(MDI),' ',;
+         END;
+         PRINT; PRINT;
+
+         PRINT 'PRESS RETURN FOR OCTAL PRINTOUT OR SPACE TO QUIT',;
+         PRINT CHARACTER("15"),;
+
+         AGAIN:
+         DO WHILE (READ("51")&2)=0; END;
+         J=READ("50")&"177";
+         IF J="40" THEN DO;
+            PRINT '                                                        ';
+            RETURN;
+         END;
+         ELSE IF J<>"15" THEN GOTO AGAIN;
+
+         PRINT 'OCTAL PRINTOUT.......                                   ';
+         WRITE(MAL)=TIM.VOLUME.LEV;
+         DO I=TIM.VOLUME.LEV TO TIM.POLY.EVENT;
+            IF (I&7)=0 THEN DO; PRINT; PRINT '   ',I,':  ',; END;
+            PRINT OCTAL(READ(MDI)),' ',;
+         END;
+         PRINT;
+      END;
+
+   END SHOW.TIMBRE.HEAD;
+
+   SHOW.TRK.HEAD.INFO: PROC PUBLIC SWAPABLE;
+      DCL #TRK FIXED EXTERNAL;
+      DCL (I,J,BASE,FLAG) FIXED;
+
+      WRITE(MAM)=TRK.HEAD;
+      WRITE(MAL)=#TRK;
+
+      IF READ(MD)=0
+      THEN DO;                  /* TRACK DOES NOT EXIST */
+         PRINT 'TRACK',#TRK,' HAS NO TRACK HEADER';
+      END;
+      ELSE DO;
+         PRINT 'TRACK HEADER FOR TRACK',#TRK,':';
+
+         PRINT 'DECIMAL PRINTOUT.......';
+         WRITE(MAM)=READ(MD);   /* POINT TO TRK HEAD */
+         DO I=0 TO 255;
+            IF (I&7)=0 THEN DO; PRINT; PRINT '   ',I,':  ',; END;
+            PRINT READ(MDI),' ',;
+         END;
+         PRINT; PRINT;
+
+         PRINT 'PRESS RETURN FOR OCTAL PRINTOUT OR SPACE TO QUIT',;
+         PRINT CHARACTER("15"),;
+
+         AGAIN:
+         DO WHILE (READ("51")&2)=0; END;
+         J=READ("50")&"177";
+         IF J="40" THEN DO;
+            PRINT '                                                        ';
+            RETURN;
+         END;
+         ELSE IF J<>"15" THEN GOTO AGAIN;
+
+         PRINT 'OCTAL PRINTOUT.......                                   ';
+         WRITE(MAM)=TRK.HEAD;
+         WRITE(MAL)=#TRK;
+         WRITE(MAM)=READ(MD);
+         DO I=0 TO 255;
+            IF (I&7)=0 THEN DO; PRINT; PRINT '   ',I,':  ',; END;
+            PRINT OCTAL(READ(MDI)),' ',;
+         END;
+         PRINT;
+      END;
+
+   END SHOW.TRK.HEAD.INFO;
+
+   SHOW.ABS.XMEM.SECTOR: PROC (PTR,LEN) SWAPABLE;
+      DCL (PTR,LEN) FIXED;
+      DCL (I,J) FIXED;
+      DCL STRNG (8) FIXED;
+      DCL PROMPT DATA('PRESS RETURN FOR OCTAL PRINTOUT OR SPACE TO QUIT');
+
+      PRINT;
+      PRINT 'DECIMAL PRINTOUT FOR SECTOR',PTR;
+
+      WRITE(MAM)=PTR;
+      DO I=0 TO LEN-1 BY 8;
+         PRINT I,': ',;
+         DO J=1 TO 8;
+            PRINT READ(MD),' ',;
+            STRNG(J) = READ(MDI);
+         END;
+         DO J=0 TO 15;
+            IF BYTE(STRNG,J) > "37" & BYTE(STRNG,J) < "177"
+            THEN PRINT CHR(BYTE(STRNG,J)),;
+            ELSE PRINT '.',;
+         END;
+         PRINT;
+      END;
+      PRINT; PRINT;
+
+      
+      PRINT STRING(PROMPT),CHARACTER("15"),;
+
+      AGAIN:
+      DO WHILE (READ("51")&2)=0; END;
+      J=READ("50")&"177";
+      IF J="40" THEN DO;
+         DO I=1 TO PROMPT(0); PRINT CHARACTER(32),; END;
+         PRINT CHARACTER("15"),;
+         RETURN;
+      END;
+      ELSE IF J<>"15" THEN GOTO AGAIN;
+
+      DO I=1 TO PROMPT(0); PRINT CHARACTER(32),; END;
+      PRINT CHARACTER("15"),;
+      PRINT 'OCTAL PRINTOUT FOR SECTOR',PTR;
+
+      WRITE(MAM)=PTR;
+      DO I=0 TO LEN-1 BY 8;
+         PRINT OCTAL(I),': ',;
+         DO J=1 TO 8;
+            PRINT OCTAL(READ(MD)),' ',;
+            STRNG(J) = READ(MDI);
+         END;
+         DO J=0 TO 15;
+            IF BYTE(STRNG,J) > "37" & BYTE(STRNG,J) < "177"
+            THEN PRINT CHR(BYTE(STRNG,J)),;
+            ELSE PRINT '.',;
+         END;
+         PRINT;
+      END;
+      PRINT;
+   END SHOW.ABS.XMEM.SECTOR;
+
+   DUMP.ABS.SECTOR: PROC PUBLIC SWAPABLE;
+      DCL PTR    FIXED;
+
+      PRINT 'ABSOLUTE SECTOR ADDR TO DUMP',;
+      INPUT PTR;
+
+      CALL SHOW.ABS.XMEM.SECTOR(PTR,256);
+
+   END DUMP.ABS.SECTOR;
+
+   SHOW.CURRENT.NOTE:  PROC PUBLIC SWAPABLE;
+      DCL (#SEC,#WRD)   FIXED EXTERNAL;
+      DCL (W1,W2,W3,W4) FIXED;
+      DCL DUR.MULTS     DATA (1,4,16,64);
+      DCL (I,J,K)       FIXED;
+
+      WRITE(MAM)=NAH.PTR+#SEC;
+      WRITE(MAL)=#WRD;
+
+      IF READ(MD)=NLS.EOS THEN DO;
+         PRINT 'CURRENTLY POINTING AT NLS.EOS';
+         RETURN;
+      END;
+
+      W1=READ(MDI);
+      W2=READ(MDI);
+      IF W1 THEN DO;
+         W3=READ(MDI);
+         W4=READ(MD );
+      END;
+
+      IF W1 THEN PRINT '4-WD ',; ELSE PRINT '2-WD ',;
+
+      IF (W1&"174001")="100001" THEN DO;
+         PRINT 'LONG REST ',;
+      END;
+      ELSE IF (W1&"174001")="104001" THEN DO;
+         PRINT 'ILP START ',;
+      END;
+      ELSE IF (W1&"174001")="110001" THEN DO;
+         PRINT 'ILP END ',;
+      END;
+      ELSE IF ((W1&1)=0)&((W2&"77")=REST.NOTE) THEN DO;
+         PRINT 'SHORT REST ',;
+      END;
+      ELSE IF W1&((W3&SHL(B.UPD,8))<>0) THEN DO;
+         IF (W3&SHL(B.GUI,8))=0 THEN DO;
+            I=SHR(W2,6)&3;
+            DO CASE I;
+               PRINT 'NORMAL UPDATE ',;
+               PRINT 'TOGGLE BITS UPDATE ',;
+               PRINT 'PRESSURE UPDATE ',;
+               PRINT 'MIDI PROGRAM CHANGE ',;
+            END;
+         END;
+         ELSE DO;
+            PRINT 'GUITAR UPDATE ',;
+         END;
+      END;
+      ELSE DO;
+         PRINT 'REAL NOTE ',;
+      END;
+      
+      PRINT '  (DELTA:',SHR(W1,1)&1023,')';
+      
+      IF (W1&"174001")="100001" THEN DO;
+         PRINT 'EXTRA REST: ',W2,' ',W3;
+      END;
+      ELSE IF (W1&"174001")="104001" THEN PRINT;
+      ELSE IF (W1&"174001")="110001" THEN PRINT;
+      ELSE IF ((W1&1)=0)&((W2&"77")=REST.NOTE) THEN PRINT;
+      ELSE IF W1&(W1>0)&((W3&SHL(B.UPD,8))<>0) THEN DO;
+         IF (W3&SHL(B.GUI,8))=0 THEN DO;
+            I=SHR(W2,6)&3;
+            DO CASE I;
+               DO; /* NORMAL UPDATE */
+                  PRINT 'CONTROLLER #: ',SHR(W2,8)&15,'  ',;
+                  DO CASE SHR(W2,8)&15;
+                     PRINT '(PEDAL 1)',;
+                     PRINT '(PEDAL 2)',;
+                     PRINT '(MOD WHEEL)',;
+                     PRINT '(BREATH)',;
+                     PRINT '(PITCH WHEEL)',;
+                     PRINT '(RIBBON)',;
+                  END;
+                  PRINT '   SWITCH BITS:',SHR(W3,8),' (',OCTAL(SHR(W3,8)),')';
+                  IF (SHR(W2,8)&15)<>4
+                  THEN PRINT 'FORWARD: ',W3&255,'   REWIND: ',SHR(W4,8);
+                  ELSE DO; /* SPECIAL FORMAT FOR PITCH WHEEL */
+                     J=W3&255;    IF (J&128)<>0 THEN J=J-256;
+                     K=SHR(W4,8); IF (K&128)<>0 THEN K=K-256;
+                     PRINT 'FORWARD: ',J,'   REWIND: ',K;
+                  END;
+               END;
+               DO; /* TOGGLE BITS UPDATE */
+                  PRINT 'SWITCH BITS:',SHR(W3,8),' (',OCTAL(SHR(W3,8)),')';
+                  PRINT 'FORWARD: ',SHR(W2,8)&15,'   REWIND: ',SHR(W2,12);
+               END;
+               DO; /* PRESSURE UPDATE */
+                  I=(W2&"77")+12;
+                  IF (W4&LOWER.KEY)<>0 THEN I=I-12;
+                  IF (W4&RAISE.KEY)<>0 THEN I=I+12;
+                  PRINT 'KEY #: ',I,;
+                  PRINT '   SWITCH BITS:',SHR(W3,8),' (',OCTAL(SHR(W3,8)),')';
+                  PRINT 'FORWARD: ',W3&255,'   NO REWIND VALUE';
+               END;
+               DO; /* MIDI PROGRAM CHANGE */
+                  PRINT 'SWITCH BITS:',SHR(W3,8),' (',OCTAL(SHR(W3,8)),')';
+                  PRINT 'FORWARD: ',W3&255,'   REWIND: ',SHR(W4,8);
+               END;
+            END;
+         END;
+         ELSE DO; /* GUITAR UPDATE */
+            PRINT 'SWITCH BITS:',SHR(W3,8),' (',OCTAL(SHR(W3,8)),')';
+            /* NOTHING ELSE FOR NOW */
+         END;
+      END;
+      ELSE DO; /* REAL NOTE */
+         I=(W2&"77")+12;
+         IF W1 THEN DO;
+            IF (W4&LOWER.KEY)<>0 THEN I=I-12;
+            IF (W4&RAISE.KEY)<>0 THEN I=I+12;
+         END;
+         PRINT 'KEY #: ',I,;
+
+         I=SHR(W2,6)\(SHR(W1&"014000",1)); /* GET 12 BIT MANTISSA  */
+         J=SHR(W1,13)&3;                   /* GET 2 BIT MULTIPLIER */
+         LOAD I; MUL DUR.MULTS(J); MWAIT;
+         J=RES; I=URES;                    /* GET 32 BIT DURATION */
+         DIV 1000;
+         I=RES; J=REM;
+         PRINT '   DURATION: ',I,'.',;
+         PRINT CHARACTER("60"+(J/100)),; J=J-(J/100)*100;
+         PRINT CHARACTER("60"+(J/10)),;  J=J-(J/10 )*10 ;
+         PRINT CHARACTER("60"+J),;
+         PRINT '  (SEC.MSEC)';
+
+         IF W1 THEN DO;
+            PRINT 'RTE DATA: ',W3&255,;
+            PRINT '   VOL DATA: ',SHR(W4,8);
+            PRINT 'SWITCH BITS:',SHR(W3,8),' (',OCTAL(SHR(W3,8)),')';
+         END;
+      END;
+
+      PRINT 'RAW DEC: ',W1,' ',W2,;
+      IF W1 THEN PRINT ' ',W3,' ',W4; ELSE PRINT;
+      PRINT 'RAW OCT: ',OCTAL(W1),' ',OCTAL(W2),;
+      IF W1 THEN PRINT ' ',OCTAL(W3),' ',OCTAL(W4); ELSE PRINT;
+
+   END SHOW.CURRENT.NOTE;
+
+   SHOW.CURRENT.NLS.HEADER:  PROC PUBLIC SWAPABLE;
+      DCL (#SEC) FIXED EXTERNAL;
+
+      WRITE(MAM)=NAH.PTR+#SEC;
+      PRINT 'NLS.FOR: ',READ(MDI);
+      PRINT 'NLS.REV: ',READ(MDI);
+      PRINT 'NLS.TRK: ',READ(MDI);
+      PRINT 'NLS.FP : ',READ(MDI);
+      PRINT 'NLS.LP : ',READ(MD );
+   END SHOW.CURRENT.NLS.HEADER;
+
+   SHOW.CURRENT.GLOBALS:  PROC PUBLIC SWAPABLE;
+      DCL (#TRK)            FIXED EXTERNAL;
+      DCL (#PTR)            FIXED EXTERNAL; /* ABS PTR TO TRACK HEAD */
+      DCL (#NMSB,#NLSB)     FIXED EXTERNAL; /* NEXT TIME CORRESPONDING TO PTR */
+      DCL (#LMSB,#LLSB)     FIXED EXTERNAL; /* LAST TIME CORRESPONDING TO PTR */
+      DCL (#WRD,#SEC)       FIXED EXTERNAL; /* RELATIVE PTR INTO NAH AREA AT WHICH ACTION OCCURS */
+      DCL (#ANYR,#ANYF)     FIXED EXTERNAL; /* ANY REV & FOR FOR THIS POINT   */
+      DCL (#MSB,#LSB)       FIXED EXTERNAL;
+      DCL (#W1,#W2,#W3,#W4) FIXED EXTERNAL;
+
+      PRINT '#TRK,#PTR:       ',#TRK ,' ',#PTR;
+      PRINT '#NMSB,#NLSB:     ',#NMSB,' ',#NLSB;
+      PRINT '#LMSB,#LLSB:     ',#LMSB,' ',#LLSB;
+      PRINT '#SEC,#WRD:       ',#SEC ,' ',#WRD;
+      PRINT '#ANYR,#ANYF:     ',#ANYR,' ',#ANYF;
+      PRINT '#MSB,#LSB:       ',#MSB ,' ',#LSB;
+      PRINT '#W1,#W2,#W3,#W4: ',#W1  ,' ',#W2 ,' ',#W3,' ',#W4;
+
+   END SHOW.CURRENT.GLOBALS;
+
+   SHOW.SHORT.STATUS: PROC PUBLIC SWAPABLE;
+      DCL (#TRK,#PTR)       FIXED EXTERNAL;
+      DCL (#WRD,#SEC)       FIXED EXTERNAL; /* RELATIVE PTR INTO NAH AREA AT WHICH ACTION OCCURS */
+      DCL (#NMSB,#NLSB)     FIXED EXTERNAL; /* NEXT TIME CORRESPONDING TO PTR */
+      DCL (#LMSB,#LLSB)     FIXED EXTERNAL; /* LAST TIME CORRESPONDING TO PTR */
+      DCL (#ANYR,#ANYF)     FIXED EXTERNAL; /* ANY REV & FOR FOR THIS POINT   */
+
+      PRINT '#TRK,#PTR:       ',#TRK ,' ',#PTR;
+      PRINT '#SEC,#WRD:       ',#SEC ,' ',#WRD;
+      PRINT '#NMSB,#NLSB:     ',#NMSB,' ',#NLSB;
+      PRINT '#LMSB,#LLSB:     ',#LMSB,' ',#LLSB;
+      PRINT '#ANYR,#ANYF:     ',#ANYR,' ',#ANYF;
+   END SHOW.SHORT.STATUS;
+
+   COPY.PLAY.INFO.TO.GLOBALS: PROC PUBLIC SWAPABLE;
+      DCL (#PTR)            FIXED EXTERNAL; /* ABS PTR TO TRACK HEAD */
+      DCL (#NMSB,#NLSB)     FIXED EXTERNAL; /* NEXT TIME CORRESPONDING TO PTR */
+      DCL (#LMSB,#LLSB)     FIXED EXTERNAL; /* LAST TIME CORRESPONDING TO PTR */
+      DCL (#WRD,#SEC)       FIXED EXTERNAL; /* RELATIVE PTR INTO NAH AREA AT WHICH ACTION OCCURS */
+      DCL (#ANYR,#ANYF)     FIXED EXTERNAL; /* ANY REV & FOR FOR THIS POINT   */
+
+      WRITE(MAM)=#PTR;
+      WRITE(MAL)=THD.NMSB;
+      #NMSB=READ(MDI);
+      #NLSB=READ(MDI);
+      #LMSB=READ(MDI);
+      #LLSB=READ(MDI);
+      #WRD =READ(MDI);
+      #SEC =READ(MD );
+      WRITE(MAL)=THD.ANY.FOR;
+      #ANYF=READ(MDI);
+      #ANYR=READ(MD );
+
+      CALL SHOW.SHORT.STATUS;
+   END COPY.PLAY.INFO.TO.GLOBALS;
+
+   COPY.LOOP.INFO.TO.GLOBALS: PROC PUBLIC SWAPABLE;
+      DCL (#PTR)            FIXED EXTERNAL; /* ABS PTR TO TRACK HEAD */
+      DCL (#NMSB,#NLSB)     FIXED EXTERNAL; /* NEXT TIME CORRESPONDING TO PTR */
+      DCL (#LMSB,#LLSB)     FIXED EXTERNAL; /* LAST TIME CORRESPONDING TO PTR */
+      DCL (#WRD,#SEC)       FIXED EXTERNAL; /* RELATIVE PTR INTO NAH AREA AT WHICH ACTION OCCURS */
+      DCL (#ANYR,#ANYF)     FIXED EXTERNAL; /* ANY REV & FOR FOR THIS POINT   */
+
+      WRITE(MAM)=#PTR;
+      WRITE(MAL)=THD.LP.NMSB;
+      #NMSB=READ(MDI);
+      #NLSB=READ(MDI);
+      #LMSB=READ(MDI);
+      #LLSB=READ(MDI);
+      #WRD =READ(MDI);
+      #SEC =READ(MD );
+      WRITE(MAL)=THD.LP.ANY.FOR;
+      #ANYF=READ(MDI);
+      #ANYR=READ(MD );
+
+      CALL SHOW.SHORT.STATUS;
+   END COPY.LOOP.INFO.TO.GLOBALS;
+
+   SET.ABS.TRK: PROC PUBLIC SWAPABLE;
+      DCL (#TRK,#PTR) FIXED EXTERNAL;
+
+      GET.INPUT:
+      PRINT 'ENTER ABS. TRACK NUMBER (0-255)',;
+      INPUT #TRK;
+
+      IF #TRK IGT 255 THEN GOTO GET.INPUT;
+
+      WRITE(MAM)=TRK.HEAD;
+      WRITE(MAL)=#TRK;
+      #PTR=READ(MD);
+
+      IF #PTR=0 THEN PRINT 'TRACK',#TRK,' HAS NO TRACK HEADER';
+      
+      PRINT;
+      CALL COPY.PLAY.INFO.TO.GLOBALS;
+
+   END SET.ABS.TRK;
+
+   MAIN.LOOP.LATENCY: PROC SWAPABLE;
+      /*
+      DCL (MAIN.LOOP.LATENCY,MAIN.LOOP.DURATION) FIXED EXTERNAL;
+      PRINT 'MAX TIME BETWEEN MAIN.LOOP CALLS: ',MAIN.LOOP.LATENCY;
+      PRINT 'LONGEST PASS THROUGH MAIN.LOOP:   ',MAIN.LOOP.DURATION;
+      MAIN.LOOP.LATENCY=0; MAIN.LOOP.DURATION=0;
+      */
+   END MAIN.LOOP.LATENCY;
+
+   CREATE.FIRST.NLS:  PROC PUBLIC SWAPABLE;
+      DCL (#TRK,#PTR) FIXED EXTERNAL;
+
+      WRITE(MAM)=TRK.HEAD;
+      WRITE(MAL)=#TRK;
+      #PTR=READ(MD);
+
+      IF #PTR=0 THEN DO;       /* NO TRACK HEAD ON THIS TRACK YET */
+
+         PRINT 'ATTEMPTING TO CREATE TRACK HEAD FOR TRACK',#TRK;
+
+         IF ALLOCATE.TRK.HEADER(#TRK)=0 /* TRY TO ALLOCATE TRK HEAD   */
+         THEN DO;
+            PRINT 'NOT ENOUGH ROOM FOR TRACK HEAD';
+            RETURN;                /* NOT ENOUGH ROOM - BOMB OUT */
+         END;
+
+         WRITE(MAM)=TRK.HEAD;
+         WRITE(MAL)=#TRK;
+         #PTR=READ(MD);            /* NEED TO SET THIS GLOBAL */
+      END;
+
+      WRITE(MAM)=#PTR;
+      WRITE(MAL)=THD.FOR;
+
+      IF READ(MD)<>0 THEN DO;
+         PRINT 'TRACK',#TRK,' ALREADY HAS A 1ST NLS';
+         RETURN;
+      END;
+
+      IF ALLOCATE.FIRST.NLS=0
+      THEN PRINT 'NOT ENOUGH ROOM TO CREATE NLS ON TRACK';
+      ELSE PRINT 'TRACK',#TRK,' NOW HAS AN NLS WITH IT.';
+
+   END CREATE.FIRST.NLS;
+
+   DEBUG.INSERT.REST:  PROC PUBLIC SWAPABLE;
+      DCL (#TRK,#PTR)  FIXED EXTERNAL;
+      DCL LEN          FIXED;
+
+      WRITE(MAM)=TRK.HEAD;
+      WRITE(MAL)=#TRK;
+
+      IF READ(MD)=0 THEN DO;       /* NO TRACK HEAD ON THIS TRACK YET */
+
+         PRINT 'ATTEMPTING TO CREATE TRACK HEAD FOR TRACK',#TRK;
+
+         IF ALLOCATE.TRK.HEADER(#TRK)=0 /* TRY TO ALLOCATE TRK HEAD   */
+         THEN DO;
+            PRINT 'NOT ENOUGH ROOM FOR TRACK HEAD';
+            RETURN;                /* NOT ENOUGH ROOM - BOMB OUT */
+         END;
+
+         WRITE(MAM)=TRK.HEAD;
+         WRITE(MAL)=#TRK;
+         #PTR=READ(MD);            /* NEED TO SET THIS GLOBAL */
+      END;
+
+
+      AGAIN:
+      PRINT 'ENTER LENGTH OF REST TO INSERT AT CURRENT POS',;
+      INPUT LEN;
+
+      IF (LEN<>2) AND (LEN<>4) THEN GOTO AGAIN;
+
+      IF INSERT.REST.RECORD(LEN)=0
+      THEN PRINT 'INSERT FAILED!';
+      ELSE PRINT 'INSERT SUCCESSFUL!';
+
+   END DEBUG.INSERT.REST;
+
+   DEBUG.DELETE.NOTE: PROC PUBLIC SWAPABLE;
+      DCL (#TRK,#PTR) FIXED EXTERNAL;
+      DCL (SEC,WRD)   FIXED;
+
+      WRITE(MAM)=TRK.HEAD;
+      WRITE(MAL)=#TRK;
+      #PTR=READ(MD);
+
+      IF #PTR=0 THEN DO;       /* NO TRACK HEAD ON THIS TRACK YET */
+
+         NO.NOTES:
+
+         PRINT 'TRACK ',#TRK,' IS EMPTY. NOTHING TO DELETE';
+         RETURN;
+      END;
+
+      WRITE(MAM)=READ(MD);
+      WRITE(MAL)=THD.FOR;
+      IF READ(MD)=0 THEN GOTO NO.NOTES;
+
+      PRINT 'ENTER SECTOR AND WORD OF NOTE TO DELETE',;
+      INPUT SEC,WRD;
+
+/*      CALL REMOVE.NOTE.RECORD(SEC,WRD); */
+
+   END DEBUG.DELETE.NOTE;
+
+   DEBUG.BACKUP.TO.PRIOR.NOTE: PROC PUBLIC SWAPABLE;
+      DCL (#TRK,#SEC,#WRD) FIXED EXTERNAL;
+      IF BACKUP.TO.PRIOR.NOTE=0
+      THEN PRINT 'HIT START OF TRACK!      #TRK,#SEC,#WRD: ',#TRK,' ',#SEC,' ',#WRD;
+      ELSE CALL SHOW.SHORT.STATUS;
+   END DEBUG.BACKUP.TO.PRIOR.NOTE;
+
+   DEBUG.ADVANCE.TO.NEXT.NOTE: PROC PUBLIC SWAPABLE;
+      DCL (#TRK,#SEC,#WRD) FIXED EXTERNAL;
+      IF ADVANCE.TO.NEXT.NOTE=0
+      THEN PRINT 'HIT END OF TRACK!      #TRK,#SEC,#WRD: ',#TRK,' ',#SEC,' ',#WRD;
+      ELSE CALL SHOW.SHORT.STATUS;
+   END DEBUG.ADVANCE.TO.NEXT.NOTE;
+
+   DEBUG.REMAP.WITH.LIVE.CLICK: PROC PUBLIC SWAPABLE;
+      DCL (TMSB,TLSB,DMSB,DLSB) FIXED;
+      DCL CTM                   FIXED;
+
+      CTM=CLICK.TRACK.MODE; /* SAVE CURRENT VALUE */
+
+      PRINT 'SELECT ABS TRACK # TO REMAP WITH (0-255)',;
+      INPUT CLICK.TRACK.MODE;   /* GET NEW VALUE */
+      CLICK.TRACK.MODE=CLICK.TRACK.MODE+2;
+      CALL SET.CLOCK.CASE;  /* SET UP FLAGS           */
+
+      PRINT 'ENTER TIME.MSB,TIME.LSB,DUR.MSB,DUR.LSB',;
+      INPUT TMSB,TLSB,DMSB,DLSB;
+
+      CALL REMAP.WITH.LIVE.CLICK(TMSB,TLSB,DMSB,DLSB,1);
+      PRINT 'WITH SYNC.TO.BEATS=1: ',;
+      PRINT REMAPPED.TIME.MSB,REMAPPED.TIME.LSB,REMAPPED.DUR.MSB,REMAPPED.DUR.LSB;
+      CALL REMAP.WITH.LIVE.CLICK(TMSB,TLSB,DMSB,DLSB,0);
+      PRINT 'WITH SYNC.TO.BEATS=0: ',;
+      PRINT REMAPPED.TIME.MSB,REMAPPED.TIME.LSB,REMAPPED.DUR.MSB,REMAPPED.DUR.LSB;
+
+      CLICK.TRACK.MODE=CTM; /* RESTORE TO PRIOR VALUE */
+      CALL SET.CLOCK.CASE;  /* SET UP FLAGS           */
+
+   END DEBUG.REMAP.WITH.LIVE.CLICK;
+
+   DEBUG.CUT.COPY.MOVE: PROC SWAPABLE;
+      DCL OPERATION FIXED;
+      DCL TRKS (15) FIXED;
+      DCL START (1) FIXED;
+      DCL FINISH(1) FIXED;
+      DCL DEST (10) FIXED;
+      DCL I         FIXED;
+
+      OPERATION=-1;
+      DO WHILE OPERATION IGT 2;
+         PRINT 'ENTER 0 FOR CUT, 1 FOR COPY, 2 FOR MOVE',;
+         INPUT OPERATION;
+      END;
+
+      PRINT 'ENTER START & END TIMES (32-BIT MSEC FORMAT)',;
+      INPUT START(0),START(1),FINISH(0),FINISH(1);
+
+      DO I=0 TO 15; TRKS(I)=0; END;
+      DO I=2 TO 201; TRKS(SHR(I,4))=TRKS(SHR(I,4))\BITS(I&15); END;
+
+      PRINT; PRINT;
+
+      IF CUT.COPY.MOVE(OPERATION,TRKS,START,FINISH,'')
+      THEN PRINT 'CUT/COPY/MOVE OPERATION SUCCESSFUL';
+      ELSE PRINT 'CUT/COPY/MOVE OPERATION BOMBED OUT';
+
+   END DEBUG.CUT.COPY.MOVE;
+
+   DEBUG.PASTE.MERGE.FILL: PROC SWAPABLE;
+      DCL OPERATION   FIXED;
+      DCL AT      (1) FIXED;
+      DCL SOURCE (10) FIXED;
+      DCL REPS        FIXED;
+      DCL I           FIXED;
+      DCL TRKS (15)   FIXED;
+
+      OPERATION=-1;
+      DO WHILE OPERATION IGT 2;
+         PRINT 'ENTER 0 FOR PASTE, 1 FOR MERGE, 2 FOR FILL',;
+         INPUT OPERATION;
+      END;
+
+      PRINT 'ENTER PASTE TIME (32-BIT MSEC FORMAT)',;
+      INPUT AT(0),AT(1);
+
+      PRINT 'ENTER NUMBER OF REPETITIONS: ',;
+      INPUT REPS;
+
+      PRINT; PRINT;
+
+      DO I=0 TO 15; TRKS(I)=0; END;
+      DO I=2 TO 201; TRKS(SHR(I,4))=TRKS(SHR(I,4))\BITS(I&15); END;
+
+      IF PASTE.MERGE.FILL(OPERATION,TRKS,AT,'',REPS)
+      THEN PRINT 'PASTE/MERGE/FILL OPERATION SUCCESSFUL';
+      ELSE PRINT 'PASTE/MERGE/FILL OPERATION BOMBED OUT';
+
+   END DEBUG.PASTE.MERGE.FILL;
+
+   TOGGLE.DEBUG.FLAGS: PROC (CH) PUBLIC SWAPABLE;
+      DCL CH FIXED;
+
+      CORE(ADDR(SEQDBUG(0))+(CH-"60"))=CORE(ADDR(SEQDBUG(0))+(CH-"60")) XOR 1;
+      PRINT 'SEQDBUG',CHARACTER(CH),': ',;
+      PRINT CORE(ADDR(SEQDBUG(0))+(CH-"60"));
+
+   END TOGGLE.DEBUG.FLAGS;
+
+   DUMP.POLY.MEMORY:  PROC SWAPABLE;
+      DCL PTR    FIXED;
+      DCL PROMPT DATA('PRESS RETURN FOR OCTAL PRINTOUT OR SPACE TO QUIT');
+      DCL (I,J,W)   FIXED;
+      DCL STRNG (8) FIXED;      /* SAVE CHARACTERS TO WRITE OUT */
+      DCL BIN       FIXED;
+      DCL BASE (1)  FIXED;
+
+      CALL SET.CUR.BIN(0);
+      IF INC.POLY=0 OR COM16(0,POLYAMOUNT) = LW#IEQ THEN RETURN;
+      
+      BIN = -1;
+      DO WHILE BIN < 0 OR BIN >= POLYNUMS;
+         PRINT 'POLY BIN TO DUMP FROM, <CR> = BIN-0',;
+         INPUT BIN;
+      END;
+      CALL SET.CUR.BIN(BIN);
+      BASE(LW#MSB) = BASE(LW#MSB) \ SHL(BIN,BASE#BIN_P);
+
+      TRY.AGAIN:
+
+      PRINT 'SECTOR ADDR OF POLY MEMORY TO DUMP',;
+      INPUT PTR;
+      IF COM16(PTR,POLYAMOUNT) = LW#IGT
+      THEN GOTO TRY.AGAIN;
+
+      PRINT;
+      PRINT 'DECIMAL PRINTOUT FOR SECTOR',PTR;
+
+      CALL PSMREAD(BASE,PTR,0); /* TURNS ON INTERRUPTS */
+      DISABLE;                  /* PUT THEM BACK OFF   */
+      DO I=0 TO 255 BY 8;
+         PRINT I,': ',;
+         DO J=1 TO 8;
+            W = READ(PSD);
+            PRINT W,' ',;
+            STRNG(J) = W;
+         END;
+         DO J=0 TO 15;
+            IF BYTE(STRNG,J) > "37" & BYTE(STRNG,J) < "177"
+            THEN PRINT CHR(BYTE(STRNG,J)),;
+            ELSE PRINT '.',;
+         END;
+         PRINT;
+      END;
+      PRINT; PRINT;
+
+      PRINT STRING(PROMPT),CHARACTER("15"),;
+
+      AGAIN:
+      DO WHILE (READ("51")&2)=0; END;
+      J=READ("50")&"177";
+      IF J="40" THEN DO;
+         DO I=1 TO PROMPT(0); PRINT CHARACTER(32),; END;
+         PRINT CHARACTER("15"),;
+         RETURN;
+      END;
+      ELSE IF J<>"15" THEN GOTO AGAIN;
+
+      DO I=1 TO PROMPT(0); PRINT CHARACTER(32),; END;
+      PRINT CHARACTER("15"),;
+      PRINT 'OCTAL PRINTOUT FOR SECTOR',PTR;
+
+      CALL PSMREAD(BASE,PTR,0); /* TURNS ON INTERRUPTS */
+      DISABLE;                  /* PUT THEM BACK OFF   */
+      DO I=0 TO 255 BY 8;
+         PRINT OCTAL(I),': ',;
+         DO J=1 TO 8;
+            W = READ(PSD);
+            PRINT OCTAL(W),' ',;
+            STRNG(J) = W;
+         END;
+         DO J=0 TO 15;
+            IF BYTE(STRNG,J) > "37" & BYTE(STRNG,J) < "177"
+            THEN PRINT CHR(BYTE(STRNG,J)),;
+            ELSE PRINT '.',;
+         END;
+         PRINT;
+      END;
+      PRINT;
+
+   END DUMP.POLY.MEMORY;
+
+   SHOW.SOUND.FILES:PROC SWAPABLE;
+      DCL (J,K,L,W,BIN)     FIXED;
+      DCL (I,TEMP.BASE) (1) FIXED;
+
+      CALL SET.CUR.BIN(0);
+      IF INC.POLY=0 OR COM16(0,POLYAMOUNT) = LW#IEQ THEN RETURN;
+
+      PRINT;
+      PRINT 'NUMBER OF POLY BINS: ',POLYNUMS;
+      DO BIN=0 TO POLYNUMS - 1;           /* LOOP OVER ALL POLY BINS */
+         CALL SET.CUR.BIN(BIN);           /* POINT AT CURRENT BIN */
+         PRINT;
+         PRINT 'BIN #',BIN;
+         PRINT 'POLYAMOUNT=',POLYAMOUNT.MSB,POLYAMOUNT.LSB,'  ',;
+         PRINT 'PSMAX=     ',PSMAX.MSB,PSMAX.LSB;
+         PRINT 'PSFIRST=   ',PSFIRST.MSB,PSFIRST.LSB,'  ',;
+         PRINT 'PSFREE=    ',PSFREE.MSB,PSFREE.LSB;
+         PRINT 'PSLAST=    ',PSLAST.MSB,PSLAST.LSB,'  ',;
+         PRINT 'PSHERE=    ',PSHERE.MSB,PSHERE.LSB;
+         PRINT 'POLYNUMVS= ',POLYNUMVS(BIN),'        ',;
+         PRINT 'ADCONFIGS= ',ADCONFIGS(BIN);
+         PRINT 'POLYADCS=  ',POLYADCS(BIN);
+         PRINT 'SOUND FILES:';
+         CALL COPY32(PSFIRST,I);          /* START AT FIRST SOUND FILE */
+         DO WHILE COM32(I,PSLAST) <> LW#IEQ;     /* SEARCH EVERY BLOCK */
+            PRINT 'AT MSB=',I(LW#MSB),' LSB=',I(LW#LSB),;
+            CALL COPY32(I,TEMP.BASE);            /* GET BIN # IN TOP 2 BITS */
+            TEMP.BASE(LW#MSB) = TEMP.BASE(LW#MSB) \ SHL(BIN,BASE#BIN_P);
+            CALL PSMREAD(TEMP.BASE,0,0);         /* SET UP FOR DATA */
+            DISABLE;                 /* PSMREAD DOES ENABLE         */
+            J=READ(PSD);             /* GET BLOCK LENGTH IN SECTORS */
+            K=READ(PSD);             /* AND USERS */
+            PRINT ', SOUND FILE "',;
+            W = READ(PSD);           /* GET 2 CHARS */
+            IF W = 0                 /* UNUSED BLOCK */
+            THEN PRINT '<FREE>  ',;
+            ELSE IF W = 1            /* SOUND FILE CACHE */
+            THEN PRINT '<CACHE> ',;
+            ELSE DO L=1 TO 4;        /* NAMED SOUND FILE */
+               IF (W&"377") = 0
+               THEN PRINT ' ',;
+               ELSE PRINT CHR(W&"377"),;
+               IF SHR(W,8) = 0
+               THEN PRINT ' ',;
+               ELSE PRINT CHR(SHR(W,8)),;
+               W = READ(PSD);        /* GET 2 MORE CHARS */
+            END;
+            PRINT '", LENGTH=',J,', USERS=',K;
+            CALL ADD16(J,I);        /* POINT AT NEXT SOUND FILE */
+         END;                       /* OF LOOP OVER BLOCKS */
+      END;                          /* OF LOOP OVER BINS */
+      RETURN;
+   END SHOW.SOUND.FILES;
+
+   SHOW.KBD.MAPS: PROC SWAPABLE;
+      DCL (I,J,K) FIXED;
+      DCL MAP     FIXED;
+
+      PRINT 'INC.KBD.MAPS,MAP.THERE,MAPDEV,MAPSEC:',INC.KBD.MAPS,MAP.THERE,MAPDEV,MAPSEC;
+      PRINT 'TTMAP.PTR,VMAP.PTR,PMAP.PTR: ',TTMAP.PTR,VMAP.PTR,PMAP.PTR;
+      PRINT '   0 - TTIME    TO VOLUME';
+      PRINT '   1 - MIDI     TO VOLUME';
+      PRINT '   2 - VOLUME   TO MIDI';
+      PRINT '   3 - PRESSURE TO VOLUME';
+      PRINT '   4 - PRESSURE CALIBRATION DATA';
+      PRINT '   5 - PRESSURE BASELINE DATA';
+      PRINT 'WHICH MAP DO YOU WANT TO VIEW:',; INPUT MAP;
+
+      DO CASE MAP;
+         CALL SHOW.ABS.XMEM.SECTOR(TTMAP.PTR,256); /* TTIME TO VOL */
+         CALL SHOW.ABS.XMEM.SECTOR(VMAP.PTR ,128); /* MIDI TO VOL */
+         CALL SHOW.ABS.XMEM.SECTOR(VMAP.PTR+1,RTE.MAX+1); /* VOL TO MIDI */
+         CALL SHOW.ABS.XMEM.SECTOR(PMAP.PTR+2,256); /* PRESSURE TO VOL */
+         CALL SHOW.ABS.XMEM.SECTOR(PMAP.PTR  ,NUM.KEYS); /* PRESSURE CAL. DATA */
+         CALL SHOW.ABS.XMEM.SECTOR(PMAP.PTR+1,NUM.KEYS); /* PRESSURE BASELINE DATA */
+      END;
+
+   END SHOW.KBD.MAPS;
+
+   DCL DBUG.DATA (20) FIXED;
+
+   SAVE.EDIT.VARS: PROC SWAPABLE;
+      WRITE("300")=ADDR(DBUG.DATA(0));
+      WRITE("301")=ADDR(#TRK);
+      WRITE("360")=READ("313");
+      WRITE("360")=READ("361"); WRITE("360")=READ("361");
+      WRITE("360")=READ("361"); WRITE("360")=READ("361");
+      WRITE("360")=READ("361"); WRITE("360")=READ("361");
+      WRITE("360")=READ("361"); WRITE("360")=READ("361");
+      WRITE("360")=READ("361"); WRITE("360")=READ("361");
+      WRITE("360")=READ("361"); WRITE("360")=READ("361");
+      WRITE("360")=READ("361"); WRITE("360")=READ("361");
+      WRITE("360")=READ("361"); WRITE("360")=READ("341");
+      WRITE("360")=READ(MAM);   WRITE("340")=READ(MAL);
+   END SAVE.EDIT.VARS;
+
+   RESTORE.EDIT.VARS: PROC SWAPABLE;
+      WRITE("300")=ADDR(DBUG.DATA(0));
+      WRITE("301")=ADDR(#TRK);
+      WRITE("313")=READ("360");
+      WRITE("361")=READ("360"); WRITE("361")=READ("360");
+      WRITE("361")=READ("360"); WRITE("361")=READ("360");
+      WRITE("361")=READ("360"); WRITE("361")=READ("360");
+      WRITE("361")=READ("360"); WRITE("361")=READ("360");
+      WRITE("361")=READ("360"); WRITE("361")=READ("360");
+      WRITE("361")=READ("360"); WRITE("361")=READ("360");
+      WRITE("361")=READ("360"); WRITE("361")=READ("360");
+      WRITE("361")=READ("360"); WRITE("361")=READ("340");
+      WRITE("361")=READ(MAM);   WRITE("341")=READ(MAL);
+   END RESTORE.EDIT.VARS;
+
+   DCL DECAY.DELAY.MSEC FIXED PUBLIC;
+
+   SET.DECAY.DELAY.MSEC: PROC SWAPABLE;
+      PRINT 'ENTER FINAL DECAY DELAY MILLISECONDS',; INPUT DECAY.DELAY.MSEC;
+   END SET.DECAY.DELAY.MSEC;
+
+   DCL IN.POLL FIXED;
+
+   HANDLE.SEQ.DEBUG.CHAR:  PROC (CH) PUBLIC SWAPABLE;
+      DCL CH   FIXED;
+      DCL SAVE FIXED;
+
+      IF (IN.POLL=0) & (CH="33") THEN DO;
+         EXIT.MY.SCREEN = 1;
+         RETURN;
+      END;
+
+      CALL TTY_WAIT;
+      SAVE=READ("314");         /* SAVE INTERRUPT STATUS */
+      DISABLE;
+
+      IF (CH>"140")&(CH<"173") THEN CH=CH-"40"; /* UPPERCASE IT    */
+
+      IF      CH>="40" THEN PRINT CHARACTER(CH);     /* ECHO COMMAND */
+      ELSE IF CH="003" THEN PRINT 'CONTINUE SEQUENCER';
+      ELSE IF CH="005" THEN PRINT 'STOP SEQUENCER';
+      ELSE IF CH="006" THEN PRINT 'FAST FORWARD SEQUENCER';
+      ELSE IF CH="020" THEN PRINT 'START SEQUENCER';
+      ELSE IF CH="022" THEN PRINT 'REWIND SEQUENCER';
+      ELSE PRINT 'CTRL-',CHARACTER(CH+"100");
+      PRINT;
+
+      IF      CH="003" /* ^C */ THEN CALL CONTINUE.SEQUENCER;     /* CONTINUE     */
+      ELSE IF CH="005" /* ^E */ THEN CALL STOP.SEQUENCER;         /* END/STOP     */
+      ELSE IF CH="006" /* ^F */ THEN CALL FAST.FORWARD.SEQUENCER; /* FAST FORWARD */
+      ELSE IF CH="020" /* ^P */ THEN DO; PRINT 'IN SEQ-DBUG'; CALL START.SEQUENCER; END;       /* PLAY/START   */
+      ELSE IF CH="022" /* ^R */ THEN CALL REWIND.SEQUENCER;       /* REWIND       */
+
+      ELSE IF CH="057" /*  / */ THEN CALL ZAP.MEMORY(0);          /* CHANGE ABLE MEMORY (DEC) */
+      ELSE IF CH="134" /*  \ */ THEN CALL ZAP.MEMORY(1);          /* CHANGE ABLE MEMORY (OCT) */
+      ELSE IF (CH>="060") AND (CH<"72") /* 0 - 9 */ THEN CALL TOGGLE.DEBUG.FLAGS(CH);
+
+      ELSE IF CH="074" /*  < */ THEN CALL DEBUG.BACKUP.TO.PRIOR.NOTE;
+      ELSE IF CH="076" /*  > */ THEN CALL DEBUG.ADVANCE.TO.NEXT.NOTE;
+
+      ELSE IF CH="101" /*  A */ THEN CALL DEBUG.PASTE.MERGE.FILL;
+      ELSE IF CH="102" /*  B */ THEN CALL SHOW.SHORT.STATUS;
+      ELSE IF CH="103" /*  C */ THEN CALL SHOW.CURRENT.NOTE;
+      ELSE IF CH="104" /*  D */ THEN CALL DUMP.ABS.SECTOR;
+      ELSE IF CH="105" /*  E */ THEN CALL DEBUG.CUT.COPY.MOVE;
+      ELSE IF CH="106" /*  F */ THEN CALL CREATE.FIRST.NLS;
+      ELSE IF CH="107" /*  G */ THEN CALL SHOW.CURRENT.GLOBALS;
+      ELSE IF CH="110" /*  H */ THEN CALL SHOW.TRK.HEAD.INFO;
+      ELSE IF CH="111" /*  I */ THEN CALL SHOW.GENERAL.INFO;
+      ELSE IF CH="112" /*  J */ THEN CALL SHOW.CHAN.LIST;
+      ELSE IF CH="113" /*  K */ THEN CALL DUMP.INT.MEMORY;
+      ELSE IF CH="114" /*  L */ THEN CALL COPY.LOOP.INFO.TO.GLOBALS;
+      ELSE IF CH="115" /*  M */ THEN CALL SHOW.TIMBRE.HEAD;
+      ELSE IF CH="116" /*  N */ THEN CALL SHOW.CURRENT.NLS.HEADER;
+      ELSE IF CH="120" /*  P */ THEN CALL COPY.PLAY.INFO.TO.GLOBALS;
+      ELSE IF CH="122" /*  R */ THEN CALL DEBUG.INSERT.REST;
+      ELSE IF CH="123" /*  S */ THEN CALL SHOW.SOUND.FILES;
+      ELSE IF CH="124" /*  T */ THEN CALL SET.ABS.TRK;
+      ELSE IF CH="126" /*  V */ THEN CALL SET.DECAY.DELAY.MSEC;
+      ELSE IF CH="127" /*  W */ THEN CALL SHOW.KBD.MAPS;
+      ELSE IF CH="130" /*  X */ THEN CALL DUMP.POLY.MEMORY;
+      ELSE IF CH="131" /*  Y */ THEN CALL DEBUG.DELETE.NOTE;
+      ELSE IF CH="132" /*  Z */ THEN CALL MAIN.LOOP.LATENCY;
+
+      ELSE CALL INIT.SEQ.DEBUG.DISPLAY;         /* REDISPLAY DIRECTIONS */
+
+      CALL PROMPT.FOR.DEBUG.COMMAND;
+
+      WRITE("314")=SAVE;        /* RESTORE ORIGINAL INTERRUPT STATUS */
+      WRITE("001")=SAVE;
+   END HANDLE.SEQ.DEBUG.CHAR;
+
+   POLL.FOR.DEBUG.COMMANDS: PROC (STR) PUBLIC;
+      DCL STR FIXED ARRAY; /* MESSAGE */
+      DCL (SAVE,I) FIXED;
+
+      IN.POLL=1;
+      CALL TTY_WAIT;
+      SAVE=READ("314");
+      DISABLE;
+
+      CALL SAVE.EDIT.VARS;
+
+      PRINT;
+      PRINT STRING(STR);
+      PRINT 'ENTER COMMAND -->',;
+
+      AGAIN:
+      I=READ("50")&"177";
+      IF (I="23") OR (I="21") THEN GOTO AGAIN;
+
+      DO WHILE I<>0;
+         CALL HANDLE.SEQ.DEBUG.CHAR(I);
+         I=READ("50")&"177";
+         IF (I="23") OR (I="21") THEN GOTO AGAIN;
+      END;
+
+      DO I=1 TO 60; WRITE(3)=0; END;         /* WAIT AFTER BREAK */
+      CALL.TERMINATE=0;                      /* DON'T ALLOW QUIT */
+
+      CALL RESTORE.EDIT.VARS;
+
+      WRITE("314")=SAVE; WRITE(1)=SAVE;
+      IN.POLL=0;
+   END POLL.FOR.DEBUG.COMMANDS;
+
+   DBUG.SCREEN: PROC(ARG) PUBLIC SWAPABLE;
+      DCL ARG  FIXED;
+      dcl code fixed;
+
+      CALL CLEAR.TERM;
+
+      CALL INIT.SEQ.DEBUG.DISPLAY;
+
+      EXIT.MY.SCREEN   = 0;        /* clear these flags before loop */
+      GOTO.THIS.SCREEN = 0;
+
+      do while EXIT.MY.SCREEN = 0; /* wait for exit condition       */
+
+         call GET_ENABLE(get.in.char);
+
+         code = GET.NEXT.EVENT;                     /* get event         */
+
+         call GET_DISABLE(get.in.char);
+
+         if code=get.in.char then do;            /* input character received */
+            if next.event.info >= asc.call.convert
+            then call RETURN.TO.PREV.STATE;
+            else call HANDLE.SEQ.DEBUG.CHAR(next.event.info);
+         end;
+
+      end;                             /* of wait for exit     */
+
+      EXIT.MY.SCREEN   = 0;            /* clear flag after loop */
+
+      return GOTO.THIS.SCREEN;
+
+   end dbug.screen;
+
+end seqdbug;

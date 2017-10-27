@@ -1,0 +1,435 @@
+/* $TITLE - :SYNRSOU:03-PRIM:050-MEM - MEMORY RELATED PROCEDURES
+
+   Modified:
+   04/05/90 - TSS	- FIX STUCK MIDI NOTE/EXTRA NOTE OFF BUGS
+   10/24/89 - MWH	- Stop (reset) the D115's 68000 on shutdown
+   10/16/89 - CJ	- Checked INC.CREG for d130/d131 code
+   03/14/89 - PF	- Disable when shutting off D115D interrupts
+   01/12/88 - TSS	- CODE TO DISABLE PROTOCOL WHEN EXITING RTP
+   12/07/88 - MWH	- TURN OFF D115 INTERRUPTS ON EXIT
+   10/20/88 - TSS	- TURNED OFF ALL BUTTONS AND FLUSH PROTOCOL BEFORE QUITING
+   08/02/88 - CJ, AG, KJC - CHANGED WRITE.OUT.SEQ TO ACCOUNT FOR MODEL D PROCESSOR
+   06/22/88 - EG	- ERASE TEMP UNDO TRACKS BEFORE NAH.COLLECT IN WRITEOUT.SEQ
+   05/02/88 - TSS	- TURN OFF TERMULATOR MOUSE REPORTING WHEN QUITTING SYNCLAVIER
+   06/23/87 - MWH	- Update for expanded poly
+   12/15/86 -		- CENTERED STEREO POSITION IN STOP.DATA
+   12/02/86 -		- REMOVED MEM.SIZE DECLARATION & USAGE IN WRITE.OUT.SEQ
+   11/13/86 -LS,EG- ADDED -7 VERSION CHECK TO LEAVE.SYNCLAVIER.PROGRAM
+   10/07/86 - KJO	- updated for -7 catalog structure
+   07/09/86 - eg	- moved pdl call into syn-m because it cannot be in a module
+   06/17/86 -		- CALLED REBOOT.LOD ON TERMINATE, CONVERT
+   05/30/86 - CJ	- Modified "Write.out" to compact sequence before overlay
+   05/15/86 -		- "official" creation of release-M modules
+*/
+
+
+/* THESE LITERALS DEFINE THE UPPER MEMORY LOCATIONS FOR XPL-6 */
+
+DCL CNV.STA        FIXED PUBLIC;       /* STATUS TO PASS TO CONVERSION PROGRAM */
+DCL CALL.TERMINATE FIXED PUBLIC;       /* SET TRUE ON BREAK RECEIVED           */
+DCL CALL.CONVERT   FIXED PUBLIC;       /* SET TRUE TO ACTIVE CONVERSION PGM    */
+DCL ORIG.PSYS      FIXED PUBLIC;       /* ORIGINAL PSYS # */
+DCL LOADER.MOVED   FIXED PUBLIC;       /* SET TO 1 IF LOADER WAS MOVED TO EXTERNAL MEMORY */
+
+
+/* ROUTINES FOR SCRIPT - SILENCE.SYNTH, OVERLAY, ETC. */
+
+/* Note: leave this procedure PUBLIC at all times !!! */
+
+OVERLAY:PROC(DEVICE,START,LEN) PUBLIC;/* PERFORM OVERLAY OF DISK OBJECT FILE */
+   DCL (DEVICE,START,LEN,I) FIXED;
+
+   IF (D54BITS<>0)      /* IF SERIAL PORT ENABLED        */
+   THEN WRITE(D54)=0;   /* THEN TURN THEM OFF            */
+	
+   I=LOC.LOAD+1;        /* ENTER WORD 1 OF LOADER MEMORY */
+   WRITE("300")=DEVICE; /* R0 DEVICE/SECTOR              */
+   WRITE("301")=START;  /* R1 POINTS TO SOURCE           */
+   WRITE("302")=0;      /* R2 POINTS TO DESTINATION      */
+   WRITE("303")=LEN;    /* R3 LEN TO COPY OVER           */
+   WRITE("320")=I;      /* ENTER UPPER MEMORY            */
+END OVERLAY;
+
+/* SILENCE SYNTHESIZER(S) */
+
+/* SILNECE.SYNTHS IS CALLED WITH INTERRUPTS  ** OFF **  */
+/* AND IT LEAVES THEM OFF                               */
+
+SILENCE.SYNTHS:PROC PUBLIC SWAPABLE;   /* PROCEDURE TO SILENCE SYNTHESIZER - CALLED BEFORE OVERLAY */
+  DCL BIN       FIXED;        /* WHICH POLY BIN  */
+  DCL (I,J)     FIXED;
+
+  IF INC.CREG THEN DO;
+     IF (NEW.ORK == 0) THEN DO;  /* CLEAR NEW PANEL */
+        DO I=0 TO 159;           /* TURN OFF BUTTON DISPLAY ON VK */
+           J=(I&15)+(144-(I&"177760"));
+           WRITE(CREG)=3; /* SET UP DREG TO INDICATE LIGHTS */
+           WRITE(DREG)=SHL(J,8)\0;
+           WRITE(CREG)=3\"40"; WRITE(CREG)=3; /* PULSE EXW */
+        END;
+        DO I=0 TO 31;            /* CLEAR CHARS */
+           WRITE(CREG)=2;        /* INDICATE ALPHA DISPLAY */
+           WRITE(DREG)=SHL(I,8)\"40";            /* WRITE OUT A SPACE */
+           WRITE(CREG)=2\"40"; WRITE(CREG)=2;    /* PULSE EXW */
+        END;
+        DO I=0 TO 3;              /* CLEAR DECIMAL POINTS */
+           WRITE(CREG)=2;         /* INDICATE ALPHA DISPLAY */
+           WRITE(DREG)=SHL(DP.TABLE(I),8)\"0"; /* WRITE ZERO */
+           WRITE(CREG)=2\"40"; WRITE(CREG)=2;  /* PULSE EXW */
+        END;
+     END;
+     ELSE DO I=0 TO 15;           /* CLEAR OLD KEYBOARD DISPLAY */
+       WRITE(CREG)=I; WRITE(DREG)=0;
+       WRITE(CREG)=I\"40"; WRITE(CREG)=I;
+     END; 
+  END;
+
+  IF INC.FM THEN DO;
+     DO I=0 TO 255;              /* SILENCE THE FM SYNTH       */
+       DO J=0 TO 11; 
+         WRITE(CHA)=I; WRITE(FUN)=J; WRITE(DAT)=STOP.DATA(J);
+       END;
+       IF (I&1)=0 THEN DO;       /* CENTER STEREO POSITION     */
+          WRITE(FUN)=ISHC; WRITE(DAT)=128;
+       END;
+     END; 
+  END;
+
+  IF INC.MONO THEN DO;       /* SILENCE MONO SYNTH? */
+  END; 
+
+  IF INC.POLY THEN DO;        /* SILENCE POLY SYNTH  */
+     DO BIN=0 TO POLYNUMS-1;
+        IF POLYNUMVS(BIN)<>0 THEN DO;  /* IF ANY VOICES IN THIS BIN */
+           DO I=0 TO 63;               /* GO THROUGH THE WHOLE BIN  */
+              WRITE(PSC)=I + 64*BIN;
+              WRITE(PSF)=PSON; WRITE(PSD)=0; 
+              IF I < POLYNUMVS(BIN) THEN DO;      /* ZERO ENV/VOL ITEMS FOR EXISTING DACS */
+                 WRITE(PSF)=PSELIM;               /* WRITE ENV INFO           */
+                 WRITE(PSD)=   0; WRITE(PSD)=0;   /* LIMIT, CVAL              */
+
+                 WRITE(PSF)=PSRCVOL;              /* WRITE VOL INFO           */
+                 WRITE(PSD)=   0; WRITE(PSD)=0;   /* R, L CVOL                */
+                 WRITE(PSD)=   0; WRITE(PSD)=0;   /* R, L DVOL                */
+              END;
+           END;
+        END;     /* OF POLY VOICES EXIST */
+     END;        /* OF LOOP OVER BINS */
+  END;           /* OF INC.POLY */
+
+  IF INC.AXE<>0 THEN DO;      /* CLEAR GUITAR BUTTON PANEL */
+     WRITE("134")=16+7; WRITE("135")=0;
+  END; 
+
+END SILENCE.SYNTHS;
+
+
+TERMINATE:  PROC PUBLIC SWAPABLE;   /* PROCEDURE TO TERMINATE IF 'S' IS TYPED */
+  IF INC.DTD THEN CALL REBOOT.LOD;  /* SEND BOOT MESSAGE TO LOD               */
+  DISABLE;                          /* HERE TO PREVENT MORE QUE PROCESSING    */
+  interp_newkey_pending(false);
+  CALL SILENCE.SYNTHS;              /* KEEPS INTERRUPTS OFF                   */
+  IF LOADER.MOVED THEN DO;          /* MEANS WE HAVE WRITTEN HIGH-CORE STUFF TO XMEM */
+     WRITE(MAM)=LOAD.PTR; 
+     CALL COPY.IN(LOC.LOAD-256,LOC.SYNRET-LOC.LOAD+256); /* LOADER + INFO, 256 WORDS FOR SFM */
+     CORE(LOC.PSYS)=ORIG.PSYS;
+  END;
+  IF SYSTYP=0 THEN WRITE("104")=1; /* START DRIVE 1 HERE - MONITOR NORMALLY HAS CURRENT FILE THERE */
+  CALL OVERLAY(CORE(LOC.MON+1),CORE(LOC.MON),CORE(LOC.MON-1));
+END TERMINATE;
+
+/* ---> THIS WAS INSERTED INTO 050-MEM ON 4/15/86 FROM 430-WROU  */
+/* 430-WROU - $SUBTITLE  ROUTINE WRITEOUT.SEQ, SILENCE.SYNTH */
+
+/* WRITEOUT.SEQ IS CALLED WHEN OVERLAYING TO THE REVERSE COMPILER OR
+.  THE MUSIC PRINTING PROGRAM.  IT COPIES THE CURRENT SEQUENCE UP
+.  IN MEMORY SO THAT IT CAN BE PASSED TO THE CONVERSION PROGRAM OR
+.  MUSIC PRINTING, AS APPROPRIATE */
+
+DCL FROM.SFM   FIXED PUBLIC;         /* 1 IF OVERLAYED FROM SFM, ELSE 0 */
+/*DCL CLEAR.TERM PROC EXTERNAL;        SCREEN CLEAR ROUTINE NOT DECLARED UNTIL 515-PLOT */
+
+WRITEOUT.SEQ:PROC PUBLIC SWAPABLE;
+  DCL (I,J,K)       FIXED;
+  DCL EXTMEM.BASE   FIXED;
+  DCL EXTMEM.NEEDED FIXED;
+  DCL INTMEM.NEEDED FIXED;
+
+  IF ( ((INC.MONO<>0)\(INC.POLY<>0)) 
+  AND  (CNV.STA=4) )          	/* GOING TO SFM             */
+  THEN DO;                    	/* MEANS TRASH THE SEQUENCE */
+     DISABLE;                 	/* MUST (!!!***!!!) DISABLE INTERRUPTS FROM HERE ON */
+     WRITE(MAM)=LOAD.PTR; 
+     CALL COPY.IN(LOC.LOAD-256,LOC.SYNRET-LOC.LOAD+256); /* LOADER + INFO, 256 WORDS FOR SFM */
+     CORE(LOC.PSYS)=ORIG.PSYS;
+     IF FROM.SFM=0
+     THEN CORE(LOC.RST)=0;      	/* COLD BOOT */
+     ELSE DO;
+        CORE(LOC.RST)=8;        	/* WARM BOOT */
+        CORE(MEM.SIZ-1128)=0;		/* SET SFM.INTACT HIGH CORE VARIABLE TO FORCE WARM BOOT */
+     END;
+     CORE(LOC.SYNTIMB)=0;       	/* PARAMS */
+     CORE(LOC.SYNSEQ) =0;
+     CORE(LOC.SYNMISC)=0;
+     CORE(LOC.SYNMED )=0;       	/* EXTERNAL MEMORY */
+     CORE(LOC.SYNSTAT)=CNV.STA; 	/* COPY STATUS                       */
+     CORE(LOC.SYNRET) =LOC.P2;   /* TELL THAT MODULE TO RETURN TO US IF BOMB OUT */
+     RETURN 0;                	/* SUCCESSFUL WRITEOUT, IN ANY CASE */
+  END;
+
+  CALL STOP.RECD.MOVE.PLAY.XPOS.CONT.ERAS; /* STOP RECORDING IF SO */
+
+  /* COMPACT SEQUENCE IN EXT MEMORY */
+
+  CALL ERASE.TRACK(UNDO.TRK);          /* WANT TO MAKE SURE THESE TRACKS */
+  CALL ERASE.TRACK(UNDO.TMP.TRK);      /* ARE NOT SAVED WITH THE SEQUENCE */
+
+  CALL NAH.COLLECT;                        /* CLEAN UP NOTE AREA */
+
+  CALL MAXIMIZE.MEMORY.FOR.RECORD;         /* NOTES DOWN        */
+  BNK.LEN=0;                               /* NO BANK IN MEMORY */
+  BNK.PTR=NAH.PTR+NAH.LEN;                 /* WOULD GO HERE     */
+
+  CALL COPY.EXT.MEM.SEC(INF.PTR,BNK.PTR,INF.LEN); /* COPY INFO DOWN */
+  INF.PTR=BNK.PTR;
+
+  CALL STORE.SEQUENCE.INFO;                /* STORE MULTI & TRACK VOL INFO      */
+
+  IF  (CNV.STA=3) THEN J=LOC.MPLT;           /* OVERLAY TO MUSIC PLOTTING */
+  ELSE                 J=LOC.RT;             /* ELSE OVERLAY TO CONVERSION PROGRAM */
+
+  /* READ IN CONFIGURATION TABLE FOR THE PROGRAM */
+  /* WE ARE ABOUT TO OVERLAY TO:                 */
+
+  CALL READDATA(CORE(J+1),CORE(J),MISC.BUF,256);
+
+  /* COMPUTE HOW MUCH INTERNAL MEMORY AND EXTERNAL MEMORY */
+  /* IS NEEDED BY THE PROGRAM WE ARE OVERLAYING TO:       */
+
+  INTMEM.NEEDED = MISC.BUF(MISC.BUF(1)+C#VSTART)   /* START OF VARIABLE AREA */
+                + MISC.BUF(MISC.BUF(1)+C#VLNGTH)   /* LENGTH OF VARS         */
+                + MISC.BUF(MISC.BUF(1)+C#STKLEN);  /* LENGTH OF STACK        */
+
+  EXTMEM.NEEDED = MISC.BUF(MISC.BUF(1)+C#SWPLEN);  /* EXTERNAL MEM NEEDED    */
+
+  IF ((LOC.LOAD-1024) ILT INTMEM.NEEDED)      /* IF NOT ENOUGH INTERNAL MEMORY */
+  OR (EXTMEM.NEEDED   IGT CORE(LOC.EMSIZE))   /* OR NO WAY JOSE                */
+  THEN DO;
+     CALL DISPLAY.ERR(10);
+     CALL MAXIMIZE.MEMORY.FOR.RECORD;      /* MOVE INFO BACK UP */
+  	  CALL COMPUTE.ACTIVE.TRKS;				 /* RECOMPUTE THD.ACTIVE */
+     RETURN 1;                             /* TOO BIG */
+  END;
+
+  /* COMPUTE BASE OF WHERE SWAP FILE WILL BE SITTING */
+  /* IN EXTERNAL MEMORY ONCE THE DESTINATION PROGRAM */
+  /* IS UP AND RUNNING.   THIS WILL DEPEND ON        */
+  /* WHETHER IT IS A MODEL C OR MODEL D COMPILATION: */
+
+  EXTMEM.BASE = CORE(LOC.EMSIZE) - EXTMEM.NEEDED;
+
+  IF (SHR(MISC.BUF(MISC.BUF(1) + C#CMOPT),8) & 7) >= 3  /* IF MODEL D, THEN */
+  THEN EXTMEM.BASE = EXTMEM.BASE & "174000";            /* USE CARD BOUNDARY   */
+
+  /* SEE IF DESTINATION SWAP FILE WILL FIT ABOVE */
+  /* THE IN-MEMORY SEQUENCE:                     */
+
+  IF (EXTMEM.BASE ILT (INF.PTR+INF.LEN))
+  THEN DO;
+  	  CALL COMPUTE.ACTIVE.TRKS;				 /* RECOMPUTE THD.ACTIVE */
+     CALL DISPLAY.ERR(10);
+     CALL MAXIMIZE.MEMORY.FOR.RECORD;      /* MOVE INFO BACK UP */
+     RETURN 1;                             /* TOO BIG */
+  END;
+
+  /* for overlay routine: new swaplen = core(loc.emsize) - extmem.base */
+
+  CALL REBOOT.LOD;            /* SEND BOOT MESSAGE TO LOD               */
+
+  DISABLE;                    /* MUST (!!!***!!!) DISABLE INTERRUPTS FROM HERE ON */
+
+  WRITE(MAM)=LOAD.PTR; 
+  CALL COPY.IN(LOC.LOAD-256,LOC.SYNRET-LOC.LOAD+256); /* LOADER + INFO, 256 WORDS FOR SFM */
+
+  CORE(LOC.PSYS)=ORIG.PSYS;
+
+  I=FIND.TIMBRE(PAR.PTR,NUM.KBD.TRACKS);   /* GET POINTER TO AFTER KEYBOARD TIMBRES */
+  J=SHR(PAR.TOP-I+255,8);                  /* LENGTH OF SEQ TIMBRES IN SECTORS */
+
+  CALL COPY.EXT.MEM(PAR.PTR,I,PAR.PTR,0,PAR.TOP-I); /* PUT PARAMETERS FOR SEQUENCE AT START OF PAR.PTR */
+
+  WRITE(MAM)  =  BAS.PTR;                       
+  WRITE(MAL)  =  SEQ.NUMSEC;
+  WRITE(MDI)  =  INF.PTR+INF.LEN-BAS.PTR;
+
+  WRITE(MDI)  =  0;                        /* SEQ.BAS */
+  WRITE(MDI)  =  BAS.LEN;                  /* BAS.LEN */
+
+  WRITE(MDI)  =  PAR.PTR-BAS.PTR;          /* SEQ.PAR */
+  WRITE(MDI)  =  J;                        /* PAR.LEN */
+
+  WRITE(MDI)  =  NAH.PTR-BAS.PTR;          /* SEQ.NAH */
+  WRITE(MDI)  =  NAH.LEN;                  /* NAH.LEN */
+
+  WRITE(MDI)  =  INF.PTR-BAS.PTR;          /* SEQ.INF */
+  WRITE(MDI)  =  INF.LEN;                  /* INF.LEN */
+
+  WRITE(MDI)  =0;  WRITE(MDI) = 0;
+  WRITE(MDI)  =0;  WRITE(MDI) = 0;
+  WRITE(MDI)  =0;  WRITE(MDI) = 0;
+  WRITE(MDI)  =0;  WRITE(MDI) = 0;
+
+  CORE(LOC.SYNMED ) = 2;        /* EXTERNAL MEMORY, NEW FORMAT */
+  CORE(LOC.SYNTIMB) = BAS.PTR;  /* WHERE                       */
+  CORE(LOC.SYNSEQ ) = 0;
+  CORE(LOC.SYNMISC) = 0;
+
+  CORE(LOC.SYNSTAT)=CNV.STA;          	 /* SAVE CONVERSION STATUS */
+  CORE(LOC.SYNRET) =LOC.P2;             /* TELL THAT MODULE TO RETURN TO US IF BOMB OUT */
+
+  RETURN 0; /* OK */
+
+END WRITEOUT.SEQ;
+
+CONVERSION.OVERLAY:  PROC PUBLIC SWAPABLE; /* PROCEDURE TO LINK TO CONVERSION PROGRAM, MUSIC PRINTING, SFM */
+  IF WRITEOUT.SEQ<>0 THEN RETURN;   /* STORE FINAL SEQUENCE DATA FOR CONVERSION; BUT RETURN IF TOO BIG. ALSO TURN OFF INTERRUPTS */
+  CALL SILENCE.SYNTHS;              /* NOTE: INTERRUPTS TURNED OFF BY 'WRITEOUT.SEQ' IF OK ' */
+
+  DISABLE;
+  
+  interp_newkey_pending(false);
+  
+  IF (CNV.STA=3) 							/* PF3 - TO MUSIC PRINTING */ 
+  THEN DO;
+     CALL OVERLAY(CORE(LOC.MPLT+1),CORE(LOC.MPLT),CORE(LOC.MPLT-1));
+  END;
+
+  IF ((INC.MONO<>0)\(INC.POLY<>0)) AND (CNV.STA=4) 	/* PF4 (IF ALLOWED) - TO SFM */
+  THEN DO;
+     CALL OVERLAY(CORE(LOC.P1+1),CORE(LOC.P1),CORE(LOC.P1-1));
+  END;
+
+  CALL OVERLAY(CORE(LOC.RT+1),CORE(LOC.RT),CORE(LOC.RT-1)); /* PF1 - CONVERSION PROGRAM */
+END CONVERSION.OVERLAY;
+
+
+LEAVE.SYNCLAVIER.PROGRAM:  PROC PUBLIC SWAPABLE;            /* TRIES TO OVERLAY TO OTHER PROGRAMS */
+   DCL (I,J) FIXED;
+   DCL DISABLE.TERMULATOR.AUTO.MOUSE.REPORT PROC EXTERNAL;
+   DCL DISABLE.TERMULATOR.PROTOCOL          PROC EXTERNAL;
+
+	interp_activate_real_time(false);					// stop interpreting in real time
+   interp_set_rtp_is_running(false);               // no longer can load sound files
+	interp_init_oms_midi_sync(0);							// stop any OMS MIDI Sync processing
+	interp_init_oms_midi_bulk(0, 0);						// stop any OMS MIDI Bulk processing
+
+	if PLAY <> 0
+	then call STOP.SEQUENCER;
+
+	CALL KBD.INIT;                /* TURN OFF ALL THE BUTTONS */
+   CALL CLEAR.DISPLAY;           /* CLEAR THE WINDOW DISPLAY */
+   WRITE(MAM)=BSTAT.PTR;
+   DO I=0 TO 255; WRITE(MDI)=0; END; /* CLEAR STATUS */
+   NEW.CLAVIER.INFO = (-1);      /* SEND IT ALL */
+
+   IF INC.PRO THEN DO;
+      /* Force an immediate update to the VK display on remote devices */
+      /* to provide an immediate update of the VK window display when  */
+      /* we leave the synclavier program.                              */
+
+      call Flush.VK.Display.To.Termulators;
+      DISABLE;
+      d115d.ints.enabled = false;
+      DO I=0 TO (NUM.D115D.BDS - 1);          /* LOOP OVER BOARDS */
+         WRITE(CPSEL) = CP#SEL_GROUP_20 | I;  /* FIRST GROUP OF BOARDS, BOARD "I" */
+         WRITE(CPCMD) = CP#DISABLE;           /* DISABLE ALL D115 INTERRUPTS */
+         WRITE(CPCMD) = CP#RESET_68K;         /* STOP 68000 UNTIL RTP STARTS UP AGAIN */
+      END;    /* OF LOOP OVER BOARDS */
+      ENABLE;
+   END;
+
+
+   /* CALL THIS ROUTINE IF CALL.CONVERT OR CALL.TERMINATE ARE EVER SET */
+
+   NPTR=NOTELIST;                /* PICK UP FIRST NOTE BLOCK    */
+   DO WHILE NPTR<>0;             /* PROCESS EACH ONE            */
+      PPTR=PTLST;                /* GET POINTER TO PARTIAL LIST */
+      DO WHILE PPTR<>0;          /* PROCESS EACH PARTIAL        */
+
+         J=PPTR;                 /* SAVE FOR BELOW       */
+         DO WHILE PPTR<>0;       /* IN CASE GHOST BLOCKS */
+            DISABLE;
+            I=MIDIRT;            /* SAMPLE ANY POSSIBLE MIDI ROUTING */
+            MIDIRT=0;            /* REZERO                           */
+
+            IF (I<>0) AND (PSTAT<>0) /* NOTE HAS STARTED */
+            THEN CALL MIDI.NOTE.OFF(I, MIDIPATH, MIDIINFO); 					/* TURN IT OFF */
+            /******/;                 /* NOTE - INTERRUPTS ARE TURNED ON BY MIDI.NOTE.OFF */
+            ENABLE;
+            PPTR=GFPTR;          /* GET GHOST BLOCKS */
+         END;
+
+         PPTR=CORE(J);           /* GET NEXT PARTIAL */
+      END;                       /* OF PARTIAL LOOP  */
+      NPTR=NFPTR;                /* PICK UP POINTER TO NEXT NOTE */
+   END;                          /* OF NOTE LOOP     */
+
+   IF (MIDI.THERE<>0)
+   THEN CALL ALL.MIDI.NOTES.OFF; /* SOME EXTRA INSURANCE HERE */
+
+   CALL DISABLE.TERMULATOR.AUTO.MOUSE.REPORT;
+   CALL DISABLE.TERMULATOR.PROTOCOL;
+
+   IF CALL.TERMINATE<>0 THEN DO;                       /* BREAK */
+       CALL CLEAR.TERM;                                /* ERASE LINE/SCREEN */
+       IF INC.MONO<>0  THEN CALL STOP.DISK;            /* STOP OUTPUT SO WE CAN OVERLAY */
+       CALL TTY_WAIT;
+       CALL TERMINATE;
+       CALL.TERMINATE=0;                               /* IN CASE WE COULD NOT STOP? */
+   END;
+
+   IF CALL.CONVERT<>0 THEN DO;                           /* CONVERSION PROGRAM/MUSIC PLOTTING/SFM */
+
+       IF ((CNV.STA=3)&(CORE(LOC.MPLT)=0))               /* TO MPLOT BUT NOT AVAILABLE */
+
+       OR ( ((INC.MONO<>0)\(INC.POLY<>0)) 
+       AND  ((CNV.STA=4)&(CORE(LOC.P1)=0)))              /* TO SFM BUT NOT AVAILABLE */
+
+       OR (((CNV.STA=1) OR (CNV.STA=2) OR (CNV.STA<0))   /* GOING TO CONV PGM */
+       AND (CORE(LOC.RT)=0)) THEN DO;                    /* BUT NOT AVAILABLE */
+          call set.error(err.sfna,'');                   /* software feature is not availabe */
+       END;
+
+       ELSE BEGIN;
+          DCL LOC FIXED;
+
+          IF      CNV.STA<2 THEN LOC=LOC.RT;        /* CONVERSION PGM */
+          ELSE IF CNV.STA=3 THEN LOC=LOC.MPLT;      /* MUSIC PLOTTING */
+          ELSE                   LOC=LOC.P1;        /* SFM */
+
+          IF INC.MONO<>0 THEN CALL STOP.DISK;       /* STOP OUTPUT SO WE CAN READ DISK */
+          CALL READDATA(CORE(LOC+1),CORE(LOC),MISC.BUF,256); /* CHECK FOR OLD PGM SYSTEM FORMAT */
+
+          IF (MISC.BUF(MISC.BUF(1)+C#VERSION) <> C#CURRENT_VERSION) /* PROGRAM COMPILED BEFORE -7 */
+          THEN CALL SET.ERROR(ERR.SINC,'');
+          ELSE DO;                                /* TRY TO OVERLAY */
+             IF INC.MONO<>0 THEN CALL STOP.DISK;  /* STOP OUTPUT SO WE CAN OVERLAY */
+             CALL TTY_WAIT;
+             CALL CONVERSION.OVERLAY;             /* TRY TO OVERLAY TO DESIRED PROGRAM */
+             CALL SET.ERROR(ERR.STL,'');          /* TOO LONG TO CONVERT */
+          END;
+       END;
+       CALL.CONVERT=0;                            /* BOMB OUT - RESET FLAG */
+   END;
+
+	interp_activate_real_time(true);					// Interpret in real time now if we failed to leave
+   interp_set_rtp_is_running(true);             // Can load sound files
+
+	// Re-enable things if could not leave...
+	IF EXT.CLOCK.MODE=6									// if activating OMS midi sync, inform interp of our byte-pending flag
+	THEN CALL interp_init_oms_midi_sync(addr(ANY.OMS.MIDI.SYNC.BYTES));
+
+	IF OMS.MIDI.ENABLED != 0
+	THEN CALL interp_init_oms_midi_bulk(addr(ANY.OMS.MIDI.BULK.BYTES), OMSMIDI.PTR);
+
+END LEAVE.SYNCLAVIER.PROGRAM;

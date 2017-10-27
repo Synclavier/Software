@@ -1,0 +1,1581 @@
+/* POLYSOU - routines for POLY Synth for LOD */
+
+/* 02/12/92 - cj - deleted ddsad_xtal restrictions */
+/* 06/05/91 - cj  - Fixed "warble" problem jeff posto               */
+/* 03/19/91 - cj  - Chaned Preset.Chan32 to remove scrubbing clicks */
+/* 03/07/91 - cj  - added routines to access DDSAD                  */
+/* 04/06/89 - cj  - added audition on/off routines                  */
+/* 03/19/89 - TSS - Sign extend into Page Bits where needed         */
+/* 02/22/89 - CJ  - added capabability for new STM (with prm)       */
+
+module polymod;
+
+insert ':lod:lodlits:globlits'; /* get main literals                */
+insert ':lod:lodlits:xmemlits'; /* get xmem literals                */
+insert ':lod:lodlits:dbuglits'; /* get dbug literals                */
+
+insert ':lod:lodlits:polylits'; /* get poly literals                */
+
+insert ':lod:lodmods:miscdcl';  /* need some misc items             */
+
+/* $page - routines to access the DDSAD                             */
+
+read_ddsad_revision: proc public swapable;
+   dcl i fixed;
+
+   if CREG_AVAIL = 0
+   then return 0;
+
+   write(creg) = CREG_REV;
+   write(creg) = CREG_REV\CREG_READ;
+   i = shr(read(dreg),12);   /* Rev code from Jeff "Mr. Walleyball" Cunningham */
+   write(creg) = CREG_REV;
+
+   return i;
+end read_ddsad_revision;
+
+write_ddsad_bits: proc(them) public;  /* non-swap for speed */
+   dcl them fixed;           /* pass control bits to write to DDSAD */
+
+   if CREG_AVAIL = 0
+   then return;
+
+   write(creg) = CREG_DDSAD;
+   write(dreg) = them;
+   write(creg) = CREG_DDSAD\CREG_WRITE;
+   write(creg) = CREG_DDSAD;
+   write(dreg) = 0;
+
+   return;
+end write_ddsad_bits;
+
+/* general routine to set up DDSAD based on what the DTD is doing   */
+
+dcl currently.auditioning fixed PUBLIC;
+
+set_ddsad_controls: proc(rate,scrub) public; /* non-swap for speed */
+   dcl rate  fixed;            /* pass in current active sampling rate */
+   dcl scrub fixed;            /* alsw if we are planning to scrub     */
+
+   if CREG_AVAIL = 0				 /* eliminate code if not desired		  */
+   then return;
+
+   /* if getting ready to scrub (or actually scrubbing) then set       */
+   /* bits according to whether we are above or below 44.1 khz         */
+
+   if scrub<>0 then do;        /* scrubbing, or about to               */
+
+      if (output.happening = 0)            /* if no output             */
+      then call write_ddsad_bits
+      (DDSAD_SCRBUF \ DDSAD_CLOCK \ DDSAD_SCRUBB \ DDSAD_MUTE \ DDSAD_STOP);
+
+      else call write_ddsad_bits
+      (DDSAD_SCRBUF \ DDSAD_CLOCK \ DDSAD_SCRUBB \ DDSAD_PLAY \ DDSAD_GO);
+
+   end;
+
+   /* For very slow rates, just use scrub mode (mostly for             */
+   /* hardware debug purposes                                          */
+
+   else if (rate<(200*4)) then do;   /* < 20 khz */
+      if (output.happening = 0) & (currently.auditioning = 0) then do;
+         call write_ddsad_bits
+         (DDSAD_BUFLEN \ DDSAD_CLOCK \ DDSAD_SCRUBB \ DDSAD_MUTE \ DDSAD_STOP);
+      end;
+      else do;
+         call write_ddsad_bits
+         (DDSAD_BUFLEN \ DDSAD_CLOCK \ DDSAD_SCRUBB \ DDSAD_PLAY \ DDSAD_GO);
+      end;
+   end;
+
+   /* if active rate is outside the range of the PLL,  then just set   */
+   /* the pll to track 44.1 and disable all output:                    */
+
+   else if (rate<(300*4)) or (rate>(520*4)) /* < 30 khz or > 52 khz    */
+   then do;
+      call write_ddsad_bits
+      (DDSAD_BUFLEN \ DDSAD_CLOCK \ DDSAD_SCRUBB \ DDSAD_MUTE \ DDSAD_STOP);
+   end;
+
+   /* else if no output is happening,  set up to track the poly:       */
+
+   else if (output.happening = 0) & (currently.auditioning = 0) then do;
+      call write_ddsad_bits
+      (DDSAD_BUFLEN \ DDSAD_CLOCK \ DDSAD_NORMAL \ DDSAD_MUTE \ DDSAD_STOP);
+   end;
+
+   /* else if actually playing, allow output now:                      */
+
+   else do;
+      call write_ddsad_bits
+      (DDSAD_BUFLEN \ DDSAD_CLOCK \ DDSAD_NORMAL \ DDSAD_PLAY \ DDSAD_GO);
+   end;
+
+end set_ddsad_controls;
+
+/* Variables set up by POLY.INIT to describe hardware:              */
+
+DCL (NEW.BACKPLANE) FIXED PUBLIC; /* SET TO 1 FOR NEW DTD BACKPLANE (1ST REAL VOICE IS ALWAYS CHANNEL 16) */
+DCL (POLYNUMS)      FIXED PUBLIC;
+DCL (POLYNUMV)      FIXED PUBLIC;
+DCL (POLYAMOUNT)    FIXED PUBLIC;
+DCL (POLYADC)       FIXED PUBLIC;
+DCL (ADCONFIG)      FIXED PUBLIC;   /* A/D CONFIGURATION */
+DCL (POLYDAC)       FIXED PUBLIC;
+DCL (POLYMAP)  (32) FIXED PUBLIC;
+
+/* Poly memory read/write: */
+
+PSMREAD:PROC(MSB,LSB) PUBLIC;  /* SET UP FOR POLY SYNTH MEMORY READ */
+   DCL (MSB,LSB) FIXED;
+
+   MSB=MSB+SHR(LSB,8);     /* NORMALIZE  */
+   LSB=LSB&255;
+   WRITE(PSC)=0;           /* SELECT CHANNEL 0 FOR CONSISTENCY */
+   WRITE(PSF)=PSRMA;       /* READ MEMORY ADDRESS FC */
+   WRITE(PSD)=MSB;         /* UPPER 16 BITS       */
+   WRITE(PSD)=LSB;         /* LOWER  8 BITS       */
+END PSMREAD;
+
+PSMWRITE:PROC(MSB,LSB) PUBLIC;    /* POLY SYNTH MEMORY WRITE */
+   DCL (MSB,LSB) FIXED;
+
+   MSB=MSB+SHR(LSB,8);     /* NORMALIZE  */
+   LSB=LSB&255;
+   WRITE(PSC)=0;           /* SELECT CHANNEL 0 FOR CONSISTENCY */
+   WRITE(PSF)=PSWMA;       /* WRITE MEMORY ADDRESS FC */
+   WRITE(PSD)=MSB;         /* UPPER 16 BITS */
+   WRITE(PSD)=LSB;         /* LOWER  8 BITS */
+END PSMWRITE;
+
+
+/* $subtitle  Determine the contents of currently configured STM boxes */
+
+READ.STM.CONFIG: PROC (CHANNEL) RETURNS (FIXED) SWAPABLE;
+   DCL CHANNEL       FIXED;    /* CHANNEL WE WANT INFO ABOUT       */
+
+   DCL PRM_THERE     FIXED;    /* 1=PRM PRESENT, 0=PRM NOT PRESENT */
+   DCL SAFE_TYPE     FIXED;    /* 1=SAFE II (NEW), O=SAFE I (OLD)  */
+   DCL NUM_BOXES     FIXED;    /* NUM STM BOXES CONNECTED TO THE BIN */
+                               /* CONTAINING CHANNEL */
+   DCL DATA1         FIXED;    /* VALUE RETURNED FROM PSADID */
+   DCL DATA2         FIXED;    /* TOP 4 BITS MASKED OFF OF DATA */
+
+   DCL INDEX_OFFSET  LIT '3';  /* OFFSET TO NEXT DATA BLOCK IN LOOK_UP TABLE */
+
+   DCL I             FIXED;
+
+   /* THE FOLLOWING TABLE LISTS ALL CURRENT CONFIGURATIONS
+      OF AN STM BOX.  TO FIND WHAT CONFIGURATION IS BEING
+      USED ON A PARTICULAR CHANNEL, WE LOOK AT WHAT WAS RETURNED
+      FROM THE PSADID CALL AND USE THAT VALUE AS AN INDEX INTO
+      THE FOLLOWING TABLE.  THE THREE VALUES STORED IN EACH BLOCK
+      ARE:  IF PRM IS PRESENT IN BOX(ES), OLD OR NEW SAFES IN BOX(ES),
+      HOW MANY STM BOXES ARE OUT THERE.  */
+
+   DCL LOOK_UP  DATA 
+       /* 0 = 0 0 0 0 = NO STM AT ALL              */  (0, 0, 0,
+       /* 1 = 0 0 0 1 = NO PRM, OLD SAFES, 1 BOX   */   0, 0, 1,
+       /* 2 = 0 0 1 0 = NO PRM, OLD SAFES, 2 BOXES */   0, 0, 2,
+       /* 3 = 0 0 1 1 = NO PRM, OLD SAFES, 3 BOXES */   0, 0, 3,
+       /* 4 = 0 1 0 0 = NO PRM, OLD SAFES, 4 BOXES */   0, 0, 4,
+       /* 5 = 0 1 0 1 = UNUSED                     */   0, 0, 0,
+       /* 6 = 0 1 1 0 = UNUSED                     */   0, 0, 0,
+       /* 7 = 0 1 1 1 = UNUSED                     */   0, 0, 0,
+       /* 8 = 1 0 0 0 =    PRM, NEW SAFES, 4 BOXES */   1, 1, 4,
+       /* 9 = 1 0 0 1 = NO PRM, NEW SAFES, 1 BOX   */   0, 1, 1,
+       /* 10= 1 0 1 0 = NO PRM, NEW SAFES, 2 BOXES */   0, 1, 2,
+       /* 11= 1 0 1 1 = NO PRM, NEW SAFES, 3 BOXES */   0, 1, 3,
+       /* 12= 1 1 0 0 = NO PRM, NEW SAFES, 4 BOXES */   0, 1, 4,
+       /* 13= 1 1 0 1 =    PRM, NEW SAFES, 1 BOX   */   1, 1, 1,
+       /* 14= 1 1 1 0 =    PRM, NEW SAFES, 2 BOXES */   1, 1, 2,
+       /* 15= 1 1 1 1 =    PRM, NEW SAFES, 3 BOXES */   1, 1, 3);
+
+   WRITE(PSC) = CHANNEL;       /* 0=BIN 0, 64=BIN 1, 128=BIN 2, 192=BIN 3 */
+   WRITE(PSF) = PSADID;        /* PASS IDENTIFICATION CODE */
+   WRITE(PSD) = 0;
+
+   DO I = 0 TO 100; END;       /* DELAY FOR HARDWARE       */
+
+   DATA1 = READ(PSD);                 /* GET WHOLE WORD     */
+   DATA2 = SHR( DATA1&"HF000", 12);   /* EXTRACT TOP 4 BITS */
+
+   PRM_THERE = LOOK_UP( INDEX_OFFSET*DATA2     )&"H0001";
+   SAFE_TYPE = LOOK_UP( INDEX_OFFSET*DATA2 + 1 )&"H0001";
+   NUM_BOXES = LOOK_UP( INDEX_OFFSET*DATA2 + 2 )&"H0007";
+
+   /* THE FORMAT OF THE RETURNED WORD IS AS FOLLOWS:
+      BIT  15:    1=NEW SAFES, 0=OLD SAFES
+      BIT  14:    1=PRM THERE, 0=PRM NOT THERE
+      BITS 13-11: NUMBER OF BOXES (0-4)
+      BITS 10-8:  UNUSED
+      BIT   7:    SET IF 2ND SAFE IN BOX 3 IS THERE
+      BIT   6:    SET IF 1ST SAFE IN BOX 3 IS THERE
+      BIT   5:    SET IF 2ND SAFE IN BOX 2 IS THERE
+      BIT   4:    SET IF 1ST SAFE IN BOX 2 IS THERE
+      BIT   3:    SET IF 2ND SAFE IN BOX 1 IS THERE
+      BIT   2:    SET IF 1ST SAFE IN BOX 1 IS THERE
+      BIT   1:    SET IF 2ND SAFE IN BOX 0 IS THERE
+      BIT   0:    SET IF 1ST SAFE IN BOX 0 IS THERE
+   */
+
+   RETURN ( SHL(SAFE_TYPE,15)+SHL(PRM_THERE,14)+SHL(NUM_BOXES,11)+(DATA1&"HFF") );
+
+END READ.STM.CONFIG;
+
+/* $PAGE - INITIALIZE POLY */
+
+/* note: set phase inc to 0 in this routine (!!!) */
+
+POLY.INIT:PROC PUBLIC SWAPABLE;
+   DCL (I,J,K,L,M) FIXED;
+
+   POLYNUMS      = 0;                    /* INIT ALL VARIABLES         */
+   NEW.BACKPLANE = 0;                    /* IN CASE NO SYSTEM          */
+   POLYNUMV      = 0;
+   POLYADC       = 0;
+   ADCONFIG      = 0;                    
+
+   DO I=0 TO 192 BY 64;                  /* ZERO EACH OF 4 SUBSYSTEMS  */
+
+      WRITE(PSC)=I+1;                    /* CHECK FOR SYSTEM EXISTS    */
+
+      IF (READ(PSC)&255)=I+1 THEN DO;    /* SUBSYSTEM EXISTS           */
+         POLYNUMS=POLYNUMS+1;            /* COUNT SUBSYSTEMS           */
+         WRITE(PSF)=20; WRITE(PSD)=0;        /* RESET COMPUTER INTERFACE */
+         WRITE(PSF)=PSNUMV;
+
+         K=(READ(PSD)&15)*4;                 /* NUMBER OF VOICES        */
+         NEW.BACKPLANE=((READ(PSD)&256)<>0); /* CHECK FOR NEW BACKPLANE */
+         IF NEW.BACKPLANE=0 THEN DO;         /* ORIGINAL BACKPLANE - LIMIT VOICES IF NOT ENOUGH AMPLITUDE COMPUTERS */
+            IF (READ(PSD)&16)=0 THEN K=0;    /* NO VOICES IF NO ENV #0  */
+            IF ((READ(PSD)&32)=0)&(K>16)     /* LIMIT TO 16 VOICES IF   */
+            THEN K=16;                       /* NO SECOND ENV CARD      */
+         END;
+         IF I=0                              /* COUNT NUMBER OF VOICES  */
+         THEN POLYNUMV=K;                    /* ON SYSTEM # 0 ONLY      */
+
+         L=READ(PSD);                        /* SAVE NUMVOICES FOR A/D CHECKS */
+
+         IF (L&"100")<>0 THEN DO;            /* RESET A/D CONTROLLER    */
+            POLYADC=1;                       /* ADC  EXISTS             */
+            WRITE(PSF) = PSADMC;             /* NUM  SAMPLING CHANS = 0 */
+            WRITE(PSD) = 0;
+            WRITE(PSF) = PSADEVSM;           /* RESET STEREO MASTERS    */
+            DO J = 0 TO 30 BY 2;             /*  (EVEN CHANS 0-30)      */
+               WRITE(PSC) = J;
+               WRITE(PSD) = 0;
+            END;
+         END;
+
+         IF (L&"200")<>0 THEN DO;            /* RESET SAMPLING UNITS    */
+            ADCONFIG = READ.STM.CONFIG(I);   /* GET NUM BOXES, A/D MAP  */
+            WRITE(PSC) = I;
+            WRITE(PSF) = PSADMODE;           /* STEREO MODE, NO AUTOGAIN */
+            WRITE(PSD) = 0;
+            DO J = I TO I+15;                /* INIT ALL 16 CHANS       */
+               WRITE(PSC) = J;
+               WRITE(PSF) = PSADVOL;         /* SET GAIN TO UNITY       */
+               WRITE(PSD) = 0;
+               WRITE(PSF) = PSADACT;         /* NO ACTIVE CHANNELS      */
+               WRITE(PSD) = 0;
+            END;
+         END;
+
+         DO J=0 TO 63;                       /* ZERO OUT EACH CHANNEL - INCLUDING GHOST/REFRESH CHANNEL(S) */
+            WRITE(PSC)= I+J; WRITE(PSF)=PSWL;
+            WRITE(PSD)=  -1; WRITE(PSD)=-1;   /* WAVE TABLE LENGTH OF 1 */
+            WRITE(PSD)=   0; WRITE(PSD)=255;  /* BASE ADDRESS OF 255    */
+            WRITE(PSD)=  -1; WRITE(PSD)=-1;   /* LOOP LENGTH OF 1       */
+            WRITE(PSD)=   0; WRITE(PSD)=0;    /* PHASE INCR OF    0     */
+            WRITE(PSD)= 255;                  /* INCR OF 256            */
+            WRITE(PSD)=   0;                  /* MODULUS OF 256         */
+            WRITE(PSD)=   0;                  /*  OFF NO LOOP           */
+
+            IF J < K THEN DO;                 /* ZERO ENV/VOL ITEMS FOR EXISTING DACS */
+               WRITE(PSF)=PSEMOD;               /* WRITE ENV INFO           */
+               WRITE(PSD)=4095; WRITE(PSD)=4095;/* MODULUS 1, INCR 4096     */
+               WRITE(PSD)=  64; WRITE(PSD)=4095;/* DELTA, COUNT             */
+               WRITE(PSD)=4095;                 /* ENV ACCUMULATOR          */
+               WRITE(PSD)=   0; WRITE(PSD)=0;   /* LIMIT, CVAL              */
+
+               WRITE(PSF)=PSRCVOL;              /* WRITE VOL INFO           */
+               WRITE(PSD)=   0; WRITE(PSD)=0;   /* R, L CVOL                */
+               WRITE(PSD)=   0; WRITE(PSD)=0;   /* R, L DVOL                */
+            END;
+         END;   /* OF CHANNEL LOOP         */
+
+         IF I=0 THEN DO J = I TO I+31;          /* SET INITIAL CHANNEL MAP */
+            POLYMAP(J)=J;
+         END;
+
+         WRITE(PSC)=I;
+         WRITE(PSF)=PSNUMV;
+         IF (READ(PSC)&"400")<>0 THEN DO;       /* IF NEW D/A CONTROLLER */
+            POLYDAC   =1;                       /* NEW DA CONTROLLER     */
+            WRITE(PSC)=I;                       /* SELECT THIS SUBSYSTEM */
+            WRITE(PSF)=PSMUTE;                  /* AND UNMUTE IT         */
+            WRITE(PSX)=0;                       /* (I.E., TURN ON D/A)   */
+            DO J = I TO I+31;                   /* SET INITIAL CHANNEL MAP */
+               WRITE(PSC)=J;                    /* EACH OSCILLATOR TO */
+               WRITE(PSF)=PSCMAP;               /* ITS OWN CHANNEL    */
+               WRITE(PSX)=J;
+            END;
+            DO J = I TO I+63;         /* read voice peak info to initialize it */
+               WRITE(PSC)=J;                    /* EACH OSCILLATOR TO */
+               WRITE(PSF)=PSRPEAK;
+               M=READ("157");
+            END;
+         END;                                   /* OF NEW D/A CONTROLLER */
+      END;      /* OF SUBSYST EXISTS       */
+   END;         /* OF LOOP OVER SUBSYSTEMS */
+
+   /* $PAGE - SEE HOW MUCH POLY MEMORY IS AVAILABLE */
+
+   // In LOD, POLYAMOUNT is a variable of type fixed.
+   // This file is LOD code; it is not run on the interpreter and only references the first bin
+   // In this implementation PSMREAD selects bin 0 by writing PSC == 0
+   POLY.AGAIN:;                         /* COUNT HOW MUCH MEMORY      */
+   CALL PSMREAD (POLYAMOUNT,0);
+   I=READ(PSD); J=READ(PSD);            /* SAVE MEMORY CONTENTS       */
+   CALL PSMWRITE(POLYAMOUNT,0);
+   WRITE(PSD)=0; WRITE(PSD)=-1;         /* SEE IF IT HOLDS 0, -1      */
+   CALL PSMREAD (POLYAMOUNT,0);
+   IF  (READ(PSD)=0)                    /* THANK YOU, KARIM           */
+   AND (READ(PSD)=(-1))
+   THEN DO;
+      CALL PSMWRITE(POLYAMOUNT,0);
+      WRITE(PSD)=I; WRITE(PSD)=J;       /* RESTORE MEMORY CONTENTS    */
+      POLYAMOUNT=POLYAMOUNT+256;        /* COUNT 256 MORE SECTORS     */
+      IF (POLYAMOUNT IGE 256)           /* DETECT FOR WRAP TO 32 MEGS */
+      THEN GOTO POLY.AGAIN;
+      POLYAMOUNT=(-1);                  /* LIMIT TO 32 MEGS - 1 SECT  */
+   END;
+
+END POLY.INIT;
+
+AD_INIT: PROC PUBLIC SWAPABLE; /* REINITIALIZE A/D IN CASE CABLE WAS CHANGED */
+   DCL (I,J,L) FIXED;
+
+   DO I=0 TO 192 BY 64;                      /* ZERO EACH OF 4 SUBSYSTEMS  */
+      WRITE(PSC)=I+1;                        /* CHECK FOR SYSTEM EXISTS    */
+      IF (READ(PSC)&"377")=I+1 THEN DO;      /* SUBSYSTEM EXISTS           */
+         WRITE(PSF)=PSNUMV;
+         L=READ(PSD);                        /* SAVE NUMVOICES FOR A/D CHECKS */
+         IF (L&"100")<>0 THEN DO;            /* RESET A/D CONTROLLER    */
+            POLYADC = 1;                     /* A/D CONTROLLER PRESENT  */
+            WRITE(PSF) = PSADMC;             /* NUM  SAMPLING CHANS = 0 */
+            WRITE(PSD) = "40";               /* set LOD bit to avoid clicks */
+            WRITE(PSF) = PSADEVSM;           /* RESET STEREO MASTERS    */
+            DO J = I TO I+30 BY 2;           /*  (EVEN CHANS 0-30)      */
+               WRITE(PSC) = J;
+               WRITE(PSD) = 0;
+            END;
+         END;
+         IF (L&"200")<>0 THEN DO;            /* RESET SAMPLING UNITS    */
+            ADCONFIG = READ.STM.CONFIG(I);   /* GET NUM BOXES, A/D MAP  */
+            WRITE(PSC) = I;
+            WRITE(PSF) = PSADMODE;           /* STEREO MODE, NO AUTOGAIN */
+            WRITE(PSD) = 0;
+            DO J = I TO I+15;                /* INIT ALL 16 CHANS       */
+               WRITE(PSC) = J;
+               WRITE(PSF) = PSADVOL;         /* SET GAIN TO UNITY       */
+               WRITE(PSD) = 0;
+               WRITE(PSF) = PSADACT;         /* NO ACTIVE CHANNELS      */
+               WRITE(PSD) = 0;
+            END;
+         END;
+         ELSE ADCONFIG = 0;
+      END;      /* OF SUBSYST EXISTS       */
+   END;         /* OF LOOP OVER SUBSYSTEMS */
+
+END AD_INIT;
+
+
+
+/* $PAGE - ROUTINES TO COPY POLY SYNTH MEMORY AROUND */
+
+POLY.OUT:PROC(SOU,LEN) PUBLIC;          /* COPY BLOCK TO POLY MEM - SET UP WRITE ADDRESS BEFORE CALLING */
+   DCL (SOU,LEN) FIXED;
+
+   WRITE("313")=SOU;                    /* SET UP CORE POINTER */
+
+   DO WHILE LEN IGE 256;               
+      RPC 256;
+      WRITE(PSD)=READ("373");
+      LEN=LEN-256;
+   END;
+   IF LEN<>0 THEN DO;
+      RPC LEN;
+      WRITE(PSD)=READ("373");
+   END;
+
+END POLY.OUT;
+
+
+POLY.IN:PROC(DES,LEN) PUBLIC;           /* COPY BLOCK INTO MAIN MEMORY FROM POLY SYNTH - SET UP READ POINTERS BEFORE CALLING */
+   DCL (DES,LEN) FIXED;
+
+   WRITE("313")=DES;                    /* SET UP CORE POINTER */
+
+   DO WHILE LEN IGE 256;              
+      RPC 256;
+      WRITE("373")=READ(PSD); 
+      LEN=LEN-256;
+   END;
+   IF LEN<>0 THEN DO;
+      RPC LEN;
+      WRITE("373")=READ(PSD); 
+   END;
+
+END POLY.IN;
+
+/* $PAGE - COPY POLY MEM AROUND */
+
+move.poly:proc(ssec,swrd,dsec,dwrd,slen,wlen) public recursive;
+   dcl ssec   fixed;   /* source sector address      */
+   dcl swrd   fixed;   /* source word address        */
+   dcl dsec   fixed;   /* destination sector address */
+   dcl dwrd   fixed;   /* destination word address   */
+   dcl slen   fixed;   /* sector length of copy      */
+   dcl wlen   fixed;   /* word length of copy        */
+   dcl (i,j)  fixed;
+
+   dcl copy.len lit '128';
+   dcl copy.buf (copy.len-1) fixed automatic;
+
+   ssec=ssec+shr(swrd,8); swrd=swrd&255; /* normalize things */
+   dsec=dsec+shr(dwrd,8); dwrd=dwrd&255;
+   slen=slen+shr(wlen,8); wlen=wlen&255;
+
+   if ((ssec=dsec) and (swrd=dwrd))    /* if data is in place */
+   or ((slen=0   ) and (wlen=0   ))    /* or not moving anything */
+   then return;
+
+   if  ((ssec igt dsec))                 /* if copying down */
+   or  ((ssec  =  dsec) 
+   and  (swrd igt dwrd)) 
+   then do;
+
+      do while (slen<>0) or (wlen<>0);
+
+         if slen<>0 then i=256;
+         else            i=wlen;
+         if i igt copy.len then i = copy.len;
+
+         call psmread(ssec,swrd);
+         call poly.in(addr(copy.buf(0)),i);
+
+         call psmwrite(dsec,dwrd);
+         call poly.out(addr(copy.buf(0)),i);
+
+         wlen = wlen - i;
+         swrd = swrd + i;
+         dwrd = dwrd + i;
+
+         if wlen<0 then do;
+            wlen=wlen+256;
+            slen=slen-1;
+         end;
+
+         ssec=ssec+shr(swrd,8); swrd=swrd&255; /* normalize things */
+         dsec=dsec+shr(dwrd,8); dwrd=dwrd&255;
+      end;
+   end;
+
+   else do; /* copy up from the top down */
+
+      swrd=swrd+wlen; dwrd=dwrd+wlen;   /* compute pointers to the top */
+      ssec=ssec+slen+shr(swrd,8); swrd=swrd&255;
+      dsec=dsec+slen+shr(dwrd,8); dwrd=dwrd&255;
+
+      do while (slen<>0) or (wlen<>0);
+
+         if slen<>0 then i=256;
+         else            i=wlen;
+         if i igt copy.len then i = copy.len;
+
+         wlen = wlen - i;
+         swrd = swrd - i;
+         dwrd = dwrd - i;
+
+         if wlen<0 then do;
+            wlen=wlen+256;
+            slen=slen-1;
+         end;
+
+         if swrd<0 then do;
+            swrd=swrd+256;
+            ssec=ssec-1;
+         end;
+
+         if dwrd<0 then do;
+            dwrd=dwrd+256;
+            dsec=dsec-1;
+         end;
+
+         call psmread(ssec,swrd);
+         call poly.in(addr(copy.buf(0)),i);
+
+         call psmwrite(dsec,dwrd);
+         call poly.out(addr(copy.buf(0)),i);
+      end;
+   end;
+
+end move.poly;
+
+
+/* $page - routine to copy between ext memory and poly */
+
+/* needed for moving cues around */
+
+Copy.Ext.Mem.To.Poly: proc(ssec,swrd,dsec,dwrd,wlen) public;
+   dcl ssec   fixed;   /* source sector address      */
+   dcl swrd   fixed;   /* source word address        */
+   dcl dsec   fixed;   /* destination sector address */
+   dcl dwrd   fixed;   /* destination word address   */
+   dcl wlen   fixed;   /* word length of copy        */
+   dcl i      fixed;
+
+   ssec=ssec+shr(swrd,8); swrd=swrd&255; /* normalize things  */
+   dsec=dsec+shr(dwrd,8); dwrd=dwrd&255;
+
+   if wlen = 0 then return;              /* no words top copy */
+
+   write(mam) = ssec;
+   write(mal) = swrd;
+
+   call psmwrite(dsec,dwrd);
+
+   do while (wlen<>0);
+
+      i = wlen;                          /* get word length   */
+      if i igt 256 then i = 256;         /* limit for rpc     */
+
+      rpc i;
+      write(psd) = read(mdi);
+
+      wlen = wlen - i;
+
+      ssec = ssec + 1;
+      dsec = dsec + 1;
+   end;
+
+end Copy.Ext.Mem.To.Poly;
+
+Copy.Poly.To.Ext.Mem: proc(ssec,swrd,dsec,dwrd,wlen) public;
+   dcl ssec   fixed;   /* source sector address      */
+   dcl swrd   fixed;   /* source word address        */
+   dcl dsec   fixed;   /* destination sector address */
+   dcl dwrd   fixed;   /* destination word address   */
+   dcl wlen   fixed;   /* word length of copy        */
+   dcl i      fixed;
+
+   ssec=ssec+shr(swrd,8); swrd=swrd&255; /* normalize things  */
+   dsec=dsec+shr(dwrd,8); dwrd=dwrd&255;
+
+   if wlen = 0 then return;              /* no words top copy */
+
+   call psmread(ssec,swrd);
+
+   write(mam) = dsec;
+   write(mal) = dwrd;
+
+   do while (wlen<>0);
+
+      i = wlen;                          /* get word length   */
+      if i igt 256 then i = 256;         /* limit for rpc     */
+
+      rpc i;
+      write(mdi) = read(psd);
+
+      wlen = wlen - i;
+
+      ssec = ssec + 1;
+      dsec = dsec + 1;
+   end;
+
+end Copy.Poly.To.Ext.Mem;
+
+/* $page - general purpose cross fade routine */
+
+/* useful routine.  combines construction of poly cross fade  */
+/* with copy of data around in poly memory                    */
+
+/* note carefully - insec, inwrd pointers are incremented     */
+/* by prelen even though the data is not touched              */
+
+/* note - to simplify buts, extra data is copied after the    */
+/* cross fade to fill out to a sector boundary.               */
+
+/* the pointers are unusual, but very useful - they correspond */
+/* to the sync points of the data                              */
+
+construct.dtd.poly.crossfade:proc (outsec,outwrd,insec,inwrd,dsec,dwrd,
+                                   prelen,fadelen,postlen) public swapable;
+
+   dcl (outsec,outwrd)   fixed;     /* pointers to poly for fade-out data */
+   dcl (insec,inwrd)     fixed;     /* pointers to poly for fade-in  data */
+   dcl (dsec,dwrd)       fixed;     /* pointers to dest data              */
+
+   dcl (prelen)          fixed;     /* word length to copy before fade    */
+   dcl (fadelen)         fixed;     /* word length of cross fade data     */
+   dcl (postlen)         fixed;     /* word length to copy after fade     */
+
+   dcl (i,j,k)  fixed;
+   dcl (accum)  fixed;              /* cross fade accumulator         */
+   dcl (incr )  fixed;              /* accumulator increment          */
+
+
+   /* move pre-fade poly data: */
+
+   if prelen<>0 then do;
+      call move.poly(outsec,outwrd,dsec,dwrd,0,prelen);
+      outwrd = outwrd + prelen;
+      inwrd  = inwrd  + prelen;
+      dwrd   = dwrd   + prelen;
+   end;
+
+
+   /* now construct fade in and move */
+   /* that data:                     */
+
+   if fadelen<>0 then do;           /* no copy and construct fade     */
+
+      /* compute increment and accumulator */
+      /* for constructing the splice       */
+
+      if fadelen = 1 then do;          /* special case to avoid math     */
+         accum=32768;                  /* math errors                    */
+         incr =32768;
+      end;
+      else do;
+         load 0; uload 1; div fadelen; /* 65536/fadelen = desired increment */
+         incr=res;                     /* desired increment              */
+         if rem<>0 then incr=incr+1;   /* round up so fadelen<=desired      */
+
+         load 0; uload 1; div incr;    /* recompute actual fadelen achieved */
+         i=res;                        
+
+         /* actual fade length will be shorter than specified # of wrds */
+         /* due to round off error.   copy extra words to account       */
+         /* for this shortfall                                          */
+
+         postlen = postlen + (fadelen-i);
+         fadelen = i;
+
+         accum=shr(incr-incr*fadelen,1);  /* init accum to 1/2 of remainder */    
+      end;
+
+      do while fadelen<>0;
+
+         i=fadelen;                 /* try to copy all data */
+         if i igt 256 then i=256;   /* limit to 256         */
+         fadelen=fadelen-i;         /* account              */
+
+         call psmread(insec,inwrd); /* get fade-in data     */
+                                    /* into misc.buf        */
+         write("313")=addr(misc.buf(0));
+         rpc i;                       
+         write("373")=read(psd);    /* read in fade in      */
+
+         call psmread(outsec,outwrd);  /* get fade out data    */
+
+         write("313")=addr(misc.buf(0));
+
+         j=accum;                   /* set mr pointers         */
+
+         k=i;
+         do while k<>0;
+            load (read("353") xor "100000");   /* get new data element     */
+            mul accum;                         /* punch in- start small    */
+            k=k-1;                             /* decrement while mul busy */
+            j=ures;                 
+            load (read(psd)   xor "100000");   /* get old data element     */
+            mul -accum;                       
+            accum=accum+incr;                  /* increment cross fade     */
+            write("373") = (j+ures) xor "100000";
+         end;
+
+         call psmwrite(dsec,dwrd);  /* store cross faded data   */
+         
+         write("313")=addr(misc.buf(0));
+         rpc i;                           
+         write(psd)=read("373");
+
+         inwrd  = inwrd  + i;
+         outwrd = outwrd + i;
+         dwrd   = dwrd   + i;
+
+      end;
+   end;
+
+
+   /* increase post len so we always copy data out */
+   /* to sector boundary                           */
+
+   if  (((dwrd+postlen)&255)<>0)
+   then postlen = postlen + 256 - ((dwrd+postlen)&255);
+   
+   
+   /* now copy out post-fade data                  */
+
+   if postlen<>0 then do;
+      call move.poly(insec,inwrd,dsec,dwrd,0,postlen);
+      outwrd = outwrd + postlen;
+      inwrd  = inwrd  + postlen;
+      dwrd   = dwrd   + postlen;
+   end;
+
+end construct.dtd.poly.crossfade;
+
+
+/* $page - construct short digital cross fades between */
+/* cues                                                */
+
+
+fadein:proc(sec,wrd) public;
+   dcl (sec,wrd) fixed;
+   dcl (accum  ) fixed;
+   dcl (i,j    ) fixed;
+
+   if  ((sec&(rec.base-1))=((buf.base+buf.len)&(rec.base-1))) /* if fade in starts at end of rot */
+   and (wrd=0                             ) /* buffer, then data is sitting    */
+   then sec=sec - buf.len;                  /* at start of buffer              */
+
+   accum = 1024;                      /* for 32 word fade in */
+
+   call psmread(sec,wrd);  
+                                      /* into misc.buf             */
+   write("313")=addr(misc.buf(0));
+   rpc 32;                            /* read in data              */
+   write("373")=read(psd);            /* newly recorded data       */
+
+   call psmwrite(sec,wrd);  
+   write("313")=addr(misc.buf(0));
+
+   do i=0 to 31;
+      load (read("373") xor "100000");   /* get orig data element    */
+      mul accum;                         /* fade in - start small    */
+      j=ures;                 
+      load "100000";                     /* get offset binary 0      */
+      mul -accum;                       
+      accum=accum+2048;                  
+      write(psd) = (j+ures) xor "100000";
+   end;
+
+end fadein;
+
+/* fadeout: pass poly mem sector, word.  fade out will end at this point */
+
+fadeout:proc(sec,wrd) public;
+   dcl (sec,wrd) fixed;
+   dcl (accum  ) fixed;
+   dcl (i,j    ) fixed;
+
+   if  ((sec&(rec.base-1))=buf.base)       /* start fade out at end of last buffer */
+   and (wrd=0             )
+   then sec=sec+buf.len;
+
+   wrd = wrd - 32;                /* 32 word fade */
+   if wrd<0 then do;
+      wrd=wrd+256;
+      sec=sec-1;
+   end;
+
+   accum = -1024;                 /* for 32 word fade out */
+
+   call psmread(sec,wrd);  
+                                      /* into misc.buf             */
+   write("313")=addr(misc.buf(0));
+   rpc 32;                            /* read in data              */
+   write("373")=read(psd);            /* newly recorded data       */
+
+   call psmwrite(sec,wrd);  
+   write("313")=addr(misc.buf(0));
+
+   do i=0 to 31;
+      load (read("373") xor "100000");   /* get orig data element    */
+      mul accum;                         /* fade out - start big     */
+      j=ures;                 
+      load "100000";                     /* get offset binary 0      */
+      mul -accum;                       
+      accum=accum-2048;                  /* decrement cross fade     */
+      write(psd) = (j+ures) xor "100000";
+   end;
+
+end fadeout;
+
+/* $page - routines to construct poly buffers for looped playback */
+
+/* the following routines handle the data processing for performing */
+/* looped playback.   during looped playback,  a section of data    */
+/* from the disk buffer is copied into one of 3 buffers in poly     */
+/* memory.   a cross fade is then constructed in this buffer        */
+
+/* algorithm:   when we want to loop a short section of data, it    */
+/* is copied into loop.buf1 (up to 10 sectors of data).  a cross    */
+/* fade is contructed from the end of the data bAck to the          */
+/* beginning                                                        */
+
+/* the fun starts when we then wish to splice to a new section of   */
+/* data for looped playback                                         */
+
+/* this is done as follows:                                         */
+
+/* a buffer (loop.buf2) is constructed that contains new data       */
+/* in its first third,  original data in its second third,          */
+/* and a cross fade from the original data to the new data in       */
+/* its last third.                                                  */
+
+/* a second buffer (loop.buf3) is constructed that contains         */
+/* the new data, crossfaded at the end back to itself               */
+
+/* the switchover is accomplished as follows:                       */
+
+/* when the voice is playing in the middle third of the buffer,     */
+/* it is switched to playing from the second buffer.  there         */
+/* will be no click here since the data is the same.   it will      */
+/* then play through the last third of the buffer and cross fade    */
+/* back to the new material at the beginning                        */
+
+/* when the voice is playing in the first third of the buffer,      */
+/* the voice is switched to the last buffer.  again, no click       */
+/* because the data is the same.                                    */
+
+/* this routine constructs two kinds of audio loops                 */
+/* Type 1 is an n sector loop that is cross faded back to itself    */
+/* Type 2 is an n sector loop whose end cross fades to a new        */
+/* section of material                                              */
+
+/* if the type is 2,  then the segment is constructed in            */
+/* loop buffer #2.  the new audio material must be in the           */
+/* the buffer# passed as the argument                               */
+
+Construct.Loop.Buffers:proc(track#,type,buf#,word.start,buf.max,loop.buf.len,base) public swapable;
+   dcl track#       fixed;    /* pass track #.   must be available */
+   dcl type         fixed;    /* 1 = a to a loop. 2 = a to b loop  */
+   dcl buf#         fixed;    /* buf# to put it in (1 or 3)        */
+   dcl word.start   fixed;    /* word start in buffer of data      */
+   dcl buf.max      fixed;    /* amount of data in buffer          */
+   dcl loop.buf.len fixed;    /* length of loop buffer (?)         */
+   dcl base         fixed;    /* base address of track             */
+
+   dcl i          fixed;
+   dcl orig       fixed;
+   dcl new        fixed;
+
+   dcl ix data (loop.buf1,loop.buf2,loop.buf3);
+
+   /* for type 1, construct a looped segment of audio that loops */
+   /* back to itself                                             */
+
+   if type = 1 then do;
+
+      /* substitue digital zeros for data that is needed */
+      /* past the end of a track                         */
+
+      if buf.max < shr(word.start,8)
+      then buf.max = shr(word.start,8);
+
+      do while (buf.max < shr(word.start + Loop.Buf.Len + 255,8));
+         call psmwrite(base + buf.base + buf.max,0);
+         rpc 256;
+         write(psd) = 0;
+         buf.max = buf.max + 1;
+      end;
+
+      call Construct.DTD.Poly.Crossfade
+           (base + buf.base, word.start,
+            base + buf.base, word.start-(Loop.Buf.Len-loop.fade.len),
+            base + ix(buf#-1),0,
+            Loop.Buf.Len-loop.fade.len,loop.fade.len,0);
+   end;
+
+   /* for type 2, construct a looped segment of audio that loops */
+   /* to data that is in the new buffer                          */
+
+   /* to save computer time, we only construct the first and     */
+   /* last 128 words of this segment                             */
+
+   else do;
+
+      orig = ix ((buf# xor 2) - 1);   /* original data sits here */
+      new  = ix ((buf#      ) - 1);   /* new data sits here      */
+
+      call Construct.DTD.Poly.Crossfade
+      (base + orig      , Loop.Buf.len - loop.pre.len,
+       base + new       , Loop.Buf.Len - loop.pre.len,
+       base + loop.buf2 , Loop.Buf.Len - loop.pre.len,
+       loop.pre.len-loop.fade.len,loop.fade.len,0);
+
+      call Move.Poly(base + new       + 1, 0,    /* source */
+                     base + loop.buf2 + 1, 0,    /* dest   */
+                     0, loop.post.len);                   /* len    */
+   end;
+
+end Construct.Loop.Buffers;
+
+
+/* $page - Other poly routines: */
+
+ps_setmode: proc(mode) PUBLIC; /* set A/D mode */
+   dcl mode fixed;
+
+   write(psc) = 0;
+   write(psf) = psadmode;
+   write(psd) = mode;
+end ps_setmode;
+
+ps_actchan: proc(channel, number) PUBLIC; /* activate A/D channel(s) */
+   dcl channel fixed; /* channel to activate (0-15) */
+   dcl number  fixed; /* number of channels to activate at once */
+   dcl code    fixed;
+
+   write(psc) = (channel and "14"); /* set first channel in box */
+   write(psf) = psadact;
+
+   code = 0; /* no channels yet */
+   do channel = channel to channel + number - 1; /* activate all channels required */
+      code = (code or shl(1, channel and "3")); /* set channel number in that box */
+   end;
+
+   write(psd) = code; /* set channel number(s) in that box */
+end ps_actchan;
+
+ps_maxchan: proc(channels, LOD) PUBLIC; /* turn on A/D channels */
+   dcl channels fixed; /* number of sampling channels */
+   dcl LOD      fixed; /* 1: LOD, 0: STM */
+
+   if LOD then channels = (channels or "40"); /* set LOD bit */
+
+   write(psc) = 0;
+   write(psf) = psadmc;
+   write(psd) = channels;
+end ps_maxchan;
+
+ps_gain: proc (channel, gain) PUBLIC; /* set gain on A/D channel */
+   dcl channel fixed; /* channel to set gain on */
+   dcl gain    fixed; /* gain to set it to */
+   dcl mult    fixed; /* multiplier to write to A/D */
+
+   dcl multiplier data (4, 10,   30,    90,   270); /* table of multipliers */
+   dcl mult_value data (4,  0, "40", "140", "340"); /* values to write to A/D */
+
+   /*------------------------------------------------------------------------------
+   | LOCAL FUNCTION: map_times_to_dB converts 
+   |   linear ("times") to log (dB) amplitude scales.  The "times"
+   |   values can range from 7 to 251 which represent actual multiplier values
+   |   of 0.7 to 25.1.  The dB values range from -3dB to +28dB.  Over or under
+   |   range parameter values will be mapped to the max and min values
+   |   (they will be "clipped").
+   | METHOD: A lookup table is used to avoid floating point.  Entries included
+   |   for each integer dB value (e.g. -3, -2, ... 28).
+   | PARAMETER: times - value to convert to dB.
+   | RETURNS: dB value.
+   +-----------------------------------------------------------------------------*/
+
+   map_times_to_dB: proc (times);
+      dcl times fixed;  /* passed 7 (represents 0.7) to 251 (25.1) times */
+      dcl i     fixed;
+
+      /* dB lookup table */
+      dcl log_scale data (
+          7,   8,   9,  10,  11,  13,  14,  16,  18,  20,  22,
+         25,  28,  32,  35,  40,  45,  50,  56,
+         63,  71,  79,  89,  100, 112, 126, 141,
+         158, 178, 200, 224, 251, 282, 316, 355);
+
+      /* Search table for value that corresponds to times value passed in */
+      do i = -3 to 28;
+         if log_scale (i + 3) >= times   /* If found in table */
+         then return (i);                /* return it         */
+      end;
+
+      return 28;    /* If not found return max gain: 28 dB */
+   end map_times_to_dB;
+
+   if (adconfig & "H8000") <> 0             /* If new SAFE (Analogic ADC board) installed */
+   then gain = 3 + map_times_to_dB (gain);  /* Convert lin to log scale; add 3 to send 0-31 to ADC */
+   else do;                                 /* Old SAFE; compute gain function for old SAFE */
+      if gain <  10 then gain =  10;        /* cannot have gains less than one */
+      if gain > 793 then gain = 793;        /* or greater than 79.3 */
+
+      mult = 1;
+      do while ((mult <= multiplier (0)) and (gain >= multiplier (mult))); /* find multiplier */
+         mult = mult + 1;
+      end;
+
+      mult = mult - 1; /* point to correct multiplier */
+      gain = mult_value (mult) + 16*gain/multiplier (mult) - 16; /* get A/D gain */
+   end;
+
+   write(psc) = channel; /* select A/D channel */
+   write(psf) = psadvol; /* set gain */
+   write(psd) = gain;
+end ps_gain;
+
+ps_envelope: proc(channel) returns (fixed) PUBLIC; /* poll A/D peak detector */
+   dcl channel fixed; /* poly channel to poll */
+
+   write(psc) = channel;
+   write(psf) = psadenv;
+
+   return (read(psd)); /* return most recent peak value */
+end ps_envelope;
+
+ps_sampcnt: proc returns (fixed) PUBLIC; /* get channel zero sample count */
+   write(psc) = 0;
+   write(psf) = psadsc0;
+
+   return (read(psd));
+end ps_sampcnt;
+
+ps_on: proc(channel, type) PUBLIC; /* turn poly channel on/off */
+   dcl channel fixed; /* channel to change */
+   dcl type fixed;    /* type of channel (0: off, 1: stop, 3: loop) */
+
+   write(psc) = channel; /* select poly channel */
+   write(psf) = pson; /* turn the channel on */
+   write(psd) = type;
+end ps_on;
+
+ps_ron: proc(channel) PUBLIC; /* read channel on status */
+   dcl channel fixed;/* channel to poll */
+
+   write(psc) = channel; /* select channel */
+   write(psf) = psron;
+
+   return (read(psd));
+end ps_ron;
+
+ps_wave: proc(channel, wavelen, waveaddr, waveword) PUBLIC; /* set up poly wave table */
+   dcl channel   fixed; /* channel to set up */
+   dcl wavelen   fixed; /* wave table length (sectors) */
+   dcl waveaddr  fixed; /* wave table address (sector) */
+   dcl waveword  fixed; /* wave table address (word  ) */
+
+   /* Routine is always called to play FORWARD (Never BACKWARD) */
+
+   write(psc) = channel; /* select channel */
+   write(psf) = pswl;    /* start with wave table length */
+
+   write(psd) = -wavelen; write(psd) = "177400"; /* wave table length */
+   write(psd) = waveaddr; write(psd) = waveword; /* base address      */
+   write(psd) = -wavelen; write(psd) = "177400"; /* loop length (entire wave table) */
+end ps_wave;
+
+ps_word_wave: proc(channel, wavemsb, wavelen, loopmsb, looplen, waveaddr) PUBLIC; /* set up poly wave table */
+   dcl channel   fixed; /* channel to set up           */
+   dcl wavemsb   fixed; /* wave table length  (msb   ) */
+   dcl wavelen   fixed; /* wave table length  (words ) */
+   dcl loopmsb   fixed; /* wave table loop    (msb   ) */
+   dcl looplen   fixed; /* wave table loop    (words ) */
+   dcl waveaddr  fixed; /* wave table address (sector) */
+   dcl lpage     fixed; /* wave table loop page bits   */
+
+   /* Routine can be called to play FORWARD or BACKWARD. */
+   /* If playing FORWARD, passed wave and loop lengths   */
+   /* will be positive.  To play BACKWARD, a negative    */
+   /* loop length is used.  You also need to set up a    */
+   /* negative phase increment value.                    */
+
+   /* EXAMPLE CALLS EXTRACTED FROM LOD-MAIN                                   */
+   /* FORWARD:  Ps_Word_Wave(32,0,shl(buf.len,8), 0, shl(buf.len,8),buf.base);*/
+   /* BACKWARD: Ps_Word_Wave(32,0,shl(buf.len,8),-1,-shl(buf.len,8),buf.base);*/
+
+   write(psc) = channel; /* select channel */
+   write(psf) = pswl;    /* start with wave table length */
+
+   if loopmsb >= 0        /* setting up to play forward        */
+   then lpage = "177400"; /* sign extend into page bits        */
+   else lpage = 0;        /* no sign extend, positive loop len */
+
+   if wavelen = 0 then do;
+      wavemsb = -wavemsb;
+   end;
+   else do;
+      wavemsb = not(wavemsb);
+      wavelen = -wavelen;
+   end;
+
+   if looplen = 0 then do;
+      loopmsb = -loopmsb;
+   end;
+   else do;
+      loopmsb = not(loopmsb);
+      looplen = -looplen;
+   end;
+
+   write(psd) = shl(wavemsb,8) \ shr(wavelen,8); 
+   write(psd) = (wavelen & 255)|"177400";  /* wave table length */
+   write(psd) = waveaddr; write(psd) = 0;  /* base address      */
+   write(psd) = shl(loopmsb,8) \ shr(looplen,8);
+   write(psd) = (looplen & 255)|lpage;     /* loop length       */
+end ps_word_wave;
+
+dcl ps_freq_inc fixed;
+dcl ps_freq_mod fixed;
+
+dcl ch32.pi     fixed;
+dcl ch32.inc    fixed;
+dcl ch32.mod    fixed;
+
+ps_freq: proc(channel, pi, inc, mod) PUBLIC; /* set poly channel frequency */
+   dcl channel fixed; /* channel to set up */
+   dcl pi      fixed; /* phase increment (LSB) */
+   dcl inc     fixed; /* increment */
+   dcl mod     fixed; /* modulus */
+
+   write(psc) = channel; /* select channel */
+
+   /* Eliminate jitter problem caused by slight phase shift */
+   /* when the same frequency is written out:               */
+
+   if channel = 32 then do;   /* if setting hz for chan     */
+      if  ( pi = ch32.pi )    /* 32, see if info is         */
+      and (inc = ch32.inc)    /* the same as last time.     */
+      and (mod = ch32.mod)    /* if so, skip rewriting      */
+      then return;            /* hz so we don't cause       */
+      ch32.pi  = pi;          /* a sligh phase shift        */
+      ch32.inc = inc;
+      ch32.mod = mod;
+   end;
+
+   write(psf) = pspi;    /* write phase increment first */
+
+   if inc = 0 then do;   /* increment of 0 comes up at very slow rates */
+      inc = 1;           /* achieve this by setting phase incre to 0   */
+      pi = 0;            /* since hardware can not do increment of 0   */
+   end;
+
+   if pi < 0 then do;
+      write(psd) = "177400" \ shr(pi,8);
+      write(psd) = (pi & 255) | "177400";
+   end;
+   else do;
+      write(psd) = shr(pi,8);
+      write(psd) = (pi & 255);      
+   end;
+
+   ps_freq_inc = inc - 1;
+   ps_freq_mod = 256 - mod;
+
+   write(psd) = ps_freq_inc; write(psd) = ps_freq_mod; /* increment of 1/modulus of MOD (if MOD = 2, 50 kHz) */
+end ps_freq;
+
+ps_master: proc(channel, on) PUBLIC; /* set an even stereo master */
+   dcl channel fixed; /* channel number of even stereo master */
+   dcl on      fixed; /* 1: on, 0: off */
+
+   write(psc) = channel; /* select channel */
+   write(psf) = psadevsm; /* set it up as an even stereo master */
+   write(psd) = on;
+end ps_master;
+
+ps_volume: proc(channel, on) PUBLIC; /* turn on volume for playback channel */
+   dcl channel fixed; /* channel to turn volume on */
+   dcl on      fixed; /* 1: on, 0: off */
+
+   if on then on = 4095; /* set volume to max */
+
+   write(psc) = channel; /* select channel */
+   write(psf) = pselim; /* set envelope */
+   write(psd) = on; write(psd) = on; /* limit and current value */
+   
+   if channel then do; /* odd channels to the right */
+      write(psf) = psrcvol; /* set volume */
+      write(psd) = on; write(psd) = 0; /* right and left current */
+      write(psd) = on; write(psd) = 0; /* right and left limit */
+   end;
+   else do; /* even channels to the left */
+      write(psf) = psrcvol; /* set volume */
+      write(psd) = 0; write(psd) = on; /* right and left current */
+      write(psd) = 0; write(psd) = on; /* right and left limit */
+   end;
+end ps_volume;
+
+/* $page - frequency table storage/lookup */
+
+/* a frequency table is constructed to set the frequency */
+/* of the poly synth.   it contains one entry for        */
+/* each .025 khz,  from 0.000 khz to 102.4 khz.          */
+/* the table contains in increment in the lower half     */
+/* and a divisor in the upper half                       */
+
+
+dcl fcont            fixed PUBLIC;   /* holds bits during loading */
+dcl ftabptr          fixed PUBLIC;   /* load pointer              */
+dcl ftable.loaded    fixed PUBLIC;   /* true when loaded          */
+
+dcl hzinc            fixed PUBLIC;   /* rate changes (to keep sync).  used  */
+dcl hzmod            fixed PUBLIC;   /* to print out new rate on toiminal   */
+
+set.lod.hz:proc(rate,pinc) PUBLIC;   /* pass rate, 0 = idling, 1 = playing */
+   dcl rate fixed;
+   dcl pinc fixed;
+   dcl inc  fixed;
+   dcl mod  fixed;
+
+   if Apply.Drop.Frame.Correction <> 0 then do; /* sync samples to 30 frames */
+      if Apply.Drop.Frame.Correction > 0 then do;
+         load rate;
+         mul  2997;
+         mwait;
+         div  3000;
+         rate = res;
+      end;
+      else do;
+         load rate;
+         mul  3000;
+         mwait;
+         div  2997;
+         rate = res;
+      end;
+   end;
+
+   write(mam) = ftab.xmsec# + shr(rate,8);
+   write(mal) = rate;
+   inc = read(md);
+   mod = shr(inc,8);
+   inc = inc & 255;
+
+   call ps_freq(32,pinc,inc,mod);
+
+   if  (hzdbug)
+   and (hzmod <> mod)
+   then do;
+      hzinc  = inc;
+      hzmod  = mod;
+   end;
+end set.lod.hz;
+
+
+/* $page - routine to preset chan 32 phase accum for point playback */
+
+/* when this routine is called,  chan 32 is in its idle state.      */
+/* this idle state is  -  chan 32 is on,  phase accum is 0,  rate   */
+/* is valid sampling rate, phase increment is 0,  total length and  */
+/* loop length are set up for the entire rotary buffer              */
+
+/* the following is a binary search kind of algorithm that quickly  */
+/* moves channel 32 out to the passed phase accumulator             */
+
+Preset.Chan.32.Phase.Accum:proc (Point) PUBLIC swapable;
+   dcl (point) fixed;
+   dcl (i,j  ) fixed;
+
+   /* set chan 32 to 100 khz for now so we know   */
+   /* phase increment gets changed in a 10 micsec */
+   /* period                                      */
+
+   call ps_freq(32,0,200,200);        /* pinc = 0, 101 khz                */
+
+   do i=1 to 10000/Current.Rate;      /* must wait 1 cycle at old hz      */
+   end;                               /* for new hz to become effective   */
+
+   point = point + 1;                 /* position pacu right at point.    */
+
+   i = shr(point,1);                  /* start with pinc of 1/2           */
+
+   /* set total length to desired point,  loop length to 1/2 */
+   /* that.  let that get digested so phase accum never gets */
+   /* out of bounds                                          */
+
+   call Ps_Word_Wave(32,0,point,0,i,buf.base);
+   do j=0 to 20; end;
+
+   do while i <> 0;                   /* increment by powers of 2         */
+
+      /* set total wave length to desired point so that */
+      /* phase accumulator stops there.  phase inc      */
+      /* must always by <= loop length                  */
+
+      call ps_freq(32,i,200,200);     /* set phase incr to i first  */
+      do j=0 to 20; end;              /* wait for it  to happend    */
+
+      call Ps_Word_Wave(32,0,point,0,i,buf.base);  /* now set loop len  */
+      do j=0 to 60; end;              /* might take several times  */
+
+      i = shr(i,1);
+   end;
+
+   /* now set phase incr back to 0, let it get digested */
+
+   call ps_freq(32,0,200,200);     /* pinc = 0, 101 khz          */
+   do j=0 to 20; end;              /* wait for it  to happend    */
+
+   /* now restore normal buffer limits so we can go forward/backwards */
+   /* in it at our leisure                                            */
+
+   call Ps_Word_Wave(32,0,shl(buf.len,8),0,shl(buf.len,8),buf.base);
+   do j=0 to 20; end;              /* wait for it  to happen  */
+
+   /* when we leave,  phase increment is at 0, chan 32 is on, */
+   /* phase accum is at (almost) desired point.               */
+   /* the total length/loop length have been set up to        */
+   /* allow us to roam around in the buffer                   */
+
+   call set.lod.hz(Current.Rate*4-2,0); /* begin under rate in case DDSAD being used */
+   do j=0 to 40; end;               /* wait for it  to happen */
+end Preset.Chan.32.Phase.Accum;
+
+/* $page - routine to zero out chan 32 phase accume           */
+
+/* This routine zeroes out the channel 32 phase accumulator   */
+/* without turning channel 32 off.  This tries to preserve    */
+/* long term phase accuracy                                   */
+
+Zero.Chan.32.Phase.Accum:proc swapable;
+   dcl (i,j) fixed static;
+   dcl temp(6) fixed;
+
+   /* First - set pinc to zero to provide for possible direction change  */
+   /* at end of scrubbing:                                               */
+
+   call set.lod.hz(current.rate*4,0);    /* normal hz, pinc = 0          */
+
+   do i=1 to 2000;                       /* wait for current.rate to get */
+   end;                                  /* set in case prior rate = 0   */
+
+   call ps_wave(32,buf.len,buf.base,0);  /* normal buffers               */
+
+   call ps_on(32,3);                     /* turn on first time through   */
+   do i=1 to 10000/Current.Rate;         /* wait for first chan 32       */
+   end;                                  /* sample # to be latched       */
+
+   /* Basic algorithm: read the current phase inc.  Set up tlen/loop     */
+   /* len that will cause it to wrap:                                    */
+
+   write(psc)=32;                        /* chan 32                      */
+   write(psf)=psadsc32;                  /* chan 32 lsb address          */
+   i = read(psd);                        /* read pacu + shl(buf.base,8)  */
+
+   if i<>shl(buf.base,8) then do;        /* reset if nonzero             */
+      call Ps_Word_Wave(32 , 0, i-shl(buf.base,8)+4,
+                             0, i-shl(buf.base,8)+4,
+                             buf.base);
+
+      temp(0) = i    ;                   /* compute data we should       */
+      temp(1) = i + 1;                   /* see for fast compare         */
+      temp(2) = i + 2;
+      temp(3) = i + 3;
+
+      write("313") = addr(temp(0));      /* set up pointer for speed     */
+
+      disable;                           /* set pinc to 1 for a moment   */
+      write(psc) = 32;                   /* until chan 32 wraps          */
+      write(psf) = pspi;                 /* to zero                      */
+      write(psd) = 0;
+      write(psd) = 1;                     /* change pinc to 1            */
+      write(psd) = ps_freq_inc;
+      write(psd) = ps_freq_mod;           /* writing mod latches pi      */
+      write(psf) = psadsc32;              /* chan 32 lsb address         */
+      do while read(psd) = read("353"); end; /* look for i               */
+      write("324")       = read("333");   /* write(r13i) to atnv         */
+      do while read(psd) = read("353"); end; /* look for i + 1           */
+      write("324")       = read("333");   /* write(r13i) to atnv         */
+      do while read(psd) = read("353"); end; /* look for i + 2           */
+      write(psf) = pspi;
+      write(psd) = 0;                     /* go back to pinc of 0        */
+      write(psd) = 0;
+      write(psd) = ps_freq_inc;
+      write(psd) = ps_freq_mod;
+      enable;
+
+      do j=1 to 10000/Current.Rate; end;
+
+   end;
+
+   call ps_wave(32,buf.len,buf.base,0);  /* normal buffers               */
+end Zero.Chan.32.Phase.Accum;
+
+/* $page - routine to initialize channel 32 */
+
+Initialize.Channel.32.For.LOD.Playback: proc PUBLIC swapable;
+   dcl i fixed;
+
+   call Zero.Chan.32.Phase.Accum;             /* set PA to zero       */
+   call set_ddsad_controls(current.rate*4,0); /* activate DDSAD if needed         */
+end Initialize.Channel.32.For.LOD.Playback;
+
+/* $page - routine to start audition audio */
+
+Initialize.Channel.32.For.Audition: proc (Audit.Voice#, srate, stereo, base, length) PUBLIC swapable;
+   dcl Audit.Voice#  fixed;     /* voice # (left) for audition    */
+   dcl srate         fixed;     /* sample rate * 10,  in khz      */
+   dcl stereo        fixed;     /* true if stereo                 */
+   dcl base          fixed;     /* sector number of start of data */
+   dcl length        fixed;     /* length of data,  in sectors    */
+   dcl inc           fixed;
+   dcl mod           fixed;
+   dcl i             fixed;
+
+   /* look up volume for this output from track directory */
+
+   set.vol.from.track.directory: proc(voice#, entry#);
+      dcl voice#        fixed;   /* pass synth voice # to set info for */
+      dcl entry#        fixed;   /* pass track dir entry # to use      */
+      dcl vol           fixed;
+      dcl pan           fixed;
+      dcl j             fixed;
+
+      write(psc) = voice#;
+      write(psf) = pselim;
+      write(psd) = 4095;          /* pselim    */
+      write(psd) = 4095;          /* pseval    */
+
+      write(mam) = venv.xmsec#;
+      write(mal) = (entry#*venv.stride) + venv.tdrvol;
+      write(psf) = psrdvol;     /* set volume                */
+      write(psd) = read(md );   /* venv.tdrvol               */
+      write(psf) = psrcvol;     /* set volume                */
+      write(psd) = read(mdi);   /* venv.tdrvol               */
+      write("324")= read(mdi);  /* skip venv.rvol            */
+   
+      write(psf) = psldvol;     /* set volume                */
+      write(psd) = read(md );   /* venv.tdlvol               */
+      write(psf) = pslcvol;     /* set volume                */
+      write(psd) = read(mdi);   /* venv.tdlvol               */
+   end set.vol.from.track.directory;
+
+   call ps_maxchan(0,0);              /* clear LOD bit for audition       */
+   do i=0 to 50;end;
+
+   /* Note: at this point we count on the fact that ALL channels are off  */
+
+   currently.auditioning = 1;
+
+   if stereo then do;                 /* set up slave channel if stereo   */
+
+      call set.vol.from.track.directory(Audit.Voice# + 1, 1);
+
+      write(psc) = Audit.Voice# + 1;  /* select right voice (is off now)  */
+      write(psf) = pswl;                /* WAVE TABLE LENGTH ENTRY */
+      write(psd) = 0;   write(psd) = 0; /* WAVE TABLE LENGTH       */
+      write(psd) = 0;   write(psd) = 0; /* BASE ADDRESS            */
+      write(psd) = 0;   write(psd) = 0; /* LOOP LENGTH             */
+      write(psd) = 0;   write(psd) = 0; /* PHASE INC               */
+      write(psd) = 255; write(psd) = 0; /* INCREMENT, MODULU       */
+
+   end;
+
+   /* now set up left voice */
+
+   call set.vol.from.track.directory(Audit.Voice#, 0);
+
+   call ps_wave(Audit.Voice#, length, base, 0);
+
+   /* now set hertz for master channel */
+
+   write(mam) = ftab.xmsec# + shr(srate*4,8);
+   write(mal) = srate*4;
+   inc = read(md);
+   mod = shr(inc,8);
+   inc = inc & 255;
+
+   call ps_freq(Audit.Voice#, 1 + stereo, inc, mod);
+
+   if stereo then do;                   /* if stereo ... */
+      call ps_master(Audit.Voice#, 1);  /* set master    */
+      call ps_on(Audit.Voice#+1, 1);    /* turn on slave */
+   end;
+
+   call ps_on(Audit.Voice#, 1);         /* turn on with no loop for now */
+
+end Initialize.Channel.32.For.Audition;
+
+/* and a routine to update the pointers once more data has been read in   */
+
+Update.Audition.Pointers: proc (Audit.Voice#, srate, stereo, base, length) PUBLIC swapable;
+   dcl Audit.Voice# fixed;     /* voice #'s in use               */
+   dcl srate        fixed;     /* sample rate * 10,  in khz      */
+   dcl stereo       fixed;     /* true if stereo                 */
+   dcl base         fixed;     /* sector number of start of data */
+   dcl length       fixed;     /* length of data,  in sectors    */
+
+   /* if the audition voice is still playing,  then update  */
+   /* the table length.   otherwise,  start over again      */
+
+   if ps_ron(Audit.Voice#) = 0            /* if had stopped, start over   */
+   then call Initialize.Channel.32.For.Audition(Audit.Voice#, srate, stereo, base, length);
+   else call ps_wave(Audit.Voice#, length, base, 0);   /* else set up new length       */
+
+end Update.Audition.Pointers;
+
+See.If.Audition.Is.Finished: proc(Audit.Voice#) PUBLIC swapable;
+   dcl Audit.Voice# fixed;
+
+   return (ps_ron(Audit.Voice#) = 0); /* return true if audition is finished */
+end See.If.Audition.Is.Finished;
+
+Terminate.Audition: proc(Audit.Voice#, stereo)  PUBLIC swapable;
+   dcl Audit.Voice#  fixed;
+   dcl stereo        fixed;
+   dcl i             fixed;
+
+   write(psc) = Audit.Voice#;
+   
+   write(psf) = psedel;     /* provide a 2.5 msec final decay in case */
+   write(psd) = 64;         /* aborting the audition in the middle    */
+
+   write(psf) = pselim;     /* set envelope limit to zero             */
+   write(psd) = 0;
+
+   write(psf) = pseval;     /* wait for it to get there               */
+   do while read(psd) <> 0; end;
+
+   write(psf) = pselim;      
+   write(psd) = 0; write(psd)=0;
+   
+   write(psf) = psrdvol;            /* set volume                */
+   write(psd) = 0;
+   write(psd) = 0;
+
+   write(psf) = psrcvol;            /* set volume                */
+   write(psd) = 0;
+   write(psd) = 0;
+
+   call ps_on  (Audit.Voice#, 0);
+
+   /* make sure channel 1 is off as well */
+
+   if stereo then do;
+      write(psc) = Audit.Voice# + 1;
+   
+      write(psf) = psedel;     /* provide a 2.5 msec final decay in case */
+      write(psd) = 64;         /* aborting the audition in the middle    */
+
+      write(psf) = pselim;     /* set envelope limit to zero             */
+      write(psd) = 0;
+
+      write(psf) = pseval;     /* wait for it to get there               */
+      do while read(psd) <> 0; end;
+
+      write(psf) = pselim;      
+      write(psd) = 0; write(psd)=0;
+   
+      write(psf) = psrdvol;            /* set volume                */
+      write(psd) = 0;
+      write(psd) = 0;
+
+      write(psf) = psrcvol;            /* set volume                */
+      write(psd) = 0;
+      write(psd) = 0;
+
+      call ps_on  (Audit.Voice# + 1, 0);
+   end;
+
+   call ps_master(Audit.Voice#, 0);
+
+   do i=0 to 50;end;
+   call ps_maxchan(0,1);              /* now restore LOD bit for ADC      */
+   do i=0 to 50;end;
+
+   currently.auditioning = 0;
+
+   call Initialize.Channel.32.For.LOD.Playback; /* reset up for normal playback */
+
+end Terminate.Audition;
+
+end polymod;

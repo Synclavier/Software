@@ -1,0 +1,2613 @@
+/*	:SYNSOU:EDITMOD:DIALOGS  $TITLE  Routines to define and handle various dialog boxes	*/
+
+/*
+Modified:
+2002/08/06 - TY  - MIDI Mapping dialog will now accept "0" in lieu of "Off", and any string starting with "k" or "K"
+						 in lieu of "Kbd".
+2002/08/04 - TY  - Added checks to GET.FILTER.DIALOG.EVENT() to prevent the range limits from crossing each other.
+1998/06/29 - TY  - Fixed bug in GET.FIT.TIME.DIALOG.EVENT that caused incorrect display and entry
+						 of the fit length when using a click track or certain meter maps.
+						 (The end-time was passed to DEPOSIT.32BIT.MSEC rather than the start-time.)
+					  - Deleted unused variables i & j from GET.FIT.TIME.DIALOG.EVENT, and j from
+						 GET.MIDI.DIALOG.EVENT.
+1998/05/16 - TY  - Substituted calls to SCALE.RTE.VAL passing 1, to calls to SCALE.PERCENT.TO.RTE.
+1998/05/10 - TY  - Changed the pitchwheel block of HANDLE.RTE.MIN.MAX.DEPOSIT to allow the
+						 user unfettered entry of the min/max values.  A detailed explanation
+						 appears in the procedure.
+					  - Modified the part of HANDLE.RTE.MIN.MAX.DEPOSIT that prevents a min > max
+						 condition, to work for pitch bend ranges exceeding -16384 to 16383.
+1998/05/09 - TY  - Replaced 8 occurrences of identical strings with string constant identifiers.
+					  - The following was done to allow users to enter negative scaling factors for
+						 inverting RTEs and velocities.  In GET.CHANGE.VEL.DIALOG.EVENT, changed the
+						 limits applied to vel.param1 when scaling, from 0,10000 to -10000,10000.
+						 In HANDLE.RTE.PARAM.DEPOSIT, changed the limits applied to rte.param1 when
+						 scaling, from 0,30000 to -30000,30000.
+1998/04/21 - TY  - Rewrote CHECK.LIMITS because the original procedure failed when
+						 "pitch.bend.range" was outside the range of -16384 to 16383.
+1990/08/27 - PF  - Support all MIDI controllers
+1990/01/10 - MWH - Allow MIDI mapping switch to be changed with MIDInet ON
+1989/08/24 - PF  - Disallow changes to MIDI input routing when MIDInet is there
+1989/07/24 - cj  - moved save.undoseq to operating system
+1989/05/12 - eeg - fix so cut paste dialog is ok after ilp warning
+1989/05/02 - eeg - added code to save "paste at" time for cut paste dialog
+1989/03/22 - eeg - add save.undoseq
+1989/03/19 -TS,PF- MORE NEW SEQ INFO AFTER MIDI MAPPING CHANGE
+1989/01/13 - PF  - used NEW SEQ INFO for MIDI mapping change
+1988/10/03 - CJ  - DEFINED TIMES TO WORK WITH LIVE CLICK TRACK
+*/
+
+#if (false)
+	dcl $limit.min	data ('Limit to Minimum of: ');
+	dcl $limit.max	data ('Limit to Maximum of: ');
+	dcl $from		data ('               From: ');
+	dcl $to			data ('                 To: ');
+#else
+	dcl $limit.min	lit '''Limit to Minimum of: ''';
+	dcl $limit.max	lit '''Limit to Maximum of: ''';
+	dcl $from		lit '''               From: ''';
+	dcl $to			lit '''                 To: ''';
+#endif
+
+WORK.MSG: proc (on) swapable;
+	dcl on boolean;
+	dcl id fixed;
+
+	id	= gid(working.msg);
+
+	if (on != false)
+	{	//	put up "working..." message
+		Enable.Object(id);
+			//	Update.Object(id);	//	check this flag:	O#ACT.Update.On.Dep
+	}
+	else
+	{	//	remove message
+		Erase.Object(id);	Disable.Object(id);
+	}
+end WORK.MSG;
+
+DRAW.EDIT.MESSAGE: proc (str) swapable;
+	dcl str	array;
+
+	//	Note:	This procedure doesn't explicitly set any transparent mode attributes.
+	//			Consequently the messages inherit the attributes of the last transparent mode string plotted.
+
+	call PUSH.GRAPHICS.ATTRIBUTES;
+	transparent_mode;
+	call cpos(0, 0);					/*	back to beginning of line	*/
+	call erase.to.end.of.line;
+	call ps(str);						/*	print the message	*/
+	call POP.GRAPHICS.ATTRIBUTES;
+
+end DRAW.EDIT.MESSAGE;
+
+ERASE.EDIT.MESSAGE: proc swapable;
+
+	call PUSH.GRAPHICS.ATTRIBUTES;
+	call cpos(0, 0);					/*	back to beginning of line	*/
+	call erase.to.end.of.line;
+	call POP.GRAPHICS.ATTRIBUTES;
+
+end ERASE.EDIT.MESSAGE;
+
+CHECK.LIMITS: proc(lo, hi) public swapable;
+	dcl (lo,	hi)	fixed;
+	dcl (i,	j)		fixed;
+
+	//	THE FOLLOWING ALGORITHM LIMITS "i" TO A VALUE BETWEEN "lo" and "hi".  THE ORIGINAL ALGORITHM USED
+	//	THE OPERATORS < AND > WHICH ONLY WORK RELIABLY FOR VALUES IN THE RANGE OF -16384 TO 16383, BUT
+	//	"pitch.bend.range" CAN HAVE ANY VALUE FROM -24000 TO 24000.  THE REWRITTEN ALGORITHM HANDLES VALUES
+	//	FROM -32768 TO 32767.
+
+	i	= Fetch.Fixed.Point(Screen.Event.Id)+Bit15;
+	j	= i;
+	lo	= lo + Bit15;
+	hi	= hi + Bit15;
+
+	if			(i igt hi)	j	= hi;
+	else if	(i ilt lo)	j	= lo;
+
+	if (i != j)	/*	only update if things have changed	*/
+	{
+		dcl sav.disable.deposits	fixed;
+
+		sav.disable.deposits	= disable.deposits;
+		disable.deposits	= true;
+		Deposit.Fixed.Point(Screen.Event.Id, j-Bit15);
+		//	Update.Object(Screen.Event.Id);	//	check this flag:	O#ACT.Update.On.Dep
+		disable.deposits	= sav.disable.deposits;
+	}
+
+end CHECK.LIMITS;
+
+/*	routine to clean up dialog area & objects	*/
+CLOSE.DIALOG: proc public swapable;
+	dcl i	                fixed;
+   dcl saved.cursor.type fixed;
+
+	if (current.dialog == -1)
+	or (current.dialog.grp == -1)
+	then return;									/*	no dialog there	*/
+
+	/*	this is here to avoid possible infinite loops caused by selecting undefined objects	*/
+	call Select.New.Cur.Obj(gid(cur.play.time), 0, 0);
+
+	do case (current.dialog);
+		;	/*	none at 0	*/
+		call Close.Bounce.Dialog;
+		call Close.Change.Dur.Dialog;
+		call Close.Change.Pitch.Dialog;
+		call Close.Change.RTE.Dialog;
+		call Close.Change.Vel.Dialog;
+		call Close.Cut.Paste.Dialog;
+		;	/*	call Close.Filter.Dialog;	*/
+		call Close.Fit.Time.Dialog;
+		call Close.Justify.Dialog;
+		call Close.Midi.Dialog;
+		;	/*	call Close.Setup.Dialog;	*/
+		call Close.Seq.Storage.Dialog;
+		call Close.SMT.SKT.Dialog;
+		call Close.Trk.Solos.Dialog;
+		call Close.Trk.Vol.Dialog;
+		call Close.UnWrap.Dialog;
+		;	/*	close ilp warning dialog	*/
+	end;
+
+	call Erase.Group.Objects(current.dialog.grp);
+	call Undefine.Group.Objects(current.dialog.grp);
+	call Ungroup.Objects(current.dialog.grp);
+
+	current.dialog.grp	= -1;
+	current.dialog			= -1;
+
+	if (Screen.Event.Id == gid(cancel.button))	/*	dialog closed by user	*/
+	then call pid(sav.cur.dialog, 0);
+
+	call pid(ok.button, 0);			/*	want to clear these out in case new dialog	*/
+	call pid(cancel.button, 0);	/*	doesn't have ok & cancel buttons					*/
+
+	do i = dialog.start to dialog.end;
+		call pid(i, 0);				/*	want to clear out PID/GID area to avoid		*/
+	end;									/*	thinking that undefined fields exist			*/
+
+   // Provide clean erasure of alias ghosting
+   saved.cursor.type = mouse.cursor.type;
+   call mouse.switch(0);
+
+   call Push.Graphics.Attributes;
+   vector_mode;
+   call data_level(1);
+   call Blockmode_On;
+   call connect(gpos.x(-90),
+                gpos.y(110),
+                gpos.x(6440),
+                gpos.y(680));
+   call Blockmode_Off;
+   call data_level(0);
+   transparent_mode;
+   call Pop.Graphics.Attributes;
+
+   call mouse.switch(saved.cursor.type);
+end CLOSE.DIALOG;
+
+
+/////////////////////////////	procedures for BOUNCE dialog
+/////////////////////////////	status:	COMPLETED
+
+GET.BOUNCE.DIALOG.EVENT: proc (event) returns (fixed) swapable;
+	dcl event	fixed;
+
+	while (true)
+	{
+		if (event != Get.Null.Event)
+		{
+			if (Screen.Event.Group != current.dialog.grp)	return event;
+
+			if (Screen.Event.Info == S#Deposit)
+			{
+				call remove.err;	//	clear any previous error message
+
+				if (Screen.Event.Id == gid(bounce.source)) then do;
+					check.limits(1, 200);
+					Select.New.Cur.Obj(gid(bounce.dest), 0, 0);
+				end;
+				else if (Screen.Event.Id == gid(bounce.dest)) then do;
+					check.limits(1, 200);
+					Select.New.Cur.Obj(gid(bounce.source), 0, 0);
+				end;
+			}	//	end of if (Screen.Event.Info == S#Deposit)
+
+			else if	(Screen.Event.Info == S#MouseSelect)
+			{
+				if (Screen.Event.Id == gid(ok.button))	/*	want to do the operation	*/
+				{
+					work.msg(1);
+
+					if (undo.enabled != false) save.undoseq();
+
+					Edit.Error	= 0;
+
+					Bounce.Down
+					(	Fetch.Fixed.Point(gid(bounce.source)) + num.kbd.tracks - 1,
+						Fetch.Fixed.Point(gid(bounce.dest  )) + num.kbd.tracks - 1,
+						0,
+						Fetch.Switch(gid(bounce.switch))
+					);
+
+					if (Edit.Error<>0) then do;
+						if		  (Edit.Error == E#NoRoom)			call no.room.error;
+						else if (Edit.Error == E#TimbNoMatch)	call timb.no.match.error;
+					end;
+
+					work.msg(0);
+				}	//	end of user clicked the Okay button
+				else if (Screen.Event.Id == gid(cancel.button))	close.dialog();
+			}	//	end of if (Screen.Event.Info == S#MouseSelect)
+		}	//	end of if (event != Get.Null.Event)
+
+		event	= Get.Next.Edit.Screen.Event;
+	}	//	end of infinite loop
+end GET.BOUNCE.DIALOG.EVENT;
+
+
+/////////////////////////////	procedures for CHANGE DURATION dialog
+/////////////////////////////	status:	COMPLETED
+
+CHECK.DUR.LIMITS: proc public swapable;
+	dcl dur32(1)	fixed;
+	dcl negative	boolean;
+
+	Fetch.32Bit.Msec(Screen.Event.Id, dur32);	//	get the deposited value we wish to check
+
+	if (dur32(0) < 0)
+	{	negative	= true;
+		neg32(dur32);
+	}
+	else
+	{	negative	= false;
+	}
+
+	//	make sure entry is within range of legal durations (plus or minus)
+	if (com32(dur32, max.duration) == lw#igt)
+	{	//	only update if things have changed
+		copy32(max.duration, dur32);
+		if (negative != false)	neg32(dur32);
+		disable.deposits	= true;
+		Deposit.32bit.Msec(Screen.Event.Id, zero.zero, dur32);		//	<<<<<<<<<<<<	???
+		disable.deposits	= false;
+			//	Update.Object(Screen.Event.Id);	//	check this flag:	O#ACT.Update.On.Dep
+	}
+end CHECK.DUR.LIMITS;
+
+HANDLE.DUR.MIN.MAX.DEPOSIT: proc swapable;
+
+	CHECK.DUR.LIMITS();
+
+	//	prevent max from being less than the newly deposited min, or min from being greater than the newly deposited max
+	//	we need not worry about negative values here
+	if (Fetch.Switch(gid(dur.switch)) != 3)	//	not doing slope
+	{
+		dcl id_min		fixed;
+		dcl id_max		fixed;
+		dcl min32(1)	fixed;
+		dcl max32(1)	fixed;
+
+		id_min	= gid(dur.min);
+		id_max	= gid(dur.max);
+		Fetch.32Bit.Msec(id_min, min32);			//	get the deposited min value
+		Fetch.32Bit.Msec(id_max, max32);			//	get the deposited max value
+
+		if (com32(min32, max32) == lw#igt)
+		{
+			disable.deposits	= true;
+			if (Screen.Event.Id == id_min)
+			{	//	a new min was deposited which is greater than the current max, so we should reset the max to its upper limit
+				Deposit.32bit.Msec(id_max, zero.zero, max.duration);	//	<<<<<<<<<<<<	???
+					//	Update.Object(id_max);	//	check this flag:	O#ACT.Update.On.Dep
+			}
+			else
+			{	//	a new max was deposited which is less than the current min, so we should reset the min to its lower limit
+				Deposit.32bit.Msec(id_min, zero.zero, zero.zero);		//	<<<<<<<<<<<<	???
+					//	Update.Object(id_min);	//	check this flag:	O#ACT.Update.On.Dep
+			}
+			disable.deposits	= false;
+		}
+	}
+end HANDLE.DUR.MIN.MAX.DEPOSIT;
+
+GET.CHANGE.DUR.DIALOG.EVENT: proc (event) returns (fixed) swapable;
+	dcl event		fixed;
+	dcl mode			fixed;	//	how to use the value: 0 = set, 1 = scale, 2 = add, 3 = slope
+	dcl id_obj		fixed;
+	dcl id_min		fixed;
+	dcl id_max		fixed;
+	dcl val32(1)	fixed;	/*	holds a 32-bit value	*/
+	dcl min32(1)	fixed;
+	dcl max32(1)	fixed;
+
+	while (true)
+	{
+		if (event != Get.Null.Event)
+		{
+			if (Screen.Event.Group != current.dialog.grp)	return event;
+
+			if (Screen.Event.Info == S#Deposit)
+			{
+				call remove.err;	//	clear any previous error message
+
+				mode	= Fetch.Switch(gid(dur.switch));
+
+				if
+				(	(Screen.Event.Id ige gid(dur.percent))
+				&&	(Screen.Event.Id ile gid(dur.add))
+				)
+				do case (mode);
+					CHECK.DUR.LIMITS();		//	set
+					check.limits(0, 10000);	//	scale
+					CHECK.DUR.LIMITS();		//	add, subtract
+				end;
+
+				else if
+				(	(Screen.Event.Id == gid(dur.min))
+				||	(	(Screen.Event.Id ige gid(dur.max))
+					&&	(Screen.Event.Id ile gid(dur.to))
+					)
+				)
+				Handle.Dur.Min.Max.Deposit();
+
+				else if (Screen.Event.Id == gid(dur.switch))
+				{
+					disable.deposits	= true;
+
+					Deposit.Switch((Screen.Event.Id+1), mode);	//	yoke dur.switch's dependent switch
+
+					do case mode;
+						//	case 0: set
+						{	//	SET DURATIONS dialog state
+							//		fields:	dur.set
+
+							//	remove possible previous fields
+							id_obj	= gid(dur.percent);	Erase.Object(id_obj);	Disable.Object(id_obj);
+							id_obj	= gid(dur.add);		Erase.Object(id_obj);	Disable.Object(id_obj);
+							id_min	= gid(dur.min);		Erase.Object(id_min);	Disable.Object(id_min);
+							id_max	= gid(dur.max);		Erase.Object(id_max);	Disable.Object(id_max);
+							id_obj	= id_min-1;				Erase.Object(id_obj);	Disable.Object(id_obj);		//	this is the label corresponding to dur.min
+							id_obj	= id_max-1;				Erase.Object(id_obj);	Disable.Object(id_obj);		//	this is the label corresponding to dur.max
+							id_min	= gid(dur.from);		Erase.Object(id_min);	Disable.Object(id_min);
+							id_max	= gid(dur.to);			Erase.Object(id_max);	Disable.Object(id_max);
+
+							//	enable new fields and reset arrow links for this dialog state
+							id_obj	= gid(dur.set);		Enable.Object(id_obj);										//	the object to be selected when we're done
+							Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+						}
+						//	case 1: scale
+						{	//	SCALE DURATIONS dialog state
+							//		fields:	dur.percent
+							//					dur.min
+							//					dur.max
+
+							//	remove possible previous fields
+							id_obj	= gid(dur.add);		Erase.Object(id_obj);	Disable.Object(id_obj);
+							id_obj	= gid(dur.set);		Erase.Object(id_obj);	Disable.Object(id_obj);
+							id_min	= gid(dur.from);		Erase.Object(id_min);	Disable.Object(id_min);
+							id_max	= gid(dur.to);			Erase.Object(id_max);	Disable.Object(id_max);
+
+							//	enable new fields and reset arrow links for this dialog state
+							id_min	= gid(dur.min);		Enable.Object(id_min);
+							id_max	= gid(dur.max);		Enable.Object(id_max);
+							id_obj	= id_min-1;	Deposit.Label(id_obj, $limit.min);	Enable.Object(id_obj);	//	this is the label corresponding to dur.min
+							id_obj	= id_max-1;	Deposit.Label(id_obj, $limit.max);	Enable.Object(id_obj);	//	this is the label corresponding to dur.max
+							id_obj	= gid(dur.percent);	Enable.Object(id_obj);										//	the object to be selected when we're done
+							Set.Object.Arrow.Links(id_obj, ARR#Auto, id_min, ARR#Auto, ARR#Auto);
+							Set.Object.Arrow.Links(id_min, id_obj, id_max, ARR#Auto, ARR#Auto);
+							Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+						}
+						//	case 2: add
+						{	//	ADD DURATIONS dialog state
+							//		fields:	dur.add
+							//					dur.min
+							//					dur.max
+
+							//	remove possible previous fields
+							id_obj	= gid(dur.percent);	Erase.Object(id_obj);	Disable.Object(id_obj);
+							id_obj	= gid(dur.set);		Erase.Object(id_obj);	Disable.Object(id_obj);
+							id_min	= gid(dur.from);		Erase.Object(id_min);	Disable.Object(id_min);
+							id_max	= gid(dur.to);			Erase.Object(id_max);	Disable.Object(id_max);
+
+							//	enable new fields and reset arrow links for this dialog state
+							id_min	= gid(dur.min);		Enable.Object(id_min);
+							id_max	= gid(dur.max);		Enable.Object(id_max);
+							id_obj	= id_min-1;	Deposit.Label(id_obj, $limit.min);	Enable.Object(id_obj);	//	this is the label corresponding to dur.min
+							id_obj	= id_max-1;	Deposit.Label(id_obj, $limit.max);	Enable.Object(id_obj);	//	this is the label corresponding to dur.max
+							id_obj	= gid(dur.add);		Enable.Object(id_obj);										//	the object to be selected when we're done
+							Set.Object.Arrow.Links(id_obj, ARR#Auto, id_min, ARR#Auto, ARR#Auto);
+							Set.Object.Arrow.Links(id_min, id_obj, id_max, ARR#Auto, ARR#Auto);
+							Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+						}
+						//	case 3: slope
+						{	//	SLOPE DURATIONS dialog state
+							//		fields:	dur.from
+							//					dur.to
+
+							//	remove possible previous fields
+							id_obj	= gid(dur.percent);	Erase.Object(id_obj);	Disable.Object(id_obj);
+							id_obj	= gid(dur.add);		Erase.Object(id_obj);	Disable.Object(id_obj);
+							id_obj	= gid(dur.set);		Erase.Object(id_obj);	Disable.Object(id_obj);
+							id_min	= gid(dur.min);		Erase.Object(id_min);	Disable.Object(id_min);
+							id_max	= gid(dur.max);		Erase.Object(id_max);	Disable.Object(id_max);
+
+							//	enable new fields and reset arrow links for this dialog state
+							id_obj	= id_min-1;	Deposit.Label(id_obj, $from);	Enable.Object(id_obj);			//	this is the label corresponding to dur.from
+							id_obj	= id_max-1;	Deposit.Label(id_obj, $to);	Enable.Object(id_obj);			//	this is the label corresponding to dur.to
+							id_min	= gid(dur.from);		Enable.Object(id_min);
+							id_max	= gid(dur.to);			Enable.Object(id_max);
+							id_obj	= id_min;																					//	the object to be selected when we're done
+							Set.Object.Arrow.Links(id_min, ARR#Auto, id_max, ARR#Auto, ARR#Auto);
+							Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+						}
+					end;	//	end of do case
+
+					Select.New.Cur.Obj(id_obj, 0, 0);
+
+					disable.deposits	= false;
+				}	//	end of Screen.Event.Id == gid(dur.switch)
+
+				else if (Screen.Event.Id == gid(filter.sw))	apply.filter	= Fetch.Switch(Screen.Event.Id);
+			}	//	end of if (Screen.Event.Info == S#Deposit)
+
+			else if	(Screen.Event.Info == S#MouseSelect)
+			{
+				if (Screen.Event.Id == gid(ok.button))			/*	want to do the operation	*/
+				{
+					work.msg(1);
+
+					if (undo.enabled != false) save.undoseq();
+
+					mode	= Fetch.Switch(gid(dur.switch));
+
+					if (mode == 3)
+					{	//	case 3: SLOPE
+						//	val32 is irrelevant
+						Fetch.32Bit.Msec(gid(dur.from), min32);
+						Fetch.32Bit.Msec(gid(dur.to), max32);
+					}
+					else
+					{
+						do case mode;
+							//	case 0: SET
+							Fetch.32Bit.Msec(gid(dur.set), val32);
+							//	case 1: SCALE
+							{	val32(0)	= Fetch.Fixed.Point(gid(dur.percent));
+								val32(1)	= 0;
+							}
+							//	case 2: ADD
+							Fetch.32Bit.Msec(gid(dur.add), val32);
+						end;
+						Fetch.32Bit.Msec(gid(dur.min), min32);
+						Fetch.32Bit.Msec(gid(dur.max), max32);
+					}
+
+					//	do the operation!
+					Scale.Duration(val32, mode, min32, max32);
+
+					work.msg(0);
+				}	//	end of user clicked the Okay button
+				else if (Screen.Event.Id == gid(cancel.button))	close.dialog();
+			}	//	end of if (Screen.Event.Info == S#MouseSelect)
+		}	//	end of if (event != Get.Null.Event)
+
+		event	= Get.Next.Edit.Screen.Event;
+	}	//	end of infinite loop
+end GET.CHANGE.DUR.DIALOG.EVENT;
+
+
+/////////////////////////////	procedures for CHANGE RTE dialog
+/////////////////////////////	status:	COMPLETED
+
+HANDLE.RTE.TYPE.SWITCH: proc swapable;
+	dcl rte.type						fixed;	//	0 = Ped1, 1 = Ped2, 2 = ModW, 3 = Breath, 4 = Pitch, 5 = Ribbon, 6 = Pressure, 7 = MIDI
+	dcl mode								fixed;	//	how to use the value: 0 = set, 1 = scale, 2 = add, 3 = slope
+	dcl (id_obj, id_min, id_max)	fixed;
+
+	rte.type	= Fetch.Switch(Screen.Event.Id);
+	mode		= Fetch.Switch(gid(rte.mode.switch));
+
+	/////////////////	Handle RTE type switch to Pitch Wheel
+	if (rte.type == 4)
+	{
+		//	regardless of mode, remove possible previous rte.midi.cntrl object
+		id_obj	= gid(rte.midi.cntrl);	Erase.Object(id_obj);	Disable.Object(id_obj);
+
+		do case mode;
+			//	case 0: set
+			{	//	SET PITCH WHEEL VALUES dialog state
+				//		fields:	rte.ptchw.set
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.monopolar.set);	Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_obj	= gid(rte.ribbon.set);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_obj	= gid(rte.midi.set);			Erase.Object(id_obj);	Disable.Object(id_obj);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.ptchw.set);		Enable.Object(id_obj);	//	the object to be selected when we're done
+				Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+			}
+			//	case 1: scale
+			{	//	SCALE PITCH WHEEL VALUES dialog state
+				//		fields:	rte.percent
+				//					rte.ptchw.min
+				//					rte.ptchw.max
+
+				//	remove possible previous fields
+				id_min	= gid(rte.monopolar.min);	Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.monopolar.max);	Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.ribbon.min);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ribbon.max);		Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.midi.min);			Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.midi.max);			Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.percent); 											//	the object to be selected when we're done
+				id_min	= gid(rte.ptchw.min);		Enable.Object(id_min);
+				id_max	= gid(rte.ptchw.max);		Enable.Object(id_max);
+				Set.Object.Arrow.Links(id_obj, ARR#Auto, id_min, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_min, id_obj, id_max, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+				//	<<<<<<<<<<<<<<	can pitch wheel be inverted with negative scale factors too?
+			}
+			//	case 2: add
+			{	//	ADD PITCH WHEEL VALUES dialog state
+				//		fields:	rte.ptchw.add
+				//					rte.ptchw.min
+				//					rte.ptchw.max
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.monopolar.add);	Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.monopolar.min);	Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.monopolar.max);	Erase.Object(id_max);	Disable.Object(id_max);
+				id_obj	= gid(rte.ribbon.add);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.ribbon.min);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ribbon.max);		Erase.Object(id_max);	Disable.Object(id_max);
+				id_obj	= gid(rte.midi.add);			Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.midi.min);			Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.midi.max);			Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.ptchw.add);		Enable.Object(id_obj);	//	the object to be selected when we're done
+				id_min	= gid(rte.ptchw.min);		Enable.Object(id_min);
+				id_max	= gid(rte.ptchw.max);		Enable.Object(id_max);
+				Set.Object.Arrow.Links(id_obj, ARR#Auto, id_min, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_min, id_obj, id_max, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+			}
+			//	case 3: slope
+			{	//	SLOPE PITCH WHEEL VALUES dialog state
+				//		fields:	rte.ptchw.from
+				//					rte.ptchw.to
+
+				//	remove possible previous fields
+				id_min	= gid(rte.monopolar.from);	Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.monopolar.to);	Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.ribbon.from);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ribbon.to);		Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.midi.from);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.midi.to);			Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_min	= gid(rte.ptchw.from);		Enable.Object(id_min);
+				id_max	= gid(rte.ptchw.to);			Enable.Object(id_max);
+				id_obj	= id_min;														//	the object to be selected when we're done
+				Set.Object.Arrow.Links(id_min, ARR#Auto, id_max, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+			}
+		end;	//	of do case
+	}	//	end of Handle RTE type switch to Pitch Wheel
+
+	/////////////////	Handle RTE type switch to Ribbon Controller
+	else if (rte.type == 5)
+	{
+		//	regardless of mode, remove possible previous rte.midi.cntrl object
+		id_obj	= gid(rte.midi.cntrl);	Erase.Object(id_obj);	Disable.Object(id_obj);
+
+		do case mode;
+			//	case 0: set
+			{	//	SET RIBBON VALUES dialog state
+				//		fields:	rte.ribbon.set
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.monopolar.set);	Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_obj	= gid(rte.ptchw.set);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_obj	= gid(rte.midi.set);			Erase.Object(id_obj);	Disable.Object(id_obj);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.ribbon.set);		Enable.Object(id_obj);	//	the object to be selected when we're done
+				Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+			}
+			//	case 1: scale
+			{	//	SCALE RIBBON VALUES dialog state
+				//		fields:	rte.percent
+				//					rte.ribbon.min
+				//					rte.ribbon.max
+
+				//	remove possible previous fields
+				id_min	= gid(rte.monopolar.min);	Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.monopolar.max);	Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.ptchw.min);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ptchw.max);		Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.midi.min);			Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.midi.max);			Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.percent); 											//	the object to be selected when we're done
+				id_min	= gid(rte.ribbon.min);		Enable.Object(id_min);
+				id_max	= gid(rte.ribbon.max);		Enable.Object(id_max);
+				Set.Object.Arrow.Links(id_obj, ARR#Auto, id_min, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_min, id_obj, id_max, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+				//	<<<<<<<<<<<<<<	can ribbon be inverted with negative scale factors too?
+			}
+			//	case 2: add
+			{	//	ADD RIBBON VALUES dialog state
+				//		fields:	rte.ribbon.add
+				//					rte.ribbon.min
+				//					rte.ribbon.max
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.monopolar.add);	Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.monopolar.min);	Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.monopolar.max);	Erase.Object(id_max);	Disable.Object(id_max);
+				id_obj	= gid(rte.ptchw.add);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.ptchw.min);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ptchw.max);		Erase.Object(id_max);	Disable.Object(id_max);
+				id_obj	= gid(rte.midi.add);			Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.midi.min);			Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.midi.max);			Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.ribbon.add);		Enable.Object(id_obj);	//	the object to be selected when we're done
+				id_min	= gid(rte.ribbon.min);		Enable.Object(id_min);
+				id_max	= gid(rte.ribbon.max);		Enable.Object(id_max);
+				Set.Object.Arrow.Links(id_obj, ARR#Auto, id_min, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_min, id_obj, id_max, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+			}
+			//	case 3: slope
+			{	//	SLOPE RIBBON VALUES dialog state
+				//		fields:	rte.ribbon.from
+				//					rte.ribbon.to
+
+				//	remove possible previous fields
+				id_min	= gid(rte.monopolar.from);	Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.monopolar.to);	Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.ptchw.from);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ptchw.to);			Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.midi.from);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.midi.to);			Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_min	= gid(rte.ribbon.from);	Enable.Object(id_min);
+				id_max	= gid(rte.ribbon.to);		Enable.Object(id_max);
+				id_obj	= id_min;														//	the object to be selected when we're done
+				Set.Object.Arrow.Links(id_min, ARR#Auto, id_max, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+			}
+		end;	//	of do case
+	}	//	end of Handle RTE type switch to Ribbon Controller
+
+	/////////////////	Handle RTE type switch to MIDI Controllers
+	else if (rte.type == 7)
+	{
+		dcl id.midi.cntrl	fixed;
+
+		//	regardless of mode, show the rte.midi.cntrl object
+		id.midi.cntrl	= gid(rte.midi.cntrl);	Enable.Object(id.midi.cntrl);
+
+		do case mode;
+			//	case 0: set
+			{	//	SET MIDI VALUES dialog state
+				//		fields:	rte.midi.cntrl
+				//					rte.midi.set
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.monopolar.set);	Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_obj	= gid(rte.ptchw.set);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_obj	= gid(rte.ribbon.set);		Erase.Object(id_obj);	Disable.Object(id_obj);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.midi.set);			Enable.Object(id_obj);	//	the object to be selected when we're done
+				Set.Object.Arrow.Links(id_obj, id.midi.cntrl, ARR#Auto, ARR#Auto, ARR#Auto);
+			}
+			//	case 1: scale
+			{	//	SCALE MIDI VALUES dialog state
+				//		fields:	rte.midi.cntrl
+				//					rte.percent
+				//					rte.midi.min
+				//					rte.midi.max
+
+				//	remove possible previous fields
+				id_min	= gid(rte.monopolar.min);	Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.monopolar.max);	Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.ptchw.min);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ptchw.max);		Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.ribbon.min);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ribbon.max);		Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.percent); 											//	the object to be selected when we're done
+				id_min	= gid(rte.midi.min);			Enable.Object(id_min);
+				id_max	= gid(rte.midi.max);			Enable.Object(id_max);
+				Set.Object.Arrow.Links(id_obj, id.midi.cntrl, id_min, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_min, id_obj, id_max, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+				//	<<<<<<<<<<<<<<	can MIDI be inverted with negative scale factors too?
+			}
+			//	case 2: add
+			{	//	ADD MIDI VALUES dialog state
+				//		fields:	rte.midi.cntrl
+				//					rte.midi.add
+				//					rte.midi.min
+				//					rte.midi.max
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.monopolar.add);	Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.monopolar.min);	Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.monopolar.max);	Erase.Object(id_max);	Disable.Object(id_max);
+				id_obj	= gid(rte.ptchw.add);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.ptchw.min);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ptchw.max);		Erase.Object(id_max);	Disable.Object(id_max);
+				id_obj	= gid(rte.ribbon.add);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.ribbon.min);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ribbon.max);		Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.midi.add);			Enable.Object(id_obj);	//	the object to be selected when we're done
+				id_min	= gid(rte.midi.min);			Enable.Object(id_min);
+				id_max	= gid(rte.midi.max);			Enable.Object(id_max);
+				Set.Object.Arrow.Links(id_obj, id.midi.cntrl, id_min, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_min, id_obj, id_max, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+			}
+			//	case 3: slope
+			{	//	SLOPE MIDI VALUES dialog state
+				//		fields:	rte.midi.cntrl
+				//					rte.midi.from
+				//					rte.midi.to
+
+				//	remove possible previous fields
+				id_min	= gid(rte.monopolar.from);	Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.monopolar.to);	Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.ptchw.from);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ptchw.to);			Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.ribbon.from);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ribbon.to);		Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_min	= gid(rte.midi.from);		Enable.Object(id_min);
+				id_max	= gid(rte.midi.to);			Enable.Object(id_max);
+				id_obj	= id_min;														//	the object to be selected when we're done
+				Set.Object.Arrow.Links(id_min, id.midi.cntrl, id_max, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+			}
+		end;	//	of do case
+
+		Set.Object.Arrow.Links(id.midi.cntrl, ARR#Auto, id_obj, ARR#Auto, ARR#Auto);
+	}	//	end of Handle RTE type switch to MIDI Controllers
+
+	/////////////////	Handle RTE type switch to monopolar RTEs (Ped1, Ped2, ModW, Brth, Pres)
+	else	//	if ((rte.type ile 3) || (rte.type == 6))
+	{
+		//	regardless of mode, remove possible previous rte.midi.cntrl object
+		id_obj	= gid(rte.midi.cntrl);	Erase.Object(id_obj);	Disable.Object(id_obj);
+
+		do case mode;
+			//	case 0: set
+			{	//	SET MONOPOLAR RTE VALUES dialog state
+				//		fields:	rte.monopolar.set
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.ptchw.set);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_obj	= gid(rte.ribbon.set);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_obj	= gid(rte.midi.set);			Erase.Object(id_obj);	Disable.Object(id_obj);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.monopolar.set);	Enable.Object(id_obj);	//	the object to be selected when we're done
+				Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+			}
+			//	case 1: scale
+			{	//	SCALE MONOPOLAR RTE VALUES dialog state
+				//		fields:	rte.percent
+				//					rte.monopolar.min
+				//					rte.monopolar.max
+
+				//	remove possible previous fields
+				id_min	= gid(rte.ptchw.min);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ptchw.max);		Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.ribbon.min);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ribbon.max);		Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.midi.min);			Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.midi.max);			Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.percent); 											//	the object to be selected when we're done
+				id_min	= gid(rte.monopolar.min);	Enable.Object(id_min);
+				id_max	= gid(rte.monopolar.max);	Enable.Object(id_max);
+				Set.Object.Arrow.Links(id_obj, ARR#Auto, id_min, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_min, id_obj, id_max, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+			}
+			//	case 2: add
+			{	//	ADD MONOPOLAR RTE VALUES dialog state
+				//		fields:	rte.monopolar.add
+				//					rte.monopolar.min
+				//					rte.monopolar.max
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.ptchw.add);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.ptchw.min);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ptchw.max);		Erase.Object(id_max);	Disable.Object(id_max);
+				id_obj	= gid(rte.ribbon.add);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.ribbon.min);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ribbon.max);		Erase.Object(id_max);	Disable.Object(id_max);
+				id_obj	= gid(rte.midi.add);			Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.midi.min);			Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.midi.max);			Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.monopolar.add);	Enable.Object(id_obj);	//	the object to be selected when we're done
+				id_min	= gid(rte.monopolar.min);	Enable.Object(id_min);
+				id_max	= gid(rte.monopolar.max);	Enable.Object(id_max);
+				Set.Object.Arrow.Links(id_obj, ARR#Auto, id_min, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_min, id_obj, id_max, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+			}
+			//	case 3: slope
+			{	//	SLOPE MONOPOLAR RTE VALUES dialog state
+				//		fields:	rte.monopolar.from
+				//					rte.monopolar.to
+
+				//	remove possible previous fields
+				id_min	= gid(rte.ptchw.from);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ptchw.to);			Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.ribbon.from);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ribbon.to);		Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.midi.from);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.midi.to);			Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_min	= gid(rte.monopolar.from);	Enable.Object(id_min);
+				id_max	= gid(rte.monopolar.to);	Enable.Object(id_max);
+				id_obj	= id_min;														//	the object to be selected when we're done
+				Set.Object.Arrow.Links(id_min, ARR#Auto, id_max, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+			}
+		end;	//	of do case
+	}	//	end of Handle RTE type switch to monopolar RTEs (Ped1, Ped2, ModW, Brth, Pres)
+
+	Select.New.Cur.Obj(id_obj, 0, 0);
+
+end HANDLE.RTE.TYPE.SWITCH;
+
+HANDLE.RTE.MODE.SWITCH: proc swapable;
+	dcl rte.type		fixed;	//	0 = Ped1, 1 = Ped2, 2 = ModW, 3 = Breath, 4 = Pitch, 5 = Ribbon, 6 = Pressure, 7 = MIDI
+	dcl mode				fixed;	//	how to use the value: 0 = set, 1 = scale, 2 = add, 3 = slope
+	dcl id_obj			fixed;
+	dcl id_min			fixed;
+	dcl id_max			fixed;
+	dcl id.midi.cntrl	fixed;
+
+	rte.type	= Fetch.Switch(gid(rte.type.switch));
+	mode		= Fetch.Switch(Screen.Event.Id);
+
+	if (rte.type == 7) id.midi.cntrl	= gid(rte.midi.cntrl);
+
+	disable.deposits	= true;
+
+	Deposit.Switch((Screen.Event.Id+1), mode);	//	yoke rte.mode.switch's dependent switch
+
+	do case mode;
+		//	case 0: SET
+		{
+			//	remove the min/max labels regardless of rte.type
+			id_min	= gid(rte.monopolar.min)-1;	Erase.Object(id_min);	Disable.Object(id_min);
+			id_max	= gid(rte.monopolar.max)-1;	Erase.Object(id_max);	Disable.Object(id_max);
+			//	remove the possible previous percent field regardless of rte.type
+			id_obj	= gid(rte.percent);				Erase.Object(id_obj);	Disable.Object(id_obj);
+
+			if (rte.type == 4)	//	Pitch Wheel
+			{	//	SET PITCH WHEEL VALUES dialog state
+				//		fields:	rte.ptchw.set
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.ptchw.add);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.ptchw.min);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ptchw.max);		Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.ptchw.from);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ptchw.to);			Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.ptchw.set);		Enable.Object(id_obj);	//	the object to be selected when we're done
+				Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+			}	//	end of rte.type == Pitch Wheel
+
+			else if (rte.type == 5)	//	Ribbon Controller
+			{	//	SET RIBBON VALUES dialog state
+				//		fields:	rte.ribbon.set
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.ribbon.add);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.ribbon.min);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ribbon.max);		Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.ribbon.from);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ribbon.to);		Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.ribbon.set);		Enable.Object(id_obj);	//	the object to be selected when we're done
+				Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+			}	//	end of rte.type == Ribbon Controller
+
+			else if (rte.type == 7)	//	MIDI Controllers
+			{	//	SET MIDI VALUES dialog state
+				//		fields:	rte.midi.cntrl
+				//					rte.midi.set
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.midi.add);			Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.midi.min);			Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.midi.max);			Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.midi.from);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.midi.to);			Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.midi.set);		Enable.Object(id_obj);		//	the object to be selected when we're done
+				Set.Object.Arrow.Links(id.midi.cntrl, ARR#Auto, id_obj, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_obj, id.midi.cntrl, ARR#Auto, ARR#Auto, ARR#Auto);
+			}	//	end of rte.type == MIDI Controllers
+
+			else	//	if ((rte.type ile 3) || (rte.type == 6))	//	Monopolar RTEs (Ped1, Ped2, ModW, Brth, Pres)
+			{	//	SET MONOPOLAR RTE VALUES dialog state
+				//		fields:	rte.monopolar.set
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.monopolar.add);	Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.monopolar.min);	Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.monopolar.max);	Erase.Object(id_max);	Disable.Object(id_max);
+				id_min	= gid(rte.monopolar.from);	Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.monopolar.to);	Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.monopolar.set);	Enable.Object(id_obj);	//	the object to be selected when we're done
+				Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+			}	//	end of rte.type == Monopolar RTEs (Ped1, Ped2, ModW, Brth, Pres)
+		}	//	end of mode == SET
+
+		//	case 1: SCALE
+		{
+			//	in case we've come from SLOPE we must re-deposit the min/max labels
+			id_min	= gid(rte.monopolar.min)-1;	Deposit.Label(id_min, $limit.min);	Enable.Object(id_min);
+			id_max	= gid(rte.monopolar.max)-1;	Deposit.Label(id_max, $limit.max);	Enable.Object(id_max);
+
+			if (rte.type == 4)	//	Pitch Wheel
+			{	//	SCALE PITCH WHEEL VALUES dialog state
+				//		fields:	rte.percent
+				//					rte.ptchw.min
+				//					rte.ptchw.max
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.ptchw.set);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_obj	= gid(rte.ptchw.add);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.ptchw.from);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ptchw.to);			Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.percent);			Enable.Object(id_obj);	//	the object to be selected when we're done
+				id_min	= gid(rte.ptchw.min);		Enable.Object(id_min);
+				id_max	= gid(rte.ptchw.max);		Enable.Object(id_max);
+				Set.Object.Arrow.Links(id_obj, ARR#Auto, id_min, ARR#Auto, ARR#Auto);
+			}	//	end of rte.type == Pitch Wheel
+
+			else if (rte.type == 5)	//	Ribbon Controller
+			{	//	SCALE RIBBON VALUES dialog state
+				//		fields:	rte.percent
+				//					rte.ribbon.min
+				//					rte.ribbon.max
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.ribbon.set);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_obj	= gid(rte.ribbon.add);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.ribbon.from);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ribbon.to);		Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.percent);			Enable.Object(id_obj);	//	the object to be selected when we're done
+				id_min	= gid(rte.ribbon.min);		Enable.Object(id_min);
+				id_max	= gid(rte.ribbon.max);		Enable.Object(id_max);
+				Set.Object.Arrow.Links(id_obj, ARR#Auto, id_min, ARR#Auto, ARR#Auto);
+			}	//	end of rte.type == Ribbon Controller
+
+			else if (rte.type == 7)	//	MIDI Controllers
+			{	//	SCALE MIDI VALUES dialog state
+				//		fields:	rte.midi.cntrl
+				//					rte.percent
+				//					rte.midi.min
+				//					rte.midi.max
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.midi.set);			Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_obj	= gid(rte.midi.add);			Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.midi.from);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.midi.to);			Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.percent);			Enable.Object(id_obj);	//	the object to be selected when we're done
+				id_min	= gid(rte.midi.min);			Enable.Object(id_min);
+				id_max	= gid(rte.midi.max);			Enable.Object(id_max);
+				Set.Object.Arrow.Links(id.midi.cntrl, ARR#Auto, id_obj, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_obj, id.midi.cntrl, id_min, ARR#Auto, ARR#Auto);
+			}	//	end of rte.type == MIDI Controllers
+
+			else	//	if ((rte.type ile 3) || (rte.type == 6))	//	Monopolar RTEs (Ped1, Ped2, ModW, Brth, Pres)
+			{	//	SCALE MONOPOLAR RTE VALUES dialog state
+				//		fields:	rte.percent
+				//					rte.monopolar.min
+				//					rte.monopolar.max
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.monopolar.set);	Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_obj	= gid(rte.monopolar.add);	Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.monopolar.from);	Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.monopolar.to);	Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.percent);			Enable.Object(id_obj);	//	the object to be selected when we're done
+				id_min	= gid(rte.monopolar.min);	Enable.Object(id_min);
+				id_max	= gid(rte.monopolar.max);	Enable.Object(id_max);
+				Set.Object.Arrow.Links(id_obj, ARR#Auto, id_min, ARR#Auto, ARR#Auto);
+			}	//	end of rte.type == Monopolar RTEs (Ped1, Ped2, ModW, Brth, Pres)
+
+			Set.Object.Arrow.Links(id_min, id_obj, id_max, ARR#Auto, ARR#Auto);
+			Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+		}	//	end of mode == SCALE
+
+		//	case 2: ADD
+		{
+			//	in case we've come from SLOPE we must re-deposit the min/max labels
+			id_min	= gid(rte.monopolar.min)-1;	Deposit.Label(id_min, $limit.min);	Enable.Object(id_min);
+			id_max	= gid(rte.monopolar.max)-1;	Deposit.Label(id_max, $limit.max);	Enable.Object(id_max);
+			//	remove the possible previous percent field regardless of rte.type
+			id_obj	= gid(rte.percent);				Erase.Object(id_obj);	Disable.Object(id_obj);
+
+			if (rte.type == 4)	//	Pitch Wheel
+			{	//	ADD PITCH WHEEL VALUES dialog state
+				//		fields:	rte.ptchw.add
+				//					rte.ptchw.min
+				//					rte.ptchw.max
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.ptchw.set);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.ptchw.from);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ptchw.to);			Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.ptchw.add);		Enable.Object(id_obj);	//	the object to be selected when we're done
+				id_min	= gid(rte.ptchw.min);		Enable.Object(id_min);
+				id_max	= gid(rte.ptchw.max);		Enable.Object(id_max);
+				Set.Object.Arrow.Links(id_obj, ARR#Auto, id_min, ARR#Auto, ARR#Auto);
+			}	//	end of rte.type == Pitch Wheel
+
+			else if (rte.type == 5)	//	Ribbon Controller
+			{	//	ADD RIBBON VALUES dialog state
+				//		fields:	rte.ribbon.add
+				//					rte.ribbon.min
+				//					rte.ribbon.max
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.ribbon.set);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.ribbon.from);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ribbon.to);		Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.ribbon.add);		Enable.Object(id_obj);	//	the object to be selected when we're done
+				id_min	= gid(rte.ribbon.min);		Enable.Object(id_min);
+				id_max	= gid(rte.ribbon.max);		Enable.Object(id_max);
+				Set.Object.Arrow.Links(id_obj, ARR#Auto, id_min, ARR#Auto, ARR#Auto);
+			}	//	end of rte.type == Ribbon Controller
+
+			else if (rte.type == 7)	//	MIDI Controllers
+			{	//	ADD MIDI VALUES dialog state
+				//		fields:	rte.midi.cntrl
+				//					rte.midi.add
+				//					rte.midi.min
+				//					rte.midi.max
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.midi.set);			Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.midi.from);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.midi.to);			Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.midi.add);			Enable.Object(id_obj);	//	the object to be selected when we're done
+				id_min	= gid(rte.midi.min);			Enable.Object(id_min);
+				id_max	= gid(rte.midi.max);			Enable.Object(id_max);
+				Set.Object.Arrow.Links(id.midi.cntrl, ARR#Auto, id_obj, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_obj, id.midi.cntrl, id_min, ARR#Auto, ARR#Auto);
+			}	//	end of rte.type == MIDI Controllers
+
+			else	//	if ((rte.type ile 3) || (rte.type == 6))	//	Monopolar RTEs (Ped1, Ped2, ModW, Brth, Pres)
+			{	//	ADD MONOPOLAR RTE VALUES dialog state
+				//		fields:	rte.monopolar.add
+				//					rte.monopolar.min
+				//					rte.monopolar.max
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.monopolar.set);	Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.monopolar.from);	Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.monopolar.to);	Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_obj	= gid(rte.monopolar.add);	Enable.Object(id_obj);	//	the object to be selected when we're done
+				id_min	= gid(rte.monopolar.min);	Enable.Object(id_min);
+				id_max	= gid(rte.monopolar.max);	Enable.Object(id_max);
+				Set.Object.Arrow.Links(id_obj, ARR#Auto, id_min, ARR#Auto, ARR#Auto);
+			}	//	end of rte.type == Monopolar RTEs (Ped1, Ped2, ModW, Brth, Pres)
+
+			Set.Object.Arrow.Links(id_min, id_obj, id_max, ARR#Auto, ARR#Auto);
+			Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+
+		}	//	end of mode == ADD
+
+		//	case 3: SLOPE
+		{
+			//	re-deposit the min/max labels as from/to labels
+			id_min	= gid(rte.monopolar.min)-1;	Deposit.Label(id_min, $from);	Enable.Object(id_min);
+			id_max	= gid(rte.monopolar.max)-1;	Deposit.Label(id_max, $to);	Enable.Object(id_max);
+			//	remove the possible previous percent field regardless of rte.type
+			id_obj	= gid(rte.percent);				Erase.Object(id_obj);	Disable.Object(id_obj);
+
+			if (rte.type == 4)	//	Pitch Wheel
+			{	//	SLOPE PITCH WHEEL VALUES dialog state
+				//		fields:	rte.ptchw.from
+				//					rte.ptchw.to
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.ptchw.set);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_obj	= gid(rte.ptchw.add);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.ptchw.min);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ptchw.max);		Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_min	= gid(rte.ptchw.from);		Enable.Object(id_min);
+				id_max	= gid(rte.ptchw.to);			Enable.Object(id_max);
+				Set.Object.Arrow.Links(id_min, ARR#Auto, id_max, ARR#Auto, ARR#Auto);
+			}	//	end of rte.type == Pitch Wheel
+
+			else if (rte.type == 5)	//	Ribbon Controller
+			{	//	SLOPE RIBBON VALUES dialog state
+				//		fields:	rte.ribbon.from
+				//					rte.ribbon.to
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.ribbon.set);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_obj	= gid(rte.ribbon.add);		Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.ribbon.min);		Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.ribbon.max);		Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_min	= gid(rte.ribbon.from);		Enable.Object(id_min);
+				id_max	= gid(rte.ribbon.to);		Enable.Object(id_max);
+				Set.Object.Arrow.Links(id_min, ARR#Auto, id_max, ARR#Auto, ARR#Auto);
+			}	//	end of rte.type == Ribbon Controller
+
+			else if (rte.type == 7)	//	MIDI Controllers
+			{	//	SLOPE MIDI VALUES dialog state
+				//		fields:	rte.midi.cntrl
+				//					rte.midi.from
+				//					rte.midi.to
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.midi.set);			Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_obj	= gid(rte.midi.add);			Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.midi.min);			Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.midi.max);			Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_min	= gid(rte.midi.from);		Enable.Object(id_min);	
+				id_max	= gid(rte.midi.to);			Enable.Object(id_max);
+				Set.Object.Arrow.Links(id.midi.cntrl, ARR#Auto, id_min, ARR#Auto, ARR#Auto);
+				Set.Object.Arrow.Links(id_min, id.midi.cntrl, id_max, ARR#Auto, ARR#Auto);
+			}	//	end of rte.type == MIDI Controllers
+
+			else	//	if ((rte.type ile 3) || (rte.type == 6))	//	Monopolar RTEs (Ped1, Ped2, ModW, Brth, Pres)
+			{	//	SLOPE MONOPOLAR RTE VALUES dialog state
+				//		fields:	rte.monopolar.from
+				//					rte.monopolar.to
+
+				//	remove possible previous fields
+				id_obj	= gid(rte.monopolar.set);	Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_obj	= gid(rte.monopolar.add);	Erase.Object(id_obj);	Disable.Object(id_obj);
+				id_min	= gid(rte.monopolar.min);	Erase.Object(id_min);	Disable.Object(id_min);
+				id_max	= gid(rte.monopolar.max);	Erase.Object(id_max);	Disable.Object(id_max);
+
+				//	enable new fields and reset arrow links for this dialog state
+				id_min	= gid(rte.monopolar.from);	Enable.Object(id_min);
+				id_max	= gid(rte.monopolar.to);	Enable.Object(id_max);
+				Set.Object.Arrow.Links(id_min, ARR#Auto, id_max, ARR#Auto, ARR#Auto);
+			}	//	end of rte.type == Monopolar RTEs (Ped1, Ped2, ModW, Brth, Pres)
+
+			Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+			id_obj	= id_min;	//	the object to be selected when we're done
+
+		}	//	end of mode == SLOPE
+
+	end;	//	of do case
+
+	Select.New.Cur.Obj(id_obj, 0, 0);
+
+	disable.deposits	= false;
+
+end HANDLE.RTE.MODE.SWITCH;
+
+HANDLE.RTE.PARAM.DEPOSIT: proc swapable;
+	dcl rte.type	fixed;	//	0 = Ped1, 1 = Ped2, 2 = ModW, 3 = Breath, 4 = Pitch, 5 = Ribbon, 6 = Pressure, 7 = MIDI
+
+	rte.type	= Fetch.Switch(gid(rte.type.switch));
+
+	do case (Fetch.Switch(gid(rte.mode.switch)));
+		//	case 0:	SET
+		do;
+			if			(rte.type == 4)										check.limits(-24000, 24000);	//	pitch bend		-2400.0 to +2400.0 cents
+			else if	(rte.type == 5)										check.limits(-10000, 10000);	//	ribbon			-100.00 to +100.00 %
+			else if	(rte.type == 7)										check.limits(		0,	  127);	//	midi cntrl
+			else	/*	if	((rte.type ile 3) || (rte.type == 6))	*/	check.limits(		0, 10000);	//	monopolar RTEs		0.00 to  100.00 %
+		end;
+		//	case 1:	SCALE
+		check.limits(-30000, 30000);			/*	widest range of fixed we can use	*/
+		//	case 2:	ADD/SUBTRACT
+		do;
+			if			(rte.type == 4)										check.limits(-24000, 24000);	//	pitch bend		-2400.0 to +2400.0 cents
+			else if	(rte.type == 5)										check.limits(-10000, 10000);	//	ribbon			-100.00 to +100.00 %
+			else if	(rte.type == 7)										check.limits(	-127,	  127);	//	midi cntrl
+			else	/*	if	((rte.type ile 3) || (rte.type == 6))	*/	check.limits(-10000, 10000);	//	monopolar RTEs		0.00 to  100.00 %
+		end;
+	end;	//	of do case
+
+end HANDLE.RTE.PARAM.DEPOSIT;
+
+HANDLE.RTE.MIN.MAX.DEPOSIT: proc swapable;
+	dcl rte.type	fixed;	//	0 = Ped1, 1 = Ped2, 2 = ModW, 3 = Breath, 4 = Pitch, 5 = Ribbon, 6 = Pressure, 7 = MIDI
+
+	rte.type	= Fetch.Switch(gid(rte.type.switch));
+
+	if			(rte.type == 4)										check.limits(-24000, 24000);	//	pitch bend		-2400.0 to +2400.0 cents
+	else if	(rte.type == 5)										check.limits(-10000, 10000);	//	ribbon			-100.00 to +100.00 %
+	else if	(rte.type == 7)										check.limits(		0,	  127);	//	midi cntrl
+	else	/*	if	((rte.type ile 3) || (rte.type == 6))	*/	check.limits(		0, 10000);	//	monopolar RTEs		0.00 to  100.00 %
+
+	//	prevent max from being less than the newly deposited min, or min from being greater than the newly deposited max
+	if (Fetch.Switch(gid(rte.mode.switch)) != 3)				//	not doing slope
+	{
+		dcl id_min	fixed;
+		dcl id_max	fixed;
+
+		if			(rte.type == 4)									//	pitch bend
+		{	id_min	= gid(rte.ptchw.min);
+			id_max	= gid(rte.ptchw.max);
+		}
+		else if	(rte.type == 5)									//	ribbon
+		{	id_min	= gid(rte.ribbon.min);
+			id_max	= gid(rte.ribbon.max);
+		}
+		else if	(rte.type == 7)									//	midi cntrl
+		{	id_min	= gid(rte.midi.min);
+			id_max	= gid(rte.midi.max);
+		}
+		else	//	if	((rte.type ile 3) || (rte.type == 6))	//	monopolar RTEs
+		{	id_min	= gid(rte.monopolar.min);
+			id_max	= gid(rte.monopolar.max);
+		}
+
+		//	ADDING bit15 TO THE TWO EXPRESSIONS BELOW AND COMPARING WITH igt INSTEAD OF >
+		//	IS NECESSARY TO HANDLE PITCH BEND AMOUNTS OUTSIDE THE RANGE OF -16384 TO 16383.
+		if (Fetch.Fixed.Point(id_min)+bit15 igt Fetch.Fixed.Point(id_max)+bit15)
+		{
+			disable.deposits	= true;
+			if (Screen.Event.Id == id_min)
+			{	//	a new min was deposited which is greater than the current max, so we should reset the max to its upper limit
+				if			(rte.type == 4)										Deposit.Fixed.Point(id_max, 24000);		//	pitch bend		+2400.0 cents
+				else if	(rte.type == 5)										Deposit.Fixed.Point(id_max, 10000);		//	ribbon			 +100.00 %
+				else if	(rte.type == 7)										Deposit.Fixed.Point(id_max,	127);		//	midi cntrl
+				else	/*	if	((rte.type ile 3) || (rte.type == 6))	*/	Deposit.Fixed.Point(id_max, 10000);		//	monopolar RTEs	  100.00 %
+					//	Update.Object(id_max);	//	check this flag:	O#ACT.Update.On.Dep
+			}
+			else
+			{	//	a new max was deposited which is less than the current min, so we should reset the min to its lower limit
+				if			(rte.type == 4)										Deposit.Fixed.Point(id_min, -24000);	//	pitch bend		-2400.0 cents
+				else if	(rte.type == 5)										Deposit.Fixed.Point(id_min, -10000);	//	ribbon			-100.00 %
+				else if	(rte.type == 7)										Deposit.Fixed.Point(id_min,		0);	//	midi cntrl
+				else	/*	if	((rte.type ile 3) || (rte.type == 6))	*/	Deposit.Fixed.Point(id_min,		0);	//	monopolar RTEs		0.00 %
+					//	Update.Object(id_min);	//	check this flag:	O#ACT.Update.On.Dep
+			}
+			disable.deposits	= false;
+		}
+	}
+
+end HANDLE.RTE.MIN.MAX.DEPOSIT;
+
+GET.CHANGE.RTE.DIALOG.EVENT: proc (event) returns (fixed) swapable;
+	dcl event	fixed;
+
+	while (true)
+	{
+		if (event != Get.Null.Event)
+		{
+			if (Screen.Event.Group != current.dialog.grp)	return event;
+
+			if (Screen.Event.Info == S#Deposit)
+			{
+				call remove.err;	//	clear any previous error message
+
+				if (Screen.Event.Id == gid(rte.type.switch))
+				then call Handle.RTE.Type.Switch;
+
+				else if (Screen.Event.Id == gid(rte.mode.switch))
+				then call Handle.RTE.Mode.Switch;
+
+				else if (Screen.Event.Id == gid(rte.midi.cntrl)) check.limits(0, 127);
+
+				else if
+				(	(Screen.Event.Id ige gid(rte.percent))
+				&&	(Screen.Event.Id ile gid(rte.midi.add))
+				)
+				then call Handle.RTE.Param.Deposit;
+
+				else if
+				(	(Screen.Event.Id == gid(rte.monopolar.min))
+				||	(	(Screen.Event.Id ige gid(rte.monopolar.max))
+					&&	(Screen.Event.Id ile gid(rte.midi.to))
+					)
+				)
+				then call Handle.RTE.Min.Max.Deposit;
+
+				else if (Screen.Event.Id == gid(filter.sw))
+				then apply.filter	= Fetch.Switch(Screen.Event.Id);
+			}	//	end of if (Screen.Event.Info == S#Deposit)
+
+			else if	(Screen.Event.Info == S#MouseSelect)
+			{
+				if (Screen.Event.Id == gid(ok.button))			/*	want to do the operation	*/
+				{
+					dcl rte.type			fixed;	//	0 = Ped1, 1 = Ped2, 2 = ModW, 3 = Breath, 4 = Pitch, 5 = Ribbon, 6 = Pressure, 7 = MIDI
+					dcl mode					fixed;	//	how to use the value: 0 = set, 1 = scale, 2 = add, 3 = slope
+					dcl (val, min, max)	fixed;
+
+					rte.type	= Fetch.Switch(gid(rte.type.switch));
+					mode		= Fetch.Switch(gid(rte.mode.switch));
+
+					work.msg(1);
+
+					if (undo.enabled != false) save.undoseq();
+
+					if			(rte.type == 4)	//	pitch bend
+					{
+						if (mode == 3)
+						{	//	val is irrelevant												//	case 3: SLOPE
+							min	= Fetch.Fixed.Point(gid(rte.ptchw.from));
+							max	= Fetch.Fixed.Point(gid(rte.ptchw.to));
+						}
+						else
+						{
+							do case mode;
+								val	= Fetch.Fixed.Point(gid(rte.ptchw.set));		//	case 0: SET
+								val	= Fetch.Fixed.Point(gid(rte.percent));			//	case 1: SCALE
+								val	= Fetch.Fixed.Point(gid(rte.ptchw.add));		//	case 2: ADD
+							end;
+							min	= Fetch.Fixed.Point(gid(rte.ptchw.min));
+							max	= Fetch.Fixed.Point(gid(rte.ptchw.max));
+						}
+					}
+					else if	(rte.type == 5)	//	ribbon
+					{
+						if (mode == 3)
+						{	//	val is irrelevant												//	case 3: SLOPE
+							min	= Fetch.Fixed.Point(gid(rte.ribbon.from));
+							max	= Fetch.Fixed.Point(gid(rte.ribbon.to));
+						}
+						else
+						{
+							do case mode;
+								val	= Fetch.Fixed.Point(gid(rte.ribbon.set));		//	case 0: SET
+								val	= Fetch.Fixed.Point(gid(rte.percent));			//	case 1: SCALE
+								val	= Fetch.Fixed.Point(gid(rte.ribbon.add));		//	case 2: ADD
+							end;
+							min	= Fetch.Fixed.Point(gid(rte.ribbon.min));
+							max	= Fetch.Fixed.Point(gid(rte.ribbon.max));
+						}
+					}
+					else if	(rte.type == 7)	//	midi cntrl
+					{
+						if (mode == 3)
+						{	//	val is irrelevant												//	case 3: SLOPE
+							min	= Fetch.Fixed.Point(gid(rte.midi.from));
+							max	= Fetch.Fixed.Point(gid(rte.midi.to));
+						}
+						else
+						{
+							do case mode;
+								val	= Fetch.Fixed.Point(gid(rte.midi.set));		//	case 0: SET
+								val	= Fetch.Fixed.Point(gid(rte.percent));			//	case 1: SCALE
+								val	= Fetch.Fixed.Point(gid(rte.midi.add));		//	case 2: ADD
+							end;
+							min	= Fetch.Fixed.Point(gid(rte.midi.min));
+							max	= Fetch.Fixed.Point(gid(rte.midi.max));
+						}
+					}
+					else	//	if	((rte.type ile 3) || (rte.type == 6))	//	monopolar RTEs
+					{
+						if (mode == 3)															//	case 3: SLOPE
+						{	//	val is irrelevant
+							min	= Fetch.Fixed.Point(gid(rte.monopolar.from));
+							max	= Fetch.Fixed.Point(gid(rte.monopolar.to));
+						}
+						else
+						{
+							do case mode;
+								val	= Fetch.Fixed.Point(gid(rte.monopolar.set));	//	case 0: SET
+								val	= Fetch.Fixed.Point(gid(rte.percent));			//	case 1: SCALE
+								val	= Fetch.Fixed.Point(gid(rte.monopolar.add));	//	case 2: ADD
+							end;
+							min	= Fetch.Fixed.Point(gid(rte.monopolar.min));
+							max	= Fetch.Fixed.Point(gid(rte.monopolar.max));
+						}
+					}
+
+					Perform.Region.Command(val, mode, min, max);
+
+					work.msg(0);
+				}	//	end of user clicked the Okay button
+				else if (Screen.Event.Id == gid(cancel.button))	close.dialog();
+			}	//	end of if (Screen.Event.Info == S#MouseSelect)
+		}	//	end of if (event != Get.Null.Event)
+
+		event	= Get.Next.Edit.Screen.Event;
+	}	//	end of infinite loop
+end GET.CHANGE.RTE.DIALOG.EVENT;
+
+
+/////////////////////////////	procedures for CHANGE VELOCITY dialog
+/////////////////////////////	status:	COMPLETED
+
+GET.CHANGE.VEL.DIALOG.EVENT: proc (event) returns (fixed) swapable;
+	dcl event							fixed;
+	dcl mode								fixed;	//	how to use the value: 0 = set, 1 = scale, 2 = add, 3 = slope
+	dcl (id_obj, id_min, id_max)	fixed;	//	object IDs
+	dcl (val, min, max)				fixed;	//	the values assigned to those objects
+
+	while (true)
+	{
+		if (event != Get.Null.Event)
+		{
+			if (Screen.Event.Group != current.dialog.grp)	return event;
+
+			if (Screen.Event.Info == S#Deposit)
+			{
+				call remove.err;	//	clear any previous error message
+				disable.deposits	= true;
+
+				mode	= Fetch.Switch(gid(vel.switch));
+
+				if
+				(	(Screen.Event.Id ige gid(vel.percent))
+				&&	(Screen.Event.Id ile gid(vel.add))
+				)
+				then do case (mode);
+					check.limits(	  0, 1000);	//	set
+					check.limits(-9999, 9999);	//	scale
+					check.limits(-1000, 1000);	//	add, subtract
+				end;
+
+				else if
+				(	(Screen.Event.Id == gid(vel.min))
+				||	(	(Screen.Event.Id ige gid(vel.max))
+					&&	(Screen.Event.Id ile gid(vel.to))
+					)
+				)
+				{
+					check.limits(0, 1000);
+
+					if (mode != 3)		//	not doing slope
+					{
+						id_min	= gid(vel.min);
+						id_max	= gid(vel.max);
+
+						if (Fetch.Fixed.Point(id_min) igt Fetch.Fixed.Point(id_max))
+						{
+							if (Screen.Event.Id == id_min)
+							{	//	a new min was deposited which is greater than the current max, so we should reset the max to its upper limit
+								Deposit.Fixed.Point(id_max, 1000);
+									//	Update.Object(id_max);	//	check this flag:	O#ACT.Update.On.Dep
+							}
+							else
+							{	//	a new max was deposited which is less than the current min, so we should reset the min to its lower limit
+								Deposit.Fixed.Point(id_min, 0);
+									//	Update.Object(id_min);	//	check this flag:	O#ACT.Update.On.Dep
+							}
+						}
+					}	//	end of if not doing slope
+				}	//	end of if setting min/max or from/to
+
+				else if (Screen.Event.Id == gid(vel.switch))
+				{
+					Deposit.Switch((Screen.Event.Id+1), mode);	//	yoke vel.switch's dependent switch
+
+					do case mode;
+						//	case 0: set
+						{	//	SET VELOCITIES dialog state
+							//		fields:	vel.set
+
+							//	remove possible previous fields
+							id_obj	= gid(vel.percent);	Erase.Object(id_obj);	Disable.Object(id_obj);
+							id_obj	= gid(vel.add);		Erase.Object(id_obj);	Disable.Object(id_obj);
+							id_min	= gid(vel.min);		Erase.Object(id_min);	Disable.Object(id_min);
+							id_max	= gid(vel.max);		Erase.Object(id_max);	Disable.Object(id_max);
+							id_obj	= id_min-1;				Erase.Object(id_obj);	Disable.Object(id_obj);		//	this is the label corresponding to vel.min
+							id_obj	= id_max-1;				Erase.Object(id_obj);	Disable.Object(id_obj);		//	this is the label corresponding to vel.max
+							id_min	= gid(vel.from);		Erase.Object(id_min);	Disable.Object(id_min);
+							id_max	= gid(vel.to);			Erase.Object(id_max);	Disable.Object(id_max);
+
+							//	enable new fields and reset arrow links for this dialog state
+							id_obj	= gid(vel.set);		Enable.Object (id_obj);										//	the object to be selected when we're done
+							Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+						}
+						//	case 1: scale
+						{	//	SCALE VELOCITIES dialog state
+							//		fields:	vel.percent
+							//					vel.min
+							//					vel.max
+
+							//	remove possible previous fields
+							id_obj	= gid(vel.add);		Erase.Object(id_obj);	Disable.Object(id_obj);
+							id_obj	= gid(vel.set);		Erase.Object(id_obj);	Disable.Object(id_obj);
+							id_min	= gid(vel.from);		Erase.Object(id_min);	Disable.Object(id_min);
+							id_max	= gid(vel.to);			Erase.Object(id_max);	Disable.Object(id_max);
+
+							//	enable new fields and reset arrow links for this dialog state
+							id_min	= gid(vel.min);		Enable.Object(id_min);
+							id_max	= gid(vel.max);		Enable.Object(id_max);
+							id_obj	= id_min-1;	Deposit.Label(id_obj, $limit.min);	Enable.Object(id_obj);	//	this is the label corresponding to vel.min
+							id_obj	= id_max-1;	Deposit.Label(id_obj, $limit.max);	Enable.Object(id_obj);	//	this is the label corresponding to vel.max
+							id_obj	= gid(vel.percent);	Enable.Object(id_obj);										//	the object to be selected when we're done
+							Set.Object.Arrow.Links(id_obj, ARR#Auto, id_min, ARR#Auto, ARR#Auto);
+							Set.Object.Arrow.Links(id_min, id_obj, id_max, ARR#Auto, ARR#Auto);
+							Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+						}
+						//	case 2: add
+						{	//	ADD VELOCITIES dialog state
+							//		fields:	vel.add
+							//					vel.min
+							//					vel.max
+
+							//	remove possible previous fields
+							id_obj	= gid(vel.percent);	Erase.Object(id_obj);	Disable.Object(id_obj);
+							id_obj	= gid(vel.set);		Erase.Object(id_obj);	Disable.Object(id_obj);
+							id_min	= gid(vel.from);		Erase.Object(id_min);	Disable.Object(id_min);
+							id_max	= gid(vel.to);			Erase.Object(id_max);	Disable.Object(id_max);
+
+							//	enable new fields and reset arrow links for this dialog state
+							id_min	= gid(vel.min);		Enable.Object(id_min);
+							id_max	= gid(vel.max);		Enable.Object(id_max);
+							id_obj	= id_min-1;	Deposit.Label(id_obj, $limit.min);	Enable.Object(id_obj);	//	this is the label corresponding to vel.min
+							id_obj	= id_max-1;	Deposit.Label(id_obj, $limit.max);	Enable.Object(id_obj);	//	this is the label corresponding to vel.max
+							id_obj	= gid(vel.add);		Enable.Object(id_obj);										//	the object to be selected when we're done
+							Set.Object.Arrow.Links(id_obj, ARR#Auto, id_min, ARR#Auto, ARR#Auto);
+							Set.Object.Arrow.Links(id_min, id_obj, id_max, ARR#Auto, ARR#Auto);
+							Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+						}
+						//	case 3: slope
+						{	//	SLOPE VELOCITIES dialog state
+							//		fields:	vel.from
+							//					vel.to
+
+							//	remove possible previous fields
+							id_obj	= gid(vel.percent);	Erase.Object(id_obj);	Disable.Object(id_obj);
+							id_obj	= gid(vel.add);		Erase.Object(id_obj);	Disable.Object(id_obj);
+							id_obj	= gid(vel.set);		Erase.Object(id_obj);	Disable.Object(id_obj);
+							id_min	= gid(vel.min);		Erase.Object(id_min);	Disable.Object(id_min);
+							id_max	= gid(vel.max);		Erase.Object(id_max);	Disable.Object(id_max);
+
+							//	enable new fields and reset arrow links for this dialog state
+							id_obj	= id_min-1;	Deposit.Label(id_obj, $from);	Enable.Object(id_obj);			//	this is the label corresponding to vel.from
+							id_obj	= id_max-1;	Deposit.Label(id_obj, $to);	Enable.Object(id_obj);			//	this is the label corresponding to vel.to
+							id_min	= gid(vel.from);		Enable.Object(id_min);
+							id_max	= gid(vel.to);			Enable.Object(id_max);
+							id_obj	= id_min;																					//	the object to be selected when we're done
+							Set.Object.Arrow.Links(id_min, ARR#Auto, id_max, ARR#Auto, ARR#Auto);
+							Set.Object.Arrow.Links(id_max, id_min, ARR#Auto, ARR#Auto, ARR#Auto);
+						}
+					end;	//	of do case
+
+					Select.New.Cur.Obj(id_obj, 0, 0);
+				}	//	end of Screen.Event.Id == gid(vel.switch)
+
+				else if (Screen.Event.Id == gid(filter.sw))	apply.filter	= Fetch.Switch(Screen.Event.Id);
+
+				disable.deposits	= false;
+			}	//	end of if (Screen.Event.Info == S#Deposit)
+
+			else if	(Screen.Event.Info == S#MouseSelect)
+			{
+				if (Screen.Event.Id == gid(ok.button))			/*	want to do the operation	*/
+				{
+					work.msg(1);
+
+					if (undo.enabled != false) save.undoseq();
+
+					mode	= Fetch.Switch(gid(vel.switch));
+
+					if (mode == 3)
+					{	//	case 3: SLOPE
+						//	val is irrelevant
+						min	= Fetch.Fixed.Point(gid(vel.from));
+						max	= Fetch.Fixed.Point(gid(vel.to));
+					}
+					else
+					{
+						do case mode;
+							val	= Fetch.Fixed.Point(gid(vel.set));		//	case 0: SET
+							val	= Fetch.Fixed.Point(gid(vel.percent));	//	case 1: SCALE
+							val	= Fetch.Fixed.Point(gid(vel.add));		//	case 2: ADD
+						end;
+						min	= Fetch.Fixed.Point(gid(vel.min));
+						max	= Fetch.Fixed.Point(gid(vel.max));
+					}
+
+					//	do the operation!
+					Perform.Region.Command(val, mode, min, max);
+
+					work.msg(0);
+				}	//	end of user clicked the Okay button
+				else if (Screen.Event.Id == gid(cancel.button)) close.dialog();
+			}	//	end of if (Screen.Event.Info == S#MouseSelect)
+		}	//	end of if (event != Get.Null.Event)
+
+		event	= Get.Next.Edit.Screen.Event;
+	}	//	end of infinite loop
+end GET.CHANGE.VEL.DIALOG.EVENT;
+
+
+/////////////////////////////	procedures for EDIT FILTER dialog
+/////////////////////////////	status:	COMPLETED
+
+Compute.Filter.Dialog.Arrow.Links: proc public swapable;
+	dcl (id_fr, id_to)							fixed;
+	dcl (id_target_left, id_target_right)	fixed;
+	dcl id_target_down							fixed;
+
+	//	where to jump to when switching from the right side of the screen to the left
+	id_target_left		= ARR#Auto;
+	if			((check.pitches == 1) || (check.pitches == 2))	id_target_left		= gid(pitch.lo.id);
+	else if	(check.vel != 0)											id_target_left		= gid(vel.lo.id);
+	else if	(check.dur != 0)											id_target_left		= gid(dur.lo.id);
+
+	//	where to jump to when switching from the left side of the screen to the right
+	id_target_right	= ARR#Auto;
+	if			(check.monopolar.val != 0)								id_target_right	= gid(monopolar.lo.id);
+	else if	(check.bipolar.val != 0)								id_target_right	= gid(bipolar.lo.id);
+	else if	(check.midi.val != 0)									id_target_right	= gid(midi.lo.id);
+	else if	((check.ctrl == 1) || (check.ctrl == 2))
+	{	if			(ctrl1 == 7)											id_target_right	= gid(ctrl.sw)+4;
+		else if	(ctrl2 == 7)											id_target_right	= gid(ctrl.sw)+5;
+		else if	(ctrl3 == 7)											id_target_right	= gid(ctrl.sw)+6;
+	}
+
+	//	fields dependent on check.pitches
+	if ((check.pitches == 1) || (check.pitches == 2))
+	{
+		id_fr	= gid(pitch.lo.id);
+		id_to	= gid(pitch.hi.id);
+
+		//	pitch from
+		//		up			ARR#Auto
+		//		down		ARR#Auto
+		//		left		ARR#Auto
+		//		right		id_to
+//		Set.Object.Arrow.Links(id_fr, ARR#Auto, ARR#Auto, ARR#Auto, id_to);	//	no need to reset as long as it was initially set in open.filter.dialog()
+
+		//	pitch to
+		//		up			ARR#Auto
+		//		down		ARR#Auto
+		//		left		id_fr
+		//		right		id_target_right
+		Set.Object.Arrow.Links(id_to, ARR#Auto, ARR#Auto, id_fr, id_target_right);
+	}
+
+	//	fields dependent on check.vel
+	if (check.vel != 0)
+	{
+		id_fr	= gid(vel.lo.id);
+		id_to	= gid(vel.hi.id);
+
+		//	velocity from
+		//		up			ARR#Auto
+		//		down		ARR#Auto
+		//		left		ARR#Auto
+		//		right		id_to
+//		Set.Object.Arrow.Links(id_fr, ARR#Auto, ARR#Auto, ARR#Auto, id_to);	//	no need to reset as long as it was initially set in open.filter.dialog()
+
+		//	velocity to
+		//		up			ARR#Auto
+		//		down		ARR#Auto
+		//		left		id_fr
+		//		right		id_target_right
+		Set.Object.Arrow.Links(id_to, ARR#Auto, ARR#Auto, id_fr, id_target_right);
+	}
+
+	//	fields dependent on check.dur
+	if (check.dur != 0)
+	{
+		id_fr	= gid(dur.lo.id);
+		id_to	= gid(dur.hi.id);
+
+		//	duration from
+		//		up			ARR#Auto
+		//		down		id_to
+		//		left		ARR#Auto
+		//		right		id_target_right
+		Set.Object.Arrow.Links(id_fr, ARR#Auto, id_to, ARR#Auto, id_target_right);
+
+		//	duration to
+		//		up			id_fr
+		//		down		ARR#Auto
+		//		left		ARR#Auto
+		//		right		id_target_right
+		Set.Object.Arrow.Links(id_to, id_fr, ARR#Auto, ARR#Auto, id_target_right);
+	}
+
+	//	fields dependent on check.ctrl
+	if	((check.ctrl == 1) || (check.ctrl == 2))
+	{
+		//	id_target_down needs to be explicitly set not to miss gid(monopolar.lo.id), gid(bipolar.lo.id) or gid(midi.lo.id)
+		if			(check.monopolar.val != 0)	id_target_down	= gid(monopolar.lo.id);
+		else if	(check.bipolar.val != 0)	id_target_down	= gid(bipolar.lo.id);
+		else if	(check.midi.val != 0)		id_target_down	= gid(midi.lo.id);
+		else											id_target_down	= ARR#Auto;
+
+		if (ctrl1 == 7)
+		{
+			//	left midi controller number
+			//		up			ARR#Auto
+			//		down		id_target_down
+			//		left		id_target_left
+			//		right		ARR#Auto
+			Set.Object.Arrow.Links(gid(ctrl.sw)+4, ARR#Auto, id_target_down, id_target_left, ARR#Auto);
+		}
+
+		if (ctrl2 == 7)
+		{
+			//	left midi controller number
+			//		up			ARR#Auto
+			//		down		id_target_down
+			//		left		if the leftmost midi control number field is enabled, then ARR#Auto, else id_target_left
+			//		right		ARR#Auto
+			if (ctrl1 == 7)	Set.Object.Arrow.Links(gid(ctrl.sw)+5, ARR#Auto, id_target_down, ARR#Auto, ARR#Auto);
+			else					Set.Object.Arrow.Links(gid(ctrl.sw)+5, ARR#Auto, id_target_down, id_target_left, ARR#Auto);
+		}
+
+		if (ctrl3 == 7)
+		{
+			//	right midi controller number
+			//		up			ARR#Auto
+			//		down		id_target_down
+			//		left		if either of the other two midi control number fields are enabled, then ARR#Auto, else id_target_left
+			//		right		ARR#Auto
+			if ((ctrl1 == 7) || (ctrl2 == 7))	Set.Object.Arrow.Links(gid(ctrl.sw)+6, ARR#Auto, id_target_down, ARR#Auto, ARR#Auto);
+			else											Set.Object.Arrow.Links(gid(ctrl.sw)+6, ARR#Auto, id_target_down, id_target_left, ARR#Auto);
+		}
+	}
+
+	//	fields dependent on check.monopolar.val
+	if (check.monopolar.val != 0)
+	{
+		id_fr	= gid(monopolar.lo.id);
+		id_to	= gid(monopolar.hi.id);
+
+		//	id_target_down needs to be explicitly set not to miss gid(bipolar.lo.id) or gid(midi.lo.id)
+		if			(check.bipolar.val != 0)	id_target_down	= gid(bipolar.lo.id);
+		else if	(check.midi.val != 0)		id_target_down	= gid(midi.lo.id);
+		else											id_target_down	= ARR#Auto;
+
+		//	rte value from
+		//		up			ARR#Auto
+		//		down		id_target_down
+		//		left		id_target_left
+		//		right		id_to
+		Set.Object.Arrow.Links(id_fr, ARR#Auto, id_target_down, id_target_left, id_to);
+
+		//	rte value to
+		//		up			ARR#Auto
+		//		down		id_target_down+1	(adding 1 increments from .lo.id to .hi.id)
+		//		left		id_fr
+		//		right		ARR#Auto
+		if (id_target_down == ARR#Auto)	Set.Object.Arrow.Links(id_to, ARR#Auto, ARR#Auto,			 id_fr, ARR#Auto);
+		else										Set.Object.Arrow.Links(id_to, ARR#Auto, id_target_down+1, id_fr, ARR#Auto);
+	}
+
+	//	fields dependent on check.bipolar.val
+	if (check.bipolar.val != 0)
+	{
+		id_fr	= gid(bipolar.lo.id);
+		id_to	= gid(bipolar.hi.id);
+
+		//	id_target_down needs to be explicitly set not to miss gid(midi.lo.id)
+		id_target_down	= ARR#Auto;
+		if (check.midi.val != 0)	id_target_down	= gid(midi.lo.id);
+		else								id_target_down	= ARR#Auto;
+
+		//	rte value from
+		//		up			ARR#Auto
+		//		down		id_target_down
+		//		left		id_target_left
+		//		right		id_to
+		Set.Object.Arrow.Links(id_fr, ARR#Auto, id_target_down, id_target_left, id_to);
+
+		//	rte value to
+		//		up			ARR#Auto
+		//		down		id_target_down+1	(adding 1 increments from .lo.id to .hi.id)
+		//		left		id_fr
+		//		right		ARR#Auto
+		if (id_target_down == ARR#Auto)	Set.Object.Arrow.Links(id_to, ARR#Auto, ARR#Auto,			 id_fr, ARR#Auto);
+		else										Set.Object.Arrow.Links(id_to, ARR#Auto, id_target_down+1, id_fr, ARR#Auto);
+	}
+
+	//	fields dependent on check.midi.val
+	if (check.midi.val != 0)
+	{
+		id_fr	= gid(midi.lo.id);
+		id_to	= gid(midi.hi.id);
+
+		//	midi controller value from
+		//		up			ARR#Auto
+		//		down		ARR#Auto
+		//		left		id_target_left
+		//		right		id_to
+		Set.Object.Arrow.Links(id_fr, ARR#Auto, ARR#Auto, id_target_left, id_to);
+
+		//	midi controller value to
+		//		up			ARR#Auto
+		//		down		ARR#Auto
+		//		left		id_fr
+		//		right		ARR#Auto
+		Set.Object.Arrow.Links(id_to, ARR#Auto, ARR#Auto, id_fr, ARR#Auto);
+	}
+end Compute.Filter.Dialog.Arrow.Links;
+
+Compute.Filter.Dialog.New.Cur.Obj: proc public swapable;
+	//	look for the first available field in the dialog
+	//	if none are available then select gid(cur.play.time)
+	if			((check.pitches == 1) || (check.pitches == 2))	Select.New.Cur.Obj(gid(pitch.lo.id), 0, 0);		//	fields dependent on check.pitches are available
+	else if	(check.vel != 0)											Select.New.Cur.Obj(gid(vel.lo.id), 0, 0);			//	fields dependent on check.vel are available
+	else if	(check.dur != 0)											Select.New.Cur.Obj(gid(dur.lo.id), 0, 0);			//	fields dependent on check.dur are available
+	else if	(check.monopolar.val != 0)								Select.New.Cur.Obj(gid(monopolar.lo.id), 0, 0);	//	fields dependent on check.monopolar.val are available
+	else if	(check.bipolar.val != 0)								Select.New.Cur.Obj(gid(bipolar.lo.id), 0, 0);	//	fields dependent on check.bipolar.val are available
+	else if	(check.midi.val != 0)									Select.New.Cur.Obj(gid(midi.lo.id), 0, 0);		//	fields dependent on check.midi.val are available
+	else if	((check.ctrl == 1) || (check.ctrl == 2))																			//	fields dependent on check.ctrl may be available
+	{	if			(ctrl1 == 7)											Select.New.Cur.Obj(gid(ctrl.sw)+4, 0, 0);
+		else if	(ctrl2 == 7)											Select.New.Cur.Obj(gid(ctrl.sw)+5, 0, 0);
+		else if	(ctrl3 == 7)											Select.New.Cur.Obj(gid(ctrl.sw)+6, 0, 0);
+		else																	Select.New.Cur.Obj(gid(cur.play.time), 0, 0);	//	no fields available
+	}
+	else																		Select.New.Cur.Obj(gid(cur.play.time), 0, 0);	//	no fields available
+end Compute.Filter.Dialog.New.Cur.Obj;
+
+GET.FILTER.DIALOG.EVENT: proc (event) returns (fixed) public swapable;
+	dcl event				fixed;
+	dcl pitch(2)			fixed;	//	string for pitches
+	dcl (id_fr, id_to)	fixed;
+	dcl id_obj				lit	'id_to';
+
+	while (true)
+	{
+		if (event != Get.Null.Event)
+		{
+			if (Screen.Event.Group != current.dialog.grp)	return event;
+
+			if (Screen.Event.Info == S#Deposit)
+			{
+				call remove.err;	//	clear any previous error message
+				disable.deposits	= true;
+
+				if (Screen.Event.Id == gid(pitch.sw))
+				{
+					check.pitches	= Fetch.Switch(Screen.Event.Id);
+					Deposit.Switch(Screen.Event.Id+1, check.pitches);			//	yoke pitch.sw's dependent switch
+
+					id_fr	= gid(pitch.lo.id);
+					id_to	= gid(pitch.hi.id);
+
+					if ((check.pitches == 0) || (check.pitches == 3))
+					{
+						Erase.Object(id_fr);	Disable.Object(id_fr);
+						Erase.Object(id_to);	Disable.Object(id_to);
+						Compute.Filter.Dialog.New.Cur.Obj();
+					}
+					else
+					{
+						Enable.Object(id_fr);
+						Enable.Object(id_to);
+						Select.New.Cur.Obj(id_fr, 0, 0);
+					}
+					Compute.Filter.Dialog.Arrow.Links();
+				}
+
+				else if (Screen.Event.Id == gid(vel.sw))
+				{
+					check.vel	= Fetch.Switch(Screen.Event.Id);
+					Deposit.Switch(Screen.Event.Id+1, check.vel);				//	yoke vel.sw's dependent switch
+
+					id_fr	= gid(vel.lo.id);
+					id_to	= gid(vel.hi.id);
+
+					if (check.vel == 0)
+					{
+						Erase.Object(id_fr);	Disable.Object(id_fr);
+						Erase.Object(id_to);	Disable.Object(id_to);
+						Compute.Filter.Dialog.New.Cur.Obj();
+					}
+					else
+					{
+						Enable.Object(id_fr);
+						Enable.Object(id_to);
+						Select.New.Cur.Obj(id_fr, 0, 0);
+					}
+					Compute.Filter.Dialog.Arrow.Links();
+				}
+
+				else if (Screen.Event.Id == gid(dur.sw))
+				{
+					check.dur	= Fetch.Switch(Screen.Event.Id);
+					Deposit.Switch(Screen.Event.Id+1, check.dur);				//	yoke dur.sw's dependent switch
+
+					id_fr	= gid(dur.lo.id);
+					id_to	= gid(dur.hi.id);
+
+					if (check.dur == 0)
+					{
+						Erase.Object(id_fr);	Disable.Object(id_fr);
+						Erase.Object(id_to);	Disable.Object(id_to);
+						Compute.Filter.Dialog.New.Cur.Obj();
+					}
+					else
+					{
+						Enable.Object(id_fr);
+						Enable.Object(id_to);
+						Select.New.Cur.Obj(id_fr, 0, 0);
+					}
+					Compute.Filter.Dialog.Arrow.Links();
+				}
+
+				else if (Screen.Event.Id == gid(ctrl.sw))
+				{
+					check.ctrl	= Fetch.Switch(Screen.Event.Id);
+
+					if ((check.ctrl == 0) || (check.ctrl == 3))
+					{
+						id_obj	= Screen.Event.Id+1; Erase.Object(id_obj);	Disable.Object(id_obj);
+						id_obj	= Screen.Event.Id+2; Erase.Object(id_obj);	Disable.Object(id_obj);
+						id_obj	= Screen.Event.Id+3; Erase.Object(id_obj);	Disable.Object(id_obj);
+						id_obj	= Screen.Event.Id+4; Erase.Object(id_obj);	Disable.Object(id_obj);
+						id_obj	= Screen.Event.Id+5; Erase.Object(id_obj);	Disable.Object(id_obj);
+						id_obj	= Screen.Event.Id+6; Erase.Object(id_obj);	Disable.Object(id_obj);
+						Compute.Filter.Dialog.New.Cur.Obj();
+					}
+					else
+					{
+						Enable.Object(Screen.Event.Id+1);
+						Enable.Object(Screen.Event.Id+2);
+						Enable.Object(Screen.Event.Id+3);
+
+						//	if any of the controllers are 'MIDI' then enable the controller number field below it
+						//	the leftmost enabled field (if any) will be selected as the current object
+						id_obj	= 0;
+						if (ctrl3 == 7)
+						{	id_obj	= Screen.Event.Id+6;	Enable.Object(id_obj);
+						}
+						if (ctrl2 == 7)
+						{	id_obj	= Screen.Event.Id+5;	Enable.Object(id_obj);
+						}
+						if (ctrl1 == 7)
+						{	id_obj	= Screen.Event.Id+4;	Enable.Object(id_obj);
+						}
+						if (id_obj != 0)	Select.New.Cur.Obj(id_obj, 0, 0);
+						//	else the current object will automatically be whatever was current when the switch was activated
+					}
+					Compute.Filter.Dialog.Arrow.Links();
+				}
+
+				else if (Screen.Event.Id == gid(monopolar.sw))
+				{
+					check.monopolar.val	= Fetch.Switch(Screen.Event.Id);
+					Deposit.Switch(Screen.Event.Id+1, check.monopolar.val);	//	yoke monopolar.sw's dependent switch
+
+					id_fr	= gid(monopolar.lo.id);
+					id_to	= gid(monopolar.hi.id);
+
+					if (check.monopolar.val == 0)
+					{
+						Erase.Object(id_fr);	Disable.Object(id_fr);
+						Erase.Object(id_to);	Disable.Object(id_to);
+						Compute.Filter.Dialog.New.Cur.Obj();
+					}
+					else
+					{
+						Enable.Object(id_fr);
+						Enable.Object(id_to);
+						Select.New.Cur.Obj(id_fr, 0, 0);
+					}
+					Compute.Filter.Dialog.Arrow.Links();
+				}
+
+				else if (Screen.Event.Id == gid(bipolar.sw))
+				{
+					check.bipolar.val	= Fetch.Switch(Screen.Event.Id);
+					Deposit.Switch(Screen.Event.Id+1, check.bipolar.val);		//	yoke bipolar.sw's dependent switch
+
+					id_fr	= gid(bipolar.lo.id);
+					id_to	= gid(bipolar.hi.id);
+
+					if (check.bipolar.val == 0)
+					{
+						Erase.Object(id_fr);	Disable.Object(id_fr);
+						Erase.Object(id_to);	Disable.Object(id_to);
+						Compute.Filter.Dialog.New.Cur.Obj();
+					}
+					else
+					{
+						Enable.Object(id_fr);
+						Enable.Object(id_to);
+						Select.New.Cur.Obj(id_fr, 0, 0);
+					}
+					Compute.Filter.Dialog.Arrow.Links();
+				}
+
+				else if (Screen.Event.Id == gid(midi.sw))
+				{
+					check.midi.val	= Fetch.Switch(Screen.Event.Id);
+					Deposit.Switch(Screen.Event.Id+1, check.midi.val);	//	yoke midi.sw's dependent switch
+
+					id_fr	= gid(midi.lo.id);
+					id_to	= gid(midi.hi.id);
+
+					if (check.midi.val == 0)
+					{
+						Erase.Object(id_fr);	Disable.Object(id_fr);
+						Erase.Object(id_to);	Disable.Object(id_to);
+						Compute.Filter.Dialog.New.Cur.Obj();
+					}
+					else
+					{
+						Enable.Object(id_fr);
+						Enable.Object(id_to);
+						Select.New.Cur.Obj(id_fr, 0, 0);
+					}
+					Compute.Filter.Dialog.Arrow.Links();
+				}
+
+				else if (Screen.Event.Id == gid(pitch.lo.id))
+				{
+					//	no need for check.limits because conv.str.to.key# doesn't allow out of range pitches
+					Fetch.String(Screen.Event.Id, pitch);
+					pitch.lo	= conv.str.to.key#(pitch);
+
+					if (pitch.lo == -1)
+					{	//	an out of range pitch was typed, so default to lowest possible value
+						pitch.lo	= 0;
+						Deposit.String(gid(pitch.lo.id), 'C0');
+					}
+					else if (pitch.lo igt pitch.hi)
+					{	//	a new lo was deposited which is greater than the current hi, so we should reset hi to its upper limit
+						pitch.hi	= 84;
+						Deposit.String(gid(pitch.hi.id), 'C7');
+					}
+				}
+				else if (Screen.Event.Id == gid(pitch.hi.id))
+				{
+					//	no need for check.limits because conv.str.to.key# doesn't allow out of range pitches
+					Fetch.String(Screen.Event.Id, pitch);
+					pitch.hi	= conv.str.to.key#(pitch);
+
+					if (pitch.hi == -1)
+					{	//	an out of range pitch was typed, so default to highest possible value
+						pitch.hi	= 84;
+						Deposit.String(gid(pitch.hi.id), 'C7');
+					}
+					else if (pitch.lo igt pitch.hi)
+					{	//	a new hi was deposited which is less than the current lo, so we should reset lo to its lower limit
+						pitch.lo	= 0;
+						Deposit.String(gid(pitch.lo.id), 'C0');
+					}
+				}
+
+				else if (Screen.Event.Id == gid(vel.lo.id))
+				{
+					check.limits(0, 1000);
+					vel.lo	= SCALE.PERCENT.TO.RTE(Fetch.Fixed.Point(Screen.Event.Id));
+
+					if (vel.lo igt vel.hi)
+					{	//	a new lo was deposited which is greater than the current hi, so we should reset hi to its upper limit
+						vel.hi				= rte.max;
+						Deposit.Fixed.Point(gid(vel.hi.id), 1000);
+					}
+				}
+				else if (Screen.Event.Id == gid(vel.hi.id))
+				{
+					check.limits(0, 1000);
+					vel.hi	= SCALE.PERCENT.TO.RTE(Fetch.Fixed.Point(Screen.Event.Id));
+
+					if (vel.lo igt vel.hi)
+					{	//	a new hi was deposited which is less than the current lo, so we should reset lo to its lower limit
+						vel.lo				= 0;
+						Deposit.Fixed.Point(gid(vel.lo.id), 0);
+					}
+				}
+
+				else if (Screen.Event.Id == gid(dur.lo.id))
+				{
+					Fetch.32Bit.Msec(Screen.Event.Id, dur.lo);
+
+					if (com32(dur.lo, dur.hi) == lw#igt)
+					{	//	a new lo was deposited which is greater than the current hi, so we should reset hi to its upper limit
+						copy32(max.duration,	dur.hi);
+						Deposit.32bit.Msec(gid(dur.hi.id), zero.zero, max.duration);	//	<<<<<<<<<<<<	???
+					}
+				}
+				else if (Screen.Event.Id == gid(dur.hi.id))
+				{
+					Fetch.32Bit.Msec(Screen.Event.Id, dur.hi);
+
+					if (com32(dur.lo, dur.hi) == lw#igt)
+					{	//	a new hi was deposited which is less than the current lo, so we should reset lo to its lower limit
+						copy32(zero.zero,	dur.lo);
+						Deposit.32bit.Msec(gid(dur.lo.id), zero.zero, zero.zero);		//	<<<<<<<<<<<<	???
+					}
+				}
+
+				else if (Screen.Event.Id == gid(monopolar.lo.id))
+				{
+					check.limits(0, 1000);
+					monopolar.lo	= SCALE.PERCENT.TO.RTE(Fetch.Fixed.Point(Screen.Event.Id));
+
+					if (monopolar.lo igt monopolar.hi)
+					{	//	a new lo was deposited which is greater than the current hi, so we should reset hi to its upper limit
+						monopolar.hi		= rte.max;
+						Deposit.Fixed.Point(gid(monopolar.hi.id), 1000);
+					}
+				}
+				else if (Screen.Event.Id == gid(monopolar.hi.id))
+				{
+					check.limits(0, 1000);
+					monopolar.hi	= SCALE.PERCENT.TO.RTE(Fetch.Fixed.Point(Screen.Event.Id));
+
+					if (monopolar.lo igt monopolar.hi)
+					{	//	a new hi was deposited which is less than the current lo, so we should reset lo to its lower limit
+						monopolar.lo		= 0;
+						Deposit.Fixed.Point(gid(monopolar.lo.id), 0);
+					}
+				}
+
+				else if (Screen.Event.Id == gid(bipolar.lo.id))
+				{
+					check.limits(-100, 100);
+					bipolar.lo	= Fetch.Fixed.Point(Screen.Event.Id);
+
+					if (bipolar.lo > bipolar.hi)
+					{	//	a new lo was deposited which is greater than the current hi, so we should reset hi to its upper limit
+						bipolar.hi			= 100;
+						Deposit.Fixed.Point(gid(bipolar.hi.id), 100);
+					}
+				}
+				else if (Screen.Event.Id == gid(bipolar.hi.id))
+				{
+					check.limits(-100, 100);
+					bipolar.hi	= Fetch.Fixed.Point(Screen.Event.Id);
+
+					if (bipolar.lo > bipolar.hi)
+					{	//	a new hi was deposited which is less than the current lo, so we should reset lo to its lower limit
+						bipolar.lo			= -100;
+						Deposit.Fixed.Point(gid(bipolar.lo.id), -100);
+					}
+				}
+
+				else if (Screen.Event.Id == gid(midi.lo.id))
+				{
+					check.limits(0, 127);
+					midi.lo	= Fetch.Fixed.Point(Screen.Event.Id);
+
+					if (midi.lo igt midi.hi)
+					{	//	a new lo was deposited which is greater than the current hi, so we should reset hi to its upper limit
+						midi.hi				= 127;
+						Deposit.Fixed.Point(gid(midi.hi.id), 127);
+					}
+				}
+				else if (Screen.Event.Id == gid(midi.hi.id))
+				{
+					check.limits(0, 127);
+					midi.hi	= Fetch.Fixed.Point(Screen.Event.Id);
+
+					if (midi.lo igt midi.hi)
+					{	//	a new hi was deposited which is less than the current lo, so we should reset lo to its lower limit
+						midi.lo				= 0;
+						Deposit.Fixed.Point(gid(midi.lo.id), 0);
+					}
+				}
+
+				else if (Screen.Event.Id == gid(ctrl.sw)+1)
+				{
+					ctrl1		= Fetch.Switch(Screen.Event.Id) - 1;	//	map switch position 0 through 8 to controller -1 through 7	(-1 means no controller)
+					id_obj	= Screen.Event.Id+3;
+
+					if (ctrl1 == 7)	//	midi
+					{
+						Enable.Object(id_obj);
+						Select.New.Cur.Obj(id_obj, 0, 0);
+					}
+					else
+					{
+						Erase.Object(id_obj);	Disable.Object(id_obj);
+						Compute.Filter.Dialog.New.Cur.Obj();
+					}
+					Compute.Filter.Dialog.Arrow.Links();
+				}
+				else if (Screen.Event.Id == gid(ctrl.sw)+2)
+				{
+					ctrl2		= Fetch.Switch(Screen.Event.Id) - 1;	//	map switch position 0 through 8 to controller -1 through 7	(-1 means no controller)
+					id_obj	= Screen.Event.Id+3;
+
+					if (ctrl2 == 7)	//	midi
+					{
+						Enable.Object(id_obj);
+						Select.New.Cur.Obj(id_obj, 0, 0);
+					}
+					else
+					{
+						Erase.Object(id_obj);	Disable.Object(id_obj);
+						Compute.Filter.Dialog.New.Cur.Obj();
+					}
+					Compute.Filter.Dialog.Arrow.Links();
+				}
+				else if (Screen.Event.Id == gid(ctrl.sw)+3)
+				{
+					ctrl3		= Fetch.Switch(Screen.Event.Id) - 1;	//	map switch position 0 through 8 to controller -1 through 7	(-1 means no controller)
+					id_obj	= Screen.Event.Id+3;
+
+					if (ctrl3 == 7)	//	midi
+					{
+						Enable.Object(id_obj);
+						Select.New.Cur.Obj(id_obj, 0, 0);
+					}
+					else
+					{
+						Erase.Object(id_obj);	Disable.Object(id_obj);
+						Compute.Filter.Dialog.New.Cur.Obj();
+					}
+					Compute.Filter.Dialog.Arrow.Links();
+				}
+				else if (Screen.Event.Id == gid(ctrl.sw)+4)	midi.ctrl1	= Fetch.Fixed.Point(Screen.Event.Id);
+				else if (Screen.Event.Id == gid(ctrl.sw)+5)	midi.ctrl2	= Fetch.Fixed.Point(Screen.Event.Id);
+				else if (Screen.Event.Id == gid(ctrl.sw)+6)	midi.ctrl3	= Fetch.Fixed.Point(Screen.Event.Id);
+
+				disable.deposits	= false;
+			}	//	end of if (Screen.Event.Info == S#Deposit)
+
+			else if	(Screen.Event.Info == S#MouseSelect)
+			{
+				if (Screen.Event.Id == gid(ok.button))
+				{	/*	OK BUTTON IS LABELED AS "DONE", closes dialog box and leaves	*/
+					pid(sav.cur.dialog, 0);	//	close.dialog() won't do this automatically since this is ok.button rather than cancel.button
+					close.dialog();
+				}
+				else if (Screen.Event.Id == gid(cancel.button))
+				{
+					/*	CANCEL BUTTON IS LABELED AS "RESET" AND THAT'S ALL IT DOES		*/
+					Deposit.Switch(gid(pitch.sw),		0);
+					Deposit.Switch(gid(vel.sw),		0);
+					Deposit.Switch(gid(dur.sw),		0);
+					Deposit.Switch(gid(ctrl.sw),		0);
+					Deposit.Switch(gid(monopolar.sw),0);
+					Deposit.Switch(gid(bipolar.sw),	0);
+					Deposit.Switch(gid(midi.sw),		0);
+				}
+			}	//	end of if (Screen.Event.Info == S#MouseSelect)
+		}	//	end of if (event != Get.Null.Event)
+
+		event	= Get.Next.Edit.Screen.Event;
+	}	//	end of infinite loop
+end GET.FILTER.DIALOG.EVENT;
+
+
+/////////////////////////////	procedures for FIT TO TIME dialog
+/////////////////////////////	status:	COMPLETED
+
+GET.FIT.TIME.DIALOG.EVENT: proc (event) returns (fixed) public swapable;
+	dcl event				fixed;
+	dcl pct					fixed;	/*	percent of change in region		*/
+	dcl new.time	(1)	fixed;	/*	new end time of region after fit	*/
+	dcl new.length	(1)	fixed;	/*	new length of region					*/
+	dcl val32		(1)	fixed;
+
+	while (true)
+	{
+		if (event != Get.Null.Event)
+		{
+			if (Screen.Event.Group != current.dialog.grp)	return event;
+
+			if (Screen.Event.Info == S#Deposit)
+			{
+				call remove.err;	//	clear any previous error message
+
+				if
+				(	(Screen.Event.Id == gid(fit.time))
+				||	(Screen.Event.Id == gid(fit.length))
+				||	(Screen.Event.Id == gid(fit.pct))
+				)
+				{
+					//	put current time length of region in val32
+					Fetch.32Bit.Msec(gid(time3), val32);
+
+					if (Screen.Event.Id == gid(fit.time))
+					{
+						Fetch.32Bit.Msec(Screen.Event.Id, new.time);
+						sub32(new.time, start, new.length);		/*	new end time - region start	*/
+						pct	= conv.ratio.to.percent(new.length, val32);
+					}
+					else if (Screen.Event.Id == gid(fit.length))
+					{
+						Fetch.32Bit.Msec(Screen.Event.Id, new.length);
+						add32(start, new.length, new.time);
+						pct	= conv.ratio.to.percent(new.length, val32);
+					}
+					else	//	if (Screen.Event.Id == gid(fit.pct))
+					{
+						pct	= Fetch.Fixed.Point(Screen.Event.Id);
+	
+						copy32(val32, bitmsbarray);
+						ratio_multiply(pct, 1000);
+						copy32(bitmsbarray, new.length);
+	
+						add32(start, new.length, new.time);
+					}
+
+					DISABLE.DEPOSITS	= TRUE;
+					Deposit.32bit.Msec(gid(fit.time), new.time, Zero.Zero);	/*	update new time field	*/
+					Deposit.32bit.Msec(gid(fit.length), start, new.length);	/*	update new length field	*/
+					Deposit.Fixed.Point(gid(fit.pct), pct);						/*	update percent change field	*/
+					DISABLE.DEPOSITS	= FALSE;
+				}
+			}	//	end of if (Screen.Event.Info == S#Deposit)
+
+			else if	(Screen.Event.Info == S#MouseSelect)
+			{
+				if (Screen.Event.Id == gid(ok.button))	/*	want to do the operation	*/
+				{
+					work.msg(1);
+
+					if (undo.enabled != false) save.undoseq();
+
+					pct	= Fetch.Fixed.Point(gid(fit.pct));
+					Fetch.32Bit.Msec(gid(fit.length), new.length);
+					Fetch.32Bit.Msec(gid(fit.time), new.time);
+
+					if (Fetch.Switch(gid(fit.dur.switch)) != false)	//	if we want to scale durations as well
+					{
+						str32(pct, 0, val32);
+						Scale.Duration(val32, 1, zero.zero, zero.zero);
+						//	NOTE: When "STAY AT NEW SPEED" is selected, we need to scale durations after the region also!
+						//	This is currently not happening.
+						//	ALSO NOTE: To properly position end times when FIT GRADUALLY is selected, we will have to adjust
+						//	durations on a note by note basis in fit.note nested in modify.bounce.
+					}
+
+					Fit.Region(new.time, new.length, pct, Fetch.Switch(gid(fit.method)), Fetch.Switch(gid(fit.cutoff)));
+
+					work.msg(0);
+				}	//	end of user clicked the Okay button
+				else if (Screen.Event.Id == gid(cancel.button))	close.dialog();
+			}	//	end of if (Screen.Event.Info == S#MouseSelect)
+		}	//	end of if (event != Get.Null.Event)
+
+		event	= Get.Next.Edit.Screen.Event;
+	}	//	end of infinite loop
+end GET.FIT.TIME.DIALOG.EVENT;
+
+
+/////////////////////////////	procedures for JUSTIFY dialog
+/////////////////////////////	status:	COMPLETED
+
+GET.JUSTIFY.DIALOG.EVENT: proc (event) returns (fixed) public swapable;
+	dcl event	fixed;
+	dcl info(3)	fixed;	/*	offset, range, percent	*/
+								/*	offset  : grid offset	*/
+								/*	range   : how far from (or close to) the grid does a note have to be to get justified	*/
+								/*	percent : what percent of the justify "distance" will be used	*/
+								/*	- i.e. 100% - justify exactly to the beat, 50% justify half way to the beat	*/
+	while (true)
+	{
+		if (event != Get.Null.Event)
+		{
+			if (Screen.Event.Group != current.dialog.grp)	return event;
+
+			if (Screen.Event.Info == S#Deposit)
+			{
+				call remove.err;	//	clear any previous error message
+
+				if (Screen.Event.ID == gid(just.crm)) then do;
+					Check.Limits(1, 48);
+					store.syncl.param(3, 0, crm.l, Fetch.Fixed.Point(Screen.Event.ID));
+				end;
+				else if (Screen.Event.Id == gid(just.pct))		Check.Limits(0, 100);
+				else if (Screen.Event.Id == gid(just.range))		Check.Limits(-100, 100);
+				else if (Screen.Event.Id == gid(just.offset))	Check.Limits(-1000, 1000);
+				else if (Screen.Event.Id == gid(filter.sw))		apply.filter	= Fetch.Switch(Screen.Event.Id);
+			}	//	end of if (Screen.Event.Info == S#Deposit)
+
+			else if	(Screen.Event.Info == S#MouseSelect)
+			{
+				if (Screen.Event.Id == gid(ok.button))	/*	want to do the operation	*/
+				{
+					work.msg(1);
+
+					if (undo.enabled != false) save.undoseq();
+
+					info(0)	= Fetch.Fixed.Point(gid(just.offset));	/*	offset	*/
+					info(1)	= Fetch.Fixed.Point(gid(just.range ));	/*	range		*/
+					info(2)	= Fetch.Fixed.Point(gid(just.pct   ));	/*	percent	*/
+
+					/*	DEBUG: for now, assume that start & finish are on	*/
+					/*	nice clean boundaries, obviously something needs	*/
+					/*	to be worked out if this is not true.					*/
+
+					Justify.Region(start, finish, info);
+
+					work.msg(0);
+				}	//	end of user clicked the Okay button
+				else if (Screen.Event.Id == gid(cancel.button))	close.dialog();
+			}	//	end of if (Screen.Event.Info == S#MouseSelect)
+		}	//	end of if (event != Get.Null.Event)
+
+		event	= Get.Next.Edit.Screen.Event;
+	}	//	end of infinite loop
+end GET.JUSTIFY.DIALOG.EVENT;
+
+
+/////////////////////////////	procedures for MIDI MAPPING dialog
+/////////////////////////////	status:	COMPLETED
+
+GET.MIDI.DIALOG.EVENT: proc (event) returns (fixed) public swapable;
+	dcl event	fixed;
+	dcl s1(3)	fixed;
+	dcl trk		fixed;
+	dcl ptr		fixed;
+	dcl id_obj	fixed;
+
+	while (true)
+	{
+		if (event != Get.Null.Event)
+		{
+			if (Screen.Event.Group != current.dialog.grp)	return event;
+
+			if (Screen.Event.Info == S#Deposit)
+			{
+				call remove.err;	//	clear any previous error message
+
+				if (max.midinet.chan == 0)	//	if using old (non-midinet) midi system
+				{
+					if
+					(	(Screen.Event.Id == gid(track.table1))
+					||	(Screen.Event.Id == gid(track.table2))
+					)
+					{
+						if (Screen.Event.Id == gid(track.table1))
+						{
+							id_obj	= gid(tracks1);
+							ptr		= Screen.Event.Table.Col+(2+0);
+						}
+						else	//	if (Screen.Event.Id == gid(track.table2))
+						{
+							id_obj	= gid(tracks2);
+							ptr		= Screen.Event.Table.Col+(2+8);
+						}
+
+						Fetch.Table(Screen.Event.Id, Screen.Event.Table.Col, Screen.Event.Table.Row);
+						Fetch.String(id_obj, s1);
+						if			(UCASE(byte(s1, 0)) == asc.k)	trk	= -1;		//	let the user type "kbd", "key", "kyb", "k"... 
+						else if	(EQSTR(S1, 'OFF') == 0)			trk	= 0;
+						else do;
+							ertyp	= 0;
+							trk	= CONV.STR.TO.FIXED(s1, 0, 0);
+							if (ertyp != 0)							trk	= midi.mapping(ptr)-1;	//	leave the track number as it was
+							else if (trk igt 200)					trk	= 200;
+						end;
+
+						if (trk+1 != midi.mapping(ptr))
+						{
+							midi.mapping(ptr)	= trk+1;
+							clear.poly.timbre.notes(midi.mapping(ptr));
+							new.seq.info	= new.seq.info | 8;
+						}
+
+						if			(trk == -1)	COPY.STRING(' Kbd', s1);
+						else if	(trk == 0)	COPY.STRING(' Off', s1);
+						else 		CONV.FIXED.TO.STR(trk, 0, 4, cf#right\cf#unsigned, s1);
+						disable.deposits	= true;
+						Deposit.String(id_obj, s1);
+						Deposit.Table(Screen.Event.Id, Screen.Event.Table.Col, Screen.Event.Table.Row);
+							//	Update.Object(Screen.Event.Id);	//	check this flag:	O#ACT.Update.On.Dep
+						disable.deposits	= false;
+					}
+					else if (Screen.Event.Id == gid(poly.timbre.switch))
+					{
+						poly.timbre.midi.control	= Fetch.Switch(Screen.Event.Id);
+
+						if ((POLY.TIMBRE.MIDI.CONTROL | OMS.MIDI.ENABLED | MAX.MIDINET.CHAN) != 0)
+							MIDI.INPUT.ENABLED	= true;
+						else
+							MIDI.INPUT.ENABLED	= false;
+
+						new.seq.info	= new.seq.info \ 8;
+
+						do case poly.timbre.midi.control;
+							{	//	CASE 0:	OFF	- midi mapped to keyboard, so enable input.switch and its label
+								do trk = 2 to 17;		//	clear any previous notes sounding on midi-mapped tracks
+									//	why would we not clear notes sounding on the keyboard if the incoming midi was playing it?
+									if midi.mapping(trk)>1 then call clear.poly.timbre.notes(midi.mapping(trk));	//	was midi mapped; actual not midi mapped!		???????
+								end;
+								id_obj	= gid(input.switch);	Enable.Object(id_obj);
+								id_obj	= id_obj - 1;			Enable.Object(id_obj);
+							}
+							{	//	CASE 1:	ON		- midi mapped to recorder, so erase and disable input.switch and its label
+								call clear.all.notes;	//	clear any previous notes sounding on keyboard
+								id_obj	= gid(input.switch);	Erase.Object(id_obj);	Disable.Object(id_obj);
+								id_obj	= id_obj - 1;			Erase.Object(id_obj);	Disable.Object(id_obj);
+							}
+						end;	//	end of do case poly.timbre.midi.control
+					}
+					else if (Screen.Event.Id == gid(input.switch))
+					{
+						call clear.all.notes;
+						midi.input.chan	= Fetch.Switch(Screen.Event.Id)-2;
+					}
+				}	//	end of if using old (non-midinet) midi system
+				else
+				{
+					call Use.MIDInet.Err;
+					call Fill.MIDI.In.Table;
+				}
+			}	//	end of if (Screen.Event.Info == S#Deposit)
+
+			else if	(Screen.Event.Info == S#MouseSelect)
+			{
+				if (Screen.Event.Id == gid(set.enables.button))
+				{
+					do case set.enables;
+						do;
+							set.enables	= 1;
+							call highlight.object(Screen.Event.Id, ATTR#AltIntensity\ATTR#Reverse);
+							call turn.on.enable.trks;
+						end;
+						do;
+							set.enables	= 0;
+							call highlight.object(Screen.Event.Id, ATTR#Normal);
+							call update.trk.mgr(true, true);
+						end;
+					end;
+				}
+
+				if (Screen.Event.Id == gid(clr.enables.button))
+				{
+					if (recd == 0) or (recd.trk == 0) then do;
+						call Flash.Object(Screen.Event.Id);
+						call Set.Track.Enable.State(num.kbd.tracks, first.lod.track-1, 0);
+					end;
+				}
+			}	//	end of if (Screen.Event.Info == S#MouseSelect)
+		}	//	end of if (event != Get.Null.Event)
+
+		event	= Get.Next.Edit.Screen.Event;
+	}	//	end of infinite loop
+end GET.MIDI.DIALOG.EVENT;

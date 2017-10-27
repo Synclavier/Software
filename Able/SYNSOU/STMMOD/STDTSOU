@@ -1,0 +1,1232 @@
+/*	:SYNSOU:STMMOD:STDTSOU - $TITLE transfer file to poly from dtd, and to dtd from poly
+
+Modified:
+2001/02/02 - TY  - Commented out obnoxious unsolicited crossfades in TRANSFER.CUE.TO.POLY()
+1999/10/16 - TY  - Modified "<filename> Active on Keyboard" message to include patch info
+1991/11/18 - PF  - More quick update support
+1990/09/04 - cj  - allow poly transfer of > 16 meg files.
+1989/09/21 - SJS - added support for 'THREE' algorithm, changed DSP.CUE
+						 to check new.dtd.info since run.syn = 0
+1989/05/31 - TSS - Removed some debug prints in BOOT.ALGORITHM
+1989/05/02 - SJS - Merged code from SGS for Optical disk support
+1989/04/14 - SJS - changed speech to 'ONE' and music to 'TWO'
+1988/12/13 - cj  - changed 'smart' to 'speech'
+1988/10/25 - cj  - put in basic error checking & messages for TSM items.
+1988/10/15 - TSS - Keep protocol output running during Poly transfer calls
+1988/09/18 - cj  - allow wave display of multi track cues (gets first track)
+1988/09/12 - MWH - Add DSP interface
+1988/07/27 - cj  - added mousrdcl
+1988/04/27 - MWH - Split from STEDSOU since STEDLIB is too big
+1988/04/14 - MWH - Move short fade-in/fade-out to POLYSOU
+1988/03/30 - MWH - Add LOD wave display data compression and transfer
+1987/12/16 - MWH - Merge poly updates with N-Final plus AEE sources
+1987/11/12 - MWH - Make timer comparisons unsigned to fix "30 sec hang"
+1987/08/26 - MWH - Update all to support max 4 poly bins, 512mb/bin
+*/
+
+Module STDTMOD;	/*	Direct-to-Disk <--> Poly transfer routines	*/
+
+insert ':synlits:comlits';		/*	compilation literals	*/
+insert ':synlits:asciilit';	/*	ASCII literals	*/
+insert ':synlits:globlits';	/*	good globals	*/
+insert ':synlits:samplits';	/*	sound file and sampling literals	*/
+insert ':synlits:fcodlits';	/*	function code literals for FM and POLY synths	*/
+insert ':synauxs:dsplits';		/*	literals for DSP70	*/
+
+insert ':-xpl:scsilits';
+insert ':-xpl:catrout';
+insert ':-xpl:intrprtr';
+
+insert ':synmods:globdcl';
+insert ':synmods:xmemdcl';		/*	external memory routines and declarations	*/
+insert ':synmods:polydcl';		/*	for accessing poly memory	*/
+insert ':synmods:mathdcl';		/*	for computations	*/
+insert ':synmods:errdcl';		/*	for error handling	*/
+insert ':synmods:ttydcl';		/*	terminal	*/
+insert ':synmods:getdcl';		/*	get event routines	*/
+insert ':synmods:getvdcl';		/*	for new.poly.contents	*/
+insert ':synmods:tformdcl';	/*	terminal formatting routines	*/
+insert ':synmods:loddcl';		/*	lod code for stm file transfer	*/
+insert ':synmods:prodcl';		/*	code to run protocol output	*/
+insert ':synmods:tprimdcl';	/*	code to run protocol output	*/
+
+insert ':synmods:steddcl';		/*	editing functions including CREATE.SOUND.FILE	*/
+insert ':synmods:stutldcl';	/*	STM utility routines	*/
+
+insert ':synmods:syncldcl';	/*	synclavier real time externals	*/
+insert ':synmods:mousrdcl';	/*	for m$presses						*/
+
+insert ':synmods:audmods:aglobdcl';	/*	for AEE cue dcl	*/
+
+/*	compute cue lengths in sectors from cue image in ext memory	*/
+/*	note: cue image must be converted to absolute sample #'s		*/
+/*	before this routine is called											*/
+
+COMPUTE.CUE.LENGTH.IN.SECTORS:proc (XMEM.PTR,SMSB,EMSB,LMSB) public swapable;
+	dcl (xmem.ptr)	fixed;
+	dcl (smsb)		array;
+	dcl (emsb)		array;
+	dcl (lmsb)		array;
+
+	write(mam)=xmem.ptr;				/*	read cue data into internal	*/
+	write(mal)=cue.s.msb;			/*	memory variables					*/
+
+	smsb (lw#msb)= read(mdi);		/*	get disk sample # start			*/
+	smsb (lw#lsb)= read(mdi);
+	emsb (lw#msb)= read(mdi);		/*	disk sample # end					*/
+	emsb (lw#lsb)= read(mdi);
+
+	call add16(128,smsb);							/*	round up by 128				*/
+	smsb(lw#lsb) = smsb(lw#lsb) & "177400";	/*	round start down to sector	*/
+
+	call add16(128,emsb);							/*	round up by 128				*/
+	emsb(lw#lsb) = emsb(lw#lsb) & "177400";	/*	compute end rounded up		*/
+
+	call shr32(smsb,8);								/*	compute sector addresses	*/
+	call shr32(emsb,8);								/*	of data							*/
+
+	call sub32(emsb,smsb,lmsb);					/*	get # of sectors in cue		*/
+
+end COMPUTE.CUE.LENGTH.IN.SECTORS;
+
+Fetch.Entire.Cue:proc(id#,error) swapable;
+	dcl id#		fixed;
+	dcl error	array;
+	dcl i			fixed;
+
+	if dtd.max.secs=0 then do;		/*	see if dtd not running	*/
+		call no.direct.to.disk;		/*	give an error message	*/
+		return 0;
+	end;
+
+	/*	if passed id#, then fetch entire cue into scsi ptr		*/
+	/*	if passed 0,   then cue has already been loaded			*/
+	/*	into the dtd temp cue area.  In this case it is also	*/
+	/*	already sitting in scsi.ptr									*/
+
+	if id#<>0 then do;					/*	fetch entire dtd cue into our	*/
+		write(mam) = SCSI.Ptr;			/*	scsi ptr ext memory buffer		*/
+		write(mdi) = id#;
+		write(mdi) = 2;					/*	get entire cue						*/
+
+		call Send.To.Lod(182,4);		/*	fetch entire cue record			*/
+
+		if dtd.cue# = id# then do;		/*	if we got it, then send it		*/
+			write(mam) = Scsi.Ptr;		/*	back over there to				*/
+			write(mal) = CUE.RLEN;		/*	store in tcue						*/
+			i			  = read(md);
+
+			call Send.To.Lod(137,shl(i,1));
+		end;
+	end;
+	else dtd.cue# = 0;
+
+	if (dtd.cue#<>id#)
+	then do;									/*	make sure we found it	*/
+		call copy.string('Invalid Cue Id Number (System Error)',error);
+		call set.error(err.lod,error);
+		return 0;
+	end;
+
+	return 1;
+end Fetch.Entire.Cue;
+
+Check.Transfer.Name:proc (name,dname,lmsb,error) swapable;
+	dcl name		array;
+	dcl dname	array;
+	dcl lmsb		array;
+	dcl error	array;
+	dcl i			fixed;
+
+	write(mam)=scsi.ptr;
+	write(mal)=cue.name;
+	call copy.in(addr(name(0)),shr(cue.name.l,1)+1);
+
+	if name(0) igt cue.name.l then name(0) = cue.name.l;
+
+	do i=0 to name(0)-1;		/*	map spaces to underlines	*/
+		if byte(name,i) = sp then call pbyte(name,i,asc.unl);
+	end;
+
+	call UpperCase.String(name,name);
+
+	if name(0) igt 8 then name(0) = 8;
+
+	if name(0)=0 then call copy.string('.CUEBUFF',name);
+
+	call copy.string(name,dname);		/*	save original name for display	*/
+
+	do i=name(0) to 7;
+		call pbyte(name,i,0);
+	end;
+
+	name(0) = 8;
+
+	call copy.string(name,fnbuf);
+   lnbuf(0)=0;
+	if ps.search<>0 then do;						/*	see if file by this name is already in memory	*/
+		call PS.DEALLOCATE(sfile.base);			/*	if so then glom it						*/
+		call psmwrite(sfile.base,0,bl.fname);	/*	and trash it completely					*/
+		write(psd) = 0; write(psd) = 0;
+		write(psd) = 0; write(psd) = 0;
+	end;
+
+	if (lmsb(lw#msb) <>  0    )	/*	detect sound file too long	*/
+	or (lmsb(lw#lsb) igt 65500)
+	then do;
+		call copy.string('Cue is too long to transfer to poly',error);
+		call set.error(err.lod,error);
+		return 0;
+	end;
+
+	if   lmsb(lw#lsb) = 0			/*	if start time = end time	*/
+	then do;
+		call copy.string('Start Time and End Time Are Equal - Cannot Transfer Cue',error);
+		call set.error(err.lod,error);
+		return 0;
+	end;
+
+	return 1;
+
+end Check.Transfer.Name;
+
+/*	pass ID# to this routine.  If the Id# is zero, then routine	*/
+/*	assumes the cue record is already sitting in Scsi.Ptr			*/
+
+TRANSFER.CUE.TO.POLY:PROC (ID#) public swapable;
+	dcl id#									fixed;
+	dcl (i,j,k)								fixed;
+	dcl (smsb) (1)							fixed;
+	dcl (emsb) (1)							fixed;
+	dcl (lmsb) (1)							fixed;
+	dcl (tmsb) (1)							fixed;
+	dcl (trks)								fixed;
+	dcl (name) (shr(cue.name.l,1))	fixed;
+	dcl (dname) (4)						fixed;
+	dcl (#trks)								fixed;
+	dcl srate								fixed;
+	dcl stereo								fixed;
+	dcl error(40)							fixed;
+	dcl max									fixed;
+	dcl first.track						fixed;
+	dcl second.track						fixed;
+	dcl timeout								fixed;
+	dcl timedout							fixed;
+	dcl bufbase								fixed;
+	dcl bufsecs								fixed;
+	dcl loadingstopped					fixed;
+	dcl rec(POLY.HIST.REC.LEN-1)		fixed;
+
+	push.system.pdl;					/*	get us some stack storage	*/
+
+	if Fetch.Entire.Cue(id#,error)=0
+	then do;
+		pop.system.pdl;
+		return 0;
+	end;
+
+	/*	read in and compute sector lengths	*/
+
+	call COMPUTE.CUE.LENGTH.IN.SECTORS (SCSI.PTR,SMSB,EMSB,LMSB);
+
+	write(mam)=scsi.ptr;
+	write(mal)=cue.trks;
+	trks = read(mdi) & dtd.avail.trks;
+
+	write(mal)=cue.srate;
+	srate = read(mdi);
+
+	if Check.Transfer.Name(name,dname,lmsb,error)=0 then do;
+		pop.system.pdl;
+		return 0;
+	end;
+
+	#trks = 0;							/*	count # of tracks to xfer	*/
+
+	do i=0 to 15;
+		if (trks&bits(i))<>0 then do;
+			#trks=#trks+1;
+			if #trks=1 then first.track  = i;
+			if #trks=2 then second.track = i;
+		end;
+	end;
+
+	if #trks = 0 then do;
+		call copy.string('Cue Has No Available Tracks Defined - Cannot Transfer',error);
+		call set.error(err.lod,error);
+		pop.system.pdl;
+		return 0;
+	end;
+
+	if #trks > 2 then do;
+		call copy.string('Cue Has More Than Two Tracks - Cannot Transfer',error);
+		call set.error(err.lod,error);
+		pop.system.pdl;
+		return 0;
+	end;
+
+	call ERASE.KEYBOARD.TIMBRE;		/*	get rid of timbre #0				*/
+
+	i = LMSB(LW#LSB);						/*	get # of sectors to xfer		*/
+
+	if #trks = 2 then do;				/*	for stereo sound file, will	*/
+		if (i igt 32750)					/*	need twice as much memory		*/
+		then do;
+			call copy.string('Stereo cue is too long to transfer to poly',error);
+			call set.error(err.lod,error);
+			pop.system.pdl;
+			return 0;
+		end;
+
+		i=shl(i,1);							/*	double data sectors if stereo	*/
+
+	end;
+
+	i = CREATE.NAMED.SOUND.FILE(NAME,I + SHR(BL.POLY,8),
+										 srate,0,(#trks = 2));
+
+	if i=0 then do;						/*	must be out of room in poly	*/
+		pop.system.pdl;
+		return 0;
+	end;
+
+	if #trks = 2 then do;				/*	get ext mem for stereo merge	*/
+		call GET.LARGE.TEMPORARY.XMEM.BUFFER (loc(addr(bufbase)));
+		if bufsecs igt 40 then bufsecs = 40;
+	end;
+
+	if  (new.pan<>0)
+	then do;
+		call CLEAR.DISPLAY;
+		call EMIT.STRING( 0,'Transferring Cue');
+		call EMIT.STRING(16,'To Poly:');
+		call EMIT.STRING(24,dname);
+		/*	Force an immediate update to the VK display on remote devices	*/
+		/*	to provide an immediate update of the VK window display while	*/
+		/*	we are transferring the sound file:										*/
+
+		call Flush.VK.Display.To.Termulators;
+	end;
+
+	call Send.To.Lod(68,0);						/*	stop all other data transfer	*/
+														/*	and start function data			*/
+														/*	read operation						*/
+
+	i=0;												/*	this will be sector counter	*/
+
+	run.syn = 0;									/*	keep button panel items from moving poly around and gloming psmwrite pointers	*/
+	store.dtd.info = 3;							/*	enable store of poly data					*/
+	if #trks = 2 then max=shr(bufsecs,1);	/*	limit to bufsecs avail if stereo xfer	*/
+	else              max=20;					/*	else try to speed up the transfer		*/
+
+	timeout	= real.milliseconds;				/*	must get disk data every 20 sec	*/
+	timedout	= 0;									/*	set true if timeout occurs		*/
+
+	/*	copy data until finished or error encountered	*/
+	do while (i<>lmsb(lw#lsb)) & ((real.milliseconds-timeout) ILT 20000) & (loadingstopped=0);
+
+		j = lmsb(lw#lsb) - i;		/*	get sectors left to copy	*/
+
+		if j igt max then j = max;	/*	limit to max					*/
+
+		k = 0;							/*	accumulate length here		*/
+
+		call psmwrite(sfile.base, shr(bl.poly,8) + i*#trks,0);	/*	set up pointers	*/
+
+		do while (k < j) & ((real.milliseconds-timeout) ILT 20000);	/*	read sectors from lod into poly	*/
+
+			timeshare_with_host();
+
+			lod.xfer.len = 0;	/*	initialize length read to 0	*/
+
+			call copy32(smsb,tmsb);		/*	get temp address	*/
+			call add16 (i+k,tmsb);		/*	comput disk addr	*/
+			write(mam)=scsi.ptr;			/*	set up dtd info	*/
+			write(mdi)=first.track;		/*	track #				*/
+			write(mdi)=tmsb(lw#msb);	/*	disk address		*/
+			write(mdi)=tmsb(lw#lsb);
+			write(mdi)=shl(j-k,8);		/*	# of words to xfer	*/
+
+			call send.to.lod(192,8);	/*	read lod data into poly memory (maybe)	*/
+
+			if lod.xfer.len<>0 then do;
+				timeout = real.milliseconds;
+				k = k + shr(lod.xfer.len,8);	/*	accumulate sectors read (if any)	*/
+			end;
+			
+			// Else no data; wait
+			else
+				chill.out.and.run.syn();
+		end;
+
+		if k<>j then timedout = 1;
+
+		if #trks = 2 then do;		/*	see if stereo transfer needed	*/
+
+			k = 0;						/*	accumulate length here			*/
+
+			do while (k < j) & ((real.milliseconds - timeout) ILT 20000);
+
+				timeshare_with_host();
+
+				lod.xfer.len = 0;		/*	initialize length to zero		*/
+
+				call copy32(smsb,tmsb);		/*	get temp address	*/
+				call add16 (i+k,tmsb);		/*	comput disk addr	*/
+				write(mam)=scsi.ptr;			/*	set up dtd info	*/
+				write(mdi)=second.track;	/*	track #				*/
+				write(mdi)=tmsb(lw#msb);	/*	disk address		*/
+				write(mdi)=tmsb(lw#lsb);
+				write(mdi)=shl(j-k,8);		/*	# of words to xfer	*/
+
+				call send.to.lod(192,8);	/*	hope to get data	*/
+
+				if lod.xfer.len<>0 then do;
+					timeout = real.milliseconds;
+					k = k + shr(lod.xfer.len,8);	/*	accumulate sectors read (if any)	*/
+				end;
+				
+				// Else no data; wait
+				else
+					chill.out.and.run.syn();
+			end;
+
+			if k<>j then timedout = 1;
+
+			/*	now merge data to create stereo sf	*/
+
+			write(mam) = bufbase;
+			call psmread(sfile.base, shr(bl.poly,8) + i*#trks,0);	/*	set up pointers	*/
+
+			do k=0 to shl(j,8)-8 by 8;		/*	loop quickly to save time	*/
+				write(mdi) = read(psd);		/*	read 1 word from poly	*/
+				write("324") = read(mdi);	/*	write to xmem.  advance	*/
+				write(mdi) = read(psd);		/*	xmem pointer by two		*/
+				write("324") = read(mdi);	/*	so every other word is	*/
+				write(mdi) = read(psd);		/*	stored						*/
+				write("324") = read(mdi);
+				write(mdi) = read(psd);
+				write("324") = read(mdi);
+				write(mdi) = read(psd);
+				write("324") = read(mdi);
+				write(mdi) = read(psd);
+				write("324") = read(mdi);
+				write(mdi) = read(psd);
+				write("324") = read(mdi);
+				write(mdi) = read(psd);
+				write("324") = read(mdi);
+			end;
+
+			write(mam) = bufbase;			/*	reset xmem pointer		*/
+
+			do k=0 to shl(j,8)-8 by 8;		/*	now write poly data to	*/
+				write("324") = read(mdi);	/*	every other sample		*/
+				write(mdi) = read(psd);		/*	beginning with 1			*/
+				write("324") = read(mdi);
+				write(mdi) = read(psd);
+				write("324") = read(mdi);
+				write(mdi) = read(psd);
+				write("324") = read(mdi);
+				write(mdi) = read(psd);
+				write("324") = read(mdi);
+				write(mdi) = read(psd);
+				write("324") = read(mdi);
+				write(mdi) = read(psd);
+				write("324") = read(mdi);
+				write(mdi) = read(psd);
+				write("324") = read(mdi);
+				write(mdi) = read(psd);
+			end;
+
+			/*	now copy the merged data back out	*/
+			/*	to poly memory								*/
+
+			write(mam) = bufbase;
+			call psmwrite(sfile.base, shr(bl.poly,8) + i*#trks,0);	/*	set up pointers	*/
+
+			do k=0 to shl(j,1)-1;			/*	do each sector quickly	*/
+				rpc 256;							/*	ie max it out			*/
+				write(psd) = read(mdi);
+			end;
+		end;
+
+		i = i + j;				/*	account for this many sectors transferred	*/
+
+		if STOP.HELD<>0 then do;	/*	check for vk stopped button	*/
+			loadingstopped = 1;
+		end;
+
+	end;
+
+	if (i<>lmsb(lw#lsb)) then timedout = 1;
+
+	run.syn = 1;				/*	re allow run syns now							*/
+	store.dtd.info = 0;		/*	dis allow data storage							*/
+
+	call send.to.lod(33,0);	/*	restore normal play buffers					*/
+
+	if (new.pan<>0)
+	then do;
+		call CLEAR.DISPLAY;
+	end;
+
+	if timedout<>0 then do;			/*	error was encountered - data not avail		*/
+		call psmwrite(sfile.base,0,bl.fname);	/*	glom name to erase file	*/
+		write(psd)=0; write(psd)=0;
+		write(psd)=0; write(psd)=0;
+
+		if loadingstopped<>0 then do;
+			call DISPLAY.ERR(30);	/*	LOADING HALTED	*/
+			call copy.string('Loading Halted',error);
+			call set.error(err.lod,error);
+		end;
+		else do;
+			call copy.string('Track Information Cannot Be Read (timeout)',error);
+			call set.error(err.lod,error);
+		end;
+		pop.system.pdl;
+		return 0;
+	end;
+
+	call PS.SETUP(sfile.base);		/*	update Synclavier info for modified sound file	*/
+
+	/*	now put this sound file on the keyboard	*/
+
+	if held.psel.buttons<>0 then do;	/*	partial button held - select it	*/
+		i=0;
+		do while (held.psel.buttons&bits(i))=0; i=i+1; end;
+	end;
+	else i=0;
+
+	call SELECT.PARTIAL(i);		/*	select the first partial	*/
+
+	call CREATE.PATCH.PARTIAL(i,name);
+
+	if  (new.pan<>0)
+	and (held.psel.buttons=0)
+	and (ertyp=0)
+	then do;
+		call BUILD.TDS.PATCH.STR;
+		call CLEAR.PARAMETERS;	/*	get rid of active parms	*/
+		call CLEAR.DISPLAY;
+		call EMIT.STRING(0,dname);
+		call EMIT.STRING(9,'Active on ');
+		call EMIT.STRING(19,TDS.PATCH.STR);
+		both.display=1;
+		supress.beat.display=1;
+		beat.display.time=real.milliseconds;
+	end;
+
+	pop.system.pdl;
+
+	call BUILD.POLY.HIST.REC(sfile.base,0,rec);
+	call ADD.POLY.TO.HIST(rec);
+
+	return true;					/*	sound file transferred		*/
+
+end TRANSFER.CUE.TO.POLY;
+
+/*	$SUBTITLE	*/
+
+/*	This procedure gets a block of data (4-sectors max: "words"	*/
+/*	may be up to 1024) representing the audio for a given cue.	*/
+/*	It is placed in external memory at location "lod.mam" set	*/
+/*	up BEFORE calling this.													*/
+/*	Pass ID# to this routine.  If the Id# is zero, then routine	*/
+/*	assumes the cue record is already sitting in Scsi.Ptr			*/
+/*	Return values:																*/
+/*				0 = failed														*/
+/*				1 = succeeded													*/
+/*				2 = interrupted (data not yet available)				*/
+
+TRANSFER.COMPRESSED.CUE:PROC (id#,words,in,out) public swapable;
+	dcl id#					fixed;	/*	Cue to compress	*/
+	dcl words				fixed;	/*	Words/pixels to compress to	*/
+	dcl (in)					array;	/*	Start time to display	*/
+	dcl (out)				array;	/*	End time to display	*/
+	dcl (stime) (1)		fixed;	/*	Start time to display	*/
+	dcl (etime) (1)		fixed;	/*	End time to display	*/
+	dcl (smsb) (1)			fixed;	/*	Starting address	*/
+	dcl (emsb) (1)			fixed;	/*	Ending address	*/
+	dcl (lmsb) (1)			fixed;	/*	Length of cue	*/
+	dcl (zero.base) (1)	fixed;	/*	Zero poly base	*/
+	dcl (trks)				fixed;	/*	Available tracks	*/
+	dcl (#trks)				fixed;	/*	Total tracks to compress	*/
+	dcl error(40)			fixed;	/*	To hold string	*/
+	dcl first.track		fixed;	/*	Track to compress	*/
+	dcl stopped				fixed;	/*	True when stop button pressed	*/
+	dcl time					boolean;	/*	True if stime & etime are times, false if disk addresses	*/
+	dcl event				fixed;	/*	Holds event (in case of any)	*/
+	dcl (i)					fixed;
+
+	call copy32(in,stime);			/*	Save since stack is about to be moved	*/
+	call copy32(out,etime);
+
+	push.system.pdl;					/*	get us some stack storage	*/
+
+	if  com32(zero.base,stime) = lw#ieq		/*	If start & end times zero...	*/
+	AND com32(zero.base,etime) = lw#ieq
+	then time = false;							/*	...use disk addr for whole cue	*/
+	else time = true;								/*	...use times passed in	*/
+
+	if Fetch.Entire.Cue(id#,error)=0
+	then do;
+		pop.system.pdl;
+		return 0;
+	end;
+
+	/*	read in and compute DTD starting address (smsb) and length (lmsb)	*/
+
+	call COMPUTE.CUE.LENGTH.IN.SECTORS (SCSI.PTR,SMSB,EMSB,LMSB);
+
+	write(mam)=scsi.ptr;
+	write(mal)=cue.trks;
+	trks = read(mdi) & dtd.avail.trks;
+
+	#trks = 0;							/*	count # of tracks to xfer	*/
+
+	do i=0 to 15;
+		if (trks&bits(i))<>0 then do;
+			#trks=#trks+1;
+			if #trks=1 then first.track = i;
+		end;
+	end;
+
+	if #trks = 0 then do;
+		call copy.string('Select one track to see wave display',error);
+		call set.error(err.lod,error);
+		pop.system.pdl;
+		return 0;
+	end;
+
+/*	Now allow multi track cues, just display first one:	*/
+/*	if #trks > 1 then do;					*/
+/*		call copy.string('Cue has more than one track - cannot show wave',error);	*/
+/*		call set.error(err.lod,error);	*/
+/*		pop.system.pdl;						*/
+/*		return 0;								*/
+/*	end;											*/
+
+	call Send.To.Lod(68,0);						/*	stop all other data transfer	*/
+														/*	and start function data		*/
+														/*	read operation					*/
+
+	run.syn = 0;
+	store.dtd.info = 4;							/*	enable store of external memory data			*/
+
+	/*	Initiate compression for the display	*/
+	write(mam)=scsi.ptr;							/*	set up dtd info	*/
+	if time = false then do;					/*	use whole cue		*/
+		write(mdi)=0;								/*	sending disk addr	*/
+		write(mdi)=first.track;					/*	track #				*/
+		write(mdi)=words;							/*	#pixels in display	*/
+		write(mdi)=smsb(lw#msb);				/*	disk address		*/
+		write(mdi)=smsb(lw#lsb);
+		write(mdi)=lmsb(lw#msb);				/*	words to compress	*/
+		write(mdi)=lmsb(lw#lsb);				/*	words to compress	*/
+	end;
+	else do;											/*	use times			*/
+		write(mdi)=1;								/*	sending times		*/
+		write(mdi)=first.track;					/*	track #				*/
+		write(mdi)=words;							/*	#pixels in display	*/
+		write(mdi)=stime(lw#msb);				/*	start time			*/
+		write(mdi)=stime(lw#lsb);
+		write(mdi)=etime(lw#msb);				/*	end time				*/
+		write(mdi)=etime(lw#lsb);
+	end;
+
+	call send.to.lod(193,14);			/*	Start compression on lod computer	*/
+
+	i = 0;									/*	Data transferred when = 1	*/
+	stopped = 0;
+
+	/*	wait for LOD to calculate and send over the data	*/
+	call enable_several_gets(get.in.char,get.mouse.button,get.mouse.movement,get.program.exit);
+	do while (i=0) & (stopped=0);
+
+      lod.xfer.len = 0;                 /* Initialize length read to 0 */
+      call send.to.lod(194,0);          /* Read compressed lod data into poly memory (maybe) */
+
+      if lod.xfer.len=words then i = 1; /* We've got the data in poly */
+		else chill.out.and.run.syn();		 // else we are waiting
+
+		if STOP.HELD<>0 then stopped = 1;	/*	Check for held stop button	*/
+
+		event = check.next.event;				/*	We must stop if user wants something else	*/
+
+		if  event = get.mouse.button
+		AND new.mouse.button	 > 0		/*	If a mouse UP...	*/
+		and m$presses			 = 0		/*	and no mouse DOWN	*/
+		then new.mouse.button = 0;		/*	...toss it!	*/
+		else									/*	See if user...	*/
+		if event = get.in.char			/*	...typed a character	*/
+		OR event = get.mouse.button	/*	...PRESSED a mouse button	*/
+		OR event = get.arrow.key		/*	...typed an arrow key	*/
+		OR event = get.program.exit	/*	...wants to exit the screen	*/
+		then stopped = 1;					/*	Event occurred	*/
+	end;
+	call disable_several_gets(get.in.char,get.mouse.button,get.mouse.movement,get.program.exit);
+
+	run.syn = 1;				/*	re allow run syns now			*/
+	store.dtd.info = 0;		/*	dis allow data storage			*/
+
+	call send.to.lod(33,0);	/*	restore normal play buffers	*/
+
+	if stopped<>0 then do;	/*	event or stop button encountered - data not avail	*/
+		pop.system.pdl;
+		return 2;
+	end;
+
+	pop.system.pdl;
+	return true;					/*	Display data was transferred		*/
+
+end TRANSFER.COMPRESSED.CUE;
+
+Boot.Algorithm: proc(dsp.fun,algorithm) public swapable;	/*	causes "algorithm" to be booted on DTD DSP70	*/
+	dcl dsp.fun			fixed;	/*	which type of algorithm	*/
+	dcl algorithm		array;	/*	name of algorithm			*/
+
+	dcl dspex.ms		fixed;
+	dcl dspex.ls		fixed;
+	dcl boot.ms			fixed;
+	dcl boot.ls			fixed;
+	dcl boot.len		fixed;
+	dcl alg.ms			fixed;
+	dcl alg.ls			fixed;
+	dcl alg.len			fixed;
+	dcl data.ms			fixed;
+	dcl data.ls			fixed;
+	dcl data.len		fixed;
+	dcl ext.info(3)	fixed;
+	dcl (s,w)			fixed;
+	dcl (ms,ls,len)	fixed;
+	dcl i					fixed;
+	dcl error(40)		fixed;	/*	To hold string	*/
+
+	if locate(dspex_file,0) = FALSE
+	then do;
+		call copy.string('DSP system file (DSPEX) is missing',error);
+		call set.error(err.lod,error);
+		return 0;
+	end;
+
+	dspex.ms = F#MS_Sector;
+	dspex.ls = F#LS_Sector;
+
+	call readdata(dspex.ms,dspex.ls,misc.buf,256);	/*	Get header into misc.buf	*/
+	if misc.buf(0) <> DSPEX_VERSION		/*	Check compatibility	*/
+	then do;
+		call copy.string('DSP system file (DSPEX) is out of date',error);
+		call set.error(err.lod,error);
+		return 0;
+	end;
+
+	do i=0 to 255 by 8;															/*	Find boot code	*/
+		if misc.buf(i + dspex_rec_type) = dspex_type#boot then do;	/*	Found it		*/
+			s = misc.buf(i+ dspex_rec_sect);									/*	Start sector offset from file	*/
+			w = misc.buf(i+ dspex_rec_flen);									/*	Word length	*/
+			i = 256;																	/*	Break loop	*/
+		end;
+	end;
+
+	if s=0 and w=0								/*	Never found boot code	*/
+	then do;
+		call copy.string('System Error (boot) with DSPEX system file',error);
+		call set.error(err.lod,error);
+		return 0;
+	end;
+
+	boot.ls = dspex.ls + s;					/*	Add offset to beginning of file	*/
+	if boot.ls ilt s							/*	Carry	*/
+	then boot.ms = dspex.ms + 1;
+	else boot.ms = dspex.ms;
+	boot.len = w;
+
+	/*	Now find the algorithm in the dspex file	*/
+	s = 0; w = 0;
+	do i=0 to 255 by 8;						/*	Find desired algorithm	*/
+		if misc.buf(i+ dspex_rec_type) = dspex_type#alg then do;		/*	An algorithm file	*/
+			if algorithm(1) = misc.buf(i)	/*	Say unique in 1st 2 chars OK	*/
+			then do;
+				s = misc.buf(i+ dspex_rec_sect);	/*	Start sector	*/
+				w = misc.buf(i+ dspex_rec_flen);	/*	Word length	*/
+				i = 256;							/*	Break loop	*/
+			end;
+		end;
+	end;
+
+	if s=0 and w=0								/*	Never found algorithm code	*/
+	then do;
+		call copy.string('System Error (alg) with DSPEX system file',error);
+		call set.error(err.lod,error);
+		return 0;
+	end;
+
+	alg.ls = dspex.ls + s;					/*	Add offset to beginning of file	*/
+	if alg.ls ilt s							/*	Carry	*/
+	then alg.ms	= dspex.ms + 1;
+	else alg.ms	= dspex.ms;
+	alg.len		= w;
+
+	if DSP.Fun = dsp#tsm then do;
+		/*	now find the data file	*/
+		if locate(tsm_data_file,0)=FALSE
+		then do;
+			call copy.string('Time Scale Modify system file (TSMDATA) is missing',error);
+			call set.error(err.lod,error);
+			return 0;
+		end;
+
+		data.ms	= f#ms_sector;
+		data.ls	= f#ls_sector;
+		data.len	= f#words;	/*	assume data length is less than 65535	*/
+									/*	DSP70 can only address that much per memory
+										space	*/
+
+	end;
+	else data.len = 0;	/*	no data files to send for other functions	*/
+
+	/*	set up info for Send.To.Lod. Note: only the length values will
+		actually be sent to the DTD. The Disk addresses are for use by the
+		debugging code on the LOD.
+	*/
+
+	run.syn = 0;
+
+	write(mam)=scsi.ptr;				/*	set up dtd info						*/
+	write(mdi)=dsp#boot;				/*	boot alg message						*/
+	write(mdi)=1;						/*	start of process						*/
+	write(mdi)=boot.len;				/*	length of boot file in words		*/
+	write(mdi)=alg.len;				/*	length of algorithm file in words	*/
+	write(mdi)=data.len;
+	write(mdi)=boot.ms;				/*	disk start address of boot file	*/
+	write(mdi)=boot.ls;
+	write(mdi)=alg.ms;				/*	disk start address of alg file	*/
+	write(mdi)=alg.ls;
+	write(mdi)=data.ms;
+	write(mdi)=data.ls;
+
+	dtd.cue# = 0;						/*	see if dsp unit is there			*/
+
+	call Send.To.Lod(199,22);		/*	Cause code to be sent to the
+												DTD. See note.	*/
+
+	if dtd.cue# = 0 then do;		/*	means no dsp hardware avail		*/
+		run.syn = 1;
+		call copy.string('DSP70 hardware is not installed in D-T-D',error);
+		call set.error(err.lod,error);
+		return 0;
+	end;
+
+	do i = 0 to 2;	/*	loop over three times	*/
+		write(mam) = Scsi.Ptr;
+		write(mdi) = dsp#boot;
+		write(mdi) = 0;	/*	continuation	*/
+		write(mdi) = 256;
+
+		ext.info(0)=Scsi.Ptr;
+		ext.info(1)=3;
+		ext.info(2)=1;
+		ext.info(3)=0;
+
+		do case i;
+			do;
+				ms = boot.ms;ls=boot.ls;len=boot.len;
+			end;
+			do;
+				ms = alg.ms;ls=alg.ls;len=alg.len;
+			end;
+			do;
+				ms = data.ms;ls=data.ls;len=data.len;
+			end;
+		end;	/*	of do case	*/
+
+		do while len igt 0;
+			if len igt 256 then do;
+				call extread(ms,ls,ext.info);
+				call Send.To.Lod(199,6);
+				ls = ls +1;
+				if ls = 0 then ms = ms+1;
+				len = len-256;
+			end;
+			else do;	/*	set up for xfer of odd bytes	*/
+				write(mam) = Scsi.Ptr;
+				write(mal) = 2;
+				write(md)  = len;
+				ext.info(2)	= 0;
+				ext.info(3)	= len;
+				call extread(ms,ls,ext.info);
+				call Send.To.Lod(199,6);
+				len = len-len;
+			end;
+		end;
+	end;	/*	of loop over three times	*/
+
+	run.syn = 1;	/*	re allow run syns now	*/
+
+	return 1;
+
+end Boot.Algorithm;
+
+Calc.TSM.Parms: proc (TSM.Options) swapable;	/*	calculate 56k parms from the values passed	*/
+	/*	Note: this proc ALTERS input	array, be careful!	*/
+
+	dcl TSM.Options	array;
+	dcl ratio			fixed;
+	dcl period			fixed;
+	dcl max.cut			fixed;
+	dcl just				fixed;
+	dcl temp(1)			fixed;
+	dcl secs(2)			fixed;
+	dcl base(1)			fixed;
+
+	/*	1. calc ratio and stuff c.or.e	*/
+	ratio = TSM.Options(TSM.Opt#ratio);
+
+	if ratio < 10000 then do;	/*	compression	*/
+		TSM.Options(TSM.Opt#c.or.e) = 0;	/*	set to compression	*/
+		bitmsb=0;bitlsb=10000;
+		call ratio_multiply(10000,ratio);
+		ratio = bitlsb;
+	end;
+	else do;	/*	expansion	*/
+		TSM.Options(TSM.Opt#c.or.e) = 1;	/*	set to expansion	*/
+	end;
+
+	load 0; uload ratio-10000; div 10000;	/*	map on to scale 0-65535	*/
+	TSM.Options(TSM.Opt#ratio) = res + (rem igt shr(10000,1));
+
+	/*	2. convert pitch to samples	*/
+	bitlsb=AEE.Current.Project.Rate;bitmsb=0;
+	call ratio_multiply(1000,TSM.Options(TSM.Opt#pitch));
+	TSM.Options(TSM.Opt#pitch) = bitlsb;
+
+	/*	3. convert max.cut to samples	*/
+	bitmsb=0;bitlsb=TSM.Options(TSM.Opt#max.cut);
+	call ratio_multiply(AEE.Current.Project.Rate,1000);
+	TSM.Options(TSM.Opt#max.cut) = bitlsb;
+
+	/*	4. convert 32bit msec time to to secs and words	*/
+	call Msec.To.DTD.Sample.#(loc(addr(TSM.Options(TSM.Opt#len.ms))), CF#Dur,1000, AEE.Current.Project.Rate,base,temp);
+
+	/*	For now, round up to next sector, then add 10 sectors (50 msec)	*/
+	/*	to account for round off error.  This way, the entire source		*/
+	/*	cue should be processed, and some trailing silence should			*/
+	/*	be at the end of the cue.														*/
+
+	call ADD16(10*256+255,temp);
+//	temp(1) = temp(1) & "177400";						//	Redundant due to shr32 below
+//	TSM.Options(TSM.Opt#len.wd) = temp(1) & 255;	//	This will always evaluate to 0 because of the previous line
+
+	call shr32(temp,8);
+	TSM.Options(TSM.Opt#len.ms) = temp(0);
+	TSM.Options(TSM.Opt#len.ls) = temp(1);
+	TSM.Options(TSM.Opt#len.wd) = 0;
+
+end Calc.TSM.Parms;
+
+/*	$SUBTITLE	*/
+
+/*	This procedure causes the DTD computer to begin running a DSP	*/
+/*	function on the current cue.												*/
+/*	Pass ID# to this routine.  If the Id# is zero, then routine		*/
+/*	assumes the cue record is already sitting in Scsi.Ptr				*/
+/*	Return values:																	*/
+/*				0 = failed															*/
+/*				1 = succeeded														*/
+
+DSP.CUE:PROC (id#,start,stop,Record.Ready.Bits,DSP.Fun,DSP.Alg,DSP.Options) public swapable;
+	dcl id#						fixed;	/*	Cue to modify	*/
+	dcl start					array;	/*	Where (in sample #'s) to start writing on DTD	*/
+	dcl stop						array;	/*	Where (in sample #'s) to stop writing on DTD	*/
+	dcl Record.Ready.Bits	fixed;	/*	Track ready bits	*/
+	dcl DSP.Fun					fixed;	/*	Which DSP function to apply (TSM,Filter, etc)	*/
+	dcl DSP.Alg					fixed;	/*	which algorithm to apply	*/
+	dcl DSP.Options			array;	/*	array for DSP parameters	*/
+
+	dcl (smsb) (1)				fixed;	/*	Starting address	*/
+	dcl (emsb) (1)				fixed;	/*	Ending address	*/
+	dcl (lmsb) (1)				fixed;	/*	Length of cue	*/
+	dcl (out.s) (1)			fixed;	/*	Local copy of start	*/
+	dcl (out.e) (1)			fixed;	/*	Local copy of end	*/
+	dcl (input.trks)			fixed;	/*	Available tracks	*/
+	dcl (#in.trks)				fixed;	/*	Total tracks to modify	*/
+	dcl (#out.trks)			fixed;	/*	Total tracks to create	*/
+	dcl error(40)				fixed;	/*	To hold string	*/
+	dcl stopped					fixed;	/*	True when stop button pressed	*/
+	dcl event					fixed;	/*	Holds event (in case of any)	*/
+	dcl hi.time					fixed;	/*	When last sent to LOD	*/
+	dcl name.array(4)			fixed;	/*	Holds name of algorithm to load	*/
+	dcl save.get.item(num.of.get.events)	fixed;	/*	Save get.item.enabled here	*/
+	dcl current.track			fixed;
+	dcl percent.done			fixed;
+	dcl (i,j,k,p)				fixed;
+	dcl (ptr,len)				fixed;
+	dcl temp(1)					fixed;
+
+	call copy32(start,out.s);			/*	Save since stack is about to be moved	*/
+	call copy32(stop, out.e);
+
+	call add16(128,out.s);							/*	round up by 128				*/
+	out.s(lw#lsb) = out.s(lw#lsb) & "177400";	/*	round start down to sector	*/
+
+	call add16(128,out.e);							/*	round up by 128				*/
+	out.e(lw#lsb) = out.e(lw#lsb) & "177400";	/*	compute end rounded up		*/
+
+	call shr32 (out.s,8);				/*	Convert to sector #'s		*/
+	call shr32 (out.e,8);
+
+	push.system.pdl;						/*	get us some stack storage	*/
+
+	if Fetch.Entire.Cue(id#,error)=0
+	then do;
+		pop.system.pdl;
+		return 0;
+	end;
+
+	/*	read in and compute DTD starting address (smsb) and length (lmsb)	*/
+
+	call COMPUTE.CUE.LENGTH.IN.SECTORS (SCSI.PTR,SMSB,EMSB,LMSB);
+
+	write(mam)=scsi.ptr;
+	write(mal)=cue.trks;
+
+	input.trks = read(md) & dtd.avail.trks;
+
+	/*	find out if this is a complex cue:	*/
+
+	write(mal) = Cue.List.Ptr;
+	ptr		  = read(mdi);
+	len		  = read(mdi);
+
+	#in.trks  = 0;							/*	count # of tracks to modify			*/
+	#out.trks = 0;							/*	count # of output tracks available	*/
+
+	/*	If complex cue - look at all segments to get # of tracks needed		*/
+
+	if ptr <> 0 then do;					/*	cue is complex cue						*/
+		do p = ptr+S#DriveBits1 to ptr + len + S#DriveBits1 - 1 by Cue.Seg.Stride;
+			write(mam) = Scsi.Ptr + shr(p,8);
+			write(mal) = p;
+
+			k = read(md) & dtd.avail.trks & input.trks;
+
+			j=0;
+			do i=0 to 15;
+				if (k & bits(i)) <> 0 then j = j + 1;
+			end;
+
+			if j > #in.trks then #in.trks = j;
+		end;
+	end;
+
+	else do;
+		do i=0 to 15;
+			if (input.trks & bits(i)) <> 0 then #in.trks = #in.trks + 1;
+		end;
+	end;
+
+	do i=0 to 15;
+		if (Record.Ready.Bits & bits(i)) <> 0 then do;
+			#out.trks=#out.trks+1;
+		end;
+	end;
+
+	if #in.trks = 0 then do;
+		call copy.string('Error - No input track selected',error);
+		call set.error(err.lod,error);
+		pop.system.pdl;
+		return 0;
+	end;
+
+	if #in.trks > 2 then do;
+		call copy.string('Cue must contain only 1 or 2 tracks for Time Scale Modify',error);
+		call set.error(err.lod,error);
+		pop.system.pdl;
+		return 0;
+	end;
+
+	if #out.trks = 0 then do;
+		call copy.string('Must READY destination track for Time Scale Modify',error);
+		call set.error(err.lod,error);
+		pop.system.pdl;
+		return 0;
+	end;
+
+	if #in.trks > #out.trks then do;
+		call copy.string('Not enough tracks READY for output',error);
+		call set.error(err.lod,error);
+		pop.system.pdl;
+		return 0;
+	end;
+
+	if #out.trks > #in.trks then do;
+		call copy.string('Too many tracks are READY for this cue',error);
+		call set.error(err.lod,error);
+		pop.system.pdl;
+		return 0;
+	end;
+
+	if DSP.Options(TSM.Opt#ratio) = 10000 then do;
+		call copy.string('Cannot Time Scale Modify with ratio of 1.0000',error);
+		call set.error(err.lod,error);
+		pop.system.pdl;
+		return 0;
+	end;
+
+	if DSP.Fun = dsp#tsm
+	then call Calc.TSM.Parms(DSP.Options);
+
+	DSP.Options(TSM.Opt#stereo) = (#in.trks = 2);
+
+	/*	see if compressed/expanded cue will fit before end of project	*/
+
+	call SUB32(out.e, out.s, temp);	/*	get # of sectors to end of project	*/
+	call ADD16(10, temp);				/*	leave some extra room					*/
+
+	if COM32(temp, loc(addr(DSP.Options(TSM.Opt#len.ms)))) = lw#ilt
+	then do;
+		call copy.string('End of project reached (out of room)',error);
+		call set.error(err.lod,error);
+		pop.system.pdl;
+		return 0;
+	end;
+
+	do case (DSP.Alg);
+		do;	/*	0: Quick	*/
+			call copy.string('THREE',name.array);
+		end;
+		do;	/*	1: ONE	*/
+			call copy.string('ONE',name.array);
+		end;
+		do;	/*	2: TWO	*/
+			call copy.string('TWO',name.array);
+		end;
+	end;
+
+	call Draw.Message('Performing Time Scale Modification ...');
+
+	if Boot.Algorithm(DSP.Fun,name.array) = 0	/*	ready to go, boot with correct alg	*/
+	then do;
+		pop.system.pdl;
+		return 0;
+	end;
+
+	call Send.To.Lod(68,0);				/*	stop all other data transfer	*/
+												/*	and start function data			*/
+												/*	read operation						*/
+
+	run.syn = 0;
+
+	/*	Initiate DSP operation	*/
+
+	if DSP.Fun = dsp#tsm then do;
+		write(mam)=scsi.ptr;							/*	set up dtd info	*/
+		write(mdi)=DSP.Fun;							/*	TSM type DSP cmd	*/
+		write(mdi)=DSP.Alg;							/*	which TSM alg		*/
+		write(mdi)=input.trks;						/*	input track #'s	*/
+		write(mdi)=smsb(lw#msb);					/*	disk start address	*/
+		write(mdi)=smsb(lw#lsb);
+		write(mdi)=lmsb(lw#msb);					/*	length in sectors	*/
+		write(mdi)=lmsb(lw#lsb);
+		write(mdi)=Record.Ready.Bits;				/*	tracks to write	*/
+		write(mdi)=out.s(lw#msb);					/*	where to write		*/
+		write(mdi)=out.s(lw#lsb);
+		write(mdi)=out.e(lw#msb);
+		write(mdi)=out.e(lw#lsb);
+		write(mdi)=DSP.Options(TSM.Opt#pitch);		/*	Pitch				*/
+		write(mdi)=DSP.Options(TSM.Opt#max.cut);	/*	Max Cut			*/
+		write(mdi)=DSP.Options(TSM.Opt#just);		/*	Justification	*/
+
+		write(mdi)=DSP.Options(TSM.Opt#c.or.e);
+		write(mdi)=DSP.Options(TSM.Opt#ratio);
+		write(mdi)=DSP.Options(TSM.Opt#stereo);
+		write(mdi)=DSP.Options(TSM.Opt#len.ms);
+		write(mdi)=DSP.Options(TSM.Opt#len.ls);
+		write(mdi)=DSP.Options(TSM.Opt#len.wd);
+		call send.to.lod(199,42);			/*	Start DSP operation on lod computer	*/
+	end;	/*	of if dsp#tsm	*/
+
+	hi.time = real.milliseconds-1000;	/*	draw percent 0 after loading algorithm	*/
+
+	stopped = 0;
+
+	/*	wait for LOD to calculate and send over the data	*/
+	do i=0 to num.of.get.events;
+		save.get.item(i) = get.item.enabled(i);	/*	Save active events	*/
+		get.item.enabled(i) = 0;						/*	But we don't want any of them	*/
+	end;
+	call get_enable(get.program.exit);				/*	We're ONLY looking for a BREAK key	*/
+
+	/*	Clear event bit.  We had better not be loading from the tapes	*/
+	/*	at the same time we are trying to do DSP!!							*/
+
+	new.ABLE.dtd.info = new.ABLE.dtd.info & (not(32));
+
+	do while (stopped=0);
+
+		chill.out.and.run.syn();
+		
+      event = check.next.event;           /* We must stop if the user wants to */
+		
+		if (STOP.HELD<>0)							/*	Check for held stop button	*/
+		OR (event = get.program.exit)			/*	OR break key	*/
+		OR ((new.ABLE.dtd.info & 32) <> 0)	/*	OR DTD claiming it's done	*/
+		OR ((new.dtd.info & 32) <> 0)			/*	OR DTD claiming it's done	*/
+		then stopped = 1;
+
+		/*	To keep LOD code going, we must say hi AT LEAST every 10 seconds	*/
+		/*	We'll say it every second to be sure, and get progress info too	*/
+
+		if (real.milliseconds - hi.time) IGT 1000 then do;
+			dtd.cue#   = 0;
+			write(mam) = scsi.ptr;				/*	set up dtd info	*/
+			write(mdi) = dsp#idle;				/*	Idle type DSP cmd	*/
+			call send.to.lod(199,2);			/*	Say HI every second	*/
+			hi.time	  = real.milliseconds;
+
+			if dtd.cue# <> 0
+			then do;
+				write(mam)	  = scsi.ptr;
+				current.track = read (mdi)+1;
+				percent.done  = read (mdi);
+				call cpos(23,40);
+
+				if  (DSP.Fun = dsp#tsm	 )
+				and (DSP.Alg = dsp#three )
+				then do;
+					call pnum(percent.done,0);call ps('%');
+				end;
+				else do;
+					call ps(' Track ');call pnum(current.track,0);
+					call ps(' :');
+					call pnum(percent.done,0);call ps('%');
+				end;
+
+				flush_termulator_output_to_host();
+			end;
+		end;
+	end;
+
+	call ERASE.MESSAGE;
+
+	if event <> 0 then call get.next.event;		/*	Flush get.program.exit event	*/
+	call get_disable(get.program.exit);
+	do i=0 to num.of.get.events;
+		get.item.enabled(i) = save.get.item(i);	/*	Restore active events	*/
+	end;
+
+	new.ABLE.dtd.info = new.ABLE.dtd.info & (NOT(32));	/*	process our bit	*/
+
+	run.syn = 1;				/*	re allow run syns now			*/
+
+	call send.to.lod(33,0);	/*	restore normal play buffers	*/
+
+	pop.system.pdl;
+	return true;				/*	DSP complete	*/
+
+end DSP.CUE;
+
+insert ':synsou:stmmod:stdtsou1';
+
+end STDTMOD;

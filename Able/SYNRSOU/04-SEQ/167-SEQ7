@@ -1,0 +1,1091 @@
+/* 165-SEQ5  -  CONVERT SEQUENCE FROM OLD FORMATS TO NEW FORMAT */
+
+/*
+   11/3/86 - TS - MODIFIED CONVERT TO ZERO OUT SEQ.S.P.T & SEQ.S.P.T.C
+   10/3/86 - MODIFIED CONVERT ROUTINE TO BE A LITTLE MORE TOLERANT OF MESSED UP SEQS
+   8/14/86 - TS - FIXED BUGS IN CONVERT.OLD.SEQUENCE STUFF (COMPRESSED/SPED UP CODE A LITTLE)
+   8/12/86 - EEG - split convert.old.sequence into procedures
+   5/15/86 - "official" creation of release-M modules
+*/
+
+
+BEGIN;               /* THIS MAKES LOCAL "GLOBAL" VARIABLES  */
+
+   /* ROUTINE:  CONVERT.OLD.SEQUENCE
+
+
+      PASSED:   4 ARGUMENTS:  (PTR TO TIMBRE INFO IN XMEM)
+                              (LEN OF TIMBRE INFO IN XMEM)
+                              (PTR TO NOTE   INFO IN XMEM)
+                              (LEN OF NOTE   INFO IN XMEM)
+
+                CONTENTS OF OLD SEQUENCE MISC AREA (256 WORDS)
+                IN GLOBAL ARRAY 'MISC.BUF';
+
+
+      ASSUMES:  BAS.PTR,BAS.LEN ARE SET UP TO POINT TO LOCATION OF
+                NEW BASE SECTOR
+
+                PAR.PTR,PAR.LEN REFLECT THE TWO KEYBOARD TIMBRES
+
+                PAR.NUMT=2   (OR GREATER.  *** NOT *** LESS!! )
+                
+                THE TIMBRE INFO AND NOTE INFO IS SITTING HIGH IN EXTERNAL
+                MEMORY SO THAT THERE IS ROOM BELOW IT
+
+                BNK.PTR, INF.PTR, TIM.PTR, TRD.PTR ARE AT THE TOP OF MEMORY
+
+
+      RETURNS:  0=FAIL - OUT OF ROOM
+                1=OK CONVERSION
+
+
+      IF OK:    RETURNS  PAR.PTR, PAR.LEN, PAR.NUMT SET UP TO REFLECT
+                TIMBRES
+
+                NAH.PTR, NAH.LEN REFLECT NEW NOTE AREA
+
+                INF.PTR, INF.LEN MAY CONTAIN MUSIC PRINTING INFORMATION
+
+   SO: */
+
+   DCL (OUR.P.PTR,OUR.P.LEN,OUR.N.PTR,OUR.N.LEN)   FIXED;
+   DCL (            N.WRD      )   FIXED;
+   DCL NOTE.BASE                   FIXED;
+   DCL (THP,NLS,W1,W2,W3,W4    )   FIXED;
+   DCL (OLDT,OLDC              )   FIXED;
+   DCL (NMSB,NLSB,LMSB,LLSB    )   FIXED;
+   DCL (DELMSB,DELLSB          )   FIXED;
+   DCL (DURMSB,DURLSB          )   FIXED;
+   DCL (NLSPTR                 )   FIXED;
+   DCL (PTBITS,PMIDI           )   FIXED;
+   DCL (PRTE)                (7)   FIXED;
+   DCL (I,J,K)                     FIXED;
+   DCL (ILPINFO)                   FIXED;
+   DCL (ILSMSB,ILSLSB)             FIXED;
+   DCL (ILEMSB,ILELSB)             FIXED;
+   DCL (TOP)                       FIXED;
+
+
+   /* $PAGE */
+
+
+   DCL NUM.OSEQ.MISC     LIT '256'; /* LENGTH OF ORIGINAL MISC AREA       */
+
+   DCL OSEQ.SCALE        LIT ' 00'; /* LOCATIONS 0-11 - HOLDS ACTIVE SCALE */
+   DCL OSEQ.SPEED        LIT ' 12'; /* HOLDS LATEST SEQUENCER SPEED */
+   DCL OSEQ.CLICK        LIT ' 13'; /* HOLDS SEQUENCER CLICK RATE */
+   DCL OSEQ.CRM          LIT ' 14'; /* CLICK RATE MULTIPLIER */
+   DCL OSEQ.SMODE        LIT ' 15'; /* SMPTE MODE            */
+   DCL OSEQ.SMBITS       LIT ' 16'; /* SMPTE START # OF BITS */
+   DCL OSEQ.SECFRA       LIT ' 17'; /* SMPTE SECONDS/FRAMES  */
+   DCL OSEQ.HRSMIN       LIT ' 18'; /* SMPTE HRS/MINS        */
+   DCL NUM.OSEQ.PARAMS   LIT ' 19'; /* NUMBER OF KNOB PARAMETERS IN SEQ LIST */
+
+   /* SPECIAL INFORMATION IS STORED HERE DURING SEQUENCE STORE: */
+
+   DCL OSEQ.MIDI         LIT ' 20'; /* 20-31: 12-BIT FIELDS FOR 16 TRKS OF MIDI ROUTING */
+   DCL OSEQ.OCTRATIO     LIT ' 33'; /* STORE ACTIVE OCTAVE RATIO HERE */
+   DCL OSEQ.TROUT1       LIT ' 34'; /* 34-41 TRACK ROUTINGS 0-7 */
+   DCL OSEQ.LOOP         LIT ' 42'; /* INDICATES IF LOOPING */
+   DCL OSEQ.G.P.T        LIT ' 43'; /* INDICATES LOOP GO BACK TIME */
+   DCL OSEQ.G.P.T.C      LIT ' 44'; /* GO BACK TIME CARRIES STORED HERE */
+   DCL OSEQ.XPOS         LIT ' 45'; /* XPOS DISTANCES - 18 IN ALL (!!)  */
+   DCL OSEQ.LIVE.CLICK   LIT ' 63'; /* LIVE CLICK TRACK FOR SEQUENCER   */
+
+   /* POINTERS FOR THE DIFFERENT TRACKS ARE STORED HERE: */
+
+   /*  63:     FREE ( 1) */
+
+   DCL OSEQ.POINTERS     LIT ' 64'; /* ONE FOR EACH TRACK & FOR TOP    */
+   DCL OSEQ.SLEN         LIT ' 80'; /* LOCATION OF SEQ.TOP - *** MUST BE SEQ.POINTERS+NUM.TRACKS *** */
+   DCL OSEQ.NPPW         LIT ' 81'; /* NUMBER OF PLOTTING PRESET WORDS */
+   DCL OSEQ.PLEN         LIT ' 82'; /* LENGTH OF PARAMETER AREA IN NEW FORMAT SEQUENCES */
+   DCL OSEQ.MPREV        LIT ' 83'; /* MUSIC PRINTING REV#             */
+   DCL OSEQ.PSEC         LIT ' 84'; /* NUMBER OF SECTORS IN TIMBRE AREA */
+   DCL OSEQ.NSEC         LIT ' 85'; /* NUMBER OF SECTORS IN NOTES ONLY */
+
+   /*  86- 87: FREE ( 2) */
+
+   DCL OSEQ.TROUT2       LIT ' 88'; /* 88-95 TRACK ROUTINGS 8-15 */
+   DCL OSEQ.FIRSTS       LIT ' 96'; /* STORE FIRST NOTES HERE FOR CORRECT PORTAMENTO */
+   DCL OSEQ.TRVOLS       LIT '112'; /* TRACK VOLUME INFO */
+
+   /* DATA STORAGE FOR INDEPENDENT LOOPS */
+
+   DCL OSEQ.ILS.PTRS     LIT '128'; /* POINTERS FOR          START OF IND LOOP */
+   DCL OSEQ.ILS.PTCS     LIT '144'; /* PLAY TIME CARRIES FOR START OF IND LOOP */
+   DCL OSEQ.ILS.PLTS     LIT '160'; /* PLAY TIMES        FOR START OF IND LOOP */
+   DCL OSEQ.ILE.PTRS     LIT '176'; /* POINTERS FOR          END OF IND LOOP */
+   DCL OSEQ.ILE.PTCS     LIT '192'; /* PLAY TIME CARRIES FOR END OF IND LOOP */
+   DCL OSEQ.ILE.PLTS     LIT '208'; /* PLAY TIMES FOR        END OF IND LOOP */
+   DCL OSEQ.ILS.LTTS     LIT '224'; /* LAST TRACK TIMES AT LOOP START */
+   DCL OSEQ.ILS.NPNS     LIT '240'; /* NUM.PS.NOTES AT     LOOP START */
+
+   DCL FIRST.NOTE        LIT ' 61';   
+
+   DCL DUR.TABLE         DATA (1,4,16,32); /* MULTIPLIERS TO MAP FLOATING PT. DURATIONS TO TICKS*1 */
+  
+
+   /* $PAGE */
+
+
+   /* ALLOCATE ANOTHER SECTOR FOR NAH */
+   /* BOMBS OUT WHEN RUNS INTO OUR.N.PTR  */
+   /* RETURNS RELATIVE PTR TO NAH.PTR */
+
+   ALLOC1:PROC SWAPABLE;
+      DCL (I) FIXED;
+
+      IF (NAH.PTR+NAH.LEN) IGE OUR.N.PTR
+      THEN DO;                                /* OUT OF ROOM DURING CONVERSION */
+         IF BNK.LEN<>0 THEN DO;               /* TOSS BANK & MOVE UP FURTHER */
+            BNK.PTR=BNK.PTR+BNK.LEN;
+            CALL COPY.EXT.MEM.SEC(OUR.N.PTR,OUR.N.PTR+BNK.LEN,TOP-OUR.N.PTR);
+            OUR.N.PTR=OUR.N.PTR+BNK.LEN;
+            NOTE.BASE=NOTE.BASE+BNK.LEN;
+            TOP  =TOP  +BNK.LEN;
+            BNK.LEN=0;
+         END;
+         IF (NAH.PTR+NAH.LEN) IGE OUR.N.PTR       /* FINALLY OUT OF ROOM */
+         THEN RETURN 0;
+      END;
+
+      WRITE(MAM)=NAH.PTR+NAH.LEN;
+
+      IF (INC.POLY)\(MODC<>0) THEN DO;
+         RPC 256;
+         WRITE(MDI)=0;
+      END;
+
+      ELSE DO I=0 TO 63;
+         WRITE(MDI)=0; WRITE(MDI)=0;
+         WRITE(MDI)=0; WRITE(MDI)=0;
+      END;
+
+      NAH.LEN=NAH.LEN+1;                            /* ADD 1  MORE */
+
+      RETURN NAH.LEN-1;                             /* RETURN REL POINTER */
+
+   END ALLOC1;
+
+
+   /* CONVERT FROM OLD SEQUENCER TIME */
+   /* TO NEW MSEC (MSB,LSB) FORMAT    */
+   /* RETURNS TIME IN   NMSB,NLSB     */
+
+   COMPUTE.NEW.TIME: PROC (C,T) SWAPABLE; /* CONVERTS OLD FORMAT TIME TO NEW FORMAT TIME */
+      DCL (C,T) FIXED;
+
+      LOAD SHR(T-2,1); MUL 5;  /* TICKS (0-32766) * 5  TO GET MSEC */
+      NMSB=URES; NLSB=RES;
+      LOAD C*5; MUL  32767;
+
+      NLSB=NLSB+ RES;
+      NMSB=NMSB+URES;
+
+      IF NLSB ILT RES THEN NMSB=NMSB+1;
+
+      IF (NMSB=0)&(NLSB ILT 15)   /* DETECT OLD TIME BEFORE SCRIPT 0.000 */
+      THEN NLSB=15;
+
+      IF NLSB ILT 15 THEN NMSB=NMSB-1;
+      NLSB=NLSB-15;               /* CORRECT FOR OLD SEQ SCRIPT 0.000 */
+
+      NLSB=NLSB+ZERO.TIME;        /* ADD IN NEW SCRIPT 0.000    */
+      IF NLSB ILT ZERO.TIME THEN NMSB=NMSB+1;
+
+   END COMPUTE.NEW.TIME;
+
+
+   /* $PAGE */
+
+
+   GET.FIRST.NLS: PROC (TRK) SWAPABLE; /* ALLOCATES FIRST NOTE LIST SEGMENT */
+      DCL TRK FIXED;
+
+      NLS=ALLOC1;
+      IF NLS=0 THEN RETURN 0;
+
+      WRITE(MAM)=THP;
+      WRITE(MAL)=THD.FOR;
+      WRITE(MD )=NLS;
+      WRITE(MAL)=THD.NUM.NLS;
+      WRITE(MD )=1;
+
+      NLS    =NAH.PTR+NLS;     /* GET ABSOLUTE POINTER */
+      NLSPTR =NLS.FIRSTL;      /* START AT FIRST WRD   */
+
+      WRITE(MAM)=NLS;          /* INITIALIZE NLS       */
+      WRITE(MAL)=NLS.REV;
+      WRITE(MDI)=THP-NAH.PTR;         /* NLS.REV - SAVE REV PTR    */
+      WRITE(MDI)=TRK+NUM.KBD.TRACKS;  /* NLS.TRK - SAVE TRK        */
+      WRITE(MDI)=NLSPTR;              /* NLS.FP  - SAVE FIRST PTR  */
+      WRITE(MD )=NLSPTR;              /* NLS.LP  - END PTR FOR NOW */
+
+      RETURN 1;
+   END GET.FIRST.NLS;
+
+
+   GET.NEXT.NLS:  PROC (TRK) SWAPABLE; /* ALLOCATE 2ND AND SUBSEQUENT NOTE SEGMENTS */
+      DCL (TRK,I) FIXED;
+
+      I=ALLOC1;                             /* GET ANOTHER BLOCK    */
+      IF I=0 THEN RETURN 0;                 /* NO ROOM              */
+
+      WRITE(MAM)=THP;
+      WRITE(MAL)=THD.NUM.NLS;
+      WRITE(MD )=READ(MD)+1;
+
+      WRITE(MAM)=NLS;                       /* SET UP FORWARD PTR */
+      WRITE(MAL)=NLS.FOR;
+      WRITE(MD )=I;
+
+      I=NAH.PTR+I;                          /* GET ABSOLUTE POINTER */
+      NLSPTR =NLS.FIRSTL;                   /* START AT NLS.FIRSTL  */
+
+      WRITE(MAM)=I;                         /* POINT TO NEW NLS     */
+      WRITE(MAL)=NLS.REV;
+      WRITE(MDI)=NLS-NAH.PTR;         /* NLS.REV - REV  PTR        */
+      WRITE(MDI)=TRK+NUM.KBD.TRACKS;  /* NLS.TRK - SAVE TRK        */
+      WRITE(MDI)=NLSPTR;              /* NLS.FP  - SAVE FIRST PTR  */
+      WRITE(MD )=NLSPTR;              /* NLS.LP  - END PTR FOR NOW */
+
+      NLS=I;                          /* NEW NOTE LIST SEGMENT */
+
+      RETURN 1;
+   END GET.NEXT.NLS;
+
+
+   /* $PAGE */
+
+
+   /* SAVE NOTE RECORD IN NEW SEQUENCE */
+   /* PASS TRACK,  4 WORDS OF RECORD   */
+   /* RETURNS 0 IF OUT OF ROOM         */
+
+   SAVE.NOTE.RECORD:PROC(TRK,NW1,NW2,NW3,NW4) SWAPABLE;   /* CREATE NEW NOTE RECORD */
+      DCL (TRK,NW1,NW2,NW3,NW4) FIXED; /****** KEEP THESE IN ORDER *****/
+
+      IF NLS=0 THEN DO;           /* GET FIRST NOTE LIST SEGMENT */
+         IF GET.FIRST.NLS(TRK)=0 THEN RETURN 0;
+      END;
+      ELSE IF NLSPTR > NLS.LAST THEN DO; /* MUST GET ANOTHER NLS */
+         IF GET.NEXT.NLS(TRK)=0 THEN RETURN 0;
+      END;
+
+      WRITE(MAM)=NLS;                  /* STORE NEW RECORD      */
+      WRITE(MAL)=NLSPTR;
+      NLSPTR=NLSPTR+2;                 /* INCR PTR FOR FIRST 2 WORDS WE WILL WRITE */
+
+      WRITE("313")=ADDR(NW1);          /* USE REGISTER FOR SPEED */
+      WRITE(MDI)=READ("373");          /* COPY NW1               */
+      WRITE(MDI)=READ("373");          /* COPY NW2               */
+
+      IF NW1 THEN DO;                  /* 4 WORD NEW RECORD      */
+         WRITE(MDI)=READ("373");       /* COPY NW3               */
+         WRITE(MDI)=READ("373");       /* COPY NW4               */
+         NLSPTR=NLSPTR+2;              /* ADV PTR BY ADDITIONAL 2 WORDS SINCE WRITING 4-WD RECORD */
+      END;
+      WRITE(MD)=NLS.EOS;               /* END WITH (-1)          */
+
+      WRITE(MAL)=NLS.LP;
+      WRITE(MD )=NLSPTR;               /* NLS.LP  - END PTR FOR NOW */
+
+      RETURN 1;
+
+   END SAVE.NOTE.RECORD;
+
+
+   /* EMIT A LONG REST RECORD   */
+   /* USES GLOBAL DELMSB,DELLSB */
+   /* ADDS TO GLOBAL LMSB, LLSB */
+
+   EMIT.LONG.REST: PROC SWAPABLE;
+
+      IF SAVE.NOTE.RECORD(I,"100001",DELMSB,DELLSB,VEL.NOTE)=0 THEN RETURN 0;
+
+      LLSB=LLSB+DELLSB;
+      LMSB=LMSB+DELMSB;
+      IF LLSB ILT DELLSB THEN LMSB=LMSB+1;
+      DELLSB=0; DELMSB=0;
+
+      RETURN 1;
+
+   END EMIT.LONG.REST;
+
+
+   /* $PAGE */
+
+
+   SETUP.BASE.SECTORS: PROC SWAPABLE;
+      /* FIRST INITIALIZE NEW BAS.PTR */
+
+      WRITE(MAM)=BAS.PTR;
+      DO I=0 TO 511; 
+         WRITE(MDI)=0; 
+      END;
+
+      WRITE(MAM)=BAS.PTR;
+      DO I=0 TO NUM.OSEQ.PARAMS-1;     /* SCALE, PARAMETERS  */
+         WRITE(MDI)=MISC.BUF(I);
+      END;
+
+      WRITE(MAL)=SEQ.CLICK;
+      WRITE(MD )=READ(MD)*5;           /* SCALE CLICK RATE FOR MSEC RES */
+
+      WRITE(MAL)=SEQ.CRM;              /* CHECK CRM                     */
+      IF READ(MD)=0 THEN WRITE(MD)=4;
+
+      WRITE(MAL)=MAGIC.NUMBER;
+      WRITE(MD )=MAGIC#5;
+
+      WRITE(MAL)=SEQ.OCTRATIO;
+      WRITE(MD )=MISC.BUF(OSEQ.OCTRATIO);
+
+      WRITE(MAL)=SEQ.LOOP;
+      WRITE(MD )=MISC.BUF(OSEQ.LOOP);
+
+      IF READ(MD)<>0 THEN DO;          /* OVERALL LOOP EXISTS */
+
+         CALL COMPUTE.NEW.TIME(MISC.BUF(OSEQ.G.P.T.C),
+                               MISC.BUF(OSEQ.G.P.T  ));  
+
+         WRITE(MAL)=SEQ.G.P.T;
+         WRITE(MD )=NLSB;
+
+         WRITE(MAL)=SEQ.G.P.T.C;
+         WRITE(MD )=NMSB;
+
+         WRITE(MAL)=SEQ.S.P.T; /* SET TO ZERO TO FORCE RECOMPUTE IN PLAY INITIALIZE */
+         WRITE(MD )=0;
+
+         WRITE(MAL)=SEQ.S.P.T.C;
+         WRITE(MD )=0;
+
+         if debug then do;
+            /* SEQ.COUNTIN      */
+            /* SEQ.LOOPLEN      */
+         end;
+
+      END;
+
+
+      WRITE(MAL)=SEQ.LIVE.CLICK;
+      WRITE(MD )=MISC.BUF(OSEQ.LIVE.CLICK)&255;
+
+      WRITE(MAL)=SEQ.MPREV;
+      WRITE(MD )=MISC.BUF(OSEQ.MPREV);
+
+      WRITE(MAL)=SEQ.NUMTIMBS;
+      WRITE(MD )=16;                 /* WILL BE 16 TIMBRES */
+   END SETUP.BASE.SECTORS;
+
+
+   /* $PAGE */
+
+
+   COPY.TIMBRES.INTO.PLACE: PROC SWAPABLE;
+
+      /* NOW COPY TIMBRES INTO PLACE */
+
+      I=FIND.TIMBRE(PAR.PTR,NUM.KBD.TRACKS);  /* FIND TOP OF KBD TIMBRES    */
+      J=FIND.TIMBRE(OUR.P.PTR,16);                /* REAL LENGTH OF SEQ TIMBRES */
+
+      IF (I+J)     ILT     J  THEN RETURN 0;  /* OVERFLOW IN LENGTH         */
+      IF (I+J+255) ILT   255  THEN RETURN 0;  /* SAME                       */
+      IF (I+J+255) IGE (-254) THEN RETURN 0;  /* TOO BIG                    */
+
+      CALL COPY.EXT.MEM(OUR.P.PTR,0,PAR.PTR,I,J);
+      PAR.LEN=SHR(I+J+255,8);
+      PAR.NUMT=2;                             /* ASSUME NO TRACKS NOTES/TIMBRES */
+
+      NAH.PTR=PAR.PTR+PAR.LEN;       /* NOTES WILL GO HERE */
+      NAH.LEN=1;
+
+      WRITE(MAM)=NAH.PTR;
+      DO I=0 TO 255;
+         WRITE(MDI)=0;
+      END;
+
+      RETURN 1;
+   END COPY.TIMBRES.INTO.PLACE;
+
+
+   COMPUTE.DELTA: PROC (MSB,LSB) SWAPABLE; /* COMPUTE TIME DELTA FROM (LMSB,LLSB) TO (MSB,LSB) */
+      DCL (MSB,LSB) FIXED;
+
+      IF   ((MSB ILT LMSB))      /* NEW NOTE EARLIER THAN OLD NOTE */
+      OR   ((MSB  =  LMSB)       /* NOTE LIST OUT OF ORDER         */
+      AND   (LSB ILE LLSB))
+      THEN DO;
+         DELMSB=0; DELLSB=0;
+      END;
+
+      ELSE DO;                    /* COMPUTE DELTA               */
+         DELMSB=MSB-LMSB;
+         DELLSB=LSB-LLSB;
+         IF LSB ILT LLSB THEN DELMSB=DELMSB-1;
+      END;
+
+   END COMPUTE.DELTA;
+
+
+   /* $PAGE */
+
+
+   STORE.ILS.RECORD:  PROC SWAPABLE; /* SAVES AN ILS RECORD IN NEW SEQ */
+
+      CALL COMPUTE.DELTA(ILSMSB,ILSLSB);
+      IF (DELMSB  <>    0)
+      OR (DELLSB IGT 1023)
+      THEN DO;
+         IF EMIT.LONG.REST=0 THEN RETURN 0;
+      END;
+
+      IF SAVE.NOTE.RECORD(I,
+         "104001"\SHL(DELLSB,1),
+         0,0,VEL.NOTE)=0 THEN RETURN 0;
+
+      LLSB=LLSB+DELLSB;
+      IF LLSB ILT DELLSB THEN LMSB=LMSB+1;
+      ILPINFO=ILPINFO XOR 1;
+
+      WRITE(MAM)=THP;
+      WRITE(MAL)=THD.ILS.WRD;
+      WRITE(MDI)=NLSPTR-4;
+      WRITE(MD )=NLS-NAH.PTR;
+
+      RETURN 1;
+   END STORE.ILS.RECORD;
+
+
+   STORE.ILE.RECORD:  PROC SWAPABLE; /* SAVES AN ILE RECORD IN NEW SEQ */
+
+      CALL COMPUTE.DELTA(ILEMSB,ILELSB);
+      IF (DELMSB  <>    0)
+      OR (DELLSB IGT 1023)
+      THEN DO;
+         IF EMIT.LONG.REST=0 THEN RETURN 0;
+      END;
+
+      IF SAVE.NOTE.RECORD(I,
+         "110001"\SHL(DELLSB,1),
+         0,0,VEL.NOTE)=0 THEN RETURN 0;
+
+      LLSB=LLSB+DELLSB;
+      IF LLSB ILT DELLSB THEN LMSB=LMSB+1;
+      ILPINFO=ILPINFO XOR 2;
+
+      WRITE(MAM)=THP;
+      WRITE(MAL)=THD.ILE.WRD;
+      WRITE(MDI)=NLSPTR-4;
+      WRITE(MD )=NLS-NAH.PTR;
+
+
+      /* NOW THAT THE ILS AND ILE RECORDS HAVE BEEN  */
+      /* SUCCESSFULLY INSERTED INTO THE SEQUENCE,    */
+      /* GO AHEAD AND SET THE ILP ENABLED BIT AND    */
+      /* COMPUTE THE COUNTIN DURATION BEFORE THE ILP */
+      /* BEGINS AND THE LENGTH OF THE ILP IN MSEC    */
+
+      WRITE(MAM)=THP;              /* RESTORE PTR TO TRK HEAD */
+      WRITE(MAL)=THD.ILP;          /* SET ILP ENABLED BIT */
+      WRITE(MDI)=1;
+
+      WRITE(MDI)=ILSMSB;           /* SET THD.COUNTIN.MSB */
+      WRITE(MDI)=ILSLSB;           /* SET THD.COUNTIN.LSB */
+
+      WRITE(MD )=ILEMSB-ILSMSB;    /* SET THD.LOOPLEN.MSB */
+      IF ILELSB ILT ILSLSB         /* NEED TO BORROW      */
+      THEN WRITE(MDI)=READ(MD)-1;  /* DECREMENT MSB       */
+      ELSE WRITE("324")=READ(MDI); /* SKIP TO NEXT WORD   */
+      WRITE(MD )=ILELSB-ILSLSB;    /* SET THD.LOOPLEN.LSB */
+
+      RETURN 1;
+   END STORE.ILE.RECORD;
+
+
+   /* $SUBTITLE  ROUTINE SCAN.OLD.NOTE.RECORD */
+
+
+   SCAN.OLD.NOTE.RECORD: PROC SWAPABLE; /* CONVERTS NOTES FOR 1 TRACK */
+      DCL (ENDSEC,ENDWRD) FIXED; /* PTR TO FIRST WORD OF NEXT TRK */
+
+      COMPUTE.DELTA: PROC (MSB,LSB); /* COMPUTE TIME DELTA FROM (LMSB,LLSB) TO (MSB,LSB) */
+         DCL (MSB,LSB) FIXED;
+
+         IF   ((MSB ILT LMSB))      /* NEW NOTE EARLIER THAN OLD NOTE */
+         OR   ((MSB  =  LMSB)       /* NOTE LIST OUT OF ORDER         */
+         AND   (LSB ILE LLSB))
+         THEN DO;
+            DELMSB=0; DELLSB=0;
+         END;
+         ELSE DO;                    /* COMPUTE DELTA               */
+            DELMSB=MSB-LMSB;
+            DELLSB=LSB-LLSB;
+            IF LSB ILT LLSB THEN DELMSB=DELMSB-1;
+         END;
+
+      END COMPUTE.DELTA;
+
+      COMPUTE.NEW.TIME: PROC (C,T); /* CONVERTS OLD FORMAT TIME TO NEW FORMAT TIME */
+         DCL (C,T) FIXED;
+
+         LOAD SHR(T-2,1); MUL 5;  /* TICKS (0-32766) * 5  TO GET MSEC */
+         NMSB=URES; NLSB=RES;
+         LOAD C*5; MUL  32767;
+
+         NLSB=NLSB+ RES;
+         NMSB=NMSB+URES;
+         IF NLSB ILT RES THEN NMSB=NMSB+1;
+
+         IF (NMSB=0)&(NLSB ILT 15)   /* DETECT OLD TIME BEFORE SCRIPT 0.000 */
+         THEN NLSB=15;
+
+         IF NLSB ILT 15 THEN NMSB=NMSB-1;
+         NLSB=NLSB-15;               /* CORRECT FOR OLD SEQ SCRIPT 0.000 */
+
+         NLSB=NLSB+ZERO.TIME;        /* ADD IN NEW SCRIPT 0.000    */
+         IF NLSB ILT ZERO.TIME THEN NMSB=NMSB+1;
+
+      END COMPUTE.NEW.TIME;
+
+      SAVE.NOTE.RECORD: PROC (TRK,NW1,NW2,NW3,NW4); /* CREATE NEW NOTE RECORD */
+         DCL (TRK,NW1,NW2,NW3,NW4) FIXED; /****** KEEP THESE IN ORDER *****/
+
+         IF NLS=0 THEN DO;           /* GET FIRST NOTE LIST SEGMENT */
+            IF GET.FIRST.NLS(TRK)=0 THEN RETURN 0;
+         END;
+         ELSE IF NLSPTR > NLS.LAST THEN DO; /* MUST GET ANOTHER NLS */
+            IF GET.NEXT.NLS(TRK)=0 THEN RETURN 0;
+         END;
+
+         WRITE(MAM)=NLS;                  /* STORE NEW RECORD      */
+         WRITE(MAL)=NLSPTR;
+         NLSPTR=NLSPTR+2;                 /* INCR PTR FOR FIRST 2 WORDS WE WILL WRITE */
+
+         WRITE("313")=ADDR(NW1);          /* USE REGISTER FOR SPEED */
+         WRITE(MDI)=READ("373");          /* COPY NW1               */
+         WRITE(MDI)=READ("373");          /* COPY NW2               */
+
+         IF NW1 THEN DO;                  /* 4 WORD NEW RECORD      */
+            WRITE(MDI)=READ("373");       /* COPY NW3               */
+            WRITE(MDI)=READ("373");       /* COPY NW4               */
+            NLSPTR=NLSPTR+2;              /* ADV PTR BY ADDITIONAL 2 WORDS SINCE WRITING 4-WD RECORD */
+         END;
+         WRITE(MD)=NLS.EOS;               /* END WITH (-1)          */
+
+         WRITE(MAL)=NLS.LP;
+         WRITE(MD )=NLSPTR;               /* NLS.LP  - END PTR FOR NOW */
+
+         RETURN 1;
+      END SAVE.NOTE.RECORD;
+
+
+      /* $PAGE */
+
+
+      EMIT.LONG.REST: PROC; /* STORE LONG REST IN SEQ, USES GLOBAL DELMSB,DELLSB,LMSB,LLSB */
+
+         IF SAVE.NOTE.RECORD(I,"100001",DELMSB,DELLSB,VEL.NOTE)=0 THEN RETURN 0;
+
+         LLSB=LLSB+DELLSB;
+         LMSB=LMSB+DELMSB;
+         IF LLSB ILT DELLSB THEN LMSB=LMSB+1;
+         DELLSB=0; DELMSB=0;
+
+         RETURN 1;
+
+      END EMIT.LONG.REST;
+
+
+      /* COMPUTE (MAM,MAL) PTR TO FIRST WORD AFTER END OF THIS TRK */
+
+      IF I<15 THEN DO;
+         ENDSEC=NOTE.BASE+SHR(MISC.BUF(OSEQ.POINTERS+I+1)-256,8);
+         ENDWRD=(MISC.BUF(OSEQ.POINTERS+I+1)-256)&"377";
+      END;
+      ELSE DO;
+         ENDSEC=NOTE.BASE+SHR(MISC.BUF(OSEQ.SLEN)-MISC.BUF(OSEQ.NPPW)-256,8);
+         ENDWRD=(MISC.BUF(OSEQ.SLEN)-MISC.BUF(OSEQ.NPPW)-256)&"377";
+      END;
+
+      DO WHILE (W1<>0)                  /* UNTIL END OF LIST            */
+         AND ((OUR.N.PTR ILT ENDSEC)    /* BUT LIMIT TO START OF NEXT TRK */
+         OR   ((OUR.N.PTR  =  ENDSEC)   /* IN CASE NOTE LIST IS TRASHED */
+         AND   (N.WRD     ILT ENDWRD)));
+
+         WRITE(MAM)=OUR.N.PTR;
+         WRITE(MAL)=N.WRD;
+      
+         WRITE("313")=ADDR(W1);
+         WRITE("373")=READ(MDI); /* GET OLD RECORD           */
+         WRITE("373")=READ(MDI);
+
+         IF W1 THEN DO;
+            WRITE("373")=READ(MDI); WRITE("373")=READ(MDI);
+         END;
+         ELSE DO;
+            WRITE("373")=RTE.MAX; WRITE("373")=VEL.NOTE;
+         END;
+
+
+         /* GET TIME OF OLD RECORD: */
+
+         IF  (W1 >=  OLDT)
+         AND (W1 ILT OLDT)
+         THEN OLDC=OLDC+1;
+
+         ELSE IF (W1  <  OLDT)
+         AND     (W1 IGT OLDT)
+         THEN OLDC=OLDC-1;
+
+         OLDT=W1&"177776";
+
+         CALL COMPUTE.NEW.TIME(OLDC,OLDT);  /* COMPUTE TIME OF NEW RECORD */
+
+
+         IF ILPINFO<>0 THEN DO;           /* CHECK FOR ILP RECORD */
+
+            IF (ILPINFO&1)<>0 THEN DO;    /* CHECK FOR ILS        */
+               IF  ((NMSB IGT ILSMSB))    /* IT IS TIME TO EMIT THE */
+               OR  ((NMSB  =  ILSMSB)     /* THE ILP START RECORD   */
+               AND  (NLSB IGE ILSLSB))
+               THEN DO;
+                  IF STORE.ILS.RECORD=0 THEN RETURN 0; /* SAVE AN ILS RECORD ON OUR TRK */
+               END;
+            END;   /* OF CHECK FOR ILS RECORD NEEDED */
+
+            IF (ILPINFO&2)<>0 THEN DO;    /* CHECK FOR ILE        */
+               IF  ((NMSB IGT ILEMSB))    /* IT IS TIME TO EMIT THE */
+               OR  ((NMSB  =  ILEMSB)     /* ILP END RECORD         */
+               AND  (NLSB IGE ILELSB))
+               THEN DO;
+                  IF STORE.ILE.RECORD=0 THEN RETURN 0;  /* SAVE AN ILE RECORD ON OUR TRK */
+               END;
+            END;                          /* OF CHECK FOR ILE RECORD NEEDED */
+
+         END;                             /* OF CHECK ILP INFO */
+
+
+         /* $PAGE */
+
+
+         /* CHECK FOR AND SKIP OVER REST NOTES */
+
+         IF  ((W3&SHL(B.UPD,8))=0)         /* NOT AN UPDATE RECORD   */
+         AND ((W2&        "77")=REST.NOTE) /* BUT HAS A REST NOTE    */
+         THEN DO;                          /* SKIP OLD REST NOTES    */
+         END;
+
+         ELSE DO;                         /* SAVE NOTE RECORD */
+
+            CALL COMPUTE.DELTA(NMSB,NLSB);
+
+            /* CHECK FOR NEED TO STORE */
+            /* LONG REST RECORD        */
+
+            IF (DELMSB  <>    0)
+            OR (DELLSB IGT 1023)
+            THEN DO;
+               IF EMIT.LONG.REST=0 THEN RETURN 0;
+            END;
+
+            IF ((W3&SHL(B.UPD,8))<>0)   /* UPDATE RECORD - SPECIAL     */
+            THEN DO;
+               IF ((W3&SHL(B.GUI,8))=0)
+               THEN DO;                 /* KEYBOARD UPDATE - CHANGE    */
+                  DURLSB=SHR(W2,6);     /* GET 10-BIT UPDATE FIELD     */
+                  DO CASE (DURLSB&3);   /* BRANCH ON TYPE              */
+                     DO;                /* RTE DATA UPDATE             */
+                        J=SHR(DURLSB,6)&15;  /* SEE IF SECOND UPDATE   */
+                        IF J<>0 THEN DO;     /* DO SPECIAL UPDATE FOR  */
+                           J=J-1;            /* GET RTE POINTER     */
+                           IF J>5  THEN J=5; /* HARDWARE ERROR      */
+                           IF SAVE.NOTE.RECORD(I,
+                              SHL(DELLSB,1)\1,         /* TIME DELTA   */
+                              SHL(J,8)\(W2&"77"),      /* RTE CODE     */
+                              (W3&"177400")\SHR(W4,8), /* FOR VALUE    */
+                              SHL(PRTE(J),8)\VEL.NOTE)=0 THEN RETURN 0;
+                           LLSB=LLSB+DELLSB;
+                           IF LLSB ILT DELLSB
+                           THEN LMSB=LMSB+1;
+                           DELLSB=0;
+                           PRTE(J)=SHR(W4,8);
+                        END;
+                        J=SHR(DURLSB,2)&15;
+                        IF J<>0 THEN J=J-1;  /* GET RTE POINTER        */
+                        IF J>5  THEN J=5;    /* HARDWARE ERROR         */
+                        W2=SHL(J,8)\(W2&"77");      /* RTE CODE        */
+                        W4=(W4&255)\SHL(PRTE(J),8); /* STORE REW VAL   */
+                        PRTE(J)=W3&255;
+                     END;
+                     DO;                /* TBITS UPDATE               */
+                        W2=SHL(PTBITS,12)\SHL(DURLSB&"77",6)\(W2&"77");
+                        PTBITS=SHR(DURLSB,2)&"17";
+                     END;
+                     DO;                /* PRESSURE UPDATE            */
+                     END;
+                     DO;                /* MIDI PGM CHANGE            */
+                        W4=(W4&255)\SHL(PMIDI,8);
+                        PMIDI=W3&255;
+                     END;
+                  END;
+               END;
+
+               IF SAVE.NOTE.RECORD(I,
+                  SHL(DELLSB,1)\(W1&1),
+                  W2,
+                  W3,
+                  W4)=0 THEN RETURN 0;
+
+               LLSB=LLSB+DELLSB;
+               IF LLSB ILT DELLSB THEN LMSB=LMSB+1;
+
+            END;   /* OF HANDLE/STORE UPDATE RECORD */
+
+
+            /* $PAGE */
+
+
+            ELSE DO;                 /* NORMAL NOTE RECORD          */
+
+               /* EXPAND OLD DURATION */
+
+               DURLSB=SHR(W2,6);     /* GET OLD 10-BIT DURATION     */
+               DURLSB=(DURLSB&255)*DUR.TABLE(SHR(DURLSB,8)); /* EXPAND DURATION DATA */
+               LOAD DURLSB; MUL 5;   /* GET MSEC=TICKS*5            */
+               DURMSB=URES; DURLSB=RES;
+
+               /* COMPUTE NEW ENCODED DURATION */
+
+               K=0;                        /* EXPONENT */
+               DO WHILE (DURMSB  <>    0)
+               OR       (DURLSB IGT 4095);
+                  K=K+1;
+                  DURLSB=SHR(DURLSB,2)\SHL(DURMSB,14);
+                  DURMSB=SHR(DURMSB,2);
+               END;
+               
+               IF SAVE.NOTE.RECORD(I,
+                  SHL(K,13)\SHL(SHR(DURLSB,10),11)\SHL(DELLSB,1)\(W1&1),
+                  SHL(DURLSB,6)\(W2&"77"),
+                  W3,
+                  W4)=0 THEN RETURN 0;
+
+               LLSB=LLSB+DELLSB;
+               IF LLSB ILT DELLSB THEN LMSB=LMSB+1;
+
+            END;  /* OF STORE NORMAL NOTE RECORD */
+
+
+            /* INCREMENT # OF NOTES ON TRACK */
+
+            WRITE(MAM)=THP;
+            WRITE(MAL)=THD.NN.LSB;
+            WRITE(MD )=READ(MD)+1;
+            IF READ(MD)=0 THEN DO;   /* MSB                  */
+               WRITE(MAL)=THD.NN.MSB;
+               WRITE(MD )=READ(MD)+1;
+            END;
+
+         END;  /* OF PROCESS/STORE A NON-REST NOTE RECORD */
+
+
+         /* ADVANCE POINTERS PAST NOTE: */
+
+         IF W1 THEN N.WRD=N.WRD+4;       /* SKIP 4 WRD REC  */  
+         ELSE       N.WRD=N.WRD+2;       /* SKIP 2 WRD REC  */
+
+         OUR.N.PTR=OUR.N.PTR+SHR(N.WRD,8);
+         N.WRD=N.WRD&255;
+
+         WRITE(MAM)=OUR.N.PTR;
+         WRITE(MAL)=N.WRD;
+
+         W1=READ(MD);
+
+      END;   /* OF LOOP UNTIL END OF TRACK REACHED */
+
+      IF  ((OUR.N.PTR IGT ENDSEC)
+      OR   ((OUR.N.PTR =  ENDSEC)
+      AND  (N.WRD     IGE ENDWRD))) THEN DO;
+         /* SOME SORT OF GLOMMED INFO AT END OF TRACK */
+      END;
+
+      RETURN 1;
+
+   END SCAN.OLD.NOTE.RECORD;
+
+
+   /* $SUBTITLE  ROUTINE CONVERT.OLD.SEQUENCE */
+
+
+   CONVERT.OLD.SEQUENCE: PROC (P.PTR,P.LEN,N.PTR,N.LEN) FIXED PUBLIC SWAPABLE;
+      DCL (P.PTR,P.LEN,N.PTR,N.LEN)   FIXED;
+
+      NOTE.BASE = N.PTR; /* STORE ORIGINAL BASE */
+      OUR.N.PTR = N.PTR; /* STORE IN LOCAL GLOBALS */
+      OUR.P.PTR = P.PTR;
+
+      /* CHECK SEQUENCE TYPE */
+
+      IF MISC.BUF(MAGIC.NUMBER)<>MAGIC#4 THEN DO;      /* SEE VERY EARLY TYPE */
+         IF MISC.BUF(MAGIC.NUMBER)=MAGIC#3 THEN DO;    /* CONVERT SFM TIMBRES */
+            I=CONVERT.SFM.TIMBRES(OUR.P.PTR,0,16);     /* CONVERT TO PATCHES  */
+            IF I=0 THEN DO;                            /* USE ZEROES IF CONVERT BOMBS OUT */
+               WRITE(MAM)=OUR.P.PTR;
+               DO I=0 TO LEN.SEQ.TIMBS-1;
+                  WRITE(MDI)=0;
+               END;
+            END;
+            ELSE MISC.BUF(OSEQ.PLEN)=I;                /* UPDATE LEN OF PARM AREA */
+         END;
+
+         ELSE IF (MISC.BUF(MAGIC.NUMBER)<>MAGIC#2)     /* NOT TYPE 2 EITHER? */
+         AND     (MISC.BUF(MAGIC.NUMBER)<>MAGIC#1)     /* NOR TYPE 1         */
+         THEN DO;
+            RETURN 0;
+         END;
+
+         MISC.BUF(MAGIC.NUMBER)=MAGIC#4;               /* SET TO NEW TYPE */
+      END;
+
+      /* MAKE SURE TRACK VOLUMES STORED */
+
+      I=0;
+      DO J=0 TO 15;    /* LOOP OVER OLD TRACKS */
+         I=I\MISC.BUF(OSEQ.TRVOLS+J)&1023; /* SEE IF ANY TRKS WITH TVOL */
+      END;
+      IF I=0 THEN DO;  /* NO TRKS HAVE A TRK VOLUME - ASSUME OLD FORMAT */
+         DO J=0 TO 15; /* SET ALL TRKS TO FULL TRK VOLUME */
+            MISC.BUF(OSEQ.TRVOLS+J)=1000;
+         END;
+      END;
+
+
+      CALL SETUP.BASE.SECTORS;   /* INITIALIZE BASE SECTORS */
+
+      IF COPY.TIMBRES.INTO.PLACE=0  THEN DO;
+         RETURN 0; /* LOAD IN THE TIMBRES */
+      END;
+
+
+      /* $PAGE - NOW CONVERT NOTES FOR EACH TRACK */
+
+
+      N.WRD=0;
+      TOP  =OUR.N.PTR+N.LEN;         /* SAVE TOP OF NOTES  */
+
+      DO I=0 TO 15;                  /* TRY EACH TRACK      */
+
+         /* RESYNC PTR TO START OF TRK EACH TIME THROUGH */
+         /* JUST IN CASE ONE OR MORE TRACKS GOT THE END  */
+         /* OF TRACK RECORDS GLOMMED FOR SOME REASON.    */
+
+         OUR.N.PTR=NOTE.BASE+SHR(MISC.BUF(OSEQ.POINTERS+I)-256,8);
+         N.WRD    =(MISC.BUF(OSEQ.POINTERS+I)-256)&"377";
+
+         WRITE(MAM)=OUR.N.PTR;
+         WRITE(MAL)=N.WRD;
+
+         W1=READ(MDI);               /* GET FIRST.NOTE      */
+
+         /* IF W1<>FIRST.NOTE THEN RETURN 0 */
+
+         N.WRD=N.WRD+1;
+         IF N.WRD=256 THEN DO;
+            N.WRD=0;
+            OUR.N.PTR=OUR.N.PTR+1;
+         END;
+
+         W1=READ(MD);                 /* GET 1ST WORD OF 1ST REAL NOTE */
+
+         /* ALLOCATE TRK HEAD SECTOR IF NON-EMPTY TRACK */
+
+         IF (W1                       <>0)   /* TRACK IS NON-EMPTY       */
+         OR (MISC.BUF(OSEQ.ILS.PTRS+I)<>0)   /* OR HAS INDEP LOOP        */
+         THEN DO;                            /* SET UP BASIC TRACK INFO  */
+
+            THP=ALLOC1;                      /* GET TRACK HEADER         */
+            IF THP=0 THEN RETURN 0;          /* NONE AVAILABLE           */
+
+            WRITE(MAM)=NAH.PTR;              /* STORE REL PTR            */
+            WRITE(MAL)=I+NUM.KBD.TRACKS;
+            WRITE(MD )=THP;
+
+            THP=NAH.PTR+THP;                 /* COMPUTE ABSOLUTE PTR     */
+
+            WRITE(MAM)=THP;                  /* INITIALIZE THP           */
+
+            WRITE(MAL)=THD.TRK;
+            WRITE(MD )=I+NUM.KBD.TRACKS;            
+
+            /* MIDI: */
+
+            IF I
+            THEN J=SHR(MISC.BUF(OSEQ.MIDI+SHR(I,1)),8);  /* TAKE UPPER BYTE */
+            ELSE J=    MISC.BUF(OSEQ.MIDI+SHR(I,1))&255; /* TAKE LOWER BYTE */
+
+            IF (J&128)<>0 THEN DO;           			/* HAVE A NON-ZERO ROUTING FOR THIS TRACK */
+               WRITE(MAL)=THD.MIDI;          			/* GET OLD MIDI ROUTINE     */
+               WRITE(MD)=(SHL(J&"140",7))    			/* PUT PRESSURE MODE INTO CORRECT POS */
+                        \(SHR(J&"37",2)+MIDI.SUBSYS)    /* COMPUTE SUBSYSTEM NUMBER */
+                        \(SHL(J&"3",5));    			/* AND OUTPUT NUMBER */
+
+               J=MISC.BUF(OSEQ.MIDI+8+SHR(I,2)); 		/* GET CORRECT WORD */
+               J=SHR(J,SHL(I&3,2))&"17";         		/* EXTRACT THE DESIRED NIBBLE */
+               WRITE(MD)=READ(MD)\SHL(J,8);
+            END;
+
+            /* TRACK VOLUME: */
+
+            WRITE(MAL)=THD.TVOL;
+            WRITE(MD )=MISC.BUF(OSEQ.TRVOLS+I);
+
+            WRITE(MAL)=THD.MIDX;
+            WRITE(MD )=0;
+
+            /* $PAGE */
+
+
+            /* TRACK ROUTING: */
+
+            WRITE(MAL)=THD.TROU;                 /* MUTLI ROUTING */
+            IF I<8 THEN DO;
+               WRITE(MD)=MISC.BUF(OSEQ.TROUT1+I);
+            END;
+            ELSE DO;
+               WRITE(MD)=MISC.BUF(OSEQ.TROUT2+I-8);
+            END;
+
+            WRITE(MAL)=THD.ORATIO;               /* INDIV ORATIO */
+            WRITE(MD )=MISC.BUF(OSEQ.OCTRATIO);
+
+            /* TRANSPOSITION KEY # */
+
+            J=12*MISC.BUF(OSEQ.XPOS+2+I)/1024;   /* GET KEY # OFFSET FROM MID C FOR XPOS */
+            IF READ(4) IGE 512 THEN J=J+1;       /* ROUND */
+
+            WRITE(MAL)=THD.SXPOS;                /* STARTING XPOS */
+            WRITE(MD )=J;
+
+            /* STARTING TIMBRE */
+
+            WRITE(MAL)=THD.STIMB;
+            WRITE(MD )=I+NUM.KBD.TRACKS;
+            PAR.NUMT=READ(MD)+1;                 /* OUR HIGHEST NON-EMPTY TRACK	*/
+
+            WRITE(MAL)=THD.USAGE;                /* SET UP USAGE SUMMARY TABLE	*/
+            WRITE(MDI)=I+NUM.KBD.TRACKS;
+            WRITE(MDI)=1;                        /* ONE OCCURRENCE					*/
+
+            WRITE(MAL)=THD.SLPITCH;
+            WRITE(MD )=MISC.BUF(OSEQ.FIRSTS+I);
+
+            /* INDIV SCALE */
+
+            DO J=0 TO 11;
+               WRITE(MAL)=THD.SCALE+J;
+               WRITE(MD )=MISC.BUF(OSEQ.SCALE+J);
+            END;
+
+
+            /* $PAGE - NOW CONVERT NOTES */
+
+
+            NLS=0;                   /* NO NOTE LIST YET         */
+
+            OLDC=0; OLDT=2;          /* INIT OLD PLAY.TIME       */
+            LMSB=0; LLSB=0;          /* INIT NEW PLAY.TIME       */
+
+            PTBITS=0; PMIDI=0;       /* INIT FOR RTE SCAN        */
+            DO J=0 TO 7; PRTE(J)=0; END;
+
+            ILPINFO=0;               /* ASSUME NO ILP INFO       */
+
+            IF MISC.BUF(OSEQ.ILS.PTRS+I)<>0 THEN DO; /* TRK SEEMS TO HAVE AN ILP */
+               ILPINFO=3;            /* SET TWO BITS             */
+               CALL COMPUTE.NEW.TIME(MISC.BUF(OSEQ.ILS.PTCS+I),
+                                     MISC.BUF(OSEQ.ILS.PLTS+I));
+               ILSMSB=NMSB;
+               ILSLSB=NLSB;
+               CALL COMPUTE.NEW.TIME(MISC.BUF(OSEQ.ILE.PTCS+I),
+                                     MISC.BUF(OSEQ.ILE.PLTS+I));
+               ILEMSB=NMSB;
+               ILELSB=NLSB;
+
+               IF  ((ILSMSB=ILEMSB)       /* IF EQUAL TIMES,  THEN LOOP LENGTH IS 0 */
+               AND  (ILSLSB=ILELSB))
+               OR  ((ILEMSB ILT ILSMSB))  /* OR ELSE OUT OF ORDER */
+               OR  ((ILEMSB  =  ILSMSB)
+               AND  (ILELSB ILT ILSMSB))
+               THEN ILPINFO=0;       
+
+            END; /* OF TRK SEEMS TO HAVE AN ILP */
+
+
+            IF SCAN.OLD.NOTE.RECORD=0 THEN DO; /* TRY TO CONVERT NOTES ON THIS TRK */
+               RETURN 0; /* OUT OF MEMORY */
+            END;
+
+
+            IF ILPINFO<>0 THEN DO;        /* CHECK FOR ILP RECORD */
+
+               IF (ILPINFO&1)<>0 THEN DO; /* CHECK FOR ILS        */
+                  IF STORE.ILS.RECORD=0 THEN DO; /* STORE ILS RECORD ON TRK */
+                     RETURN 0; /* OUT OF MEMORY */
+                  END;
+               END;                       /* OF CHECK FOR ILS RECORD NEEDED */
+
+               IF (ILPINFO&2)<>0 THEN DO; /* CHECK FOR ILE        */
+                  IF STORE.ILE.RECORD=0 THEN DO; /* STORE ILE RECORD ON TRK */
+                     RETURN 0; /* OUT OF MEMORY */
+                  END;
+               END;                       /* OF CHECK FOR ILE RECORD NEEDED */
+
+            END;                          /* OF CHECK ILP INFO */
+
+         END;                           /* OF CONVERT THE NEXT TRACK */
+
+      END;  /* OF LOOP OVER THE 16 OLD TRACKS */
+
+
+      /* $PAGE - CONVERT MUSIC PRINTING INFO */
+
+
+      IF MISC.BUF(OSEQ.NPPW)<>0 THEN DO; /* CONVERT MUSIC PRINTING INFO */
+
+         OUR.N.PTR=NOTE.BASE+SHR(MISC.BUF(OSEQ.POINTERS+16)-256-MISC.BUF(OSEQ.NPPW),8);
+         N.WRD    =(MISC.BUF(OSEQ.POINTERS+16)-256-MISC.BUF(OSEQ.NPPW))&"377";
+
+         INF.LEN=SHR(MISC.BUF(OSEQ.NPPW)+255,8); /* LENGTH, SECS     */
+
+         IF BNK.LEN<>0 THEN DO;                  /* TRY TO MOVE BANK */
+            CALL COPY.EXT.MEM(OUR.N.PTR,N.WRD,NAH.PTR+NAH.LEN,0,MISC.BUF(OSEQ.NPPW));  /* COPY MPLOT INFO DOWN */
+            OUR.N.PTR=NAH.PTR+NAH.LEN;               /* NEW LOCATION     */
+            N.WRD=0;                      
+            IF (OUR.N.PTR+INF.LEN+INF.LEN) IGT BNK.PTR
+            THEN DO;                             /* MUST TOSS BANK   */
+               BNK.PTR=BNK.PTR+BNK.LEN-INF.LEN;  /* MOVE PTR UP      */
+               BNK.LEN=0;                        /* GONZO            */
+            END;
+            ELSE DO;                             /* COPY BANK TO NEW PLACE */
+               CALL COPY.EXT.MEM.SEC(BNK.PTR,BNK.PTR-INF.LEN,BNK.LEN);
+               BNK.PTR=BNK.PTR-INF.LEN;
+            END;
+         END;
+         ELSE BNK.PTR=BNK.PTR-INF.LEN;           /* ELSE MAKE ROOM FOR INF */
+            
+         INF.PTR=INF.PTR-INF.LEN;
+
+         CALL COPY.EXT.MEM(OUR.N.PTR,N.WRD,INF.PTR,0,MISC.BUF(OSEQ.NPPW));
+
+      END;   /* OF CONVERT OLD MUSIC PRINTING INFO */
+
+      RETURN 1;                         /* OK CONVERSION */
+
+   END CONVERT.OLD.SEQUENCE;
+
+END;

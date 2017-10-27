@@ -1,0 +1,589 @@
+/* SMG-REG   $TITLE  Region Routines
+
+   Modified:
+2002/08/19 - TY  - Modified DEFINE.BUTTON.ICON() so that the caller can specify a width longer than the label
+					  - and have the label automatically centered.
+   06/23/88 - cj  - added O#ICON.BlockMOde On/Off
+   05/24/88 - TSS - Modified MOUSE.SWITCH calls to save and restore MOUSE.CURSOR.TYPE
+   05/24/88 - EEG - Modified grab icon triangle to extend to top edge
+   05/10/88 - EEG - Modified icon fills to work faster with termulator
+   04/22/88-TSS,KJO-Fixed icons to use MAC features
+   04/22/88-TSS,KJO-Added new poly fill commands, fixed bug in original poly fill
+   10/21/87 - MWH - Use passed ID for mouse hole icon; don't force S#AA!
+   10/19/87 - MWH - Screen.Changed, Update, Exhibit, Enable USED CONSISTENTLY
+   10/05/87 - MWH - Better error return
+   10/01/87 - MWH - Make unreferenced procedures NON-public
+   09/25/87 - MWH - Use literals for suffix lengths
+*/
+
+DEFINE.GRAPHICS.ICON: proc (id, x, y, region, icon) public swapable;
+   dcl id				fixed;
+   dcl (x, y)			fixed;
+   dcl region			fixed;	/*	0 = no region, 1 = no margin, 2 = margin */
+   dcl icon				array;
+   dcl icon.length	fixed;
+   dcl i					fixed;
+
+   Id = Allocate.Id(Id);		/*	keep system info up to date, possibly auto allocate id */
+
+   icon.length = 0;
+   do while icon(icon.length) <> O#ICON.End;
+      icon.length = icon.length + 1;
+   end;
+
+   If Allocate.New.Object(O#Hlen+O#ICON.Size+icon.length) then do;
+      call Write.Object(Object.Ptr + O#Type,  O$Graphics.Icon);
+      call Write.Object(Object.Ptr + O#Status,O#STAT.Update);                                        
+      call Write.Object(Object.Ptr + O#Id,    Id);
+      call Write.Object(Object.Ptr + O#Action,Default.Action
+                                              \ O#ACT.Prev.Obj);
+      call Write.Object(Object.Ptr + O#ICON.X,x);
+      call Write.Object(Object.Ptr + O#ICON.Y,y);
+      call Write.Object(Object.Ptr + O#ICON.Region,region);
+      call Write.Object(Object.Ptr + O#ICON.Length,icon.length);
+
+      call Read.Object(Object.Ptr+O#ICON.Icon); /* get MAM/MAL ptrs set up */
+      write("313")=addr(icon(0));
+      do i = 0 to icon.length-1;     /* write out data */
+         write(mdi) = read("373");
+      end;
+
+      Screen.Changed = true;
+      return Id;                     /* allocate was successful */
+   end;
+   else return 0;
+
+end DEFINE.GRAPHICS.ICON;
+
+dcl (icon.xmin,icon.xmax) fixed;    /* Globals used for determining the region of an icon */
+dcl (icon.ymin,icon.ymax) fixed;
+
+DRAW.GRAPHICS.ICON: proc (ptr,base.x,base.y,define.region,force.erase) swapable; 
+
+   /* NOTE: THIS PROCEDURE USES RECURSION */
+
+   dcl ptr					fixed; /* ptr to object to aupdate */
+   dcl i						fixed;
+   dcl first.word			fixed; /* Contains first word of parameter list */
+   dcl icon.length		fixed; /* Length of icon list in words          */
+   dcl (base.x, base.y)	fixed; /* base x and y coordinate of icon       */
+   dcl (x, y)				fixed;
+   dcl (x1, y1)			fixed;
+   dcl define.region		fixed;
+   dcl force.erase		fixed; /* if a 1 then forces erasure of object */
+   dcl command				fixed;
+   
+   EXPAND.REGION: proc (x,y);
+      dcl (x,y) fixed;
+
+      if      x < icon.xmin then icon.xmin = x;
+      else if x > icon.xmax then icon.xmax = x;
+      if      y < icon.ymin then icon.ymin = y;
+      else if y > icon.ymax then icon.ymax = y;
+   end EXPAND.REGION;
+
+   if gtype=0 then return;
+
+   icon.length = Read.Object(ptr+O#ICON.Length);
+   i = 0;
+
+   do while i < icon.length;
+
+      command    = Read.Object(ptr+O#ICON.Icon+i);   /* Get command word */
+      i = i + 1;
+      first.word = Read.Object(ptr+O#ICON.Icon+i);   /* Get First parameter word */
+
+      do case command;
+         do; /* 0: Move to O#ICON.MoveTo */
+            x = base.x + gpix.x(first.word);
+            y = base.y + gpix.y(Read.Object(ptr+O#ICON.Icon+i+1));
+            call move_to(x,y);
+            if define.region then call expand.region(x,y);
+            i = i + 2;
+         end;
+
+         do; /* 1: Plot O#ICON.Plot */
+            x = base.x + gpix.x(first.word);
+            y = base.y + gpix.y(Read.Object(ptr+O#ICON.Icon+i+1));
+            call plot(x,y);
+            if define.region then call expand.region(x,y);
+            i = i + 2;
+         end;
+
+         do; /* 2: Connect O#ICON.Connect */
+            x  = base.x + gpix.x(first.word);
+            y  = base.y + gpix.y(Read.Object(ptr+O#ICON.Icon+i+1));
+            x1 = base.x + gpix.x(Read.Object(ptr+O#ICON.Icon+i+2));
+            y1 = base.y + gpix.y(Read.Object(ptr+O#ICON.Icon+i+3));
+            call move_to(x,y);
+            call plot(x1,y1);
+            if define.region then do;
+               call expand.region(x,y);
+               call expand.region(x1,y1);
+            end;
+            i = i + 4;
+         end;
+
+         do;  /* 3: Alpha String O#ICON.AlphaString */
+            if define.region then do;
+               call expand.region(#lastx,#lasty);
+               call expand.region(#lastx+(first.word*char.width),
+                                  #lasty+(char.height-2));
+            end;
+            alpha_mode;
+            call Print.EMString(ptr+O#ICON.Icon+i);
+            vector_mode;
+            i = i+shr(first.word+1,1)+1;
+         end;
+
+         do;  /* 4: Character size O#ICON.CharSize */
+            alpha_mode;
+            call pc(27);
+            call pc(first.word+a.0);
+            vector_mode;
+            i = i + 1;
+         end;
+
+         do; /* 5: Line type O#ICON.LineType */
+            call Line_Type(first.word);
+            i = i + 1;
+         end;
+
+         do; /* 6: Data Level O#ICON.DataLevel */
+            if force.erase = 0 then do;  /* if we are erasing do not allow data_level change */
+               call Data_Level(first.word);
+            end;
+            i = i + 1;
+         end;
+
+         do; /* 7: Poly Fill O#ICON.PolyFill */
+            if mg600 then do;
+               call pc(27);             /* Select the pattern */
+               call ps('|P');
+               call pc(first.word);
+               call pc(27);             /* Fill the pattern */
+               call ps('|FF');          
+            end;
+            i=i+1;
+         end;
+
+         do; /* 8: Insert Icon O#ICON.InsertIcon */
+            if (Locate.Object(first.word))
+            &  (Read.Object(Object.Ptr+O#Type) = O$Graphics.Icon)
+            then call Draw.Graphics.Icon(Object.Ptr,#lastx,#lasty,define.region,force.erase);
+            i=i+1;
+         end;
+
+         do; /* 9: Start Poly O#ICON.StartPoly */
+            if mg600 then do;
+               call pc(27);             /* Select the pattern */
+               call ps('|P');
+               call pc(first.word);
+               if termulator then do;
+                  call pc(27); call ps('\P');
+               end;
+            end;
+            i=i+1;
+         end;
+
+         do; /* 10: End Poly O#ICON.EndPoly */
+            if mg600 then do;
+               x = base.x + gpix.x(first.word);
+               y = base.y + gpix.y(Read.Object(ptr+O#ICON.Icon+i+1));
+
+               if termulator then do;
+                  vector_mode;
+                  call pc(27); call ps('\p');
+               end;
+               else do;
+                  call move_to(x,y);
+                  call pc(27);             /* Fill the pattern */
+                  call ps('|FF');          
+               end;
+
+               if define.region then call expand.region(x,y);
+            end;
+            i = i + 2;
+         end;
+
+         do;                    /* 11: Block Mode on O#ICON.BlockModeOn */
+            call BLOCKMODE_ON;
+         end;
+
+         do;                    /* 12: Block Mode Off O#ICON.BlockModeOff */
+            call BLOCKMODE_OFF;
+         end;
+
+         do;                    /* 13: O#ICON.AliasLinesOn */
+            call alias.lines.on();
+         end;
+
+         do;                    /* 14: O#ICON.AliasLinesOff */
+            call alias.lines.off();
+         end;
+
+      end;  /* of do case on command */
+   end;
+end DRAW.GRAPHICS.ICON;
+
+UPDATE.GRAPHICS.ICON: proc (ptr) swapable;
+   dcl ptr             fixed;
+   dcl define.region   fixed;
+   dcl (base.x,base.y) fixed;
+   dcl status          fixed;
+   dcl region          fixed;
+   dcl saved.cursor.type fixed;
+
+   status = Read.Object(ptr+O#Status);
+   region = Read.Object(ptr+O#ICON.Region);
+
+   if (status & O#STAT.Enable) = 0       /* Object may not be drawn on screen */
+   then do;                              /* Just turn off update bit */
+      call Write.Object(ptr+O#Status,(Status & NOT(O#STAT.Update)));
+      return;
+   end;
+
+   if (status&O#STAT.Exhibit) = 0 then do;
+      define.region = (region <> 0)   /* User wants a region */
+                    & (not(Read.Object(ptr + O#Status)&O#STAT.Exhibit));
+
+      if (define.region)
+      then do;
+         icon.xmax = 0;
+         icon.xmin = screen.width;
+         icon.ymax = 0;
+         icon.ymin = screen.height;
+      end;
+
+      if gtype<>0 then do;
+
+         saved.cursor.type = mouse.cursor.type;
+         call mouse.switch(0);
+
+         call Push.Graphics.Attributes;
+
+         vector_mode;
+         call data_level(0);
+         base.x = gpos.x(Read.Object(ptr+O#ICON.X));
+         base.y = gpos.y(Read.Object(ptr+O#ICON.Y));
+
+         call move_to(base.x,base.y); /* Start the drawing */
+         call Draw.Graphics.Icon(ptr,base.x,base.y,define.region,0);
+
+         call data_level(0);
+         call line_type(0);
+         call Pop.Graphics.Attributes;
+
+         call mouse.switch(saved.cursor.type);
+
+      end;
+
+      if (define.region)   /* Write out region to base icon */
+      then do;
+         if region = 2 then do;
+            call Write.Object(ptr+O#ULX,limit.x(icon.xmin-gpix.x(50)));
+            call Write.Object(ptr+O#ULY,limit.y(icon.ymax+gpix.y(25)));
+            call Write.Object(ptr+O#LRX,limit.x(icon.xmax+gpix.x(50)));
+            call Write.Object(ptr+O#LRY,limit.y(icon.ymin-gpix.y(25)));
+         end;
+         else do;
+            call Write.Object(ptr+O#ULX,limit.x(icon.xmin));
+            call Write.Object(ptr+O#ULY,limit.y(icon.ymax));
+            call Write.Object(ptr+O#LRX,limit.x(icon.xmax));
+            call Write.Object(ptr+O#LRY,limit.y(icon.ymin));
+         end;
+      end;
+
+   end;
+
+   call Write.Object(ptr+O#Status,(Read.Object(ptr+O#Status)&not(O#STAT.Update\O#STAT.Disp.Attr.Set))
+                     \(O#STAT.Exhibit\shl(Read.Object(ptr+O#Status)&O#STAT.Attr.Set,1))); /* object now displayed and refreshed */
+end UPDATE.GRAPHICS.ICON;
+
+GET.GRAPHICS.ICON: proc (ptr) returns (fixed) swapable;
+   dcl ptr fixed;  /* Here for consistency with other get routines */
+
+   Last.Event.Code = Get.Screen.Event;
+   Last.Event.Info = S#ObjectTerminate;
+   return Last.Event.Code;
+end GET.GRAPHICS.ICON;
+
+ERASE.GRAPHICS.ICON: proc (id) swapable;
+   dcl id     fixed;
+   dcl base.x fixed;
+   dcl base.y fixed;
+   dcl saved.cursor.type fixed;
+
+   if gtype=0 then return 0;
+
+   if Locate.Object(id) then do;
+      saved.cursor.type = mouse.cursor.type;
+      call mouse.switch(0);
+      call Push.Graphics.Attributes;
+      vector_mode;
+      call data_level(1);   /* Set up to erase */
+      base.x = gpos.x(Read.Object(Object.ptr+O#ICON.X));
+      base.y = gpos.y(Read.Object(Object.ptr+O#ICON.Y));
+      call move_to(base.x,base.y); /* Start the drawing */
+      call Draw.Graphics.Icon(Object.ptr,base.x,base.y,0,1);
+      call data_level(0);
+      call line_type(0);
+      call Pop.Graphics.Attributes;
+      call mouse.switch(saved.cursor.type);
+      return 1;
+   end;
+	return 0;
+end ERASE.GRAPHICS.ICON;
+
+/* $subtitle - generally useful icon definition routines */
+
+DEFINE.BUTTON.ICON: proc (id#, col, row, char_width, label, style) fixed public swapable;
+	dcl id#				fixed;
+	dcl (col, row)		fixed;		/*	transparent mode coords * 100				*/
+	dcl char_width		fixed;		/* Maximum width of label; 0 means use length of label */
+	dcl label			array;		/*	string to put inside button				*/
+	dcl style			fixed;		/*	0 = single outline, 1 = double outline	*/
+
+	dcl i					fixed;
+	dcl string_chars	fixed;		//	the actual number of characters in the string
+	dcl button_chars	fixed;		//	the number of characters to use for the width of the button
+	dcl label_offset	fixed;		//	used to center the label in the button if the button width is other than the string width
+
+	dcl (x_width, y_height)	fixed;
+	dcl y_cut			fixed;		//	how far inward from the top or bottom of the rectangle is the vertex of the octagon
+	dcl (x_left, x_left_plus, x_right_minus, x_right)	fixed;
+	dcl (y_bottom, y_bottom_plus, y_top_minus, y_top)	fixed;
+
+	dcl max_chars		lit '64';	/*	limits label to 64 chars long				*/
+	dcl icon((3*((2*(1+8))+1)) + 1 + shr(max_chars+1,1) + 1 + 2 - 1)	fixed;
+
+	string_chars	= label(0);
+	if (string_chars igt max_chars)	string_chars	= max_chars;
+
+	if (char_width == 0)
+	{	button_chars	= string_chars;
+	}
+	else
+	{	if (char_width igt max_chars)	button_chars	= max_chars;
+		else									button_chars	= char_width;
+	}
+
+   y_height	= 1000 * char.height / tchar.height;						/*	height of alpha char in transparent rows * 100	*/
+   x_width	= (1000 * char.width) * button_chars / tchar.width;	/*	width of label in transparent columns * 100		*/
+
+	if (button_chars != string_chars)
+	{	//	we need to compute an additional x_offest for centering
+		label_offset = (x_width - ((1000 * char.width) * string_chars / tchar.width)) / 2;	//	else label_offset = 0;
+	}
+
+	dcl x_margin	lit '50';	//	the distance from the side of the inner octagon to the alpha text
+	dcl x_cut		lit '30';	//	how far inward from the sides of the rectangle is the vertex of the octagon
+	dcl y_offset	lit '10';
+
+	y_cut				= 2 * y_height / 3;
+
+	//	precompute coordinates of inner octagon
+	x_left			= 0;
+	x_right			= x_width + (2 * x_margin);
+	x_left_plus		= x_left		+ x_cut;
+	x_right_minus	= x_right	- x_cut;
+
+	y_bottom			= y_offset;
+	y_top				= y_height + y_offset;
+	y_bottom_plus	= y_top		- y_cut;	//	note:	since y_cut is actually two thirds of the height, this is correct
+	y_top_minus		= y_bottom	+ y_cut;
+
+	dcl mr13i		lit 'write("373")';
+   write("313")	= addr(icon(0));		/*	set up ptr for loading of icon	*/
+
+   mr13i = O#ICON.AliasLinesOff;
+	mr13i	= O#ICON.MoveTo;	mr13i	= x_left;			mr13i	= y_bottom_plus;
+	mr13i	= O#ICON.Plot;		mr13i	= x_left;			mr13i	= y_top_minus;
+	mr13i	= O#ICON.Plot;		mr13i	= x_left_plus;		mr13i	= y_top;
+	mr13i	= O#ICON.Plot;		mr13i	= x_right_minus;	mr13i	= y_top;
+	mr13i	= O#ICON.Plot;		mr13i	= x_right;			mr13i	= y_top_minus;
+	mr13i	= O#ICON.Plot;		mr13i	= x_right;			mr13i	= y_bottom_plus;
+	mr13i	= O#ICON.Plot;		mr13i	= x_right_minus;	mr13i	= y_bottom;
+	mr13i	= O#ICON.Plot;		mr13i	= x_left_plus;		mr13i	= y_bottom;
+	mr13i	= O#ICON.Plot;		mr13i	= x_left;			mr13i	= y_bottom_plus;
+
+	if style<>0 then do;			/*	circumscribe a 2nd border around label	*/
+		dcl x_extra	lit '20';	//	added to outermost x coordinates for circumscription
+		dcl y_extra	lit '10';	//	added to outermost y coordinates for circumscription
+
+		x_left	= x_left		- x_extra;
+		x_right	= x_right	+ x_extra;
+		y_bottom	= y_bottom	- y_extra;
+		y_top		= y_top		+ y_extra;
+
+		mr13i	= O#ICON.MoveTo;	mr13i	= x_left;			mr13i	= y_bottom_plus;
+		mr13i	= O#ICON.Plot;		mr13i	= x_left;			mr13i	= y_top_minus;
+		mr13i	= O#ICON.Plot;		mr13i	= x_left_plus;		mr13i	= y_top;
+		mr13i	= O#ICON.Plot;		mr13i	= x_right_minus;	mr13i	= y_top;
+		mr13i	= O#ICON.Plot;		mr13i	= x_right;			mr13i	= y_top_minus;
+		mr13i	= O#ICON.Plot;		mr13i	= x_right;			mr13i	= y_bottom_plus;
+		mr13i	= O#ICON.Plot;		mr13i	= x_right_minus;	mr13i	= y_bottom;
+		mr13i	= O#ICON.Plot;		mr13i	= x_left_plus;		mr13i	= y_bottom;
+		mr13i	= O#ICON.Plot;		mr13i	= x_left;			mr13i	= y_bottom_plus;
+	end;
+
+	mr13i	= O#ICON.MoveTo;	mr13i	= x_margin + label_offset;	mr13i	= y_height/4 + y_offset;	/*	position here to load label	*/
+
+	if (string_chars != 0)
+	{
+		mr13i	= O#ICON.AlphaString;
+		//	NOTE BUG: label[0] was written into the icon rather than k.  If the untruncated label exceeded 64 characters,
+		//	we would have beeen printing garbage to the screen when the graphics icon was printed.
+//		do i = 0 to shr(string_chars+1,1);
+		mr13i	= string_chars;
+		do i = 1 to shr(string_chars+1,1);
+			mr13i	= label(i);
+		end;
+	}
+
+   mr13i = O#ICON.AliasLinesOn;
+	mr13i	= O#Icon.End;
+
+	id#	= define.graphics.icon(id#, col, row, 1, icon);
+	set.object.action(id#, O#ACT.Animate.Disabled, true); 
+	set.object.mouse.access(id#, O#Act.Middle.Press);	/*	want buttons to activate on press	*/
+
+	return id#;
+
+end DEFINE.BUTTON.ICON;
+
+/* $PAGE */
+
+DEFINE.GRAB.ICON: proc(id#,col,row) fixed public swapable;
+   dcl id#        fixed;
+   dcl (col,row)  fixed;
+   dcl icon (33)  fixed;
+   dcl mr13i      lit 'write("373")';
+
+   write("313") = addr(icon(0));
+
+   mr13i = O#Icon.MoveTo; mr13i =  -5; mr13i = 25;
+
+   mr13i = O#Icon.Plot;   mr13i =  -5; mr13i = 95;
+   mr13i = O#Icon.Plot;   mr13i = 155; mr13i = 95;
+   mr13i = O#Icon.Plot;   mr13i = 155; mr13i = 25;
+   mr13i = O#Icon.Plot;   mr13i =  -5; mr13i = 25;
+
+   mr13i = O#Icon.StartPoly; mr13i = a.score;
+   mr13i = O#Icon.MoveTo; mr13i =  75; mr13i = 25;
+   mr13i = O#Icon.Plot;   mr13i =  -5; mr13i = 95;
+   mr13i = O#Icon.Plot;   mr13i = 155; mr13i = 95;
+   mr13i = O#Icon.Plot;   mr13i =  75; mr13i = 25;
+   mr13i = O#Icon.EndPoly; mr13i = 75; mr13i=50;
+
+   mr13i = O#Icon.End;
+
+   id#=define.graphics.icon(id#,col,row,1,icon);
+
+   return id#;
+
+end DEFINE.GRAB.ICON;
+
+DEFINE.MOUSE.HOLE.ICON: proc(id#,col,row) fixed public swapable;
+   dcl id#        fixed;
+   dcl (col,row)  fixed; /* transparent coords * 100 of lower left corner of icon */
+   dcl icon (64)  fixed;
+   dcl mr13i      lit 'write("373")';
+
+   /* NOTE: Icon is exactly 1 transparent character high */
+   /*       and 2 transparent characters wide            */
+
+   write("313") = addr(icon(0));
+
+   mr13i = O#Icon.DataLevel; mr13i = #dots.comp;
+   mr13i = O#Icon.StartPoly; mr13i = a.score;
+   mr13i = O#Icon.MoveTo;    mr13i =     0;  mr13i =    0;
+   mr13i = O#Icon.Plot;      mr13i =     0;  mr13i =  100;
+   mr13i = O#Icon.Plot;      mr13i =   200;  mr13i =  100;
+   mr13i = O#Icon.Plot;      mr13i =   200;  mr13i =    0;
+   mr13i = O#Icon.Plot;      mr13i =     0;  mr13i =    0;
+   mr13i = O#Icon.EndPoly;   mr13i =   100;  mr13i =   50;
+
+   mr13i = O#Icon.StartPoly; mr13i = a.score; 
+   mr13i = O#Icon.MoveTo;    mr13i =    25;  mr13i =   25;
+   mr13i = O#Icon.Plot;      mr13i =    25;  mr13i =   75;
+   mr13i = O#Icon.Plot;      mr13i =   175;  mr13i =   75;
+   mr13i = O#Icon.Plot;      mr13i =   175;  mr13i =   25;
+   mr13i = O#Icon.Plot;      mr13i =    25;  mr13i =   25;
+   mr13i = O#Icon.EndPoly;   mr13i =   100;  mr13i =   50; 
+
+   mr13i = O#Icon.End;
+
+   id# = define.graphics.icon(id#,col,row,1,icon);
+
+   return id#;
+
+end DEFINE.MOUSE.HOLE.ICON;
+
+DEFINE.GRID.ICON: proc (Id,Row,Col,NumCols,NumRows,ColWidth) fixed public swapable;
+   dcl Id         fixed; /* object id        */
+   dcl (Row,Col)  fixed; /* upper left transparent mode coordinate */
+   dcl NumCols    fixed; /* columns per row  */
+   dcl NumRows    fixed; /* rows in grid     */
+   dcl ColWidth   fixed; /* chars per column */
+   dcl MaxRowCols lit '16'; /* (NumCols+NumRows) must be less than MaxRowCols */
+   dcl IconLen    lit '(3+(MaxRowCols-2)*5)';  /* supports grid up to ((NumRows+NumCols-2)<=((IconLen-3)/5) */
+   dcl Icon (IconLen-1) fixed; /* temp array */
+   dcl (i,x,y)    fixed;
+   dcl mr13i      lit 'write("373")';
+
+   if (((NumRows-1)+(NumCols-1))*5+3) IGT IconLen
+   then return 0; /* ICON() array is too small */
+
+   /* build a grid icon for Category table */
+   write("313")=addr(Icon(0));
+   mr13i=O#ICON.LineType; mr13i=1; /* dotted line type */
+
+   x=NumCols*ColWidth*100-10; /* right edge X-coordinate */
+   do i=0 to NumRows-2;
+      y=-i*100; 
+      mr13i=O#ICON.Connect; mr13i=10; mr13i=y; mr13i=x; mr13i=y;
+   end;
+
+   y=10-(NumRows-1)*100;
+   do i=1 to NumCols-1;
+      x=i*ColWidth*100;
+      mr13i=O#ICON.Connect;  mr13i=x;  mr13i= +90; mr13i=x; mr13i=y;
+   end;
+   mr13i=O#ICON.End;
+
+   Id=Define.Graphics.Icon(Id,Col*100,Row*100,0,Icon);
+
+   return Id;
+end DEFINE.GRID.ICON;
+
+/* define a graphics string label with no region */
+
+DEFINE.GRAPHICS.LABEL: proc (Id#,Row,Col,Str) fixed public swapable;
+   dcl Id#       fixed;
+   dcl (Row,Col) fixed; /* transparent mode coords * 100 */
+   dcl Str       array; /* label to display */
+   dcl CharLen   fixed; 
+   dcl I         fixed;
+   dcl mr13i     lit 'write("373")';
+   dcl MaxChars  lit '32'; /* limits label to 32 chars long */
+   dcl Icon (2+1+shr(maxchars+1,1)) fixed;
+
+   CharLen=Str(0);
+   if CharLen igt MaxChars then CharLen=MaxChars;
+
+   write("313")=addr(Icon(0));
+
+   mr13i=O#ICON.AlphaString;
+   mr13i=CharLen;
+   do I=1 to shr(CharLen+1,1);
+      mr13i=Str(I);
+   end;
+   mr13i=O#Icon.End;
+
+   Id#=Define.Graphics.Icon(Id#,Col,Row,0,Icon); /* no region */
+
+   return Id#;
+
+end DEFINE.GRAPHICS.LABEL;
+

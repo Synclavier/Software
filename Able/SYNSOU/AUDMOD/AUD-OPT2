@@ -1,0 +1,1266 @@
+/* AUD-OPT2  Optical Disk Dialog panel routines */
+
+/*
+   Modifications:
+   07/08/91 - cj  - restored prior calls to ratio multiply in Get.SRC.Ratio
+                    and Compute.SRC.Len since apparently only certain ratios
+                    are allowed during the sample rate conversion (e.g. 9
+                    bit limit on precision)
+   10/30/90 - cj  - Argument changes for optical-to-dtd-via-protocol
+   10/15/90 - cj  - Allocated correct length on optical.  Corrected calls
+                    to multiply, ratiomultiply in Get.SRC.Ratio,
+                    Compute.SRC.Len
+   06/09/89 - TSS - Allow transfer logic to read/store cues >> 32MB long
+   05/23/89 - SGS - Handle recovery from user and read/write aborts
+   05/23/89 - SGS - Added call to CORRECT.FOR.TRACK.AVAILABILITY, fixed cue name bug
+   05/17/89 - SGS - Fixed lots of bugs for alpha release
+   05/09/89 - TSS - Moved some procs from here to AUD-OPT1
+   04/29/89 - TSS - "Literalized" use of GET.CURRENT.FILENAME.AND.INFO
+   03/28/89 - SGS - author
+
+*/
+
+dcl Check.DTD.Project.Status.Before.Transfer proc recursive;
+
+dcl debugOptDTD       lit '0';
+dcl debugDTDOpt       lit '0';
+
+dcl DTD.trackbits     fixed;  /* holds which DTD tracks are source/dest */
+
+Open.Copy.To.DTD.Dialog: proc (TopRow,name,sfinfo) swapable;
+   dcl TopRow            fixed;
+   dcl name              array; /* sound file name - used as default cue name */
+   dcl sfinfo            array; /* file info, as per Get.Current.Filename.And.Info() */
+   dcl Str(40)           fixed;
+   dcl (FirstId,Id)      fixed;
+
+   /* For a mono sound file: */
+   /* 0         1         2         3         4         5         6         7          */
+   /* 01234567890123456789012345678901234567890123456789012345678901234567890123456789 */
+   /* Copy mono sound file to track: NN             Save as: CUE_NAME  [COPY] [CANCEL] */
+
+   /* For a stereo sound file: */
+   /* 0         1         2         3         4         5         6         7          */
+   /* 01234567890123456789012345678901234567890123456789012345678901234567890123456789 */
+   /* Copy Left to track: NN   Right to track: NN   Save as: CUE_NAME  [COPY] [CANCEL] */
+
+   call Set.Default.Action(O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press|O#ACT.Jog.Enabled);
+   call Set.Default.Attr(0,ATTR#Normal);
+   call Set.Default.Attr(1,ATTR#Normal|ATTR#Reverse|ATTR#AltIntensity);
+
+   if sfinfo(5)<>0 then do;  /* if sound file is in stereo */
+
+      call Copy.String('Copy left to track:',Str);
+      FirstId=Define.Label(s#aa,TopRow,0,Str(0),Str);
+      call Set.Object.Mouse.Access(FirstId,0);
+      call Set.Object.Attr(FirstId,0,ATTR#Normal);
+
+      Id=Define.Fixed.Point(s#aa,TopRow,20,2,0,cf#unsigned|cf#right);
+      call Set.Object.Action(Id,O#ACT.Jog.Enabled,1);
+      call PID(OptDlgTrk1,Id);
+      Disable.Deposits=true;
+      call Deposit.Fixed.Point(Id,GID(OptXferLeftTrack));  /* set default value */
+      Disable.Deposits=false;
+
+      call Copy.String('Right to track:',Str);
+      Id=Define.Label(s#aa,TopRow,25,Str(0),Str);
+      call Set.Object.Mouse.Access(Id,0);
+      call Set.Object.Attr(Id,0,ATTR#Normal);
+
+      Id=Define.Fixed.Point(s#aa,TopRow,41,2,0,cf#unsigned|cf#right);
+      call Set.Object.Action(Id,O#ACT.Jog.Enabled,1);
+      call PID(OptDlgTrk2,Id);
+      Disable.Deposits=true;
+      call Deposit.Fixed.Point(Id,GID(OptXferRightTrack));  /* set default value */
+      Disable.Deposits=false;
+
+   end;
+
+   else do;  /* mono sound file */
+
+      call Copy.String('Copy mono sound file to track:',Str);
+      FirstId=Define.Label(s#aa,TopRow,0,Str(0),Str);
+      call Set.Object.Mouse.Access(FirstId,0);
+      call Set.Object.Attr(FirstId,0,ATTR#Normal);
+
+      Id=Define.Fixed.Point(s#aa,TopRow,31,2,0,cf#unsigned|cf#right);
+      call Set.Object.Action(Id,O#ACT.Jog.Enabled,1);
+      call PID(OptDlgTrk1,Id);
+      Disable.Deposits=true;
+      call Deposit.Fixed.Point(Id,GID(OptXferMonoTrack));  /* set defaults */
+      Disable.Deposits=false;
+
+      call PID(OptDlgTrk2,0); /* other track field doesn't exist */
+   end;
+
+   call Copy.String('Save as:',Str);
+   Id=Define.Label(s#aa,TopRow,46,Str(0),Str);
+   call Set.Object.Mouse.Access(Id,0);
+   call Set.Object.Attr(Id,0,ATTR#Normal);
+
+   Id=Define.String(s#aa,TopRow,55,8,O#STR.Filename);
+   call PID(OptDlgCueName,Id);
+   Disable.Deposits=true;
+   call Deposit.String(Id,name);  /* use sound file name as default */
+   Disable.Deposits=false;
+
+   call Copy.String('[COPY]',Str);
+   Id=Define.Label(s#aa,TopRow,65,Str(0),Str);
+   call PID(OptDlgGo,Id);
+   call Set.Object.Action(Id,O#ACT.Jog.Enabled,0);
+   
+   call Copy.String('[CANCEL]',Str);
+   Id=Define.Label(s#aa,TopRow,72,Str(0),Str);
+   call PID(OptDlgAbort,Id);
+   call Set.Object.Action(Id,O#ACT.Jog.Enabled,0);
+
+   /* call Set.Object.Arrow.Links(Id,Above,Below,Left,Right)  */
+   if sfinfo(5)<>0 then do;  /* stereo sound file */
+      call Set.Object.Arrow.Links(GID(OptDlgTrk1)   ,-1,-1,-1,GID(OptDlgTrk2));
+      call Set.Object.Arrow.Links(GID(OptDlgTrk2)   ,-1,-1,GID(OptDlgTrk1),GID(OptDlgCueName));
+      call Set.Object.Arrow.Links(GID(OptDlgCueName),-1,-1,GID(OptDlgTrk2),GID(OptDlgGo));
+   end;
+   else do;
+      call Set.Object.Arrow.Links(GID(OptDlgTrk1)   ,-1,-1,-1,GID(OptDlgCueName));
+      call Set.Object.Arrow.Links(GID(OptDlgCueName),-1,-1,GID(OptDlgTrk1),GID(OptDlgGo));
+   end;
+   call Set.Object.Arrow.Links(GID(OptDlgGo)        ,-1,-1,GID(OptDlgCueName),GID(OptDlgAbort));
+   call Set.Object.Arrow.Links(GID(OptDlgAbort)     ,-1,-1,GID(OptDlgGo),-1);
+
+   call PID(OptDlgFirstId,FirstId);
+   call PID(OptDlgLastId,GID(OptDlgAbort));
+
+   call Activate.Object.Range(GID(OptDlgFirstId),GID(OptDlgLastId));
+   call Update.Object.Range  (GID(OptDlgFirstId),GID(OptDlgLastId));
+
+end Open.Copy.To.DTD.Dialog;
+
+Open.Store.Cue.Dialog: proc (TopRow) swapable;
+   dcl TopRow            fixed;
+   dcl Str(40)           fixed;
+   dcl vol.name(10)      fixed;
+   dcl (FirstId,Id)      fixed;
+
+   /* 0         1         2         3         4         5         6         7          */
+   /* 01234567890123456789012345678901234567890123456789012345678901234567890123456789 */
+   /* Store cue on Volume LONG_VOLUME_NAME01 as ABCDEFGH at 100.0kHz [STORE]  [CANCEL] */
+
+   call Set.Default.Action(O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press|O#ACT.Jog.Enabled);
+   call Set.Default.Attr(0,ATTR#Normal);
+   call Set.Default.Attr(1,ATTR#Normal|ATTR#Reverse|ATTR#AltIntensity);
+
+   call Copy.String('Store cue on ',Str);
+   call Get.Device.Name(DirDevice,vol.name);
+   if vol.name(0) igt 24 then vol.name(0) = 24;
+   call Append.To.Str(Str,vol.name);
+   call Append.To.Str(Str,' as ');
+
+   FirstId=Define.Label(s#aa,TopRow,0,Str(0),Str);
+   call Set.Object.Mouse.Access(FirstId,0);
+   call Set.Object.Attr(FirstId,0,ATTR#Normal);
+
+   Id=Define.String(s#aa,TopRow,17+vol.name(0),8,O#STR.Filename);
+   call PID(OptDlgSFName,Id);
+   call Set.Object.Attr(Id,0,ATTR#Normal|ATTR#Reverse|ATTR#AltIntensity);
+
+   Id=Define.Label(s#aa,TopRow,25+vol.name(0),0,' at ');
+   call Set.Object.Mouse.Access(Id,0);
+
+   Id=Define.Fixed.Point(s#aa,TopRow,29+vol.name(0),5,1,cf#right);
+   call PID(OptDlgRate,Id);
+   call Set.Object.Mouse.Access(Id,0); /* for now */
+
+   Id=Define.Label(s#aa,TopRow,34+vol.name(0),0,'kHz');
+   call Set.Object.Mouse.Access(Id,0);
+
+   call Copy.String('[STORE]',Str);
+   Id=Define.Label(s#aa,TopRow,63,Str(0),Str);
+   call PID(OptDlgGo,Id);
+   
+   call Copy.String('[CANCEL]',Str);
+   Id=Define.Label(s#aa,TopRow,72,Str(0),Str);
+   call PID(OptDlgAbort,Id);
+
+   /* call Set.Object.Arrow.Links(Id,Above,Below,Left,Right)  */
+   call Set.Object.Arrow.Links(GID(OptDlgSFName),-1,-1,-1,GID(OptDlgGo));
+   call Set.Object.Arrow.Links(GID(OptDlgGo)    ,-1,-1,GID(OptDlgSFName),GID(OptDlgAbort));
+   call Set.Object.Arrow.Links(GID(OptDlgAbort) ,-1,-1,GID(OptDlgGo),-1);
+
+   write(mam) = Current.Cue.Ptr;
+   write(mal) = CUE.NAME;
+   call COPY.IN(addr(Str(0)),17);
+   if Str(0) igt 8 then Str(0)=8;
+   if (simulate_dtd) {
+      call Copy.String('A Cue',Str);
+   }
+   call Deposit.String(GID(OptDlgSFName),Str); /* S#Deposit event will clean this string */
+   Disable.Deposits = true;
+   call Deposit.Fixed.Point(GID(OptDlgRate),AEE.Current.Project.Rate);
+   Disable.Deposits = false;
+
+   call PID(OptDlgFirstId,FirstId);
+   call PID(OptDlgLastId,GID(OptDlgAbort));
+
+   call Activate.Object.Range(GID(OptDlgFirstId),GID(OptDlgLastId));
+   call Update.Object.Range  (GID(OptDlgFirstId),GID(OptDlgLastId));
+
+end Open.Store.Cue.Dialog;
+
+Close.Optical.Xfer.Dialog: proc swapable;
+   dcl (i,j,k)             fixed;
+   dcl (Col,Row)           fixed; /* keep in order */
+   
+   if GID(OptDlgFirstId)=0 then return; /* panel already undefined */
+
+   /* save stereo tracks for next time */
+   if (GID(OptDlgTrk1)<>0) and (GID(OptDlgTrk2)<>0)
+   then do;
+      call PID(OptXferLeftTrack,Fetch.Fixed.Point(GID(OptDlgTrk1)));
+      call PID(OptXferRightTrack,Fetch.Fixed.Point(GID(OptDlgTrk2)));
+   end;
+   /* save mono track for next time */
+   else if (GID(OptDlgTrk1)<>0) then do;
+      call PID(OptXferMonoTrack,Fetch.Fixed.Point(GID(OptDlgTrk1)));
+   end;
+
+   /* erase and undefine all objects */
+   call Erase.Object.Range(GID(OptDlgFirstId),GID(OptDlgLastId));
+   call Undefine.Object.Range(GID(OptDlgFirstId),GID(OptDlgLastId));
+
+   /* null out entire dialog object area */
+   j = OptDlgLastId - OptDlgFirstId;
+   do i = 0 to j;
+      call PID(OptDlgFirstId+i,0);
+   end;
+
+   /* reselect obj last selected before we opened dialog */
+   call Select.DlgOrigObj;
+
+   /* highlight cell if that is what is cur obj now */
+   if Cur.Obj.Id=Optical.Table then do; 
+      call Fetch.Table.Cur.Cell(Optical.Table,loc(addr(Col)));
+      call Set.DirTable.Position(Row,Col);
+   end;
+
+end Close.Optical.Xfer.Dialog;
+
+Open.Optical.Xfer.Dialog: proc (dialog,TopRow) returns (fixed) swapable;
+   dcl dialog             			fixed;  		/* which dialog to put up 							*/
+   dcl TopRow             			fixed;  		/* where to put dialog 								*/
+   dcl Name   (SFNAME#Arr_Len) 	fixed; 		/* a string buffer 									*/
+   dcl SFInfo (SFINFO#Arr_Len) 	fixed; 		/* holds misc info about the current file 	*/
+   dcl (Col,Row)          			fixed; 		/* Keep these in order 								*/
+   dcl i                  			fixed;
+
+   call Close.Dialog.Panel;       				/* close any SFD dialogs still open 			*/
+
+   if (GID(OptDlgFirstId)<>0) then   			/* close any Optical Xfer dialogs still open */
+      call Close.Optical.Xfer.Dialog;
+
+   call Set.DlgOrigObj;
+   call Set.Auto.Allocation.Id(Optical.Alloc+200); /* reset id # */
+
+   if dialog=O#CopyToDTD then do;
+      /* error check previous left and right tracks */
+      i = Correct.For.Track.Availability(GID(OptXFerLeftTrack),0);
+      call PID(OptXferLeftTrack,i);
+      i = Correct.For.Track.Availability(GID(OptXFerRightTrack),GID(OptXFerLeftTrack));
+      call PID(OptXferRightTrack,i);
+
+      /* error check previous mono track */
+      i = Correct.For.Track.Availability(GID(OptXFerMonoTrack),0);
+      call PID(OptXferMonoTrack,i);
+
+      call Fetch.Table.Cur.Cell(Optical.Table,loc(addr(Col)));
+      call Fetch.DirTable.Item.Type(Row,Col);
+      /* NOTE: Above line repositions index file vars to current item */
+      if Get.Current.FileName.And.Info(Name,SFInfo)<>ITEM$Filename
+      then do;
+         call Display.Notice(NT#CannotTransferCategory,ATTR#Reverse,NulStr,0,0,0);
+         return false;
+      end;
+      
+		if (Check.DTD.Project.Status.Before.Transfer() == false)
+		{
+         call Display.Notice(NT#CantXferToLockedProj,ATTR#Reverse,NulStr,0,0,0);
+         return false;
+		}
+		
+      /* replace spaces in name with underscores */
+      call clean.cue.name(name);
+      do i=0 to name(0)-1;
+         if byte(name,i)=a.sp then call pbyte(name,i,a.score);
+      end;
+      call Open.Copy.To.DTD.Dialog(TopRow,Name,SFInfo); /* pass row, filename, and file info */
+      call Select.New.Cur.Obj(GID(OptDlgGo),-1,-1);
+   end;
+
+   else if dialog=O#StoreToOptical then do;
+      /* check to make sure we have a current cue */
+
+      call Open.Store.Cue.Dialog(TopRow); /* pass row */
+      call Select.New.Cur.Obj(GID(OptDlgGo),-1,-1);
+   end;
+
+   else if dialog=O#DisplayOptions then do;
+      call Open.Display.Options(TopRow);
+      call Select.New.Cur.Obj(Corner.Label,-1,-1);
+   end;
+
+   else if dialog=O#RatesDiffer then do;
+      call Open.Rates.Differ(TopRow);
+      call Select.New.Cur.Obj(Corner.Label,-1,-1);
+   end;
+
+   return true; /* dialog was successfully opened */
+
+end Open.Optical.Xfer.Dialog;
+
+Get.SRC.Ratio: proc (SourceRate, DestRate, Ratio) swapable;
+   dcl SourceRate        fixed;
+   dcl DestRate          fixed;
+   dcl Ratio             array;  /* output array: 0 = integer  */
+                                 /*               1 = fraction */
+   bitmsb = 0; bitlsb = 512;
+   call ratio_multiply(SourceRate,DestRate);
+
+   bitmsb = bitlsb; bitlsb = 0;  /* effectively multiply result by 65536 */
+   call ratio_multiply(1,512);    /* then divide by 512 */
+
+   Ratio(0) = bitmsb;            /* integer  */
+   Ratio(1) = bitlsb;            /* fraction */
+
+end Get.SRC.Ratio;
+
+Compute.SRC.Length: proc (InWords,SRC.Ratio,OutWords) swapable;
+   dcl InWords   array; /* 32-bit sample count of original */
+   dcl SRC.Ratio array; /* 0: integer portion, 1: fractional portion * 64K */
+   dcl OutWords  array; /* 32-bit sample count after SRC process */
+   dcl M         fixed;
+
+   /* Routine basically just multiplys the SRC ratio times  */
+   /* the input word length and puts the result in OutWords */
+
+   call Copy32(SRC.Ratio,BitMsbArray);
+   call ratio_multiply(512,1);
+
+   M = BitMsb;
+
+   call Copy32(InWords,BitMsbArray);   /* copy input word length */
+   call ratio_multiply(512,M);
+   call Copy32(BitMsbArray,OutWords);
+
+end Compute.SRC.Length;
+
+DSP70.There: proc swapable;
+   dcl i              fixed;
+
+   dtd.cue# = 0;
+   write(mam) = scsi.ptr;
+   write(mal) = 0;
+   write(mdi) = dsp#check.dsp70;
+
+   call Send.To.Lod(199,2);
+
+   if dtd.cue# <> 0
+   then do;
+      write(mam) = scsi.ptr;
+      write(mal) = 0;
+      i = read(mdi);
+   end;
+   else do;
+      /* some sort of narly error? */
+   end;
+
+   if i <> 0
+   then return true;                         /* DSP70 not found */
+   else return false;                        /* board is probably there */
+
+end DSP70.There;
+
+Setup.Opt.To.DTD.Params: proc (SF.Info,Cue.Info,DSP.Info,Code) returns (fixed) swapable;
+   dcl SF.Info  array;  /* ARRAY READ & SET BY THIS ROUTINE  */
+                        /* ON ENTRY, buffer contains:        */
+                        /* 0-1: address                      */
+                        /* 2-3: length                       */
+                        /* 4:   sample rate                  */
+                        /* 5:   stereo flag                  */
+                        /* 6:   data type                    */
+                        /* 7:   word length mod 64K          */
+                        /* See SYNAUXS:ODISKLIT for literals */
+                        /* ON RETURN, it contains:           */
+                        /* 0:   source device (Opt disk)     */
+                        /* 1-2: address of actual sample data */
+                        /* 3-4: length, # of full sectors (not including header) */
+                        /* 5:   length, extra words in addition to sector len */
+   dcl Cue.Info array;  /* ARRAY SET BY THIS ROUTINE         */
+                        /* ON RETURN, buffer contains:       */
+                        /* 0:   destination device (DTD)     */
+                        /* 1-2: start address                */
+                        /* 3-4: end address                  */
+                        /* 5:   extra words beyond end addr  */
+   dcl DSP.Info array;  /* ARRAY SET BY THIS ROUTINE         */
+                        /* ON RETURN, buffer contains:       */
+                        /* 0-1: sample rate conversion ratio */
+                        /* 2:   stereo flag                  */
+                        /* 3:   DSP70 there flag             */
+
+   dcl out.info (5)    fixed;  /* temp to construct output SF.Info data */
+   dcl tmp(3)          fixed;  /* temp buffer */
+   dcl stmp(1)         fixed;
+   dcl etmp(1)         fixed;
+   dcl Record.In(1)    fixed;  /* where to start recording on DTD   */
+   dcl Record.Out(1)   fixed;  /* where to stop recording on DTD    */
+   dcl Dest_Len(1)     fixed;  /* sector length of destination      */
+   dcl Dest_Wrds       fixed;  /* extra words in addition to sector len */
+   dcl i               fixed;
+   dcl code            fixed;  /* 0 = from protocol = no dialogs        */
+                               /* 1 = from AEE = close dialogs          */
+
+   /* Look to see if a DSP card is in the system.  If not, don't */
+   /* try to do any sample rate converting (ratio=1). Otherwise, */
+   /* calculate the ratio.                                       */
+   if DSP70.There then do; /* see if DSP card is present in system */
+      call Get.SRC.Ratio(SF.Info(SFINFO#S_Rate),AEE.Current.Project.Rate,loc(addr(DSP.Info(SRC.Opt#ratio))));
+      DSP.Info(SRC.Opt#dsp70there) = 1;
+   end;
+   else do;
+      if SF.Info(SFINFO#S_Rate)<>AEE.Current.Project.Rate then do;
+         /* file's rate is different from project rate */
+         /* and there is no DSP70 card - print warning! */
+         if code then do;
+            call Close.Optical.Xfer.Dialog;
+            call Open.Optical.Xfer.Dialog(O#RatesDiffer,Optical.Row+Optical.Size);
+            if Get.Rates.Differ.Event=0 then do;
+               return false;  /* user does not want to continue */
+            end;
+         end;
+         else do;                        /* from protocol - just return */
+            Xfer$Status = Xfer#NoDSP;    /* no dsp status               */
+            return false;
+         end;
+      end;
+      call Str32(1,0,loc(addr(DSP.Info(SRC.Opt#ratio)))); /* Can't do any SRC, so set ratio to 1.0 */
+      DSP.Info(SRC.Opt#dsp70there) = 0;
+   end;
+   
+   DSP.Info(SRC.Opt#stereo) = SF.Info(SFINFO#Stereo);
+
+   /* fill sound file info buffer */
+   Out.Info(0) = LaserDev;                       /* store device */
+   Out.Info(1) = SF.Info(SFINFO#F_Base    );
+   Out.Info(2) = SF.Info(SFINFO#F_Base+1  );
+   Out.Info(3) = SF.Info(SFINFO#F_SecLen  );
+   Out.Info(4) = SF.Info(SFINFO#F_SecLen+1);
+   Out.Info(5) = SF.Info(SFINFO#F_WordLen)&255;  /* samples in last sector */
+
+   if Out.Info(5)<>0                             /* last sector is not full */
+   then call Sub16(1,loc(addr(Out.Info(3))));    /* get 32-bit count of FULL sectors */
+                                                 /* extra words handled separately */
+   call Add16((SF.HDR+SF.SYM),loc(addr(Out.Info(1)))); /* add header len to file start addr */
+   call Sub16((SF.HDR+SF.SYM),loc(addr(Out.Info(3)))); /* subtract header sectors from file len */
+
+   /* compute word length of file after sample rate conversion process */
+
+   call Copy32(loc(addr(Out.Info(3))),tmp);      /* put sector len into temp */
+   call Shl32(tmp,8);                            /* convert sectors to samples */
+   call Add16(Out.Info(5),tmp);                  /* add in odd words */
+   call Compute.SRC.Length(tmp,loc(addr(DSP.Info(SRC.Opt#Ratio))),Dest_Len);
+
+   call Shr32(Dest_Len,(DSP.Info(SRC.Opt#stereo)<>0)); /* half if in stereo */
+   call Add16(255,Dest_Len);                     /* round up to next sector */
+   call Shr32(Dest_Len,8);                       /* Convert to sectors */
+   Dest_Wrds = 0;                                /* No extra words in addition to sector len */
+
+   /* see if compressed/expanded cue will fit before end of project */
+   /* DTD Tracks must be in READY state for following call to work! */
+
+   call Fetch.DTD.Auto.Allocate.Time(0, stmp, etmp); /* get auto allocate start and stop times */
+   call SET.DTD.SYNC.POINT(stmp);                    /* this line probably not required?? */
+
+   /* Convert to DTD sample numbers */
+   call MSEC.To.DTD.Sample.#(stmp, CF#Time, S$Speed, AEE.Current.Project.Rate, AEE.Current.Project.Base, Record.In);
+   call MSEC.To.DTD.Sample.#(etmp, CF#Time, S$Speed, AEE.Current.Project.Rate, AEE.Current.Project.Base, Record.Out);
+
+   call SHR32(Record.In,8);                /* get sector #'s (round down) */
+   call ADD16(255,Record.Out);
+   call SHR32(Record.Out,8);               /* get sector #'s (round up) */
+   call SUB32(Record.Out, Record.In, tmp); /* get # of sectors to end of project */
+
+   if COM32(tmp, Dest_Len) = lw#ilt
+   then do;
+      if code
+      then call Display.Notice(NT#SFXferPastEof,ATTR#Reverse,NulStr,0,0,0);
+      else Xfer$Status = Xfer#NoRoom;
+      return false;
+   end;
+   
+   do i=0 to 5; SF.Info(i)=Out.Info(i); end;     /* copy source info to output buffer */
+
+   call Add32(Record.In,Dest_len,Record.Out);    /* compute DTD end address */
+
+   /* fill cue info output buffer */
+   Cue.Info(0) = DTDDev;                           /* store dest device   */
+   call Copy32(Record.In ,loc(addr(Cue.Info(1)))); /* store start address */
+   call Copy32(Record.Out,loc(addr(Cue.Info(3)))); /* store end   address */
+   Cue.Info(5) = Dest_Wrds;                        /* store extra words   */
+
+   return true;
+
+end Setup.Opt.To.DTD.Params;
+
+Check.DTD.Project.Status.Before.Transfer: proc swapable;		/* Checks for project locked state	*/
+	call Fetch.DTD.Song.Directory(AEE.Current.Project);		/* before doing transfer to dtd		*/
+	write(mam) = SCSI.Ptr;
+	write(mal) = song.stat.off;
+	if ((read(md) & 2) != 0)
+		return (false);
+	else
+		return (true);
+end Check.DTD.Project.Status.Before.Transfer;
+	      
+dcl Saved.Record.Ready.Bits fixed; 				   /* holds prior READY bits during xfer */
+
+Set.DTD.Track.Status.Before.Transfer: proc (XFer.Bits) swapable;
+   dcl XFer.Bits      fixed;
+   dcl modes    (15)  fixed;
+   dcl statuses (15)  fixed;
+   dcl i              fixed;
+
+   /* First, check to make sure our dest tracks are */
+   /* not locked.  Then save a copy of the current  */
+   /* track READY state bits.  Ready the DTD dest   */
+   /* tracks for the transfer.  After the transfer, */
+   /* restore READY bits to saved state.            */
+
+   /* Fetch modes and status for each */
+   /* dtd track:                      */
+   call SEND.FOR.DTD.TRACK.MODES (modes,statuses);  /* leave values at 0 if dtd not ready */
+
+   do i = 0 to 15;                 /* lookup locked  bits */
+      if ((statuses(i)&2) <> 0) and ((Xfer.Bits & bits(i))<>0)
+      then return false; /* cannot change status of LOCKED tracks */
+   end;
+
+   Saved.Record.Ready.Bits = Record.Ready.Bits; /* save current bits so we can restore them later */
+
+   /* Put any currently READY tracks which will not be */
+   /* used during the transfer into SAFE mode          */
+
+   call Set.DTD.Drive.Status(0,Record.Ready.Bits & (not XFer.Bits));
+
+   /* Then READY any tracks used for the Optical to DTD */
+   /* transfer which are not already in that state      */
+
+   call Set.DTD.Drive.Status(1,(not Record.Ready.Bits) & XFer.Bits);
+
+   Record.Ready.Bits = XFer.Bits; /* this should be true now */
+
+   /* Finally, update both the Record and Project Manager */
+   /* Panels according to which DTD track status changes  */
+   /* made in the prior two calls                         */
+
+   call Update.AEE.Track.Status.Displays.And.Tallies
+                          (0,Saved.Record.Ready.Bits xor XFer.Bits);
+
+   return true;
+end Set.DTD.Track.Status.Before.Transfer;
+
+Restore.DTD.Track.Status.After.Transfer: proc swapable;
+   dcl Changes fixed;
+
+   /* This routine is called after transferring to the DTD.   */
+   /* It restores the track status READY bits to saved state. */
+
+   /* Restore READY tracks no longer needed back to SAFE state */
+
+   call Set.DTD.Drive.Status(0,Record.Ready.Bits & (not Saved.Record.Ready.Bits));
+
+   /* Then READY all tracks which had been READY before the transfer */
+
+   call Set.DTD.Drive.Status(1,(not Record.Ready.Bits) & Saved.Record.Ready.Bits);
+
+   Changes = Record.Ready.Bits xor Saved.Record.Ready.Bits; /* these tracks changed status */
+   Record.Ready.Bits = Saved.Record.Ready.Bits; /* this should be true now */
+
+   /* Finally, update both the Record and Project Manager */
+   /* Panels according to which DTD track status changes  */
+   /* made in the prior two calls                         */
+
+   call Update.AEE.Track.Status.Displays.And.Tallies(0,Changes);
+
+end Restore.DTD.Track.Status.After.Transfer;
+
+Get.Copy.To.DTD.Event: proc returns (fixed) swapable;
+   dcl event									fixed;
+   dcl Name		(SFNAME#Arr_Len)		   fixed; /* holds the current sound filename */
+   dcl SFInfo	(SFINFO#Arr_Len)		   fixed; /* holds info about the current sound file  */
+   dcl CueInfo	(5)							fixed; /* holds info about the cue to be created   */
+   dcl DSPInfo	(SRC.Opt#array.size-1)	fixed; /* holds misc info used during DSP transfer */
+   dcl (Track1, Track2)						fixed; /* which DTD tracks will be recorded on     */
+   dcl (Col, Row)								fixed; /* Keep these in order */
+   dcl new.cue.name(17-1)					fixed; /* name of cue that will point to sound file on DTD */
+   dcl i											fixed;
+   dcl cue.in			(1)					fixed; /* where we started recording on DTD */
+   dcl cue.sync		(1)					fixed; /* what the sync time was when we started recording */
+   dcl cue.out			(1)					fixed; /* how much we recorded, in DTD #s */
+   dcl dummy			(1)					fixed;
+	dcl theNewCue								fixed;
+
+   clear.statuses:proc;
+      call DISPLAY.NOTICE (NT#EraseNotice,ATTR#Normal,NulStr,0,0,0);
+      call REMOVE.ERR;
+   end clear.statuses;
+
+   Track1 = 0; Track2 = 0;
+
+   do while 1;
+
+      event=Get.Next.Screen.Event;
+
+      if event = Get.Screen.Event then do;
+
+         if Screen.Event.Group = Optical.Group then do;
+
+            if (Screen.Event.Id = GID(OptDlgTrk1))
+            and (GID(OptDlgTrk1)<>0)
+            then do;
+               if (Screen.Event.Info=S#Deposit) then do;
+                  call clear.statuses;
+
+                  /* error checking */
+                  Track1 = Correct.For.Track.Availability(Fetch.Fixed.Point(GID(OptDlgTrk1)),0);
+                  Disable.Deposits = true;
+                  call Deposit.Fixed.Point(GID(OptDlgTrk1),Track1);
+                  Disable.Deposits = false;
+               end;
+            end;
+
+            else if (Screen.Event.Id = GID(OptDlgTrk2))
+            and (GID(OptDlgTrk2)<>0)
+            then do;
+               if (Screen.Event.Info=S#Deposit) then do;
+                  call clear.statuses;
+
+                  /* error checking */
+                  Track2 = Correct.For.Track.Availability(Fetch.Fixed.Point(GID(OptDlgTrk2)),0);
+                  Disable.Deposits = true;
+                  call Deposit.Fixed.Point(GID(OptDlgTrk2),Track2);
+                  Disable.Deposits = false;
+               end;
+            end;
+
+            else if Screen.Event.Id = GID(OptDlgCueName) then do;
+               if Screen.Event.Info = S#Deposit then do;
+                  call clear.statuses;
+                  /* clean the new string */
+                  call Fetch.String(GID(OptDlgCueName),name);
+                  call clean.cue.name(name);
+                  do i=0 to name(0)-1;
+                     if byte(name,i)=a.sp then call pbyte(name,i,a.score);
+                  end;
+                  Disable.Deposits = true;
+                  call Deposit.String(GID(OptDlgCueName),name);
+                  Disable.Deposits = false;
+               end;
+            end;
+
+            else if Screen.Event.Id = GID(OptDlgGo) then do;
+               if (Screen.Event.Info=S#MouseActivate)
+               or (Screen.Event.Info=S#MouseSelect)
+               or (Screen.Event.Info=S#KeyActivate)
+               then do;
+                  call clear.statuses;
+
+                  Track1 = Correct.For.Track.Availability(Fetch.Fixed.Point(GID(OptDlgTrk1)),0);
+                  if Track1 = -1 then do;
+                     call Display.Notice(NT#BadTracksSelected,ATTR#Reverse,NulStr,1,0,(GID(OptDlgTrk2)<>0));
+                     call Close.Optical.Xfer.Dialog;
+                     return true;  /* we want to return to dialog */
+                  end;
+
+                  DTD.TrackBits = bits(Track1-1);
+
+                  if (GID(OptDlgTrk2)<>0) then do;
+                     Track2 = Correct.For.Track.Availability(Fetch.Fixed.Point(GID(OptDlgTrk2)),0);
+                     if Track2 = -1 then do;
+                        call Display.Notice(NT#BadTracksSelected,ATTR#Reverse,NulStr,0,1,1);
+                        call Close.Optical.Xfer.Dialog;
+                        return true;  /* we want to return to dialog */
+                     end;
+
+                     if Track1=Track2 then do; 
+                        call Display.Notice(NT#SameDTDTracksSelected,ATTR#Reverse,NulStr,0,0,0);
+
+                        /* restore some sensible value */
+                        Track2 = Correct.For.Track.Availability(Fetch.Fixed.Point(GID(OptDlgTrk2)),Track1);
+                        Disable.Deposits = true;
+                        call Deposit.Fixed.Point(GID(OptDlgTrk2),Track2);
+                        Disable.Deposits = false;
+                        call Close.Optical.Xfer.Dialog;
+                        return true;  /* we want to return to dialog */
+                     end;
+                     DTD.TrackBits = DTD.TrackBits|bits(Track2-1);
+                  end;
+
+                  if not Set.DTD.Track.Status.Before.Transfer(DTD.TrackBits)
+                  then do;         /* Could not READY tracks. Some were LOCKED. */
+                     /* Need to put an error message call here */
+                     call Display.Notice(NT#MustUnlockTracks,ATTR#Reverse,NulStr,Track1,Track2,0);
+                     call Close.Optical.Xfer.Dialog;
+                     return true;  /* we want to return to dialog */
+                  end;
+
+                  call Fetch.String(GID(OptDlgCueName),new.cue.name);
+                  call clean.cue.name(new.cue.name);
+
+                  /* check to see if that name is already taken */
+                  if Locate.DTD.Cue(new.cue.name)<>0 then do;
+
+                     /* print error message and return to dialog */
+                     call Close.Optical.Xfer.Dialog;
+                     if Get.Cue.Dialog(Optical.Group,9) then do;
+                        return true;  /* we want to return to dialog */
+                     end;
+                  end;
+
+                  call Fetch.Table.Cur.Cell(Optical.Table,loc(addr(Col)));
+                  call Fetch.DirTable.Item.Type(Row,Col);
+                  /* NOTE: Above line repositions index file vars to current item */
+
+                  if Get.Current.FileName.And.Info(Name,SFInfo)<>ITEM$Filename
+                  then do;
+                     /* NOTE: This should have been caught earlier! */
+                     call Display.Notice(NT#CannotTransferCategory,ATTR#Reverse,NulStr,0,0,0);
+                     call Close.Optical.Xfer.Dialog;
+                     return false; /* we don't want to return to dialog */
+                  end;
+
+                  /* set up DSPInfo array and pass it to transfer routine */
+                  if Setup.Opt.To.DTD.Params(SFInfo,CueInfo,DSPInfo,True)=0
+                  then do;
+                     call Close.Optical.Xfer.Dialog;
+                     return false;  /* we don't want to return to dialog */
+                  end;
+if debugOptDTD<>0 then do;
+                  /* DEBUG */
+                  call cpos(20,0); call erase.to.end.of.line;
+                  call ps('Source:');     call pnum   (SFInfo(0),0);
+                  call ps(' addr:');      call pnumhex(SFInfo(1));
+                  call ps(' ');           call pnumhex(SFInfo(2));
+                  call ps(' len:');       call pnumhex(SFInfo(3));
+                  call ps(' ');           call pnumhex(SFInfo(4));
+                  call ps(' ');           call pnumhex(SFInfo(5));
+                  call ps(' ratio:');     call pnum   (DSPInfo(0),0);
+                  call ps(' ');           call pnum   (DSPInfo(1),0);
+                  call ps(' ster:');      call pnum   (DSPInfo(2),0);
+                  call ps(' DSP:');       call pnum   (DSPInfo(3),0);
+
+                  call cpos(21,0); call erase.to.end.of.line;
+                  call ps('Dest:');        call pnum   (CueInfo(0),0);
+                  call ps(' trks:');       call pnumhex(DTD.TrackBits);
+                  call ps(' start addr:'); call pnumhex(CueInfo(1));
+                  call ps(' ');            call pnumhex(CueInfo(2));
+                  call ps(' end addr:');   call pnumhex(CueInfo(3));
+                  call ps(' ');            call pnumhex(CueInfo(4));
+                  call tty_wait;
+end;
+                  call Transfer.Between.DTD.And.Opt(SFInfo,CueInfo,DTD.TrackBits,DSPInfo,true);
+
+                  if Xfer$Status=Xfer#DSPError   /* some problem with DSP */
+                  then do;
+                     call Display.Notice(NT#CannotBootDSP70,ATTR#Reverse,NulStr,0,0,0);
+                     call Close.Optical.Xfer.Dialog;
+                     return false;  /* we do not want to return to dialog */
+                  end;
+
+                  if Xfer$Status=Xfer#NoDataPath /* no data path */
+                  then do;
+                     call Display.Notice(NT#NoDataPath,ATTR#Reverse,NulStr,0,0,0);
+                     call Close.Optical.Xfer.Dialog;
+                     return false;  /* we do not want to return to dialog */
+                  end;
+
+                  /* else at least something was written to destination */
+
+                  /* Do we have to do this ? */
+                  call Fetch.DTD.Drive.Status(dummy);    /* wait for punch out to finish so cue gets created correctly */
+                  do while (dummy(0)&2)<>0;
+                     call Fetch.DTD.Drive.Status(dummy);
+                  end;
+
+                  call GID(AEE.Record.Cue.Name);
+                  call COPY.OUT(addr(new.cue.name(0)),17);
+
+                  /* Create new cue to point to sound file */
+                  call Str32(0,0,cue.sync);           /* sync point is zero */
+                  call Copy32(loc(addr(CueInfo(1))),cue.in);
+                  call Shl32(cue.in, 8);              /* convert sectors to sample #s */
+                  if Xfer$Status<>Xfer#Good then do;  /* transfer aborted - save as much as what was transferred */
+                     call Copy32(LastDestSector,cue.out);
+                     call Shl32(cue.out,8);
+                  end;
+                  else do;                            /* transfer succeeded */
+                     call Copy32(loc(addr(CueInfo(3))),cue.out);
+                     call Shl32(cue.out,8);
+                  end;
+
+                  call Save.New.Cue(cue.in,cue.out,cue.sync,DTD.TrackBits);
+
+					   theNewCue = DTD.Cue#;				   /* preserve return value */
+						
+                  if theNewCue > 0 then do;
+                     call Str32(0,0,dummy);    /* set dummy zeroes */
+                     call RECALL.CURRENT.CUE.BY.ID(theNewCue,0,dummy); /* put in cue editor if available */
+                  end;
+                  else do;
+                     if Xfer$Status=Xfer#Good 
+                     then Xfer$Status=Xfer#SaveErr;
+                  end;
+
+                  /* let the user know the final outcome */
+                  if Xfer$Status<>Xfer#Good 
+                  then do;                       /* transfer was incomplete */
+                     if (Xfer$Status=Xfer#OptError) /* abort was due to optical error */
+                     or (Xfer$Status=Xfer#ScsiError)
+                     then do;
+                        S$SenseKey=Xfer$Error;   /* restore status after transfer */
+                        call Generate.Optical.Error.Message;
+                     end;
+                     else if Xfer$Status=Xfer#Timeout
+                     then do;
+                        /* presumably Xfer$Error=Xfer#DTDTimeout */
+                        call Display.Notice(NT#DTDTimeout,ATTR#Reverse,NulStr,0,0,0);
+                     end;
+                     else call Display.Notice(NT#OptDtdXferAborted,ATTR#Reverse,new.cue.name,1,theNewCue,0);
+                  end;
+                  else do;                     /* transfer succeeded */
+                     call Display.Notice(NT#OptDtdXferComplete,ATTR#Normal,new.cue.name,1,theNewCue,0);
+                  end;
+
+                  call Restore.DTD.Track.Status.After.Transfer; /* restore track ready bits to prior state */
+
+                  call UPDATE.ALLOCATE.TIMES;  /* update record panel, if up */
+                  call UPDATE.PROJECT.MANAGER; /* update project manager, if up */
+
+                  call Close.Optical.Xfer.Dialog;
+                  return false;  /* we don't want to return to dialog */
+               end;
+            end;
+
+            else if Screen.Event.Id = GID(OptDlgAbort) then do;
+               if (Screen.Event.Info=S#MouseActivate)
+               or (Screen.Event.Info=S#MouseSelect)
+               or (Screen.Event.Info=S#KeyActivate)
+               then do;
+                  call clear.statuses;
+                  call Close.Optical.Xfer.Dialog;
+                  return false;  /* we don't want to return to dialog */
+               end;
+            end;
+
+            else do;
+               call Display.Notice(NT#MustRespondToDialog,ATTR#Reverse,NulStr,0,0,0);
+               call Select.New.Cur.Obj(Corner.Label,-1,-1);
+            end;
+         end;
+
+         else if (Screen.Event.Group <> 0)
+         &  ((Screen.Event.Info = S#MouseSelect)
+         or  (Screen.Event.Info = S#MouseActivate))
+         then do;
+            call Display.Notice(NT#MustRespondToDialog,ATTR#Reverse,NulStr,0,0,0);
+            call Select.New.Cur.Obj(Corner.Label,-1,-1);
+         end;
+      end;  /* of event = Get.Screen.Event */
+
+      else if event = Get.Program.Exit then do;
+         call Close.Optical.Xfer.Dialog;
+         return false;
+      end;
+
+   end;
+
+end Get.Copy.To.DTD.Event;
+
+Setup.DTD.To.Opt.Params: proc (SF.Info,Cue.Info,DSP.Info) returns (fixed) swapable;
+   dcl SF.Info         array;  /* Buffer containing sound file info */
+                               /* As INPUT buffer, contains:        */
+                               /* 0:   sample rate to record sfile  */
+                               /* As OUTPUT buffer, contains:       */
+                               /* 0:   dest device (Opt disk)       */
+                               /* 1-2: (will hold start addr, 0s for now)*/
+                               /* 3-5: (will hold end addr, holds SRC len for now) */
+                               /* 3-4: len, in sectors (after SRC)  */
+                               /* 5:   extra words in addition to sector len */
+   dcl Cue.Info        array;  /* Buffer containing cue info        */
+                               /* As INPUT buffer, contains:        */
+                               /* 0:   proj sample rate             */
+                               /* 1-2: start address                */
+                               /* 3-4: length, sectors              */
+                               /* 5-6: end address                  */
+                               /* 7:   num of tracks                */
+                               /* As OUTPUT buffer, contains:       */
+                               /* 0:   source device (DTD)          */
+                               /* 1-2: start address                */
+                               /* 3-4: original length, sectors     */
+                               /* 5:   length, extra words (=0)     */
+   dcl DSP.Info        array;  /* misc DSP info buffer              */
+                               /* As OUTPUT buffer, contains:       */
+                               /* 0-1: sample rate conversion ratio */
+                               /* 2:   stereo flag                  */
+                               /* 3:   DSP70 there flag             */
+
+   dcl cue.rate        fixed;  /* cue sample rate */
+   dcl sf.rate         fixed;  /* sound file sample rate */
+   dcl tmp(3)          fixed;  /* temp buffer */
+   dcl Record.In(1)    fixed;  /* where to start recording on DTD   */
+   dcl Record.Out(1)   fixed;  /* where to stop recording on DTD    */
+   dcl Dest_Len(1)     fixed;
+   dcl Dest_Wrds       fixed;
+   dcl (i,j,k)         fixed;
+
+   sf.rate  = SF.Info(0);
+   cue.rate = Cue.Info(0);
+
+   /* Look to see if a DSP card is in the system.  If not, and   */
+   /* sf and proj rates are different, print warning. Otherwise, */
+   /* calculate the ratio.                                       */
+   if DSP70.There  /* see if DSP card is present in system */
+   then do;
+      call Get.SRC.Ratio(cue.rate,sf.rate,loc(addr(DSP.Info(SRC.Opt#ratio))));
+      DSP.Info(SRC.Opt#dsp70there) = 1;
+   end;
+   else do;
+      if sf.rate<>cue.rate then do;
+         /* file's rate is different from project rate */
+         /* and there is no DSP70 card - print warning! */
+         call Close.Optical.Xfer.Dialog;
+         call Open.Optical.Xfer.Dialog(O#RatesDiffer,Optical.Row+Optical.Size);
+         if Get.Rates.Differ.Event=0 then do;
+            return false;  /* user does not want to continue */
+         end;
+      end;
+      call Str32(1,0,loc(addr(DSP.Info(SRC.Opt#ratio)))); /* Can't do any SRC, so set ratio to 1.0 */
+      DSP.Info(SRC.Opt#dsp70there) = 0;
+   end;
+   DSP.Info(SRC.Opt#stereo) = (Cue.Info(7) igt 1);
+
+   /* compute word length of file after sample rate conversion process */
+
+   call Copy32(loc(addr(Cue.Info(3))),tmp);      /* put sector len into temp */
+   call Shl32(tmp,8);                            /* convert sectors to samples */
+   call Add16(0,tmp);                            /* add in odd words */
+   call Compute.SRC.Length(tmp,loc(addr(DSP.Info(SRC.Opt#Ratio))),Dest_Len);
+
+   call Shl32(Dest_Len,(DSP.Info(SRC.Opt#stereo)<>0)); /* double if in stereo */
+   Dest_Wrds = Dest_Len(1)&255;                  /* get words mod 255 */
+   call Shr32(Dest_Len,8);                       /* get sectors (truncate) */
+
+/***** TURN OFF LINES BELOW TO ALLOW TRANSFER OF LARGE (>>32 MB) FILES *****/
+   if 0&(Dest_Len(0)<>0) then do;  /* sound file will be greater than 32 megs */
+      call Display.Notice(NT#SoundFileTooBig,ATTR#Reverse,NulStr,0,0,0);
+      return false;
+   end;
+/***** TURN OFF LINES ABOVE TO ALLOW TRANSFER OF LARGE (>>32 MB) FILES *****/
+
+   /* fill sound file info output buffer */
+   SF.Info(0) = LaserDev;
+   call Str32(0,0,loc(addr(SF.Info(1))));
+   call Copy32(Dest_Len,loc(addr(SF.Info(3))));
+   SF.Info(5) = Dest_Wrds;      /* extra words        */
+
+   /* fill cue info output buffer */
+   Cue.Info(0) = DTDDev;        /* store device       */
+   /* start addr  is already in place in the array */
+   /* len in sectors already in place in the array */
+   Cue.Info(5) = 0;             /* no extra words in addition to sector len */
+
+   return true;
+
+end Setup.DTD.To.Opt.Params;
+
+Get.Store.Cue.Event: proc returns (fixed) swapable;
+   dcl event									fixed;	//	  1
+   dcl sf.name	(4)							fixed;	//	  5
+   dcl SFInfo	(5)							fixed;	//	  6	/* holds info about the current sound file  */
+   dcl CueInfo	(7)							fixed;	//	  8	/* holds info about the cue to be created   */
+   dcl DSPInfo	(SRC.Opt#array.size-1)	fixed;	//	  4	/* holds misc info used during DSP transfer */
+   dcl SFBuf	(255+16)						fixed;	//	272	/* 1 sector sound file header buffer + 2 symbols in symbol sector */
+   dcl Temp2	(18)                 	fixed;	//	 19	//	room for 35 chars (width of Optical.Caption.String = 35)
+   dcl Temp		(35)                 	fixed;	//	 36	//	room for 70 chars (two rows of optical caption string)
+   dcl (Col, Row)								fixed;	//	  2	/* Keep these in order      */
+   dcl (i, j, k)								fixed;	//	  3
+   dcl Recbuf(L#Rec_Length-1)				fixed;	//	 64	/* directory entry buffer   */
+   dcl stereo									fixed;	//	  1
+   dcl Dest_Len(1)							fixed;	//	  2
+   dcl Dest_Words								fixed;	//	  1
+   dcl Dest_Rate								fixed;	//	  1
+   dcl Alen		(1)							fixed;	//	  2
+   dcl Tlen		(1)							fixed;	//	  2
+	//	429 words on the stack
+
+   clear.statuses:proc;
+      call DISPLAY.NOTICE (NT#EraseNotice,ATTR#Normal,NulStr,0,0,0);
+      call REMOVE.ERR;
+   end clear.statuses;
+
+   PUSH.SYSTEM.PDL;               /* free up as much of stack as we can */
+
+   do while 1;
+
+      event=Get.Next.Screen.Event;
+
+      if event = Get.Screen.Event then do;
+
+         if Screen.Event.Group = Optical.Group then do;
+
+            if Screen.Event.Id = GID(OptDlgSFName) then do;
+               if Screen.Event.Info = S#Deposit then do;
+                  call clear.statuses;
+                  /* replace any spaces with underscores */
+                  /* and truncate to remove trailing spaces */
+                  call Fetch.String(GID(OptDlgSFName),sf.name);
+                  j=0;
+                  do i=0 to sf.name(0)-1;
+                     if (byte(sf.name,sf.name(0)-1-i)=a.sp)
+                     then do;
+                        if j<>0 then call pbyte(sf.name,sf.name(0)-1-i,a.score);
+                     end;
+                     else if j=0 then j=sf.name(0)-i;
+                  end;
+                  sf.name(0) = j;
+                  Disable.Deposits = true;
+                  call Deposit.String(GID(OptDlgSFName),sf.name);
+                  Disable.Deposits = false;
+               end;
+            end;
+
+            else if Screen.Event.Id = GID(OptDlgRate) then do;
+               if Screen.Event.Info = S#Deposit then do;
+               end;
+            end;
+
+            else if Screen.Event.Id = GID(OptDlgGo) then do;
+               if (Screen.Event.Info=S#MouseActivate)
+               or (Screen.Event.Info=S#MouseSelect)
+               or (Screen.Event.Info=S#KeyActivate)
+               then do;
+                  call clear.statuses;
+
+                  write(mam) = Current.Cue.Ptr;
+                  write(mal) = cue.trks;
+                  DTD.TrackBits = read(md);
+
+                  if (simulate_dtd)
+                     DTD.TrackBits = 1;
+
+                  k=0;
+                  do j=0 to 15;  /* make sure cue is 1 or 2 tracks */
+                     if (bits(j)&DTD.TrackBits)<>0 then k=k+1;
+                  end;
+
+                  if      k=1 then stereo=0;
+                  else if k=2 then stereo=1;
+                  else /*if (k igt 2) or (k=0) then*/ do;
+                     call Display.Notice(NT#TooManyTracks,ATTR#Reverse,NulStr,k,0,0);
+                     call Close.Optical.Xfer.Dialog;
+                     POP.SYSTEM.PDL;               /* restore stack */
+                     return false;
+                  end;
+//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\	
+                  call Load.DTD.Temp.Cue(Current.Cue.Ptr);  /* load cue into temp area on DTD side */
+                  CueInfo(0) = AEE.Current.Project.Rate;
+                  call Get.Cue.Size(Current.Cue.Ptr,loc(addr(CueInfo(1))),
+                                    loc(addr(CueInfo(3))),loc(addr(CueInfo(5))));
+                  CueInfo(7) = k;          /* number of DTD tracks */
+
+                  Dest_Rate = Fetch.Fixed.Point(GID(OptDlgRate));
+                  call Fetch.String(GID(OptDlgSFName),sf.name);
+
+                  if Index_Locate(sf.name,Recbuf,LaserDev)<>0 then do;
+                     /* file by that name already exists - prompt for replace */
+                     call Close.Optical.Xfer.Dialog;
+                     if Get.Cue.Dialog(Optical.Group,11)=0 then do;
+                        /* user does not want to replace existing file */
+                        POP.SYSTEM.PDL;               /* restore stack */
+                        return false;
+                     end;
+                  end;
+                  else if C#Status<>E#No_File then do;
+                     /* some error occurred other than not finding the file */
+                     call Close.Optical.Xfer.Dialog;
+                     call Generate.Optical.Error.Message;
+                     POP.SYSTEM.PDL;               /* restore stack */
+                     return false;
+                  end;
+
+                  SFInfo(0) = Dest_Rate;
+
+                  if Setup.DTD.To.Opt.Params(SFInfo,CueInfo,DSPInfo)=0
+                  then do;
+                     call Close.Optical.Xfer.Dialog;
+                     POP.SYSTEM.PDL;               /* restore stack */
+                     return false;  /* we don't want to return to dialog */
+                  end;
+
+                  /* now that we have:
+                        1) start addr on source (CueInfo),
+                        2) original length on source (CueInfo),
+                        3) length after sample rate conversion (SFInfo),
+                        4) misc DSP info (DSPInfo)
+                     We must construct the following:
+                        1) build sound file header
+                        2) try to write a new directory entry to optical disk
+                        3) if it succeeded (there is room in dir and data 
+                           areas), get where to start writing sample data 
+                           in data area and store the addr in SFInfo
+                   */
+
+                  /* set up sound file header */
+                  do i=0 to 255+16; SFBuf(i)=0; end; /* zero out buffer */
+
+                  /* Compute number of data sectors needed to allocate: */
+
+                  call COPY32(loc(addr(SFInfo(3))), Alen);
+                  if SFInfo(5) <> 0                 /* compute total data  */
+                  then call ADD16(1, Alen);         /* sectors needed      */
+                  call COPY32(Alen, Tlen);
+                  call ADD16(SF.HDR+SF.SYM, Tlen);  /* include hdr here    */
+
+                  call Create.SFHeader(Alen, 0,     /* length */
+                                       Dest_Rate,   /* sound file rate */
+                                       stereo,SFBuf);
+
+                  /* put caption and categories in sound file header */
+                  call Fetch.Table(Optical.Caption.String,0,0); 
+                  call Fetch.String(Optical.Capt.Type.Obj,Temp);
+                  call Fetch.Table(Optical.Caption.String,0,1);
+                  call Fetch.String(Optical.Capt.Type.Obj,Temp2);
+                  call Append.To.Str(Temp,Temp2);
+                  if Temp(0)<>0
+                  then call Copy.String(Temp,Loc(Addr(SFBuf(sf.id.field.bytes))));
+
+                  if not Stuff.Categories(SFBuf) then do;
+                     /* not enough room for both caption and categories */
+                     call Display.Notice(NT#NoRoomForCatsAndCapt,ATTR#Reverse,NulStr,0,0,0);
+                     call Close.Optical.Xfer.Dialog;
+                     POP.SYSTEM.PDL;               /* restore stack */
+                     return false;
+                  end;
+
+                  /* write new directory entry in dir area of optical disk */
+                  /* and in index file */
+                  if Index_Replace(sf.name,T#Sound,
+                                   Tlen(0),Tlen(1),    /* len in sectors */
+                                   shl(Tlen(1), 8),    /* len in words mod 64K */
+                                   SFBuf,Recbuf,LaserDev)=0
+                  then do;
+                     /* something wrong (no room, SCSI problem, etc.) */
+                     call Close.Optical.Xfer.Dialog;
+                     call Generate.Optical.Error.Message;
+                     POP.SYSTEM.PDL;               /* restore stack */
+                     return false;
+                  end;
+
+                  /* store globals set up by Index_Replace */
+                  SFInfo(1) = F#MS_Sector; /* starting sector to write sound file */
+                  SFInfo(2) = F#LS_Sector;
+                  call Str32(F#MS_Length,F#LS_Length,Dest_Len);
+                  call Add32(Dest_Len,loc(addr(SFInfo(1))),loc(addr(SFInfo(3))));  /* end addr (sectors) */
+                  call Add16((SF.HDR+SF.SYM),loc(addr(SFInfo(1)))); /* write sample data after header */
+                  SFInfo(5) = F#Words&255; /* number of words past end addr (mod 255) */
+
+                  /* write new header and first symbol sector to optical data area */
+                  call Copy32(loc(addr(SFInfo(1))),Dest_Len); /* use Dest_Len as addr */
+                  call Sub16((SF.HDR+SF.SYM),Dest_Len);       /* back up to where header should go */
+                  call Writedata(shl(SFInfo(0),8) | (Dest_Len(0)&255), Dest_Len(1), SFBuf, 256+16); 
+//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\	
+                  call Transfer.Between.DTD.And.Opt(CueInfo,SFInfo,DTD.TrackBits,DSPInfo,true);
+
+                  if Xfer$Status=Xfer#DSPError 
+                  then do;                     /* some problem with DSP */
+                     call Display.Notice(NT#CannotBootDSP70,ATTR#Reverse,NulStr,0,0,0);
+                     call Close.Optical.Xfer.Dialog;
+                     POP.SYSTEM.PDL;           /* restore stack */
+                     return false;             /* we do not want to return to dialog */
+                  end;
+
+                  else if Xfer$Status=Xfer#NoDataPath /* no data path */
+                  then do;
+                     call Display.Notice(NT#NoDataPath,ATTR#Reverse,NulStr,0,0,0);
+                     call Close.Optical.Xfer.Dialog;
+                     POP.SYSTEM.PDL;           /* restore stack */
+                     return false;             /* we do not want to return to dialog */
+                  end;
+
+                  else if Xfer$Status<>Xfer#Good then do;
+                     /* Transfer was incomplete - delete entire sound file */
+                     call Update.Laser.Index;  /* do this first to keep index up to date */
+                     call Index_Delete(sf.name,Recbuf,LaserDev);
+                     /**** if the delete bombs, what do we tell user and how?? ****/
+                  end;
+
+                  /* update index file and refresh window */
+                  call Clean.Up.After.OptDTD.Transfer(true);
+
+                  if Xfer$Status<>Xfer#Good then do; /* transfer was incomplete */
+                     if (Xfer$Status=Xfer#OptError) /* abort was due to optical error */
+                     or (Xfer$Status=Xfer#ScsiError)
+                     then do;
+                        S$SenseKey = Xfer$Error;     /* restore status during transfer */
+                        call Generate.Optical.Error.Message;
+                     end;
+                     else if Xfer$Status=Xfer#Timeout
+                     then do;
+                        call Display.Notice(NT#DTDTimeout,ATTR#Reverse,NulStr,0,0,0);
+                     end;
+                     else call Display.Notice(NT#OptDtdXferAborted,ATTR#Reverse,sf.name,0,i,0);
+                  end;
+                  else do;                     /* transfer succeeded */
+                     call Display.Notice(NT#OptDtdXferComplete,ATTR#Normal,sf.name,0,1,0);
+                  end;
+
+                  call Close.Optical.Xfer.Dialog;
+                  POP.SYSTEM.PDL;               /* restore stack */
+                  return false;  /* we don't want to return to dialog */
+               end;
+            end;
+
+            else if Screen.Event.Id = GID(OptDlgAbort) then do;
+               if (Screen.Event.Info=S#MouseActivate)
+               or (Screen.Event.Info=S#MouseSelect)
+               or (Screen.Event.Info=S#KeyActivate)
+               then do;
+                  call clear.statuses;
+                  call Close.Optical.Xfer.Dialog;
+                  POP.SYSTEM.PDL;               /* restore stack */
+                  return false;  /* we don't want to return to dialog */
+               end;
+            end;
+
+            else do;
+               call Display.Notice(NT#MustRespondToDialog,ATTR#Reverse,NulStr,0,0,0);
+               call Select.New.Cur.Obj(Corner.Label,-1,-1);
+            end;
+         end;	//	of if (Screen.Event.Group == Optical.Group)
+
+         else if (Screen.Event.Group <> 0)
+         and ((Screen.Event.Info = S#MouseSelect)
+         or  (Screen.Event.Info = S#MouseActivate))
+         then do;
+            call Display.Notice(NT#MustRespondToDialog,ATTR#Reverse,NulStr,0,0,0);
+            call Select.New.Cur.Obj(Corner.Label,-1,-1);
+         end;
+      end;  /* of event = Get.Screen.Event */
+
+      else if event = Get.Program.Exit then do;
+         call Close.Optical.Xfer.Dialog;
+         POP.SYSTEM.PDL;               /* restore stack */
+         return false;
+      end;
+
+   end;
+
+end Get.Store.Cue.Event;
+

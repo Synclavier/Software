@@ -1,0 +1,399 @@
+/* PRO-IO   $TITLE  Protocol I/O routines: SEND and RECEIVE packets
+
+   Modified:
+   10/30/90 - cj  - changed get.next.d50.protocol.packet to not use
+                    misc.buf.  Good idea since it is called from
+                    poly.readdata and other places.
+   05/24/90 - MWH - Add Karim's HEX logging routines
+   11/29/89 - MWH - Add retry time when sending protocol packets
+   08/24/89 - PF  - Clear MIDI.BUF in EMPTY.MIDI.BUF if MIDInet not there
+   07/24/89 - cj  - changed format of value returned by map.d115.node.id
+   06/26/89 - PF  - Added Empty.MIDI.Buf PROC
+   06/01/89 - MWH - Better logging; don't map timed out devices
+   05/18/89 - MWH/TSS - Make mapping of node ID non-swap (MIDI calls from INT)
+   05/04/89 - MWH - Support for multiple D115 boards & channels; timeouts
+   04/27/89 - MWH - Split from PROSOU
+   
+*/
+
+dcl protocol.in.ptr      fixed public;  /* ext mem buffer for protocol input stream */
+dcl p.in.wptr            fixed public;  /* ptr to next free loc in input buffer */
+dcl p.in.rptr            fixed public;  /* ptr to next good message byte to be read */
+dcl p.in.prior           fixed public;
+dcl num.of.new.packets   fixed public;  /* number of unprocessed D50 packets in buffer */
+
+dcl protocol.out.ptr     fixed public;  /* ext mem buffer for protocol output stream */
+dcl p.out.wptr           fixed public;  /* ptr to next free loc in output buffer */
+dcl p.out.rptr           fixed public;  /* ptr to next byte to send */
+
+dcl hereis.printed       fixed public;  /* flag when here_is message gets printed */
+dcl allow.proto.msgs     fixed public;  /* to allow debug printouts               */
+
+/* Find which D115 port has a device connected, given the node_id of the device */
+/* Return value is shl(board #,1) + and channel #.                              */
+/* Returns -1 if it fails to find the node-id */
+
+map.d115.node.id: proc (node_id) public recursive;
+   dcl node_id fixed;                      /* Identifies the device */
+   dcl i       fixed;
+
+   /* NOTE: This routine must remain RECURSIVE since it may be */
+   /*       called re-entrantly from the interrupt routine.    */
+   /*       This can happen if MIDI.NOTE.ON or MIDI.NOTE.OFF   */
+   /*       are called during an interrupt.                    */
+
+   if node_id > 0                          /* If we have a valid node */
+   then do i=0 to (shl(num.d115d.bds,1) - 1);
+      if d115d.chans(i) = node_id then do; /* We found the device */
+         return i;                         /* indicate which.     */
+      end;
+   end;
+
+   return (-1);
+
+end map.d115.node.id;
+
+/* $SUBTITLE  Print outgoing packet data */
+
+/* Assumes packet is set up in misc.buf before calling; prints: */
+/* [Output] Super = 12, Sub = 8, len = 2, node = 32, board = 0, chan = 1 */
+/* (also prints data words if verbose mode printing is on) */
+
+LOG.OUTPUT.MESSAGE: proc(len,node,board) swapable;
+   dcl len        fixed;  /* length of message in: words for D50, bytes for RS422!! */
+   dcl node       fixed;  /* destination node id */
+   dcl board      fixed;  /* destination board */
+   dcl done fixed static; /* Print frequent sync message only once */
+   dcl i          fixed;
+   dcl Log.Format fixed external;
+   dcl print_packet proc (pointer, fixed) external;
+
+   dcl sr         fixed;
+
+   if (Allow.Proto.Msgs & "7") = 0            /* if no output logging, */
+   then return;                               /* then quit             */
+
+   if misc.buf(P#Type) = T#Current_Time       /* Don't log current time message */
+   then do;
+      if done <> 0 then return;               /* Unless we NEVER have */
+      else done = 1;                          /* OK, once is enough! */
+   end;
+
+   /* If we are within PC at the current moment,  we cannot log      */
+   /* any output (sorry!)                                            */
+
+   if disable.protocol.output <> 0  then return;  /* oops - called from PC */
+
+   sr = run.syn;                              /* save run.syn state  */
+   run.syn = 0;                               /* to keep from re-entering */
+   
+   call tty_wait;
+
+   if (Allow.Proto.Msgs & "7") >= 1 then do;  /* Brief log of output */
+      call cpos(23,0);                  /* Move to bottom line of screen */
+      if (Allow.Proto.Msgs & "7") = 1
+      then do;
+         call pc(27); call ps('[K');    /* Erase it */
+      end;
+      else call pcr;
+      call ps('[Output]');
+      call ps(' Super = ');     call pnum(shr(misc.buf(P#Type),8), 0);
+      call ps(', Sub = ');      call pnum(misc.buf(P#Type) & "377",0);
+      call ps(', len = ');      call pnum((len-4),0);
+      call ps(', node = ');     call pnum(node,0);
+      call ps(', board = ');    call pnum(board,0);
+      call ps(', chan = ');     call pnum(misc.buf(P#Source),0);
+   end;
+
+   if (Allow.Proto.Msgs & "7") >= 2 then do;  /* Full dump of output packet */
+      call pcr;
+      if Log.Format = 0 then do;              /* Log in decimal */
+         do i=0 to (shr(len+1,1) - (P#Data + 1));
+            call pc(27); call ps('[K');     /* Erase line */
+            call ps('   Data word = '); call pnum(misc.buf(i+P#Data),0);
+            call pcr;
+         end;
+      end;
+      else do;
+         call print_packet(addr(misc.buf(P#Data)),len - (shl(P#Data,1)));
+      end;
+   end;
+
+   call tty_wait;
+
+   run.syn = sr;
+
+   return;
+end LOG.OUTPUT.MESSAGE;
+
+/* $SUBTITLE  Print when a device times out */
+
+log.d115d.timeout: proc swapable;
+   dcl board   fixed;
+   dcl channel fixed;
+   dcl node_id fixed;
+   dcl device  fixed;
+
+   if (Allow.Proto.Msgs & "7") >= 1 then do;  /* At least brief logging */
+      node_id = d115d.timeout & "377";
+      board   = shr(d115d.timeout,9) & "3";
+      channel = shr(d115d.timeout,8) & "1";
+      call cpos(23,0);                        /* Move to bottom line of screen */
+      if (Allow.Proto.Msgs & "7") = 1         /* Brief */
+      then do;                                /* Erase it */
+         call pc(27); call ps('[K');
+      end;
+      else call pcr;                          /* Or get a new line */
+      call ps('[DEV_GONE]');
+      call ps(' Board = ');     call pnum(board,0);
+      call ps(', Chan = ');     call pnum(channel,0);
+      call ps(', Node = ');     call pnum(node_id,0);
+      device = shr(node_id & NN#Dev_Mask,4);    /* Get the remote device type */
+      do case device;
+         ;                            /* 0 = Able (we don't receive from!) */
+         call ps(', (MAC)');          /* 1 = MAC */
+         call ps(', (DESC)');         /* 2 = Remote Box */
+         call ps(', (MIDI)');         /* 3 = Monster MIDI */
+      end;
+      if (Allow.Proto.Msgs & "7") >= 2 then do;  /* Full dump of output packet */
+         call pcr;
+      end;
+   end;
+
+end log.d115d.timeout;
+
+/* $SUBTITLE  Protocol Routines */
+
+GET.NEXT.D50.PROTOCOL.PACKET: proc (ptr) fixed public swapable;
+   dcl ptr         fixed; /* xmem ptr to where data should be put */
+   dcl (len,i,j,k) fixed;
+   dcl buf(32)     fixed;
+
+   if inc.pro=0 then return;
+
+   if num.of.new.packets <> 0 then do;
+      write(mam) = protocol.in.ptr + shr(p.in.rptr,8);
+      write(mal) = p.in.rptr;
+      len = read(md);                       /* length of entire packet (including length) */
+
+      i = p.in.rptr;                        /* get starting offset of info                */
+      j = 0;                                /* initialize count of words transferred      */
+
+      do while j <> len;                    /* transfer message in chunks                 */
+         k = len - j;                       /* get words left to transfer                 */
+         if   k > 32 then k = 32;           /* limit to size of buffer                    */
+         if   k > (protocol.in.len - i)     /* limit to end of buffer wrap                */
+         then k = (protocol.in.len - i);
+         write(mam) = protocol.in.ptr + shr(i,8);
+         write(mal) = i;
+         call copy.in(addr(buf(0)),k);
+         write(mam) = ptr;
+         write(mal) = j;
+         call copy.out(addr(buf(0)),k);
+         j = j + k;
+         i = (i + k) & (protocol.in.len - 1);
+      end;
+
+      disable;
+         p.in.rptr = (p.in.rptr + len) & (protocol.in.len - 1); /* advance rotary ptr */
+         num.of.new.packets = num.of.new.packets - 1; /* one less message in buffer */
+      enable;
+
+   end;
+   else len = 0;
+
+   return len; /* number of words read */
+end GET.NEXT.D50.PROTOCOL.PACKET;
+
+/* $PAGE */
+
+// Note: This is called from the low level real time loop via midi send sysex
+// It is also called
+
+SEND.PROTOCOL.PACKET: proc (ptr,media) fixed PUBLIC swapable;
+   dcl ptr        fixed; /* xmem sector ptr or internal mem word ptr to data */
+   dcl media      fixed; /* 0 = internal memory, 1 = external memory */
+   dcl len        fixed; /* length of message in bytes */
+   dcl node_id    fixed; /* ID for the remote device we are sending to */
+   dcl avail      fixed;
+   dcl board      fixed;
+   dcl i          fixed;
+
+   /* NOTES:                                                     */
+   /*        Routine will send the full 16-bit value for all     */
+   /*        D115D/RS422 ports.  If enough room in buffer        */
+   /*        to send message, routine returns 1 (TRUE),          */
+   /*        otherwise routine returns 0 (FALSE).                */
+
+   if inc.pro=0   then return TRUE;
+
+   if media = 1 then do;                   /* In external memory */
+      write(MAM) = ptr;
+      write(MAL) = P#Len;
+      len = read(md);
+   end;
+   else len = core(ptr + P#Len);           /* In internal memory */
+
+   if len igt 80 then return TRUE;
+
+   /* Move the outgoing message to misc.buf */
+   if media = 1 then do;                   /* In external memory */
+      write(MAM) = ptr;
+      call copy.in(addr(misc.buf(0)),shr(len+1,1));
+   end;
+   else do;
+      call blockmove(loc(ptr), misc.buf, shr(len+1,1));
+   end;
+
+   /* Find which D115 port has the destination device connected */
+   node_id = misc.buf(P#Source);
+   board = map.d115.node.id(node_id);
+
+   if board = -1                       /* Never found the device */
+   then return(TRUE);                  /* So we're done */
+
+   misc.buf(P#Source) = board & 1;     /* Low bit is the channel # */
+   board = shr(board,1);               /* Get board #              */
+
+   /* Emulator call to output packet data to the terminal */
+   if Allow.Proto.Msgs < 0 then call log.output.message(len,node_id,board);	// will probably crunch if called from real time loop, but not done in the real world
+
+   if (num.d115d.bds <> 0) then do;             /* If we have any output boards */
+      DISABLE;                                  /* must disable now because of possible output during interrupts */
+      write(cpsel) = cp#sel_group_20 | board;   /* Select board */
+      if (read(cpstat) & cp#tx_half_full) <> 0  /* Transmit FIFO half full */
+      then do;
+         ENABLE;                                /* re-enable interrupts */
+         return(FALSE);                         /* Try again later */
+      end;
+      write("313") = addr(misc.buf(0));         /* Point at the data */
+      RPC shr(len+1,1);
+      write(cpdata) = read("373");              /* Write it quickly */
+      write(cpcmd) = cp#increment;              /* Increment transmit frame counter */
+      ENABLE;                                   /* re-enable interrupts */
+   end;
+
+   return (TRUE);                               /* We did it OK */
+
+end SEND.PROTOCOL.PACKET;
+
+/* $PAGE */
+/*
+This routine is generally identical to SEND.PROTOCOL.PACKET with
+the following exceptions:
+
+    1.   It assumes the packet will be in internal memory (no media argument)
+    2.   It is non-swapping and may be called from within an interrupt
+    3.   It has none of the emulator code for screen output
+    4.   It does NOT map the destination to a D115 channel number.  The
+         CALLER must put a 0 or 1 in the buffer at P#Source!
+
+    NOTE:  Be aware that this routine leaves interrupts enabled!
+*/
+
+// Note: This routine is called from the D3 interrupt routine.  E.G. it may be called
+// at timer task level on the Mac.
+FAST.SEND.PROTOCOL.PACKET: proc (ptr,board) fixed PUBLIC recursive;
+   dcl ptr        fixed; /* ptr to data in internal memory */
+   dcl board      fixed; /* which D115 board to quickly send message on */
+   dcl len        fixed; /* length of message: in bytes for RS422!! */
+   dcl save.r13   fixed;
+
+   /* NOTE:  routine must be recursive since it is sometimes     */
+   /* re-enterred from the real time interrupt routine !!        */
+
+   /* NOTES:                                                     */
+   /*        Routine will send the full 16-bit value for all     */
+   /*        ports.  If enough room in buffer to log message,    */
+   /*        routine returns 1 (TRUE), otherwise routine         */
+   /*        returns 0 (FALSE).                                  */
+
+   if inc.pro = 0 then return TRUE;
+   len = core(ptr + P#Len);
+   if len igt 127    then return TRUE;
+
+   DISABLE;                                     /* must disable now because of possible output during interrupts */
+
+   if (num.d115d.bds <> 0) then do;             /* If we have any output boards */
+      write(cpsel) = cp#sel_group_20 | board;   /* Select board */
+      if (read(cpstat) & cp#tx_half_full) <> 0  /* Transmit FIFO half full */
+      then do;
+         ENABLE;                                /* re-enable interrupts */
+         return(FALSE);                         /* Try again later   */
+      end;
+      save.r13      = read("313");
+      write("313")  = ptr;                      /* Point at the data */
+      RPC shr(len+1,1);                        
+      write(cpdata) = read("373");              /* Write it quickly */
+      write(cpcmd)  = cp#increment;             /* Increment transmit frame counter */
+      write("313")  = save.r13;
+   end;
+   ENABLE;                                      /* re-enable interrupts */
+
+   return (TRUE);                               /* We did it OK */
+
+end FAST.SEND.PROTOCOL.PACKET;
+
+SEND.PROTOCOL.PACKET.WITH.RETRY: proc (ptr,media,retry_time) fixed PUBLIC swapable;
+   dcl ptr        fixed; /* xmem sector ptr or internal mem word ptr to data */
+   dcl media      fixed; /* 0 = internal memory, 1 = external memory */
+   dcl retry_time fixed; /* milliseconds to retry before giving up */
+   dcl timer      fixed; /* snapshot of time when we started trying */
+   dcl i          fixed;
+
+   /* Start a timer in case send fails continuously */
+   i = 0;
+   timer = real.milliseconds;
+
+   do while i = 0;
+      i = Send.Protocol.Packet(ptr,media);
+      if  i = 0 then do;
+         if (real.milliseconds - timer) igt retry_time
+      	 then return(FALSE);              /* Give up */
+	 	 interp_run_host_non_timer();
+	  end;
+   end;
+
+   return(TRUE);                          /* Made it! */
+
+end SEND.PROTOCOL.PACKET.WITH.RETRY;
+
+EMPTY.MIDI.BUF: proc PUBLIC recursive;
+   dcl board    fixed;
+   dcl save.r13 fixed;
+   dcl len      fixed;
+   dcl save.int fixed; /* holds saved interrupt status */
+
+   board = map.d115.node.id(NN#Midi);    /* lookup d115 channel for MIDInet */
+
+   if board <> (-1)                      /* if MIDInet is there */
+   then do;                              /* send this packet */
+
+      save.int = read("314");            /* save current interrupt status */
+      DISABLE;
+      save.r13 = read("313");            /* save r13 */
+
+      len = midi.buf(0);                 /* get the word length of the buffer */
+      midi.buf(0) = shl(midi.buf(0),1);  /* change word length into byte count */
+      midi.buf(1) = board & 1;           /* Low bit is the channel # */
+
+      write(cpsel) = cp#sel_group_20 | shr(board,1); /* Select board */
+      write("313") = addr(midi.buf(0));  /* point at midi.buf */
+      rpc len;                           /* repeat counter for speed */
+      write(cpdata) = read("373");       /* write out data as quickly as possible */
+      write(cpcmd) = cp#increment;       /* Increment transmit frame counter */
+
+      midi.buf(0) = 3;                   /* reset word length in buffer to header size */
+
+      write("313") = save.r13;           /* restore r13 */
+      write("314") = save.int;           /* restore interrupt status to status reg */
+      write(1)     = save.int;           /* and restore processor to correct state */
+
+   end;
+
+   else do;                              /* MIDInet not out there */
+      midi.buf(0) = 3;                   /* just re-init the length word in buffer */
+   end;
+
+end EMPTY.MIDI.BUF;
+

@@ -1,0 +1,1152 @@
+/*	:SYNSOU:AUDMOD:AUD-OPT1  Optical Disk Dialog panel routines	*/
+
+/*
+Modifications:
+2001/01/29 - TY  - fixed OPT XFER memory corruption bug in CREATE.SFHEADER()
+1990/10/31 - cj  - saved/restored run.syn as needed
+1990/10/30 - cj  - Arguments changed to allow opt-dtd from protocol
+1990/10/15 - cj  - Broadened check for tahiti to cover other types
+1990/08/06 - LSS - added configuration info for magneto optical
+1989/11/17 - SGS - Bug fix in Wait.during.DSP.transfer INFO array dcl
+1989/06/30 - SGS - Added Get.Optical.Time.Left
+1989/05/23 - SGS - Handle recovery from aborts due to hardware problems or user abort
+1989/05/23 - SGS - Added CORRECT.FOR.TRACK.AVAILABILITY
+1989/05/22 - TSS - Fixed some bugs in the category table stuff
+1989/05/18 - SGS - Display dialog goes away now if obj outside of dialog selected
+1989/05/18 - SGS - Added Stuff.Category.Into.Table
+1989/05/17 - SGS - Fixed lots of bugs for alpha release
+1989/05/09 - TSS - Moved some procs here from AUD-OPT2
+1989/03/31 - SJS/SGS - authors
+*/
+
+dcl Close.Optical.Xfer.Dialog proc recursive;
+
+dcl Xfer$Status	fixed;	/*	holds outcome of Opt<->DTD transfer			*/
+dcl Xfer$Error		fixed;	/*	holds error that occurred during transfer	*/
+
+Open.Display.Options: proc (row) swapable;
+	dcl row					fixed;
+	dcl (s1)	(16)			fixed;
+	dcl (s2)	(16)			fixed;
+	dcl (FirstId,LastId)	fixed;
+	dcl Id					fixed;
+	dcl (i,j,k)				fixed;
+
+	/*	define 'Set Display Options' line	*/
+
+	/*	0         1         2         3         4         5         6         7				*/
+	/*	01234567890123456789012345678901234567890123456789012345678901234567890123456789	*/
+	/*	No. of rows:NN    Show:[CAPTION] [SECONDS]    Sort:by Files and Cats      [DONE]	*/
+
+	call Set.Default.Action (O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	call Set.Default.Attr(0,ATTR#Normal);
+	call Set.Default.Attr(1,ATTR#Normal|ATTR#Reverse);
+
+	/*	Define "No. of Rows" label & field:	*/
+
+	FirstId = Define.Label(S#AA,row,0,0,'No. of rows:');
+	call Set.Object.Mouse.Access (Id, 0);
+
+	Id = Define.Fixed.Point(S#AA, row, 12, 2, 0, cf#right);
+	call PID(OptDlgPanelSize, Id);
+
+	/*	"Show:" label:	*/
+
+	Id = Define.Label(S#AA,row,18,0,'Show:');
+	call Set.Object.Mouse.Access (Id, 0);
+
+	/*	"caption seconds" fields:	*/
+
+	call Set.Default.Action(O#ACT.Prev.Obj|O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Id = Define.Label(S#AA,row,23,0,'[CAPTION]');
+	call PID(OptDlgDisp1,Id);
+	Id = Define.Label(S#AA,row,33,0,'[SECONDS]');
+	call PID(OptDlgDisp2,Id);
+
+	call Set.Default.Action (O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+
+	Id = Define.Label(S#AA,row,46,0,'Sort:');
+	call Set.Object.Mouse.Access(Id,0);
+
+	Id = Define.Switch(S#AA,row,51,17,0,'by Cats Only|by Cats and Files|by Files Only');
+	call PID(OptDlgSort,Id);
+
+	Id = Define.Label(S#AA,row,74,0,'[DONE]');
+	call PID(OptDlgGo,Id);
+
+	LastId = GID(OptDlgGo);
+
+	call PID(OptDlgFirstId,FirstId);
+	call PID(OptDlgLastId,LastId);
+
+	/*	display info table:	*/
+
+	/*	Put initial values in display contents line	*/
+
+	Disable.Deposits = true;
+
+	call Deposit.Fixed.Point(GID(OptDlgPanelSize),Optical.Rows+1);
+	call Deposit.Switch(GID(OptDlgSort),Compute.SortFormat(SortInfo,ItemFilter));
+
+	if (ShowInfo&INFO$Caption)<>0 then do;
+		call Set.Object.Attr(GID(OptDlgDisp1),0,ATTR#Normal|ATTR#Reverse);
+		call Set.Object.Attr(GID(OptDlgDisp1),1,ATTR#Normal|ATTR#Reverse);
+	end;
+	if (ShowInfo&INFO$Second)<>0 then do;
+		call Set.Object.Attr(GID(OptDlgDisp2),0,ATTR#Normal|ATTR#Reverse);
+		call Set.Object.Attr(GID(OptDlgDisp2),1,ATTR#Normal|ATTR#Reverse);
+	end;
+
+	Disable.Deposits = false;
+
+	call Activate.Object.Range(GID(OptDlgFirstId),GID(OptDlgLastId));
+	call Update.Object.Range  (GID(OptDlgFirstId),GID(OptDlgLastId));
+
+end Open.Display.Options;
+
+Get.Display.Options.Event: proc returns (fixed) swapable;
+	dcl event					fixed;
+	dcl (Col,Row)				fixed;	/*	Keep these in order	*/
+	dcl (old.size,new.size)	fixed;
+	dcl Info						fixed;
+
+	do while 1;
+
+		event=Get.Next.Screen.Event;
+
+		if event = Get.Screen.Event then do;
+
+			if Screen.Event.Group = Optical.Group then do;
+				if (Screen.Event.Id = GID(OptDlgPanelSize))
+				and (GID(OptDlgPanelSize)<>0)
+				then do;
+					if (Screen.Event.Info=S#Deposit)
+					then do;
+						old.size = Optical.Rows;
+						new.size = Fetch.Fixed.Point(GID(OptDlgPanelSize));
+						call Close.Optical.Xfer.Dialog;
+						call Close.Optical.Panel;
+						call Open.Optical.Panel(new.size+1);
+						if Optical.Rows = old.size	/*	couldn't resize to desired size	*/
+						then call Display.Notice(NT#CouldNotResizePanel,ATTR#Reverse,NulStr,0,0,0);
+						return true;
+					end;
+				end;
+
+				else if (Screen.Event.Id = GID(OptDlgDisp1))
+				or		  (Screen.Event.Id = GID(OptDlgDisp2))
+				then do;
+					if (Screen.Event.Info=S#MouseSelect)
+					then do;
+						if (Screen.Event.Id = GID(OptDlgDisp1)) then do;
+							Info = ShowInfo xor INFO$Caption;
+							if (Info&INFO$Caption)<>0 then do;
+								call Set.Object.Attr(GID(OptDlgDisp1),0,ATTR#Normal|ATTR#Reverse);
+								call Set.Object.Attr(GID(OptDlgDisp1),1,ATTR#Normal|ATTR#Reverse);
+							end;
+							else do;
+								call Set.Object.Attr(GID(OptDlgDisp1),0,ATTR#Normal);
+								call Set.Object.Attr(GID(OptDlgDisp1),1,ATTR#Normal);
+							end;
+						end;
+						else if (Screen.Event.Id = GID(OptDlgDisp2)) then do;
+							Info = ShowInfo xor INFO$Second;
+							if (Info&INFO$Second)<>0 then do;
+								call Set.Object.Attr(GID(OptDlgDisp2),0,ATTR#Normal|ATTR#Reverse);
+								call Set.Object.Attr(GID(OptDlgDisp2),1,ATTR#Normal|ATTR#Reverse);
+							end;
+							else do;
+								call Set.Object.Attr(GID(OptDlgDisp2),0,ATTR#Normal);
+								call Set.Object.Attr(GID(OptDlgDisp2),1,ATTR#Normal);
+							end;
+						end;
+
+						/*	redraw the window	*/
+						call SaveDisplayPos(LaserDev,0);
+						call Change.Window.Info.Format(0,Info);
+						call Refresh.OptWindow.Title(0);
+					end;
+				end;
+
+				else if (Screen.Event.Id = GID(OptDlgSort))
+				and (GID(OptDlgSort)<>0)
+				then do;
+					if (Screen.Event.Info=S#Deposit)
+					then do;
+						do case (Fetch.Switch(GID(OptDlgSort)));
+							call Change.Window.Sort.Format(0,SORT$Category,FILTER$Filename);
+							call Change.Window.Sort.Format(0,SORT$Category,FILTER$None);
+							call Change.Window.Sort.Format(0,SORT$Filename,FILTER$None);
+						end;
+					end;
+				end;
+
+				else if (Screen.Event.Id = GID(OptDlgGo)) then do;
+					if (Screen.Event.Info=S#MouseActivate)
+					or (Screen.Event.Info=S#MouseSelect)
+					or (Screen.Event.Info=S#KeyActivate)
+					then do;
+						call Close.Optical.Xfer.Dialog;
+						return true;
+					end;
+				end;
+
+				else do;
+					call Display.Notice(NT#MustRespondToDialog,ATTR#Reverse,NulStr,0,0,0);
+					call Select.New.Cur.Obj(Corner.Label,-1,-1);
+				end;
+			end;
+
+			else if (Screen.Event.Group <> 0)
+			&	((Screen.Event.Info = S#MouseSelect)
+			or	 (Screen.Event.Info = S#MouseActivate))
+			then do;
+				call Close.Optical.Xfer.Dialog;
+				return true;
+			end;
+
+		end;	/*	of event = Get.Screen.Event	*/
+
+		else if event = Get.Program.Exit then do;
+			call Close.Optical.Xfer.Dialog;
+			return false;
+		end;
+
+	end;
+
+end Get.Display.Options.Event;
+
+Open.Rates.Differ: proc (row) swapable;
+	dcl row					fixed;
+	dcl (s1)	(16)			fixed;
+	dcl (s2)	(16)			fixed;
+	dcl (FirstId,LastId)	fixed;
+	dcl Id					fixed;
+	dcl (i,j,k)				fixed;
+
+	/*	define 'Rates Differ warning' line	*/
+
+	/*	0         1         2         3         4         5         6         7				*/
+	/*	01234567890123456789012345678901234567890123456789012345678901234567890123456789	*/
+	/*	Sound file and proj rates differ AND no DSP card in system   [CONTINUE] [CANCEL]	*/
+
+	call Set.Default.Action (O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	call Set.Default.Attr(0,ATTR#Normal|ATTR#Reverse);
+	call Set.Default.Attr(1,ATTR#Normal|ATTR#Reverse);
+
+	FirstId = Define.Label(S#AA,row,0,0,'Sound file and proj rates differ AND no DSP card in system');
+	call Set.Object.Mouse.Access (Id, 0);
+
+	call Set.Default.Attr(0,ATTR#Normal);
+
+	Id = Define.Label(S#AA,row,61,0,'[CONTINUE]');
+	call PID(OptDlgGo,Id);
+
+	Id = Define.Label(S#AA,row,72,0,'[CANCEL]');
+	call PID(OptDlgAbort,Id);
+
+	LastId = GID(OptDlgAbort);
+
+	call Set.Object.Arrow.Links(GID(OptDlgGo)		,-1,-1,-1,GID(OptDlgAbort));
+	call Set.Object.Arrow.Links(GID(OptDlgAbort)	,-1,-1,GID(OptDlgGo),-1);
+
+	call PID(OptDlgFirstId,FirstId);
+	call PID(OptDlgLastId,LastId);
+
+	call Activate.Object.Range(GID(OptDlgFirstId),GID(OptDlgLastId));
+	call Update.Object.Range  (GID(OptDlgFirstId),GID(OptDlgLastId));
+
+end Open.Rates.Differ;
+
+Get.Rates.Differ.Event: proc returns (fixed) swapable;
+	dcl event					fixed;
+	dcl (Col,Row)				fixed;	/*	Keep these in order	*/
+	dcl (old.size,new.size)	fixed;
+	dcl Info						fixed;
+
+	do while 1;
+
+		event=Get.Next.Screen.Event;
+
+		if event = Get.Screen.Event then do;
+
+			if Screen.Event.Group = Optical.Group then do;
+
+				if (Screen.Event.Id = GID(OptDlgGo)) then do;
+					if (Screen.Event.Info=S#MouseActivate)
+					or (Screen.Event.Info=S#MouseSelect)
+					or (Screen.Event.Info=S#KeyActivate)
+					then do;
+						call Close.Optical.Xfer.Dialog;
+						return true;
+					end;
+				end;
+
+				else if (Screen.Event.Id = GID(OptDlgAbort)) then do;
+					if (Screen.Event.Info=S#MouseActivate)
+					or (Screen.Event.Info=S#MouseSelect)
+					or (Screen.Event.Info=S#KeyActivate)
+					then do;
+						call Close.Optical.Xfer.Dialog;
+						return false;
+					end;
+				end;
+
+				else do;
+					call Display.Notice(NT#MustRespondToDialog,ATTR#Reverse,NulStr,0,0,0);
+					call Select.New.Cur.Obj(Corner.Label,-1,-1);
+				end;
+
+			end;
+
+			else if (Screen.Event.Group <> 0)
+			&	((Screen.Event.Info = S#MouseSelect)
+			or	 (Screen.Event.Info = S#MouseActivate))
+			then do;
+				call Display.Notice(NT#MustRespondToDialog,ATTR#Reverse,NulStr,0,0,0);
+				call Select.New.Cur.Obj(Corner.Label,-1,-1);
+			end;
+
+		end;	/*	of event = Get.Screen.Event	*/
+
+		else if event = Get.Program.Exit then do;
+			call Close.Optical.Xfer.Dialog;
+			return false;
+		end;
+
+	end;
+
+end Get.Rates.Differ.Event;
+
+/*	$SUBTITLE	*/
+
+dcl (syncl.target.#)	lit '6';	/*	literals from lodsou	*/
+dcl (lod.target.#  )	lit '3';
+
+Check.For.Break: proc returns (fixed) swapable;
+
+	/*	scan keyboard to see if user typed anything	*/
+	if (num.of.d50.in.chars<>0) then do;		/*	any characters in D50 buffer ?	*/
+		if (get.item.enabled(get.program.exit)<>0)
+		&	(((next.d50.in.char >= ASC.CALL.CONVERT)
+		&	  (next.d50.in.char <= ASC.CALL.TERMINATE))
+		or	 ( next.d50.in.char	= ESC						))
+		then return get.program.exit;				/*	user hit break key		*/
+
+		else do while (next.D50.in.char<>0);	/*	flush any other chars	*/
+			call Get.Next.D50.In.Char;
+		end;
+	end;
+
+	return 0;
+
+end Check.For.Break;
+
+/*	Following proc taken from DSP.CUE() in :STMMOD:STDTSOU	*/
+
+Wait.During.DSP.Transfer: proc(code) returns (fixed) swapable;
+	dcl code				fixed;	/*	0 = from protocol - no prints	*/
+										/*	1 = from AEE - prints ok		*/
+	dcl stopping		fixed;	/*	user set flag to stop			*/
+	dcl stopped			fixed;	/*	DTD set flag to stop				*/
+	dcl timeout			fixed;
+	dcl event			fixed;
+	dcl current.track	fixed;	/*	used for status information	*/
+	dcl percent.done	fixed;	/*	used for status information	*/
+	dcl (i)				fixed;
+	dcl success			fixed;	/*	return flag	*/
+	dcl info(8)			fixed;	/*	info array from scsi.reselect	*/
+	dcl save.get.item(num.of.get.events-1)	fixed;
+	dcl aborted			fixed;	/*	flag to show transfer stopped before completing	*/
+	dcl status			fixed;	/*	return error literal, if any error occurred		*/
+
+	dcl Poly.Read.Aborted	fixed external;	/*	set by stop message during protocol transfer	*/
+
+	stopping				= 0;	/*	initialize them all	*/
+	stopped				= 0;
+	success				= 0;
+	event					= 0;
+	aborted				= 0;
+	status				= 0;
+	poly.read.aborted	= 0;
+
+	/*	wait for LOD to calculate and send over the data	*/
+	if code then do;
+		do i=0 to num.of.get.events;
+			save.get.item(i) = get.item.enabled(i);	/*	Save active events	*/
+			get.item.enabled(i) = 0;						/*	But we don't want any of them	*/
+		end;
+		call get_enable(get.program.exit);				/*	We're ONLY looking for a BREAK key	*/
+	end;
+
+	timeout = real.milliseconds;
+
+	do while (stopped=0);
+
+		interp_run_host_non_timer();                 //	got nothing to do.  Chill.  run_syn == 0 here...
+
+		/*	scan SCSI for reselect	*/
+		if check.for.scsi.reselect(8,info) then do;
+
+			write(mam) = SCSI.Ptr;
+			write(mdi) = dsp#idle;
+			write(mdi) = stopping;
+			call Send.To.Lod(199,4);
+
+			timeout = real.milliseconds;
+
+			/*	read from SCSI buffer % completed, etc.	*/
+			current.track	  = info(1);
+			percent.done	  = info(2);
+			stopped			  = info(3);	/*	transfer stopped	*/
+			aborted			  = info(4);	/*	didn't finish the entire transfer	*/
+													/*	(user abort OR read/write error occurred)	*/
+			status			  = info(5);	/*	errors, if any	*/
+			LastDestSector(0)= info(6);	/*	last sector written to dest device	*/
+			LastDestSector(1)= info(7);
+
+			if (stopped<>0) then do;
+				if (stopping<>0) then do;	/*	transfer aborted by user	*/
+					XFer$Status = XFer#UserAbort;
+				end;
+				else do;
+					if (aborted=0) then do;	/*	transfer was complete	*/
+						XFer$Status	= XFer#Good;
+						success		= 1;
+					end;
+					else do;						/*	transfer aborted due to machine failure	*/
+						if (status&255)=S$CheckCondition then do;
+							XFer$Status	= Xfer#OptError;	/*	optical error occurred	*/
+							Xfer$Error	= shr(status,8);
+						end;
+						else do;
+							Xfer$Status	= Xfer#ScsiError;	/*	scsi error occurred	*/
+							Xfer$Error	= status;
+						end;
+						stopping	= 1;
+						success	= 0;
+					end;
+				end;
+			end;
+			else if (code) & (stopping=0) then do;
+				/*	print % completed	*/
+				call cpos(23,45);
+				call ps('('); call pnum(percent.done,0); call ps('%)');
+				flush_termulator_output_to_host();
+			end;
+		end;	/*	SCSI.reselect	*/
+
+		/*	scan keyboard for break	*/
+		if code then event = check.for.break;
+
+		if ((STOP.HELD<>0)					/*	Check for held stop button	*/
+		or (poly.read.aborted)				/*	or protocol stop button		*/
+		OR (event = get.program.exit))	/*	OR break key	*/
+		then do;
+			if (code) & (stopping=0) then do;
+				call ERASE.REST.OF.LINE(23,0);
+				call cpos(23,1);
+				call ps('Aborting transfer...');
+			end;
+			stopping	= 1;
+			success	= 0;
+		end;
+
+		if (real.milliseconds - timeout) igt 10000	/*	wait 10 seconds	*/
+		then do;
+			if code then do;
+				call ERASE.REST.OF.LINE(23,0);
+				call cpos(23,1);
+				call ps('D-T-D System Timeout Error');
+			end;
+			Xfer$Status	= Xfer#Timeout;
+			Xfer$Error	= Xfer#DTDTimeout;
+			stopped = 1;
+			success = 0;
+		end;
+
+	end;	/*	of do while stopped = 0	*/
+
+	if code then do;
+		if event <> 0 then call get.next.event;		/*	Flush get.program.exit event	*/
+		call get_disable(get.program.exit);
+		do i=0 to num.of.get.events;
+			get.item.enabled(i) = save.get.item(i);	/*	Restore active events	*/
+		end;
+	end;
+
+	call send.to.lod(33,0);	/*	restore normal play buffers	*/
+
+	return success;
+
+end Wait.During.DSP.Transfer;
+
+Transfer.Between.DTD.And.Opt: proc (Source_Info,Dest_Info,TrackBits,DSP_Info,code) returns (fixed) swapable;
+	dcl Source_Info	array;	/*	ARRAY READ BY THIS ROUTINE				*/
+										/*	ON ENTRY, buffer contains:				*/
+										/*	0:   source device						*/
+										/*	1-2: address of actual sample data	*/
+										/*	3-4: length, # of full sectors (not including header)	*/
+										/*	5:   length, extra words				*/
+	dcl Dest_Info		array;	/*	ARRAY READ BY THIS ROUTINE				*/
+										/*	ON ENTRY, buffer contains:				*/
+										/*	0:   destination device					*/
+										/*	1-2: start address						*/
+										/*	3-4: end address							*/
+										/*	5:   extra words beyond end addr		*/
+	dcl TrackBits		fixed;	/*	DTD tracks we will be transferring	*/
+										/*	to/from										*/
+	dcl DSP_Info		array;	/*	ARRAY READ BY THIS ROUTINE				*/
+										/*	ON ENTRY, buffer contains:				*/
+										/*	0-1: sample rate conversion ratio	*/
+										/*	2:   stereo flag							*/
+										/*	3:   DSP70 there flag					*/
+	dcl code				fixed;	/*	0 = from protocol (no prints)			*/
+										/*	1 = from screen (prints ok)			*/
+
+	dcl (Source_Dev,Dest_Dev)	fixed;	/*	logical device #s				*/
+	dcl Source_Addr(1)			fixed;	/*	source start address			*/
+	dcl Source_Len(1)				fixed;	/*	source length					*/
+	dcl Source_Wrds				fixed;
+	dcl Dest_Addr(1)				array;	/*	destination start	address	*/
+	dcl Dest_End(1)				array;	/*	destination end	address	*/
+
+	dcl (DSP.Fun,DSP.Alg)		fixed;	/*	what type of DSP process to perform	*/
+	dcl name.array(4)				fixed;
+	dcl ScsiAvail					fixed;	/*	flag set if desired dev is there		*/
+	dcl Target#						fixed;
+	dcl Loon#						fixed;
+	dcl BlockSize					fixed;	/*	bytes/sec for wich			*/
+
+	//	info pertaining to the non DtoD SCSI device (the optical in this case.)  Used to determine ScsiAvail
+	dcl ddev							fixed;	//	device number in upper byte, most significant byte of 24-bit address in lower byte
+	dcl dsec							fixed;	//	lower 16 bits of 24-bit address
+	dcl dlen(1)						fixed;	//	24-bit sector length
+
+	dcl temp(1)						fixed;
+	dcl tmp.str(20)				fixed;	/*	string for error messages	*/
+	dcl (i,j,k)						fixed;
+	dcl saved						fixed;
+
+	/*	NOTE:	Routine assumes ACTIVATE.OPTICAL has	*/
+	/*			been called to set up Optical disk.		*/
+
+	Xfer$Status	= Xfer#Good;			/*	assume the transfer will be successful	*/
+	Xfer$Error	= 0;
+
+	saved = run.syn; run.syn=0;		/*	halt synclavier	*/
+	if code then call Set.Term.Attr(Attr#Normal);	/*	for status messages, below	*/
+
+	Source_Dev = Source_Info(0);		/*	get source and destination devices	*/
+	Dest_Dev   = Dest_Info(0);
+
+	/*	Set up DTD to read/write the correct device	*/
+	if (Source_Dev=DTDDev) then do;
+		ddev = (Dest_Info(1)&255) | shl(Dest_Info(0),8);
+		dsec = Dest_Info(2);
+		call Sub32(loc(addr(Dest_Info(3))), loc(addr(Dest_Info(1))), dlen);	/*	get length here	*/
+		if Dest_Info(5)<>0				/*	extra words	*/
+		then call Add16(1,dlen);		/*	round sector length up by 1	*/
+	end;
+
+	else if (Dest_Dev=DTDDev) then do;
+		ddev = (Source_Info(1)&255) | shl(Source_Info(0),8);
+		dsec = Source_Info(2);
+		call Copy32(loc(addr(Source_Info(3))), dlen);
+		if Source_Info(5)<>0				/*	extra words	*/
+		then call Add16(1,dlen);		/*	round sector length up by 1	*/
+	end;
+
+	ScsiAvail = 0;							/*	assume will not be scsi avail		*/
+
+	i = find_device(shr(ddev,8));		/*	get pointer to storage table		*/
+	if i <> 0 then do;					/*	big trouble if not there			*/
+
+		if ((core(i+s#devtyp) & "001417") = "401")	/*	scsi winch			*/
+		or ((core(i+s#devtyp) & "001417") = "404")	/*	scsi worm			*/
+		then do;
+
+			j = shr(core(i+s#devadr),4) & 15;			/*	get d24 #			*/
+
+			if j = lod.d24.# then do;						/*	if is d24 then ok	*/
+
+				/*	see if end of sound file is before end of drive (could	*/
+				/*	be two winchesters on w0											*/
+
+				temp(0) = ddev & 255;
+				temp(1) = dsec;
+				call Add32(temp,dlen,temp);		/*	calc end of sound file	*/
+
+				load core(i+s#totcyl);
+				mul  core(i+s#seccyl);
+
+				if  ((ures IGT	temp(0)))			/*	if more storage is on	*/
+				or  ((ures	=	temp(0))				/*	disk than needed, then	*/
+				and  (res  IGT	temp(1)))			/*	can read directly			*/
+				then do;
+					Target#	= core(i + s#devadr) & 15;
+					Loon#		= shr(core(i + s#devadr), 8) & 15;
+
+					if (j == 1)							/*	substitute lun 0 if		*/
+						Loon# = 0;						/*	using d24 #1				*/
+
+					disk.io.setup();					/*	prepare for errors		*/
+					BlockSize = GetCachedBlockSize(core(i + s#devadr));
+					disk.io.cleanup();
+
+					if (BlockSize == 512 || BlockSize == 1024)
+						ScsiAvail = 1;
+				end;
+			end;
+		end;
+	end;
+
+	/*	Send info to LOD for read function	*/
+
+   // Disallow DTD-Optical for Sync3 image files
+   if ((interp_real_time_prefs(0) & SYNCLAVIER_PREF_NO_OPT_DTD) != 0)
+      ScsiAvail = 0;
+
+	if ScsiAvail then do;			/*	send target#, loon#, and block size	*/
+		write(mam) = SCSI.PTR;		/*	to LOD so it can use its own			*/
+		write(mdi) = 43;				/*	readdata/writedata functions			*/
+		write(mdi) = Target#;
+		write(mdi) = Loon#;
+		write(mdi) = BlockSize;
+		rpc 20;
+		write(mdi) = 0;
+		call Send.To.Lod(144,48);	/***** THIS USED TO BE (144,32) ? *****/
+	end;
+	else do;								/*	fatal error if SCSIAVAIL=0	*/
+		run.syn=saved;					/*	turn synclavier back on		*/
+		Xfer$Status = Xfer#NoDataPath;
+		return -1;
+	end;
+
+	/*	initialize the last written sector to the first sector to be written	*/
+	call Copy32(loc(addr(Dest_Info(1))),LastDestSector);
+
+	DSP.Fun = dsp#synSCSI;			/*	set to load from Synclavier SCSI bus	*/
+
+	if (DSP_Info(SRC.Opt#dsp70there)<>0)
+	then do;
+		if (DSP_Info(SRC.Opt#ratio)=1)
+		and (DSP_Info(SRC.Opt#ratio+1)=0)
+		then do;							/*	ratio = 1, so don't do SRC	*/
+			DSP.Alg = dsp#nosrc;
+		end;
+		else do;
+			DSP.Alg = dsp#src;		/*	use SRC algorithm	*/
+			call copy.string('SRC',name.array);
+			if Boot.Algorithm(DSP.Fun,name.array) = 0	/*	ready to go, boot with correct alg	*/
+			then do;
+				run.syn=saved;						/*	turn synclavier back on	*/
+				Xfer$Status = Xfer#DSPError;	/*	set status global			*/
+				return -1;
+			end;
+		end;
+	end;
+	else DSP.Alg = dsp#nosrc;
+
+	if code then do;
+		call ERASE.REST.OF.LINE(23,0);
+		call cpos(23,1);
+		if (DSP_Info(SRC.Opt#ratio)=1) and (DSP_Info(SRC.Opt#ratio+1)=0)
+		then call ps('Transferring sound file (no conversion)...');
+		else call ps('Performing Sample Rate Conversion...');
+	end;
+
+	call Send.To.Lod(68,0);					/*	stop all other data transfer	*/
+													/*	and start function data			*/
+													/*	read operation						*/
+	if code then call tty_wait;
+
+	if (Source_Dev == DTDDev)	/*	and (Dest_Dev == LaserDev)	*/ then do;
+		/*	Direct-To-Disk -> Optical disk transfer	*/
+		/*	Initiate DSP operation	*/
+		write(mam)	=scsi.ptr;						/*	set up dtd info			*/
+		write(mdi)	=DSP.Fun;						/*	SRC type DSP cmd			*/
+		write(mdi)	=DSP.Alg;						/*	which algorithm			*/
+		write(mdi)	=TrackBits;						/*	DTD source tracks			*/
+		write("313")=addr(Source_Info(0));		/*	get source info			*/
+		write(mdi)	=read("373");					/*	source dev (DTD)			*/
+		write(mdi)	=read("373");					/*	cue start addr				*/
+		write(mdi)	=read("373");
+		write(mdi)	=read("373");					/*	length in sectors			*/
+		write(mdi)	=read("373");
+		write(mdi)	=read("373");					/*	extra words (in addition to sector len)	*/
+		write(mdi)	=0;								/*	no dest tracks				*/
+		write("313")=addr(Dest_Info(0));			/*	get destination info		*/
+		write(mdi)	=read("373");					/*	dest device(LaserDev)	*/
+		write(mdi)	=read("373");					/*	Opt start address			*/
+		write(mdi)	=read("373");
+		write(mdi)	=read("373");					/*	Opt end address			*/
+		write(mdi)	=read("373");
+		write(mdi)	=read("373");					/*	extra words (past end addr)	*/
+		write("313")=addr(DSP_Info(0));			/*	get special DSP info		*/
+		write(mdi)	=read("373");					/*	sample rate ratio			*/
+		write(mdi)	=read("373");
+		write(mdi)	=read("373");					/*	stereo flag					*/
+		call send.to.lod(199,38);	/*	Start DSP operation on lod computer	*/
+
+	end;
+
+	else if /* (Source_Dev == LaserDev) and */ (Dest_Dev == DTDDev) then do;
+		/*	Optical disk -> Direct-To-Disk transfer	*/
+
+		/*	Initiate DSP operation	*/
+		write(mam)	=scsi.ptr;						/*	set up dtd info			*/
+		write(mdi)	=DSP.Fun;						/*	SRC type DSP cmd			*/
+		write(mdi)	=DSP.Alg;						/*	which algorithm			*/
+		write(mdi)	=0;								/*	no source tracks			*/
+		write("313")=addr(Source_Info(0));		/*	get source info			*/
+		write(mdi)	=read("373");					/*	source dev (LaserDev)	*/
+		write(mdi)	=read("373");					/*	Opt disk start addr		*/
+		write(mdi)	=read("373");
+		write(mdi)	=read("373");					/*	length in sectors			*/
+		write(mdi)	=read("373");
+		write(mdi)	=read("373");					/*	extra words (in addition to sector len)	*/
+		write(mdi)	=TrackBits;						/*	DTD dest tracks			*/
+		write("313")=addr(Dest_Info(0));			/*	get destination info		*/
+		write(mdi)	=read("373");					/*	dest device (DTD)			*/
+		write(mdi)	=read("373");					/*	DTD start address			*/
+		write(mdi)	=read("373");
+		write(mdi)	=read("373");					/*	DTD end address			*/
+		write(mdi)	=read("373");
+		write(mdi)	=read("373");					/*	extra words (past end addr)	*/
+		write("313")=addr(DSP_Info(0));			/*	get special DSP info		*/
+		write(mdi)	=read("373");					/*	sample rate ratio (2 WRDS)		*/
+		write(mdi)	=read("373");
+		write(mdi)	=read("373");					/*	stereo flag					*/
+		call send.to.lod(199,38);	/*	Start DSP operation on lod computer	*/
+
+	end;
+
+	/*	now wait until process is complete or user quits	*/
+
+	i = Wait.During.DSP.Transfer(code);
+
+	run.syn = saved;		/*	turn synclavier main loop back on	*/
+
+	if i<>0
+	then return 1;
+	else return 0;
+
+end Transfer.Between.DTD.And.Opt;
+
+SAVE.NEW.CUE: proc (start.time,stop.time,sync.time,drive.bits) returns (fixed) swapable;
+	dcl start.time		array;
+	dcl stop.time		array;
+	dcl sync.time		array;
+	dcl drive.bits		fixed;
+
+	dcl rec.len			fixed;
+	dcl cname(17-1)	fixed;
+	dcl retryctr		fixed;
+	dcl temp.time(1)	fixed;
+	dcl i					fixed;
+	dcl (in,out) (1)	fixed;
+
+	if DTD.MAX.SECS = 0 then return 0;
+	if Com32(Start.Time,Stop.Time) = lw#ieq then return 0;
+
+	call Copy32(Start.Time,In);
+	call Copy32(Stop.Time,Out);
+
+	write("313") = addr(misc.buf(0));	/*	set MR13 to beginning of misc.buf	*/
+	rpc 256;
+	write("373") = 0;							/*	fill array with zeros	*/
+
+	misc.buf(CUE.S.MSB) = In(0);
+	misc.buf(CUE.S.LSB) = In(1);
+
+	misc.buf(CUE.E.MSB) = Out(0);
+	misc.buf(CUE.E.LSB) = Out(1);
+
+	misc.buf(CUE.OFF.MSB) = In(0);		/*	ultimately wants to get set to sf offset	*/
+	misc.buf(CUE.OFF.LSB) = In(1);
+
+	misc.buf(CUE.EDIT.IN.MSB) = misc.buf(CUE.OFF.MSB);
+	misc.buf(CUE.EDIT.IN.LSB) = misc.buf(CUE.OFF.LSB);
+
+	misc.buf(CUE.EDIT.OUT.MSB) = Out(0);
+	misc.buf(CUE.EDIT.OUT.LSB) = Out(1);
+
+	misc.buf(CUE.IN.S#.MSB)	= In(0);
+	misc.buf(CUE.IN.S#.LSB)	= In(1);
+
+	misc.buf(CUE.FIN)			= 1;
+	misc.buf(CUE.FOUT)		= 1;
+
+	misc.buf(CUE.TRKS)		= drive.bits;
+
+	call MSEC.TO.SMPTE(sync.time, cf#time, SAMP.SPEED, SM.MODE, loc(addr(SM.HRS)), temp.time);
+	call SMPTE.TO.SBITS (temp.time, SM.MODE, loc(addr(misc.buf(CUE.SMPT.MSB))));
+	misc.buf(CUE.SMPT.MODE)	= SM.MODE;
+	misc.buf(CUE.BITS		 )	= misc.buf(CUE.BITS) \ bit3;	/*	absolute smpte sync time	*/
+
+	do i = 0 to shr(GID(AEE.Record.Cue.Name)+1,1);
+		misc.buf(CUE.NAME+i)	= GID(AEE.Record.Cue.Name+i);
+	end;
+
+	misc.buf(0) = CUE.NAME+1+shr(misc.buf(CUE.NAME)+1,1);	/*	compute and set record length	*/
+
+	rec.len = misc.buf(0);
+
+	call Define.DTD.Cue(misc.buf);
+
+	return rec.len;
+
+end SAVE.NEW.CUE;
+
+SPLIT.STRING: proc (in.str,where,out.str) public swapable;
+	dcl in.str	array;	/*	as INPUT, holds original str. As OUTPUT, holds first half	*/
+	dcl where	fixed;	/*	position of char to put in 2nd string	*/
+	dcl out.str	array;	/*	holds second half of string	*/
+	dcl (i,j)	fixed;
+
+	if where ige in.str(0) then do;
+		out.str(0)=0;
+		return;
+	end;
+
+	do i = where to in.str(0)-1;
+		call pbyte(out.str,j,byte(in.str,i));
+		j=j+1;
+	end;
+	out.str(0)	= j;
+	in.str(0)	= where;
+
+end SPLIT.STRING;
+
+/*	Returns a string consisting of ":DTD:<Proj Name>"	*/
+GET.DEFAULT.CATEGORY: proc (out.str) public swapable;
+	dcl out.str	array;
+	dcl (i,j,k)	fixed;
+
+	call Copy.String(':DTD:',out.str);
+	call Append.To.Str(out.str,AEE.Current.Project.Name);
+
+	i = Fetch.Object.Info(Optical.Cat.Type.Obj,O#STR.Max.Chars);
+	if out.str(0) igt i then out.str(0)=i;
+
+	j=out.str(0)-1;
+	do while (j>=0) and (k=0);
+		if (byte(out.str,j)=a.sp)
+		then out.str(0) = out.str(0)-1;	/*	chop off trailing spaces	*/
+		else k=1;
+		j=j-1;
+	end;
+
+end GET.DEFAULT.CATEGORY;
+
+/*	$SUBTITLE	*/
+
+/*	Sees if passed string is already in category table	*/
+Category.Exists: proc (Str,Row) boolean swapable;
+	dcl Str			array;	/*	category string to look for	*/
+	dcl Row			fixed;	/*	row in table from which new category came (don't test this cell)	*/
+	dcl I				fixed;
+	dcl Str1(18)	fixed;
+
+	do I=0 to 3;
+		if (I<>Row) then do;
+			call Fetch.Table (Optical.Category.Table,0,I);
+			call Fetch.String(Optical.Cat.Type.Obj,Str1);
+
+			if Str1(0)<>0 then do;	/*	not an empty category	*/
+				if EqStr(Str,Str1)=0
+				then return true;
+			end;
+		end;
+	end;
+
+	return false;	/*	no match found	*/
+end Category.Exists;
+
+/*	$Subtitle Create Sound File	*/
+
+/*	Creates the first sector of a sound file header given the passed info	*/
+CREATE.SFHEADER: proc(#secs,#wrds,srate,stereo,header) fixed swapable;
+	/*	returns 1 if okay or 0 if not enough memory to create the sound file	*/
+	dcl #secs	array;	/*	length of sound file in sectors	*/
+	dcl #wrds	fixed;	/*	length of sound file in words mod 256	*/
+	dcl srate	fixed;	/*	must pass correct SRATE				*/
+	dcl stereo	fixed;	/*	1 -> stereo sound file 0 -> mono sound file	*/
+	dcl header	array;	/*	the sf header in which to put all this stuff	*/
+
+	write("313")=addr(header(sf.compatibility));
+
+	write("373")=4;					/*	compat is 4				*/
+	write("373")=16;					/*	sample rate converted	*/
+
+	write("373")=#secs(0);			/*	valid data				*/
+	write("373")=#secs(1);
+	write("373")=#wrds;
+
+	write("373")=0;					/*	unused					*/
+
+	write("373")=#secs(0);			/*	total data				*/
+	write("373")=#secs(1);
+	write("373")=#wrds;
+
+	call INDEX_TO_TIME(#secs(0),#secs(1),#wrds,srate,stereo);	/*	compute the total time of the entire sound file	*/
+
+	//	The line below was inserted to fix the OPT XFER memory corruption bug.  INDEX_TO_TIME calls ratio_multiply which uses register 13.
+	//	Only naughty programmers rely on a register being unchanged after a call to an external procedure.  -TY 2001/01/29
+	write("313")=addr(header(sf.data.end));
+
+	write("373")=TIME.SECONDS;		/*	NOTE: save info for use below!	*/
+	write("373")=TIME.MILLISECONDS;
+	write("373")=TIME.MICROSECONDS;
+
+	write("373")=0;					/*	keyboard decay #		*/
+	write("373")=0;					/*	pitch bend				*/
+	write("373")=0;					/*	vibrato info			*/
+	write("373")=0;
+	write("373")=0;
+	write("373")=0;
+
+	/*	$page	*/
+
+	write("373")=4400;				/*	hertz (middle a)		*/
+
+	write("373")="061341";			/*	FLOATING POINT 3.09	*/
+	write("373")="043702";
+
+	load 300; mul 1000;				/*	convert sample rate to period index	*/
+	mwait;	 div srate;
+	if shl(rem,1) ige srate
+	then write("373")=res+1;		/*	period.index			*/
+	else write("373")=res;
+
+	load srate; mul (100/2);
+	write("373")=res;					/*	nyquist (hz)			*/
+
+	write("373")=0;					/*	mark start				*/
+	write("373")=0;
+	write("373")=0;
+
+	write("373")=TIME.SECONDS;		/*	mark end					*/
+	write("373")=TIME.MILLISECONDS;
+	write("373")=TIME.MICROSECONDS;
+
+	write("373")=0;					/*	cursor time				*/
+	write("373")=0;
+	write("373")=0;
+
+	write("373")=0;					/*	gain exponent			*/
+	write("373")=0;					/*	# of symbols			*/
+
+	write("313")=addr(header(sf.stereo));
+	write("373")=stereo;
+	write("373")=srate;
+
+	return 1;							/*	everything is okay	*/
+
+end CREATE.SFHEADER;
+
+GET.CUE.SIZE: proc (ptr,smsb,lmsb,emsb) swapable;
+	dcl ptr	fixed;	/*	where the cue info is		*/
+	dcl smsb	array;	/*	output buf for start	time	*/
+	dcl lmsb	array;	/*	output buf for length		*/
+	dcl emsb	array;	/*	output buf for end	time	*/
+
+	write(mam)=ptr;				/*	read cue data into internal	*/
+	write(mal)=cue.s.msb;		/*	memory variables					*/
+
+	smsb (lw#msb)= read(mdi);	/*	get disk sample # start			*/
+	smsb (lw#lsb)= read(mdi);
+	emsb (lw#msb)= read(mdi);	/*	disk sample # end					*/
+	emsb (lw#lsb)= read(mdi);
+
+	smsb(lw#lsb) = smsb(lw#lsb) & "177400";	/*	round start down to sector	*/
+
+	call add16(255,emsb);							/*	round up to next sector		*/
+	emsb(lw#lsb) = emsb(lw#lsb) & "177400";	/*	compute end rounded up		*/
+
+	call shr32(smsb,8);								/*	compute sector addresses	*/
+	call shr32(emsb,8);								/*	of data							*/
+
+	call sub32(emsb,smsb,lmsb);					/*	get # of sectors in cue		*/
+
+end GET.CUE.SIZE;
+
+/*	$SUBTITLE	*/
+
+/*	Put categories into passed buf	*/
+Stuff.Categories: proc(buf) boolean swapable;
+	dcl buf				fixed array;	/*	output buffer for sf header (256 words)	*/
+	dcl category (20)	fixed;			/*	category space	*/
+	dcl start			fixed;			/*	starting index	*/
+	dcl limit			fixed;			/*	limit for category info in header	*/
+	dcl (i,k)			fixed;
+
+	limit = sf.id.field + shr(buf(sf.id.field.bytes) + 1,1);	/*	lower limit of category area		*/
+	buf(sf.index.base)=0;				/*	re-init category base pointer to indicate no categories	*/
+	start = buf(sf.index.base);		/*	get first word of index data	*/
+	if start = 0 then start = 256;	/*	no index data, so start at end of header	*/
+
+	k=3;
+	do while k>=0;							/*	write categories in reverse order	*/
+		call Fetch.Table (Optical.Category.Table,0,k);
+		call Fetch.String(Optical.Cat.Type.Obj,Category);
+		call Remove.Spaces.From.String(category,category);
+		call UpperCase.String			(category,category);
+
+		if Category(0)<>0 then do;
+			start = start - (1 + shr(category(0) + 1,1));	/*	calculate starting word for new index data	*/
+
+			if start < limit then return false;	/*	not enough room for new index data	*/
+
+			buf(sf.index.base) = start;	/*	point to beginning of category area	*/
+			do i = 0 to shr(category(0) + 1,1);
+				buf(start + i) = category(i);
+			end;
+			if (category(0)&1)<>0 then call pbyte(Loc(Addr(buf(start))),category(0),0);
+		end;
+
+		k=k-1;
+	end;
+
+	return true;
+end Stuff.Categories;
+
+Clean.Up.After.OptDTD.Transfer: proc (update_index) swapable;
+	dcl update_index	fixed;
+	dcl TStr(20)		fixed;
+
+	if update_index
+	then call Update.Laser.Index;					/*	update index file	*/
+
+	call Refresh.All.Display.Windows;
+
+	call Display.Optical.Statistics(TStr);		/*	show new info about current volume	*/
+	Disable.Deposits=true;
+	call Deposit.Label(Optical.Stats.Label,TStr);
+	Disable.Deposits=false;
+
+end Clean.Up.After.OptDTD.Transfer;
+
+Stuff.Category.Into.Table: proc (str,row) public swapable;
+	dcl str			array;
+	dcl row			fixed;
+	dcl i				fixed;
+	dcl str2 (18)	fixed;
+
+	if GID(AEE.Opt.Width.Mode)=0 then return;	/*	table is not there	*/
+
+	call Clean.Category.Strings(str,str);
+	call Uppercase.String(str,str);
+
+	/*	if cat already exists, flag error and return	*/
+	if Category.Exists(str,row) then do;
+		call Display.Notice(NT#DuplicateCategory,ATTR#Reverse,NulStr,0,0,0);
+		str(0)=0;
+		return false;
+	end;
+
+	/*	find next available row, if row = -1	*/
+	i=0;
+	do while (row = -1) and (i < 4);
+		call Fetch.Table(Optical.Category.Table,0,i);
+		call Fetch.String(Optical.Cat.Type.Obj,str2);
+		if str2(0)=0 then row = i;
+		i=i+1;
+	end;
+	if row = -1 then do;		/*	no room in table - flag error and return	*/
+		call Set.Optical.Error(Err#CategoryTableFull);
+		return false;
+	end;
+
+	call Fetch.Table(Optical.Category.Table,0,row);	/*	to get the proper attributes	*/
+	Disable.Deposits = true;
+	call Deposit.String(Optical.Cat.Type.Obj,str);
+	call Deposit.Table(Optical.Category.Table,0,row);
+	Disable.Deposits = false;
+
+	call Update.Object(Optical.Category.Table);
+
+	return true;
+
+end Stuff.Category.Into.Table;
+
+/*	$SUBTITLE	*/
+/*	Given a desired track, determines whether that track is			*/
+/*	actually available.  If not, returns the closest track to it.	*/
+/*	If unavail.trk is non-zero, will skip over that one when			*/
+/*	searching for next closest track.										*/
+Correct.For.Track.Availability: proc (desired.trk,unavail.trk) swapable;
+	dcl desired.trk	fixed;	/*	track the user has requested	*/
+	dcl unavail.trk	fixed;	/*	do not select this track		*/
+	dcl found			fixed;	/*	boolean	*/
+	dcl i					fixed;
+
+   if (simulate_dtd) return desired.trk;
+
+	found = false;
+
+	if desired.trk > DTD.NUM.VOICES then desired.trk = DTD.NUM.VOICES;
+	else if desired.trk < 1 then desired.trk = 1;
+
+	i = desired.trk;
+
+	if ((bits(i-1)&DTD.AVAIL.TRKS)=0)
+	or (i = unavail.trk)
+	then do;
+
+		/*	get next available track above desired track	*/
+		do while (not found) and (i <= DTD.NUM.VOICES);
+			if (i <> unavail.trk) and ((bits(i-1)&DTD.AVAIL.TRKS) <> 0)
+			then found=true;
+			else i=i+1;
+		end;
+
+		/*	if we still could not find a valid track,		*/
+		/*	get next available track below desired track	*/
+		if not found then do;
+			i = desired.trk;
+			do while (not found) and (i > 0);
+				if (i <> unavail.trk) and ((bits(i-1)&DTD.AVAIL.TRKS) <> 0)
+				then found=true;
+				else i=i-1;
+			end;
+		end;
+
+	end;
+	else found = true;
+
+	if not found then return (-1);	/*	if we still could not find a valid track, return bad track	*/
+	else return i;
+
+end Correct.For.Track.Availability;
+
+Get.Optical.Time.Left: proc (OutBuf) swapable;
+	dcl OutBuf								array;	/*	output buffer	*/
+	dcl StrNum(4)							fixed;
+	dcl InfoBuf (Stat#Rec_Length-1)	fixed;
+	dcl (Msb,Lsb,I,J,K)					fixed;
+
+	if Get_Statistics(LaserDev,InfoBuf) then do;
+		Msb=InfoBuf(Stat$MS_Free);	/*	free data sectors	*/
+		Lsb=InfoBuf(Stat$LS_Free);
+
+		call Shl32(loc(addr(Msb)),8);	/*	get number of samples	*/
+		bitmsb = Msb; bitlsb = Lsb;
+		call ratio_multiply(1,AEE.Current.Project.Rate);
+		call ratio_multiply(1,100);
+
+		/*	now (bitmsb,bitlsb) contains number of seconds left on optical	*/
+		call ratio_multiply(1,60);	/*	translate to number of minutes		*/
+
+		call Conv.Fixed.To.Str(bitlsb,0,cf#default,cf#unsigned|cf#right|cf#nofill,StrNum);
+
+		call Copy.String('Free time: ',OutBuf);
+		call Append.To.Str(OutBuf,StrNum);
+		call Append.To.Str(OutBuf,' min. at ');
+		call Conv.Fixed.To.Str(AEE.Current.Project.Rate,1,cf#default,cf#unsigned|cf#append|cf#right|cf#nofill,OutBuf);
+		call Append.To.Str(OutBuf,'kHz');
+	end;
+
+end Get.Optical.Time.Left;
+

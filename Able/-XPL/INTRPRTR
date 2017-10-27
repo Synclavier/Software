@@ -1,0 +1,153 @@
+/* INTERPLITS   $TITLE  literals for Interpreter Interface
+
+   Modified:
+   08/04/00 - CWJ - Changed rev code and added new routines
+   02/24/98 - CWJ - Created
+*/
+
+// Revision level required in host
+
+dcl	INTERP_REVISION_LEVEL lit '4';
+dcl   interp_snd_file_name   data ('.SNDDATA');
+dcl   interp_tmb_file_name   data ('.NEWDATA');
+dcl   interp_seq_file_name   data ('.SEQDATA');
+
+// Literals for interp_set_scsi_id
+dcl   interp_set_scsi_id_poll_host     lit '1';						// About to poll host for scsi selection
+dcl	interp_set_scsi_id_access_dtd    lit '2';						// About to access DTD over SCSI
+dcl   interp_set_scsi_id_device        lit '3';					   // About to access a configurable storage device
+
+// Literals for preference bits
+dcl   SYNCLAVIER_PREF_POLL_DTD         lit '0x0001';           // Real time code should poll for DTD
+dcl   SYNCLAVIER_PREF_POLL_DD70MIDI    lit '0x0002';           // Real time code should poll D70 MIDI hardware
+dcl   SYNCLAVIER_PREF_POLL_D34GPI      lit '0x0004';           // Real time code should poll D34 GPI
+dcl   SYNCLAVIER_PREF_BOOT_MONITOR     lit '0x0008';           // Real time code should boot to MONITOR
+dcl   SYNCLAVIER_PREF_BOOT_LOGGER      lit '0x0010';           // Real time code should boot to LOGGER
+dcl   SYNCLAVIER_PREF_PEDAL2_MAX       lit '0x0020';           // Real time code should initialize pedal 2 to max
+dcl   SYNCLAVIER_PREF_CREATE_CLOCK     lit '0x0040';           // Real time code should generate ext 50 hz or beat clock
+dcl   SYNCLAVIER_PREF_CREATE_CACHE     lit '0x0080';           // Real time code should create B-Screen sound file cache
+dcl   SYNCLAVIER_PREF_NO_OPT_DTD       lit '0x0100';           // Real time code should disallow Optical-to-DTD Transfers (no data path)
+dcl   SYNCLAVIER_PREF_RECORD_SUSTAIN   lit '0x0200';           // Real time code should record sustain pedal as MIDI controller
+dcl   SYNCLAVIER_PREF_XPOS_MIDI        lit '0x0400';           // Real time code should transpose MIDI Output
+dcl   SYNCLAVIER_PREF_XPOS_MIDI_MASK   lit '0x0C00';           // Real time code should transpose MIDI Output
+dcl   SYNCLAVIER_PREF_POLL_TRACE       lit '0x8000';           // Real time code should debug trace
+
+// Native routines - General
+Native	( 0) interp_set_revision    	   (fixed);			      // Inform interpreter of our revision level
+Native	( 1) interp_check_interrupts	   ();					   // Direct interpreter to poll for pending interrupts
+Native	( 2) interp_run_host        	   ();						// Direct interpreter to run host CPU if no interrupts are pending
+Native	( 3) interp_run_host_250_call   	();						// Direct interpreter to run host CPU if 250 msec has gone by
+Native	( 4) interp_was_at_nontask_level (fixed);             // Returns nonzero if running at deferred or timer task time (discontinued; handles newkey incorrectly)
+Native	( 5) interp_is_at_timer_level    (fixed);					// Returns nonzero if running at timer level AND THERE ARE NO INTERRUPTS PENDING
+Native	( 6) interp_flush_char_output    ();					   // Flush all D50 output to termulator screen
+Native	( 7) interpret_set_timebase_mode (fixed);					// If true sets rtp_is_playing and interpret_at_defrd_prior
+Native	( 8) interp_poll_for_stop        (fixed);					// See if stop desired (e.g. stop audition)
+Native	( 9) interp_poll_for_message     (fixed);					// Poll for message from interpreter.  Nonzero if any
+Native	(10) interp_enter_debugger       ();						// Debugger entry trap
+Native	(11) interp_fetch_real_msecs     (fixed);			      // Fetch host millisecond counter
+
+// Native routines - SCSI
+Native	(16) interp_set_imem_addr		   (fixed);					// Set internal memory address for SCSI
+Native	(17) interp_set_xmem_addr		   (fixed, fixed);	   // Set external memory address for SCSI
+Native	(18) interp_set_pmem_addr		   (fixed, fixed);	   // Set poly     memory address for SCSI
+Native	(19) interp_fetch_scsi_result	   ();					   // Not implemented: was retrieve blocks transferred last scsi operation
+Native	(20) interp_loader_step_1		   ();					   // Communicates from loader to interpreter
+Native	(21) interp_loader_step_2		   ();					   // Communicates from loader to interpreter
+Native	(22) interp_loader_step_3		   ();					   // Communicates from loader to interpreter
+Native	(23) interp_set_config			   ();					   // Construct config area for InterChangeª settings
+Native	(24) interp_write_blank_pattern	();					   // Data pattern will be write blank media
+Native	(25) interp_set_scsi_id			   (fixed, fixed, fixed); // Inform interpreter which scsi device is about to be accessed (pass code, board, id)
+Native   (26) interp_set_loader_scsi_id   (fixed);					// From loader only: R3 = d24 & id
+Native   (27) interp_start_scsi_timer     ();					   // Start SCSI timeout timer (e.g. latch TickCount())
+Native   (28) interp_get_scsi_timer       (fixed);					// Return SCSI timer, milliseconds
+Native   (29) interp_set_media_lock       (fixed, fixed);	   // Inform host of media lock/unlock.  arg0 == DevAdr, arg1 == lock bits
+Native   (30) interp_eject_media          (fixed);					// Inform host of media ejection.     arg0 == DevAdr
+Native   (31) interp_check_media_use      (fixed, fixed);	   // See if device is busy for use.  pass 0, readdata code. returns nonzero if busy
+
+// Native routines - Special
+Native	(32) interp_set_quit_menu    	   (array);				   // Set quit menu
+Native	(33) interp_activate_real_time	(fixed);					// Sets regs.rtp_is_running; sets interpret_at_interrupt_prior
+Native	(34) interp_delay_on_d3_write    (fixed);					// Accurately delay host CPU on write to d3
+Native	(35) interp_catalog_update		   (fixed, fixed);	   // A catalog was written (e.g. update interchange)
+Native	(36) interp_file_unsaved		   (fixed, fixed);	   // A file has been unsaved
+Native	(37) interp_file_renamed		   (fixed, fixed);	   // A file has been renamed
+Native	(38) interp_check_scsi_io		   (fixed);				   // Check for overlapped SCSI I/O in process
+
+// Native routines - Messages
+Native	(48) interp_get_message    		(fixed, fixed);	   // Get message and its data
+Native	(49) interp_audition_started	   ();				      // Inform interp audition start occurred
+Native	(50) interp_audition_stopped	   ();					   // Inform interp audition stopped
+Native	(51) interp_seq_dirtyness		   (fixed);				   // Inform interp of sequence dirtyness; 0 == clean; 1 == dirty; 2 == path is changing
+
+// Digital STM interface
+Native	(64) interp_start_dig_stm		   ();					   // Start digital STM (stereo, rate)
+Native	(65) interp_dig_stm_samples		();					   // Number of samples available
+Native	(66) interp_dig_stm_underflowed  ();					   // Returns true if data underflow occurred
+Native	(67) interp_stop_dig_stm		   ();					   // Stop digital STM
+Native	(68) interp_dig_stm_do_import	   ();					   // Import 256 or 512 samples to memory
+Native	(69) interp_dig_stm_lmax		   ();					   // Return left  chan max value for most recent import
+Native	(70) interp_dig_stm_rmax		   ();					   // Return right chan max value for most recent import
+Native	(71) interp_dig_stm_toss_data	   ();					   // Toss 256 or 512 samples after scanning for min/max
+Native	(72) interp_latch_dig_stm	      (fixed, fixed, fixed);		// Latch on to digital STM hardware in preparation for recording (0, stereo, rate:khz810)
+Native	(73) interp_release_dig_stm	   ();					   // Release digital STM
+Native	(74) interp_get_dig_stm_rate 	   ();					   // Get Digital STM sample rate setting
+Native	(75) interp_set_dig_stm_rate 	   (fixed);					// Set Digital STM sample rate setting
+Native	(76) interp_get_dig_stm_chan     ();					   // Get user settings for which channel to use
+
+// OMS MIDI INTERFACE
+Native	(96) interp_init_oms_midi_sync	(fixed);					// Init and start using OMS Midi Sync input; pass pointer to byte count word
+Native	(97) interp_send_all_notes_off	();						// Send all notes off as needed
+Native	(98) interp_fetch_oms_sync_byte	();					   // Fetch next stored up OMS MIDI sync byte
+Native	(99) interp_send_oms_clk_byte    (fixed);					// Send a one-byte OMS MIDI Clock packet
+Native (100) interp_send_oms_clk_bytes    (fixed,fixed,fixed); // Send a 3-byte OMS MIDI Clock packet
+Native (101) interp_send_oms_mtc_frame    (fixed,array);		   // Send mtc full frame message: mode code, pointer to byte list
+Native (102) interp_send_oms_mtc_qf       (fixed,fixed);		   // Send mtc quarter frame message: HF1, the byte
+Native (103) interp_init_oms_midi_bulk	   (fixed,fixed);		   // Init and start using OMS MIDI Bulk input.pass pointer to bytes ready word and xmem sector
+Native (104) interp_toggle_oms_midi		   ();					   // Toggle A&B OMS Midi Bulk Input buffers; return xmem sector where RTP's buffer is
+Native (105) interp_newkey_pending		   (fixed);					// Inform interpreter that newkey is pending
+Native (106) interp_send_oms_controller	(fixed, fixed, fixed);		// Send MIDI Controller movement - Virtual Port or track#, controller, value
+Native (107) interp_send_oms_pbend		   (fixed, fixed, fixed);		// Send MIDI Pitch Bend - Virtual Port or track#, lsb, msb
+Native (108) interp_send_oms_chanp		   (fixed, fixed);				// Send MIDI Channel Pressure - Virtual Port or track# value
+Native (109) interp_send_oms_indivp		   (fixed, fixed, fixed);		// Send MIDI Individual Pressure - Virtual Port or track# key, value
+Native (110) interp_send_oms_noteoff      (fixed, fixed, fixed);		// Send MIDI Note Off - Virtual Port or track# key, velocity
+Native (111) interp_send_oms_noteon       (fixed, fixed, fixed);		// Send MIDI Note On - Virtual Port or track# key, velocity
+Native (112) interp_send_oms_progchg      (fixed, fixed);				// Send MIDI Prog Change - Virtual Port or track# program
+Native (113) interp_send_oms_sysexb       (fixed, fixed);				// Send MIDI Sys Ex Byte - Virtual Port or track# byte
+
+// Miscellaneous
+Native (114) interp_set_scsi_done		   ();					         // Finish SCSI command for the moment
+Native (115) interp_fetch_real_micros     (fixed);					      // Fetch host microsecond counter
+Native (116) interp_compute_time_stamp    (fixed);					      // Compute corrected time for OMS MIDI input
+Native (117) interp_current_level         (fixed);					      // 0 = ABLE hardware; 1 = timer task; 2 = deferred task; 3 = iokit; 4 = main loop
+Native (118) interp_w0_write_protected    (fixed);					      // W0 is simulated
+Native (119) interp_w0_allow_write_ms     (fixed);					      // ms sector of simulated W0 where write is allowed (e.g. inside .INDEX)
+Native (120) interp_w0_allow_write_ls     (fixed);					      // ls sector of simulated W0 where write is allowed (e.g. inside .INDEX)
+Native (121) interp_D24_requested         (fixed);					      // Return true if another application is requesting access to the D24 SCSI
+Native (122) interp_real_time_prefs       (fixed);					      // Return real time preferences bits
+Native (123) interp_locate_file           (fixed, fixed);	         // Locate cached file - filetype, pointer to name
+Native (124) interp_located_file          (fixed);	                  // Locate cached file results - pass in 0
+Native (125) interp_usleep                (fixed);	                  // Delay in microseconds
+Native (126) interp_wake_up_host          ();                        // Wake up host application (for example to display some character output)
+Native (127) interp_exit_real_time_thread ();                        // Exit the real time thread if running at timer level and no d16 interrupts pending
+Native (128) interp_do_interrupts         ();                        // Process pending interrupts
+Native (129) interp_hardware_avail        (fixed);                   // 0 == Model D or None; 1 = PCI-1; 2 = BTB-1
+Native (130) interp_alt_scsi_id           (fixed);                   // Look up possible alternate SCSI id for target
+Native (131) interp_clear_boot_args       (fixed);                   // Clear startup args
+Native (132) interp_patch_screen_active   (fixed, fixed, fixed);     // Patch screen wants to intercept sound file recalls
+Native (133) interp_set_rtp_is_running    (fixed);                   // Set rtp_is_running
+Native (134) interp_get_d16_time          (fixed);                   // Get time approximating D16
+
+// True if running in interpreted mode
+dcl	interp_is_running   fixed external;
+
+// Higher level procedures
+
+dcl timeshare_with_host            	proc external;					// runs host every 250 msec.  use during long dedicated computations
+dcl flush_termulator_output_to_host	proc external;					// flush terminal output, then wait for termulator to draw it
+dcl interp_run_host_non_timer       proc external;             // Run host; return only at non-timer level
+dcl interp_run_host_250             proc external;             // Run host every 250 msecs; return at same level
+dcl interp_run_host_at_level        proc external;             // Run host; return only at same level
+
+// Bring in our library
+
+library ':-xpl:libs:intrprtr';

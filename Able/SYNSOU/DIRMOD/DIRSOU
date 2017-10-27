@@ -1,0 +1,379 @@
+/* $TITLE DIRSOU  - Module for:   Timbre Directory Screen     */
+/*                                Sequence Directory Screen   */
+/*                                Subcatalog Directory Screen */
+/*                                Missing Sound File Screen   */
+
+/*
+   12/12/88 - cj - added features for poly memory (96 voice ram control)
+   06/30/88 - MWH - Remove unused inserts
+   04/04/88 - MWH - insert alltmods
+   11/17/87 - cj - inserted allmods
+   02/14/87 - cj - created this file
+*/
+
+module dirmod;
+
+   insert ':synlits:alltlits';  /* get all terminal literals */
+
+   insert ':-xpl:catrout';  /* get catalog routines */
+   insert ':-xpl:devutil';  /* device utilities */
+
+   insert ':synmods:indexdcl';  /* for mount optical volume  */
+   insert ':synmods:giddcl';    /* for seq name storage      */
+   insert ':synmods:globdcl';
+   insert ':synmods:gprmdcl';
+   insert ':synmods:polydcl';
+   insert ':synmods:xmemdcl';
+   insert ':synmods:ttydcl';
+   insert ':synmods:plotdcl';
+   insert ':synmods:errdcl';
+   insert ':synmods:filedcl';
+
+   insert ':synmods:scrndcl';
+   insert ':synmods:d40dcl';
+   insert ':synmods:getdcl';
+   insert ':synmods:getvdcl';
+   insert ':synmods:tprimdcl';
+   insert ':synmods:moussdcl';
+   insert ':synmods:tformdcl';
+   insert ':synmods:mathdcl';
+
+   insert ':synrdcls:03-pdcls';
+   insert ':synrdcls:04-sdcls';
+   insert ':synrdcls:05-bdcls';
+   insert ':synrdcls:11-tdcls';
+
+
+   insert ':synsou:dirmod:536-lib';
+   insert ':synsou:dirmod:570-dirs';
+   insert ':synsou:dirmod:575-timb';
+   insert ':synsou:dirmod:577-seq';
+   insert ':synsou:dirmod:578-subc';
+
+
+   /* $PAGE - driver for Timbre directory */
+   remove.timbre.error: proc swapable;
+      if (err.displayed != 0) {
+         REMOVE.ERR();
+         call POS.TIMBRE.DIRECTORY.CURSOR;
+      }
+   end remove.timbre.error;
+
+   TIMBRE.DIRECTORY.SCREEN:proc (arg) public swapable;
+      dcl (arg)   fixed;           /* argument - must pass 0 for now */
+      dcl (code)  fixed;
+
+      bank.pos=our.bank;
+      entry.pos=our.timbre;
+      last.bank.pos=bank.pos; 
+      last.entry.pos=entry.pos;
+      call PRINT.TIMBRE.DIRECTORY;      /* draw directory frame */
+      call FILL.TIMBRE.DIRECTORY(255);  /* fill in ALL the timbre names */
+      call POS.TIMBRE.DIRECTORY.CURSOR; /* put cursor in correct spot */
+
+      EXIT.MY.SCREEN   = 0;        /* clear these flags before loop */
+      GOTO.THIS.SCREEN = 0;
+
+      do while EXIT.MY.SCREEN = 0; /* wait for exit condition       */
+
+         call ENABLE_SEVERAL_GETS(get.in.char,       /* get in.chars      */
+                                  get.mouse.button,  /* get mouse buttons */
+                                  get.ertyp,         /* errors            */
+                                  get.entry.writes); /* new timbre - name change */
+         call GET_ENABLE(get.new.timbre.info);       /* for timbre recalls */
+         call GET_ENABLE(get.poly.contents  );       /* for poly changes   */
+
+         code = GET.NEXT.EVENT;                      /* get event         */
+
+         call DISABLE_SEVERAL_GETS(get.in.char,      
+                                  get.mouse.button, 
+                                  get.ertyp,
+                                  get.entry.writes); 
+         call GET_DISABLE(get.new.timbre.info);      /* for timbre recalls */
+         call GET_DISABLE(get.poly.contents  );
+
+         do case (code-1);
+
+            do;                        /* input character received */
+               remove.timbre.error();
+               if next.event.info >= asc.call.convert
+               then call RETURN.TO.PREV.STATE;
+               else call TIMBRE.DIRECTORY.INPUT(in.chin,next.event.info);        
+            end;
+
+            if next.event.info=2       /* look for release of middle button */
+            then do;
+               remove.timbre.error();
+               call TIMBRE.DIRECTORY.MOUSE.POS(mouse(release.x),mouse(release.y));
+            end;
+
+            ;                          /* mouse movement not used */
+
+            if (next.event.info&1)<>0  /* timbre info - check     */
+            then do;                   /* new timbre              */
+              remove.timbre.error();
+              last.bank.pos=bank.pos; last.entry.pos=entry.pos;
+              bank.pos=our.bank;      entry.pos=our.timbre;
+              call POS.TIMBRE.DIRECTORY.CURSOR;
+            end;
+            ;                          /* unused event type         */
+            ;                          /* new seq info not used     */
+            ;                          /* no play scrolling         */
+            do; call REFRESH.TIMBRE.DIRECTORY; remove.timbre.error(); end;    /* refresh on write    */
+            ;                          /* tds update - nothing      */
+            ;                          /* dtd info - nothing        */
+            do;                        /* new poly contents         */
+               remove.timbre.error();
+               if (next.event.info & 2) <> 0 /* new amount of       */
+               then do;                      /* free poly memory    */
+                  if  (dialog.code >= 1)     /* redraw free memory, */
+                  and (dialog.code <= 3)     /* available memory    */
+                  then do;                   /* or bin preference   */
+                     do case (dialog.code-1);/* if that dialog line */
+                        call Fill.Avail.Dialog; /* is up            */
+                        call Fill.Free.Dialog;
+                        call Fill.Bin.Dialog;
+                     end;
+                     call POS.TIMBRE.DIRECTORY.CURSOR; /* put cursor in correct spot */
+                  end;
+               end;
+            end;
+
+            if next.event.info then do;                         /* error message to display */
+               remove.timbre.error();
+               call DISPLAY.ERROR.MESSAGE(latched.ertyp,14,0);  /* ertyp - display error here */
+               call POS.TIMBRE.DIRECTORY.CURSOR; /* put cursor in correct spot */
+            end;
+
+            ;                          /* nothing on ork/smpte */
+
+         end;                          /* of do case           */
+
+      end;                             /* of wait for exit     */
+
+      EXIT.MY.SCREEN   = 0;            /* clear flag after loop */
+
+      return GOTO.THIS.SCREEN;
+
+   end TIMBRE.DIRECTORY.SCREEN;
+
+
+   /* $PAGE - driver for Sequence Directory */
+
+   SEQUENCE.DIRECTORY.SCREEN:proc (arg) public swapable;
+      dcl (arg)   fixed;           /* argument - must pass 0 for now */
+      dcl (code)  fixed;
+
+      call SEQUENCE.DIRECTORY.FRAME;
+      call FILL.SEQUENCE.DIRECTORY;
+      call POS.SEQUENCE.DIRECTORY.CURSOR;
+
+      EXIT.MY.SCREEN   = 0;        /* clear these flags before loop */
+      GOTO.THIS.SCREEN = 0;
+
+      do while EXIT.MY.SCREEN = 0; /* wait for exit condition       */
+
+         call ENABLE_SEVERAL_GETS(get.in.char,        /* get in.chars      */
+                                  get.mouse.button,   /* get mouse buttons */
+                                  get.ertyp,          /* errors            */
+                                  get.entry.writes);  /* workspace change  */
+
+         code = GET.NEXT.EVENT;                       /* get event         */
+
+         call DISABLE_SEVERAL_GETS(get.in.char,      
+                                  get.mouse.button, 
+                                  get.ertyp,
+                                  get.entry.writes);
+
+         do case (code-1);
+
+            do;                        /* input character received */
+               if next.event.info >= asc.call.convert
+               then call RETURN.TO.PREV.STATE;
+               else call RECALL.SEQUENCE.INPUT(in.chin,next.event.info);           
+            end;
+
+            if next.event.info=2 then do;    /* look for release of middle button */
+               call RECALL.SEQUENCE.MOUSE.POS(mouse(release.x),mouse(release.y));
+            end;
+
+            ;                             /* mouse movement not used */
+            ;                             /* new timbre not used     */
+            ;                             /* psfree not displayed    */
+            ;                             /* new seq info not used   */
+            ;                             /* no play scrolling       */
+            do;                           /* entry writes workspace  */
+               if ((next.event.info & 512) != 0)
+                  REFRESH.SEQUENCE.DIRECTORY();
+            end;
+            ;                             /* tds update - nothing    */
+            ;                             /* dtd info - nothing      */
+            ;                             /* poly change - nothing   */
+
+            do;                        /* error message to display */
+               call Handle.System.Error.Codes(next.event.info);
+               call POS.SEQUENCE.DIRECTORY.CURSOR;
+            end;
+
+            ;                          /* nothing on ork/smpte */
+
+         end;                          /* of do case           */
+
+      end;                             /* of wait for exit     */
+
+      EXIT.MY.SCREEN   = 0;            /* clear flag after loop */
+
+      return GOTO.THIS.SCREEN;
+
+   end SEQUENCE.DIRECTORY.SCREEN;
+
+   /* $PAGE - driver for Subcat directory */
+
+
+   SUBCAT.DIRECTORY.SCREEN:proc (arg) public swapable;
+      dcl (arg)   fixed;           /* argument - must pass 0 for now */
+      dcl (code)  fixed;
+
+      call ENTER.SUBCAT.SCREEN;
+
+      EXIT.MY.SCREEN   = 0;        /* clear these flags before loop */
+      GOTO.THIS.SCREEN = 0;
+
+      do while EXIT.MY.SCREEN = 0; /* wait for exit condition       */
+
+         call ENABLE_SEVERAL_GETS(get.in.char,      /* get in.chars      */
+                                  get.mouse.button, /* get mouse buttons */
+                                  get.ertyp,        /* errors            */
+/**/                              0);               /* enable others if needed */
+
+         code = GET.NEXT.EVENT;                     /* get event         */
+
+         call DISABLE_SEVERAL_GETS(get.in.char,      
+                                  get.mouse.button, 
+                                  get.ertyp,
+/**/                              0);
+
+         do case (code-1);
+
+            do;                        /* input character received */
+               if next.event.info >= asc.call.convert
+               then call RETURN.TO.PREV.STATE;
+               else call ENTER.SUBCAT.INPUT(in.chin,next.event.info);              
+            end;
+
+            if next.event.info=2       /* look for release of middle button */
+            then do;
+               call ENTER.SUBCAT.MOUSE.POS(mouse(release.x),mouse(release.y));
+            end;
+
+            ;                          /* mouse movement not used */
+            ;                          /* new timbre not used     */
+            ;                          /* psfree not displayed    */
+            ;                          /* new seq info not used   */
+            ;                          /* no play scrolling       */
+            ;                          /* entry writes no effect  */
+            ;                          /* tds update - nothing    */
+            ;                          /* dtd info - nothing      */
+            ;                          /* poly change - nothing   */
+
+            if entering.treename=0 then do;  /* error message to display */
+               call Handle.System.Error.Codes(next.event.info);
+               call POS.ENTER.SUBCAT.CURSOR;
+            end;
+
+            ;                          /* nothing on ork/smpte */
+
+         end;                          /* of do case           */
+
+      end;                             /* of wait for exit     */
+
+      EXIT.MY.SCREEN   = 0;            /* clear flag after loop */
+
+      return GOTO.THIS.SCREEN;
+
+   end SUBCAT.DIRECTORY.SCREEN;
+
+   /* $PAGE - driver for Missing Sound File directory */
+
+
+   MISSING.SOUND.FILE.SCREEN:proc(arg)  public swapable;
+      dcl (arg)   fixed;           /* argument - must pass 0 for now */
+      dcl (code)  fixed;
+
+      if (inc.mono=0)
+      and (inc.poly=0)
+      then do;
+         call feature.not.available;
+         return -1;
+      end;
+
+      call DRAW.LIBRARY.FRAME;
+      call UPDATE.LIBRARY.DISPLAY;
+
+      EXIT.MY.SCREEN   = 0;        /* clear these flags before loop */
+      GOTO.THIS.SCREEN = 0;
+
+      do while EXIT.MY.SCREEN = 0; /* wait for exit condition       */
+
+         call ENABLE_SEVERAL_GETS(get.in.char,      /* get in.chars      */
+                                  get.mouse.button, /* get mouse buttons */
+                                  get.ertyp,        /* errors            */
+                                  get.new.timbre.info);
+
+         call GET_ENABLE(get.new.seq.info);
+         call GET_ENABLE(get.poly.contents);
+
+         code = GET.NEXT.EVENT;                     /* get event         */
+
+         call DISABLE_SEVERAL_GETS(get.in.char,      
+                                  get.mouse.button, 
+                                  get.ertyp,
+                                  get.new.timbre.info);
+
+         call GET_DISABLE(get.new.seq.info);
+         call GET_DISABLE(get.poly.contents);
+
+         do case (code-1);
+
+            do;                        /* input character received */
+               if next.event.info >= asc.call.convert
+               then call RETURN.TO.PREV.STATE;
+               else call TIMBRE.LIBRARY.INPUT(in.chin,next.event.info);
+            end;
+
+            if next.event.info=2       /* look for release of middle button */
+            then do;
+               call TIMBRE.LIBRARY.MOUSE.POS(mouse(release.x),mouse(release.y));
+            end;
+
+            ;                             /* mouse movement not used */
+            if next.event.info then call UPDATE.LIBRARY.DISPLAY;  /* timbre recalled */
+            ;                             /* psfree not displayed    */
+            if (next.event.info&3)<>0 then call UPDATE.LIBRARY.DISPLAY;  /* new seq info         */
+            ;                             /* no play scrolling       */
+            ;                             /* entry writes no effect  */
+            ;                             /* tds update - nothing    */
+            ;                             /* dtd info - nothing      */
+            do;
+               if (next.event.info&1) <> 0
+               then call UPDATE.LIBRARY.DISPLAY;  /* new poly contents */
+            end;
+
+            do;                           /* error message to display */
+               call Handle.System.Error.Codes(next.event.info);
+               call POS.LIBRARY.CURSOR;
+            end;
+
+            ;                          /* nothing on ork/smpte */
+
+         end;                          /* of do case           */
+
+      end;                             /* of wait for exit     */
+
+      EXIT.MY.SCREEN   = 0;            /* clear flag after loop */
+
+      return GOTO.THIS.SCREEN;
+
+   end MISSING.SOUND.FILE.SCREEN;
+
+end dirmod;

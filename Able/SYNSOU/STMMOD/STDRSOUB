@@ -1,0 +1,923 @@
+/*	:SYNSOU:STMMOD:STDRSOUB  $Title  Draw Sound Display Routines
+
+Modified:
+1999/10/14 - TY  - Modified DRAW.SOUND.DISPLAY to display patch related information at the bottom of the screen
+1991/05/31 - CJ  - Slightly different usage of mouse.playing
+1988/04/22 - MWH - Add point mode
+1987/12/11 - MWH - Merge poly updates with N-Final plus AEE sources
+1987/08/07 - MWH - Update all to support max 4 poly bins, 512mb/bin
+*/
+
+	/*	Compute Plotting Information	*/
+
+	dcl save.xbase (1)	fixed;	/*	poly sound file base	*/
+	dcl save.xsec			fixed;	/*	sector in poly memory file block	*/
+	dcl save.xwrd			fixed;	/*	word offset in poly memory	*/
+	dcl lock.xbase (1)	fixed;	/*	locked sound file base	*/
+	dcl lock.xsec			fixed;	/*	sector in poly mem of locked sound file	*/
+	dcl lock.xwrd			fixed;	/*	locked sound file word offset in poly memory	*/
+	dcl lock.esec			fixed;	/*	locked sound file ending sector	*/
+	dcl lock.ewrd			fixed;	/*	locked sound file ending word	*/
+	dcl (j1,j2)				fixed;	/*	# of samples per pixel	*/
+	dcl (m1,n1)				fixed;	/*	minimum and maximum samples for left sound	*/
+
+	dcl (m2,n2)				fixed;	/*	minimum and maximum samples for right sound	*/
+	dcl syn.rate			fixed;	/*	rate at which to look at pixels	*/
+	dcl syn.skip			fixed;	/*	samples to skip					*/
+	dcl (q1,q2)				fixed;	/*	left and right sample values	*/
+	dcl z						fixed;	/*	origin of sound file display	*/
+	dcl our.resolution	fixed;	/*	for this display				*/
+
+	COMPUTE.PLOT.INFO: proc (base) swapable;		/*	Computes plotting information	*/
+		dcl base		fixed array;	/*	specified starting sector of sound file block in poly memory	*/
+		dcl #secs			fixed;	/*	number of sectors of valid data	*/
+		dcl #wrds			fixed;
+		dcl i					fixed;
+
+		/*	determine vertical scale	*/
+		load 32768;					/*	load largest 16 bit number	*/
+		div stm.vert.scale;		/*	divide by specified vertical scale (a number between 2 and 512)	*/
+		z=res-display.origin;	/*	set z to origin	*/
+
+		/*	find start and end of sound file	*/
+
+		call TIME_TO_INDEX(start.time(0),start.time(1),start.time(2),stm.sample.rate,stereo);	/*	get sectors & word to start display	*/
+		save.xsec=sector.numb; save.xwrd=sector.offset;	/*	rel address of start time	*/
+
+		call TIME_TO_INDEX(tot.time(0),tot.time(1),tot.time(2),stm.sample.rate,stereo);
+		#secs=sector.numb-save.xsec;			/*	get distance to end	*/
+		#wrds=sector.offset-save.xwrd;
+		if #wrds<0 then do;						/*	normalize addresses	*/
+			#wrds=#wrds+256; #secs=#secs-1;
+		end;
+		if #wrds>256 then do;
+			#wrds=#wrds-256;
+			#secs=#secs+1;
+		end;
+
+		j1=stm.hor.scale;							/*	find the current number of samples per pixel	*/
+		if stereo<>0 then j1=j1+j1;			/*	if the file is in stereo then double the number of samples per pixel	*/
+
+		load #secs; mul 256;						/*	convert and get 32 bit # of words into d4567	*/
+		m1=rem; m2=res;
+		m2=m2+#wrds;
+		if m2 ilt #wrds then m1=m1+1;
+
+		if m1 ige j1 then j2=-1;				/*	if overflow constrain # of samples per pixel to 65535	*/
+		else do;										/*	convert # of words to samples per pixel	*/
+			write(5)=m2; write(4)=m1;
+			div j1;									/*	divide words by # of samples per pixel	*/
+			j2=res;									/*	result is end of sound file in pixels	*/
+		end;
+
+		if j2 igt display.width					/*	only draw to end of viewport	*/
+		then j2=display.width;
+
+		call copy32(base,save.xbase);			/*	save base of sound file		*/
+		call add16(shr(bl.poly,8),save.xbase);
+
+		syn.rate=stm.hor.scale;					/*	get SCALE FACTOR	*/
+		syn.skip=0;
+
+		if syn.rate>256 then do;
+			syn.rate=128;							/*	look at 128 data samples	*/
+			syn.skip=shr(stm.hor.scale,7);
+			if stereo<>0 then syn.skip=shl(syn.skip,1);
+		end;
+
+		/*	$page	*/
+
+		our.resolution = stm.resolution;
+
+		if   our.resolution=0					/*	# of pixels per block	*/
+		then our.resolution=1;
+
+		if   mg600=0								/*	no mg600						*/
+		then our.resolution=1;
+
+		if stm.hor.scale < 64
+		then our.resolution=1;
+
+		/*	limit data scan to look at	*/
+		/*	max of 256 data points		*/
+		/*	per block to keep computer	*/
+		/*	from getting overloaded		*/
+
+		do while	((our.resolution*syn.rate)	> 256)
+		and		((syn.rate&1)					= 0  );
+			syn.rate=shr(syn.rate,1);
+			syn.skip=shl(syn.skip,1);
+		end;
+
+		if locked<>0 then do;		/*	if a sound file is locked into the right channel display	*/
+			do i=0 to f#name_len;
+				FNBUF(i)=lock.name(i);
+			end;
+         FNBUF(0)=8;
+         LNBUF(0)=0;
+			if ps.search<>0 then do;
+				call copy32(SFILE.BASE,lock.xbase);
+				call add16(shr(bl.poly,8),lock.xbase);
+				call psmread(SFILE.BASE,SF.HDR,sf.valid.data);	/*	find ending sector and word for the locked file	*/
+				i=read(psd);			/*	waste	*/
+				lock.esec=read(psd);
+				lock.ewrd=read(psd);
+				call TIME_TO_INDEX(start.time(0),start.time(1),start.time(2),lock.sample.rate,lock.stereo);
+				lock.xsec=sector.numb;
+				lock.xwrd=sector.offset;
+			end;
+			call LOOK.UP.SF.INFO;	/*	reset current sound file information	*/
+		end;
+	end COMPUTE.PLOT.INFO;
+
+	/*	$Subtitle Mouse Handling	*/
+
+	//	Handle mouse buttons while drawing the sample display
+	DEAL.WITH.MOUSE: proc (code) swapable;
+		dcl code		fixed;
+		dcl (mx,my)	fixed;
+
+		if inc.mouse=0 then return;
+
+		if code = get.mouse.button then do;
+			if (new.ABLE.mouse.button == (-2))										/*	if press...	*/
+			{
+				mx = mouse(press.x);
+				my = mouse(press.y);
+
+				if (((mx >= left.rect.minx) and (mx <= left.rect.maxx))		/*	detect entry into	*/
+				and (((my >= left.rect.miny ) and (my <= left.rect.maxy))	/*	STM sound file	*/
+				or   ((my >= right.rect.miny) and (my <= right.rect.maxy)))	/*	windows	*/
+				and (mouse.playing <> 3))												/*	not protocol scrubbing	*/
+				then do;
+					call PERFORM.MOUSE.PLAYBACK(1);
+				end;
+
+				else if (((mx >= landscape.left)	& (mx <= landscape.right))	/*	detect entry into	*/
+				&&			((my >= landscape.bot)	& (my <= landscape.top)))	/*	landscape control	*/
+				then do;
+					new.ABLE.mouse.button = 0;											//	swallow the mouse button press
+					call ADJUST.LANDSCAPE.DISPLAY(0);								//	adjust landscape display
+				end;
+
+				else
+					new.ABLE.mouse.button = 0;											//	ignore other presses (e.g. no mouse hole on L page)
+			}
+
+			else if (new.ABLE.mouse.button == (+2))								//	else release
+			{
+				mx = mouse(release.x);
+				my = mouse(release.y);
+
+				if (mouse.playing == 1 || mouse.playing == 2)					//	if playing, finish up
+					call PERFORM.MOUSE.PLAYBACK(0);
+
+				else if (((mx >= left.rect.minx) and (mx <= left.rect.maxx))
+				and		(((my >= left.rect.miny ) and (my <= left.rect.maxy))
+				or			 ((my >= right.rect.miny) and (my <= right.rect.maxy))))
+					new.ABLE.mouse.button = 0;											//	ignore release in playback area if not playing
+
+				else if (((mx >= landscape.left)	& (mx <= landscape.right))	/*	detect entry into	*/
+				&&			((my >= landscape.bot)	& (my <= landscape.top)))	/*	landscape control	*/
+					new.ABLE.mouse.button = 0;											//	ignore release in landscape area
+
+				else
+				{
+					new.ABLE.mouse.button = 0;											//	accept the button release
+					call push.graphics.attributes;
+					vector_mode;
+					call data_level(0);
+					transparent_mode;
+					call STM.SOUND.EDITOR.MOUSE.POS(mx,my,0);						//	act on button release
+					call pop.graphics.attributes;
+				}
+			}
+
+			else
+				new.ABLE.mouse.button = 0;												//	ignore other mouse button functions
+		end;
+	end DEAL.WITH.MOUSE;
+
+	/*	$Subtitle VT640 Draw Sound Display Routine	*/
+
+	DRAW.SAMPLES.VT640: proc returns (fixed) swapable;		/*	VT640 Drawing Routine	*/
+		dcl p						fixed;	/*	number of sample per pixel	*/
+		dcl x						fixed;	/*	pixel location of sample in sound display	*/
+		dcl mouse.msec			fixed;	/*	when mouse last sampled		*/
+		dcl stm.sample.miny	fixed;
+		dcl stm.sample.maxy	fixed;
+		dcl code					fixed;	/*	Used for check.next.event	*/
+
+		stm.is.drawing = 1;
+
+		/*	Returns 0 when successful 1 when interrupted	*/
+
+		if stm.draw.mode = 0
+		then vector_mode;
+		else point_mode;
+		call data_level(2);
+		call window(0,display.width,1,pixel.samples+1);
+
+		do x=0 to j2-1;							/*	do to width of display or end of sound file in pixels	*/
+
+			call get_enable(get.mouse.button);
+			mouse.msec = real.milliseconds;
+			code = check.next.event;
+			call get_disable(get.mouse.button);
+
+			if (code = get.mouse.button)
+			then do;
+				call DEAL.WITH.MOUSE(code);
+			end;
+
+			else if code <> 0					/*	some foreign code	*/
+			then new.poly.contents = new.poly.contents \ 1;
+
+			if new.poly.contents then do;
+				vector_mode;
+				call data_level(0);
+				call viewport(left.rect.minx+1,left.rect.maxx-1,left.rect.miny+1,left.rect.maxy-1);
+				transparent_mode;
+				return 1;	/*	note: leave "stm.is.drawing = 1", we'll be back to finish drawing	*/
+			end;
+
+			call psmread(save.xbase,save.xsec,save.xwrd);	/*	point to the data in poly memory	*/
+			m1=read(psd) xor "100000";			/*	get the left minimum sample and convert to offset binary	*/
+			n1=m1;									/*	temp. save left and right samples for min max check	*/
+			if stereo<>0 then do;				/*	if a stereo sound file	*/
+				m2=read(psd) xor "100000";		/*	get the right minimum sample and convert to offset binary	*/
+				n2=m2;
+			end;
+
+			do p=1 to syn.rate;					/*	do for the number of samples per pixel (inclusive)	*/
+				q1=read(psd) xor "100000";		/*	get the next left sample and convert to offset binary	*/
+				if q1 ilt m1 then m1=q1;		/*	find minimum y left sample	*/
+				if q1 igt n1 then n1=q1;		/*	find maximum y left sample	*/
+				if stereo<>0 then do;			/*	if stereo sound file then left and right samples	*/
+					q2=read(psd) xor "100000";	/*	get the next right sample and convert ot offset binary	*/
+					if q2 ilt m2 then m2=q2;	/*	find minimum y right sample	*/
+					if q2 igt n2 then n2=q2;	/*	find maximum y right sample	*/
+				end;
+				if ((real.milliseconds - mouse.msec) igt mouse.refresh.rate)
+				then do;
+					mouse.msec = real.milliseconds;
+					call check.next.event;
+				end;
+				if syn.skip<>0 then do;
+					call psmread(save.xbase,save.xsec,save.xwrd+p*syn.skip);	/*	point at data in poly	*/
+				end;
+			end;
+
+			load m1;									/*	load the minimum left signal value	*/
+			div stm.vert.scale;					/*	scale it by the vertical factor (2-512)	*/
+			m1=res;									/*	get the scaled result (0-64)	*/
+			if m1 ilt z then m1=z;				/*	make sure the scaled result is within the bounds (0-64)	*/
+			if m1 igt z+pixel.samples then m1=z+pixel.samples;	/*	(0-191)	*/
+			m1=m1-z+1;								/*	yields a result between 1 and 128	*/
+
+			load n1;									/*	load the maximum left signal value	*/
+			div stm.vert.scale;					/*	scale it by the vertical factor (2-512)	*/
+			n1=res;									/*	get the scaled result (0-64)	*/
+			if n1 ilt z then n1=z;				/*	make sure the scaled result is within the bounds	*/
+			if n1 igt z+pixel.samples then n1=z+pixel.samples;
+			n1=n1-z+1;								/*	yields a result between 1 and 128	*/
+
+		/*	$page	*/
+
+			call viewport(left.rect.minx+1,left.rect.maxx-1,left.rect.miny+1,left.rect.maxy-1);
+			write(mam)=trd.ptr+shr(x,8);		/*	find address of left image in external memory	*/
+			write(mal)=x;							/*	point to the word	*/
+			q1=read(md);							/*	get minimum left sample of image(x)	*/
+			if q1<>(m1\shl(n1,8)) then do;	/*	if the previous sample line is different than the new sample	*/
+				if q1<>0 then do;					/*	if something there we must erase	*/
+					stm.sample.miny=q1&255;		/*	set minimum left value	*/
+					stm.sample.maxy=shr(q1,8);	/*	set maximum value	*/
+					call connect(x,stm.sample.miny,x,stm.sample.maxy);	/*	erase previous image in complement mode	*/
+				end;
+				call connect(x,m1,x,n1);		/*	draw new image	*/
+				write(mam)=trd.ptr+shr(x,8);	/*	restore address of image in external memory	*/
+				write(mal)=x;						/*	point to the word	*/
+				write(md)=m1\shl(n1,8);			/*	save new min and max left sample in image(x)	*/
+			end;
+
+			if locked<>0 then do;				/*	if a sound file locked	*/
+				if (lock.xsec ilt lock.esec) or
+					((lock.xsec ieq lock.esec) and (lock.xwrd ile lock.ewrd)) then do;
+					call psmread(lock.xbase,lock.xsec,lock.xwrd);	/*	point to the data in poly memory	*/
+					m1=read(psd) xor "100000";			/*	get the left minimum sample and convert to offset binary	*/
+					n1=m1;									/*	temporarily save the left and right samples for min max check	*/
+					if lock.stereo<>0 then do;			/*	if a stereo sound file	*/
+						m2=read(psd) xor "100000";		/*	get the right minimum sample and convert to offset binary	*/
+						n2=m2;
+					end;
+
+					do p=1 to syn.rate;					/*	do for the number of samples per pixel (inclusive)	*/
+						q1=read(psd) xor "100000";		/*	get the next left sample and convert to offset binary	*/
+						if q1 ilt m1 then m1=q1;		/*	find minimum y left sample	*/
+						if q1 igt n1 then n1=q1;		/*	find maximum y left sample	*/
+						if lock.stereo<>0 then do;		/*	if stereo sound file then left and right samples	*/
+							q2=read(psd) xor "100000";	/*	get the next right sample and convert ot offset binary	*/
+							if q2 ilt m2 then m2=q2;	/*	find minimum y right sample	*/
+							if q2 igt n2 then n2=q2;	/*	find maximum y right sample	*/
+						end;
+						if syn.skip<>0 then do;
+							call psmread(lock.xbase,lock.xsec,lock.xwrd+p*syn.skip);	/*	point to the data in poly memory	*/
+						end;
+						if ((real.milliseconds - mouse.msec) igt mouse.refresh.rate)
+						then do;
+							mouse.msec = real.milliseconds;
+							call check.next.event;
+						end;
+					end;
+				end;
+				else do;										/*	set display to origin	*/
+					m1=32768;
+					n1=32768;
+				end;
+
+				load m1;									/*	load the minimum left signal value	*/
+				div stm.vert.scale;					/*	scale it by the vertical factor (2-512)	*/
+				m1=res;									/*	get the scaled result (0-64)	*/
+				if m1 ilt z then m1=z;				/*	make sure the scaled result is within the bounds (0-64)	*/
+				if m1 igt z+pixel.samples then m1=z+pixel.samples;	/*	(0-191)	*/
+				m1=m1-z+1;								/*	yields a result between 1 and 128	*/
+
+				load n1;									/*	load the maximum left signal value	*/
+				div stm.vert.scale;					/*	scale it by the vertical factor (2-512)	*/
+				n1=res;									/*	get the scaled result (0-64)	*/
+				if n1 ilt z then n1=z;				/*	make sure the scaled result is within the bounds	*/
+				if n1 igt z+pixel.samples then n1=z+pixel.samples;
+				n1=n1-z+1;								/*	yields a result between 1 and 128	*/
+
+			/*	$page	*/
+
+				call viewport(right.rect.minx+1,right.rect.maxx-1,right.rect.miny+1,right.rect.maxy-1);
+				write(mam)=trd.ptr+4+shr(x,8);	/*	find address of locked image in external memory	*/
+				write(mal)=x;							/*	point to the word	*/
+				q1=read(md);							/*	get minimum left sample of image(x)	*/
+				if q1<>(m1\shl(n1,8)) then do;	/*	if the previous sample line is different than the new sample	*/
+					if q1<>0 then do;					/*	if something there we must erase	*/
+						stm.sample.miny=q1&255;		/*	set minimum left value	*/
+						stm.sample.maxy=shr(q1,8);	/*	set maximum value	*/
+						call connect(x,stm.sample.miny,x,stm.sample.maxy);	/*	erase previous image in complement mode	*/
+					end;
+					call connect(x,m1,x,n1);		/*	draw new image	*/
+					write(mam)=trd.ptr+4+shr(x,8);	/*	restore address of image in external memory	*/
+					write(mal)=x;						/*	point to the word	*/
+					write(md)=m1\shl(n1,8);			/*	save new min and max left sample in image(x)	*/
+				end;
+			end;
+
+			else if stereo<>0 then do;				/*	if stereo sound file then draw right sound	*/
+				load m2;									/*	load the minimum right value	*/
+				div stm.vert.scale;					/*	scale it by the vertical factor (2-512)	*/
+				m2=res;									/*	get the scaled result	*/
+				if m2 ilt z then m2=z;				/*	make sure the scaled result is within the bounds	*/
+				if m2 igt z+pixel.samples then m2=z+pixel.samples;
+				m2=m2-z+1;								/*	yields a result between 1 and 128	*/
+
+				load n2;									/*	load the maximum right value	*/
+				div stm.vert.scale;					/*	scale it by the vertical factor (2-512)	*/
+				n2=res;									/*	get the scaled result (0-64)	*/
+				if n2 ilt z then n2=z;				/*	make sure the scaled result is within the bounds	*/
+				if n2 igt z+pixel.samples then n2=z+pixel.samples;
+				n2=n2-z+1;							/*	yields a result between 1 and 128	*/
+
+				write(mam)=trd.ptr+4+shr(x,8);	/*	find address of previous right image in external memory	*/
+				write(mal)=x;							/*	point to the word	*/
+				q2=read(md);							/*	get minimum right sample of image(x)	*/
+				if q2<>(m2\shl(n2,8)) then do;	/*	if the previous line is different than the new one	*/
+					call viewport(right.rect.minx+1,right.rect.maxx-1,right.rect.miny+1,right.rect.maxy-1);
+					if q2<>0 then do;						/*	if something there must erase	*/
+						stm.sample.miny=q2&255;			/*	set minimum right value	*/
+						stm.sample.maxy=shr(q2,8);		/*	set maximum value	*/
+						call connect(x,stm.sample.miny,x,stm.sample.maxy);	/*	erase previous image in complement mode	*/
+					end;
+					call connect(x,m2,x,n2);			/*	draw new image	*/
+					write(mam)=trd.ptr+4+shr(x,8);	/*	restore address of image in external memory	*/
+					write(mal)=x;							/*	point to the word	*/
+					write(md)=m2\shl(n2,8);				/*	save new min and max right sample in image(x)	*/
+				end;
+			end;												/*	of if stereo sound file	*/
+			else do;											/*	if mono file and previously a stereo sound file	*/
+				write(mam)=trd.ptr+4+shr(x,8);
+				write(mal)=x;
+				q2=read(md);
+				if q2<>0 then do;							/*	if something there	*/
+					call viewport(right.rect.minx+1,right.rect.maxx-1,right.rect.miny+1,right.rect.maxy-1);
+					stm.sample.miny=q2&255;				/*	set minimum right value	*/
+					stm.sample.maxy=shr(q2,8);			/*	set maximum value	*/
+					call connect(x,stm.sample.miny,x,stm.sample.maxy);	/*	erase previous image in complement mode	*/
+					write(mam)=trd.ptr+4+shr(x,8);	/*	set values to zero	*/
+					write(mal)=x;
+					write(md)=0;
+				end;
+			end;
+			/*	get next set of left and right coordinates	*/
+
+			save.xwrd=save.xwrd+stm.hor.scale;		/*	find word offset by increasing word offset by number of samples per pixel	*/
+			if stereo<>0
+			then save.xwrd=save.xwrd+stm.hor.scale;	/*	word offset is twice the number of samples per pixel	*/
+			save.xsec=save.xsec+shr(save.xwrd,8);
+			save.xwrd=save.xwrd&255;					/*	word cannot be greater than a sector (256)	*/
+
+		/*	$page	*/
+
+			if locked<>0 then do;						/*	if sound file locked in channel displayt	*/
+				lock.xwrd=lock.xwrd+stm.hor.scale;	/*	find word offset by increasing word offset by number of samples per pixel	*/
+				if lock.stereo<>0
+				then lock.xwrd=lock.xwrd+stm.hor.scale;	/*	word offset is twice the number of samples per pixel	*/
+				lock.xsec=lock.xsec+shr(lock.xwrd,8);
+				lock.xwrd=lock.xwrd&255;					/*	word cannot be greater than a sector (256)	*/
+			end;
+
+		end;
+		call ERASE.SAMPLES(j2,display.width-1,2);	/*	erase noise to end of viewport	*/
+		if (inc.mouse) then do;
+			if (mouse.playing=1)\(mouse.playing=2)	/*	if still playing back, keep it up	*/
+			then call PERFORM.MOUSE.PLAYBACK(1);
+			else if landscape.adjust<>0				/*	if in the middle of adjusting landscape	*/
+			then call ADJUST.LANDSCAPE.DISPLAY(1);
+		end;
+		vector_mode;
+		call data_level(0);						/*	put back in draw and transparent mode	*/
+		transparent_mode;
+		stm.is.drawing = 0;
+		return 0;
+	end DRAW.SAMPLES.VT640;
+
+	/*	$subtitle MG600 Draw Sample Routine	*/
+
+	DRAW.SAMPLES.MG600: proc(channel) returns (fixed) swapable;		/*	Pericom Drawing Routine			*/
+		dcl channel			fixed;	/*	0-left channel  1-right channel		*/
+		dcl mode				fixed;	/*	0: undefined  1: vector  2: incplot	*/
+		dcl last.plot		fixed;
+		dcl (miny,maxy)	fixed;
+		dcl waste			fixed;
+		dcl plot.active	fixed;
+		dcl last.x			fixed;
+		dcl pendown			fixed;
+		dcl resctr			fixed;
+		dcl exit.counter	fixed;
+		dcl x					fixed;	/*	pixel location of sample in sound display	*/
+		dcl p					fixed;	/*	number of sample per pixel	*/
+		dcl mouse.msec		fixed;	/*	when mouse last sampled	*/
+		dcl code				fixed;	/*	Used for check.next.event	*/
+
+		stm.is.drawing = 1;
+
+		/*	returns 0 when successful 1 when interrupted by STM.EXIT.CHECK	*/
+
+		if (stereo=0) and (locked=0) then do;	/*	see if we have gone stereo to mono or locked to unlocked	*/
+			write(mam)=trd.ptr+4;			/*	look at first sample of right channel	*/
+			q2=read(md);
+			if q2<>0
+			then call erase.samples(0,display.width-1,1);	/*	erase right channel	*/
+		end;
+
+		if channel = 0
+		then call viewport(left.rect.minx+1,left.rect.maxx-1,left.rect.miny+1,left.rect.maxy-1);
+		else call viewport(right.rect.minx+1,right.rect.maxx-1,right.rect.miny+1,right.rect.maxy-1);
+
+		call window(0,display.width,1,pixel.samples+1);
+
+		plot.active = 0;							/*	reset for new plot	*/
+		exit.counter= 0;
+		transparent_mode;				/*	make sure we can get to vector_mode	*/
+		vector_mode;					/*	make sure we can get to point_mode	*/
+		call data_level(2);
+
+		if our.resolution<>1 then do;
+			mode = 1;								/*	no incremental		*/
+			if stm.draw.mode = 0					/*	if not dot mode	*/
+			then call blockmode_on;				/*	do block mode		*/
+		end;
+		else mode=0;								/*	undefined - use inc plot mode, then switch to vector mode	*/
+
+		if stm.draw.mode <> 0
+		OR stm.zero.line <> 0
+		then do;
+			if stm.draw.mode <> 0 then point_mode;
+			mode = 1;	/*	don't use inc plot for point mode, or when zero line is on	*/
+		end;
+
+		mouse.msec = real.milliseconds;
+
+		do x=0 to j2-1 by our.resolution;	/*	process each block of display	*/
+
+			//	Timeshare in inc plot mode
+			if (mode == 2)													//	in inc plot mode
+			{
+				timeshare_with_host();									//	keep mac going on PowerPC
+
+				if ((M$PRESSES | M$RELEASES) != 0)					//	if mouse presses or released: pop out
+				{
+					mode = 0;												//	revert to undefined mode
+					alpha_mode;												//	get out of point mode
+					transparent_mode;										//	get to where we can re-enter vector mode
+					vector_mode;
+					call data_level(2);									//	back to complement mode
+					call mouse.switch(1);								//	turn mouse back on; but was it ever turned off?
+				}
+			}
+
+			if (mode <> 2) then do;										//	not inc plot
+				timeshare_with_host();									//	keep mac alive
+
+				interp_check_interrupts();								// get real.milliseconds up to date
+
+				if ((real.milliseconds - mouse.msec) igt mouse.refresh.rate)
+				{
+					call Get_Enable(Get.Mouse.Button);
+					mouse.msec = real.milliseconds;
+					code = check.next.event;
+					call Get_Disable(Get.Mouse.Button);
+
+					if (code = Get.Mouse.Button)
+					then do;
+						transparent_mode;									//	make sure we can get to vector_mode
+						vector_mode;										//	be sure we're not left in point_mode
+						call Deal.With.Mouse(code);
+						if stm.draw.mode <> 0 then point_mode;
+					end;
+
+					else if code <> 0										//	some foreign code
+					then new.poly.contents = new.poly.contents \ 1;
+
+					if new.poly.contents then do;
+						call blockmode_off;
+						transparent_mode;
+						vector_mode;
+						call data_level(0);
+						call viewport(left.rect.minx+1,left.rect.maxx-1,left.rect.miny+1,left.rect.maxy-1);
+						transparent_mode;
+						return 1;											//	note: leave "stm.is.drawing = 1", we'll be back to finish drawing
+					end;
+				}
+			end;
+
+			if (locked<>0) and (channel<>0) then do;	/*	if sf locked & drawing in the right channel window	*/
+				if (lock.xsec ilt lock.esec) or
+					((lock.xsec ieq lock.esec) and (lock.xwrd ile lock.ewrd)) then do;
+					call psmread(lock.xbase,lock.xsec,lock.xwrd);	/*	point to the data in poly memory	*/
+					m1=read(psd) xor "100000";				/*	get left channel data of locked sound file	*/
+					if lock.stereo<>0							/*	if locked sound file is stereo ignore the right channel data	*/
+					then waste=read(psd);
+					n1=m1;										/*	temporarily save the sample for min max check	*/
+
+					do resctr=1 to our.resolution;	/*	look to samples for block	*/
+						if (lock.xsec ilt lock.esec) or
+						((lock.xsec ieq lock.esec) and (lock.xwrd ile lock.ewrd)) then do;
+							if (x+resctr)<=j2					/*	stop at end of file		*/
+							then do p=1 to syn.rate;		/*	do for the number of samples per pixel (inclusive)	*/
+								if syn.skip<>0 then do;
+									call psmread(lock.xbase,lock.xsec,lock.xwrd+p*syn.skip);	/*	point to the data in poly memory	*/
+								end;
+								q1=read(psd) xor "100000";	/*	get the left sample and convert to offset binary	*/
+								if q1 ilt m1 then m1=q1;	/*	find minimum y sample	*/
+								if q1 igt n1 then n1=q1;	/*	find maximum y sample	*/
+								if (lock.stereo<>0)			/*	skip over right channel	*/
+								then waste=read(psd);		/*	data	*/
+								interp_check_interrupts();
+								if mode <> 2
+								AND ((real.milliseconds - mouse.msec) igt mouse.refresh.rate)
+								then do;
+									mouse.msec = real.milliseconds;
+									call check.next.event;
+								end;
+							end;
+						end;
+						lock.xwrd=lock.xwrd+stm.hor.scale;		/*	find word offset by increasing word offset by number of samples per pixel	*/
+						if lock.stereo<>0
+						then lock.xwrd=lock.xwrd+stm.hor.scale;	/*	word offset is twice the number of samples per pixel	*/
+						lock.xsec=lock.xsec+shr(lock.xwrd,8);
+						lock.xwrd=lock.xwrd&255;					/*	word cannot be greater than a sector (256)	*/
+					end;
+				end;
+				else do;										/*	display a line of zeroes	*/
+					m1=32768;
+					n1=32768;
+				end;
+			end;
+			else do;
+				call psmread(save.xbase,save.xsec,save.xwrd);	/*	point to the data in poly memory	*/
+				if (stereo) & (channel<>0)			/*	waste left channel	*/
+				then m1=read(psd);					/*	skip over left channel data	*/
+				m1=read(psd) xor "100000";			/*	get the minimum sample and convert to offset binary	*/
+				n1=m1;									/*	temporarily save the sample for min max check	*/
+				if (stereo) & (channel=0)			/*	skip right channel if stereo	*/
+				then waste = read(psd);				/*	and left channel chosen	*/
+
+				do resctr=1 to our.resolution;	/*	look to samples for block	*/
+					if (x+resctr)<=j2					/*	stop at end of file		*/
+					then do p=1 to syn.rate;		/*	do for the number of samples per pixel (inclusive)	*/
+						if syn.skip<>0 then do;
+							call psmread(save.xbase,save.xsec,save.xwrd+p*syn.skip);	/*	point to the data in poly memory	*/
+						end;
+						if (stereo) & (channel<>0)	/*	right channel			*/
+						then q1=read(psd);			/*	skip over left channel data	*/
+						q1=read(psd) xor "100000";	/*	get the next sample and convert to offset binary	*/
+						if q1 ilt m1 then m1=q1;	/*	find minimum y sample	*/
+						if q1 igt n1 then n1=q1;	/*	find maximum y sample	*/
+						if (stereo) & (channel=0)	/*	skip right channel if stereo	*/
+						then waste = read(psd);		/*	and left channel chosen	*/
+						interp_check_interrupts();
+						if mode <> 2
+						AND ((real.milliseconds - mouse.msec) igt mouse.refresh.rate)
+						then do;
+							mouse.msec = real.milliseconds;
+							call check.next.event;
+						end;
+					end;
+					save.xwrd=save.xwrd+stm.hor.scale;	/*	find word offset by increasing word offset by number of samples per pixel	*/
+					if stereo<>0
+					then save.xwrd=save.xwrd+stm.hor.scale;	/*	word offset is twice the number of samples per pixel	*/
+					save.xsec=save.xsec+shr(save.xwrd,8);
+					save.xwrd=save.xwrd&255;					/*	word cannot be greater than a sector (256)	*/
+				end;
+			end;
+
+			/*	$page	*/
+			load m1;									/*	load the minimum signal value	*/
+			div stm.vert.scale;					/*	scale it by the vertical factor (2-512)	*/
+			m1=res;									/*	get the scaled result (0-64)	*/
+			if m1 ilt z then m1=z;				/*	make sure the scaled result is within the bounds (0-64)	*/
+			if m1 igt z+pixel.samples then m1=z+pixel.samples;	/*	(0-191)	*/
+			m1=m1-z+1;								/*	yields a result between 1 and 128	*/
+
+			load n1;									/*	load the maximum signal value	*/
+			div stm.vert.scale;					/*	scale it by the vertical factor (2-512)	*/
+			n1=res;									/*	get the scaled result (0-64)	*/
+			if n1 ilt z then n1=z;				/*	make sure the scaled result is within the bounds	*/
+			if n1 igt z+pixel.samples then n1=z+pixel.samples;
+			n1=n1-z+1;								/*	yields a result between 1 and 128	*/
+
+
+			/*************** COMPARE PLOT TO LAST PLOT ********	*/
+			if plot.active = 0 then do;		/*	if still searching for first difference	*/
+				write(mam)=trd.ptr+shr(x,8)+shl(channel,2);	/*	compare image in memory to current	*/
+				write(mal)=x;						/*	the display from our current	*/
+				q1 = read(md);
+				if (q1 <> (m1\shl(n1,8)))		/*	samples differ - erase rest of display	*/
+				or (our.resolution<>prev.stm.resolution)	/*	or different block size (happens first time thru)	*/
+				then do;
+					call erase.samples(x,display.width-1,channel);
+					plot.active = 1;
+					prev.stm.resolution = our.resolution;
+
+					if channel = 0
+					then call viewport(left.rect.minx+1,left.rect.maxx-1,left.rect.miny+1,left.rect.maxy-1);
+
+					else call viewport(right.rect.minx+1,right.rect.maxx-1,right.rect.miny+1,right.rect.maxy-1);
+
+					call window(0,display.width,1,pixel.samples+1);
+
+					transparent_mode;				/*	make sure we can get to vector_mode	*/
+					vector_mode;					/*	make sure we can get to point_mode	*/
+					call data_level(2);
+					if stm.draw.mode <> 0 then point_mode;
+				end;
+			end;
+
+			if plot.active <> 0 then do;	/*	plot.active is set just above here	*/
+
+				write(mam)=trd.ptr+shr(x,8)+shl(channel,2);	/*	write address of image in external memory	*/
+				write(mal)=x;							/*	point to the word	*/
+				do resctr=1 to our.resolution;
+					if (x+resctr) < display.width
+					then write(mdi)=(m1\shl(n1,8));	/*	save new min and max sample in image(x)	*/
+				end;
+
+				if mode <> 1 then do;				/*	use point mode to speed things up	*/
+
+					if abs(n1-m1) > 12 then do;	/*	means switch out of point mode	*/
+						exit.counter=exit.counter+1;
+					end;
+
+					if exit.counter=10 then do;	/*	means switch out of point mode	*/
+						mode = 1;						/*	switch to connect mode by	*/
+						alpha_mode;						/*	get out of point mode	*/
+						transparent_mode;				/*	get to where we can re-enter vector mode	*/
+						vector_mode;
+						call data_level(2);			/*	back to complement mode	*/
+						resctr=x+our.resolution-1;
+						if resctr>=display.width then resctr=display.width-1;
+						call connect(x,m1,resctr,n1);
+						call mouse.switch(1);		/*	turn mouse on for slow plot	*/
+					end;
+
+					/*	$page	*/
+
+					else do;
+
+						if mode = 0 then do;			/*	still inc plot, can be changed by above code	*/
+							transparent_mode;			/*	make sure we can get to vector_mode	*/
+							vector_mode;
+							call data_level(0);		/*	must plot in non-complement	*/
+							call move_to(x,m1);		/*	move to anchor point	*/
+							last.plot = m1;			/*	save that value for future	*/
+							last.x	 = x;				/*	where pen is now		*/
+							call pc(rs);				/*	put into inc plot mode	*/
+							pendown=0;					/*	start with pen up		*/
+							mode = 2;					/*	we are now in inc plot mode	*/
+						end;
+
+						if  (x = stm.graphx)			/*	current position has cursor	*/
+						and (pendown<>0	 )			/*	and pen is down				*/
+						then do;							/*	then lift pen before			*/
+							call pc(sp);				/*	moving on top of cursor		*/
+							pendown=0;
+						end;
+
+						if abs(n1-last.plot) < abs(m1-last.plot)
+						then do;
+							waste = n1;						/*	swap n1, m1			*/
+							n1 = m1;							/*	on a negative slope	*/
+							m1 = waste;						/*	this saves plot time	*/
+						end;									/*	and is more accurate	*/
+
+						if last.x<>x then do;
+							if last.plot<>m1 then do;
+								call pc(sp);				/*	lift pen; we will move to m1 with pen up	*/
+								pendown = 0;				/*	pen is lifted	*/
+							end;
+							do while last.x<>x;			/*	move pen to correct x		*/
+								call pc(asc.a);			/*	position							*/
+								last.x=last.x+1;
+							end;
+						end;
+
+						if last.plot<>m1 then do;
+							call pc(sp);					/*	lift pen; we will move to m1 with pen up	*/
+							pendown = 0;					/*	pen is lifted	*/
+							do while (last.plot <> m1);
+								if last.plot < m1 then do;	/*	if we are below new min	*/
+									call pc(asc.d);			/*	then move north	*/
+									last.plot = last.plot + 1;
+								end;
+								else do;							/*	if we are above new min	*/
+									call pc(asc.h);			/*	then move south	*/
+									last.plot = last.plot - 1;
+								end;
+							end;
+						end;
+
+						if (pendown = 0) then do;			/*	if pen is up, put it down	*/
+							if x=stm.graphx					/*	use erase data level on top of cursor	*/
+							then call data_level(1);		/*	erase pixels	*/
+							call pc(asc.p);					/*	now put pen down - will erase this pixel on cursor	*/
+							pendown = 1;
+						end;
+
+						/*	$page	*/
+
+						do while (last.plot <> n1);
+							if last.plot < n1 then do;	/*	if we are below new max	*/
+								call pc(asc.d);			/*	then move north	*/
+								last.plot = last.plot + 1;
+							end;
+							else do;							/*	if we are above new max	*/
+								call pc(asc.h);			/*	then move south	*/
+								last.plot = last.plot - 1;
+							end;
+						end;
+
+						if x=stm.graphx then do;		/*	reset data level after erasing part or cursor	*/
+							call pc(sp);					/*	first lift pen	*/
+							pendown=0;
+							call data_level(0);			/*	now set data level back to draw	*/
+						end;
+
+					end;
+				end;		/*	of use point mode to speed things up	*/
+				else do;	/*	just draw a line...ho-hum	*/
+					resctr=x+our.resolution-1;
+					call connect(x,m1,resctr,n1);
+				end;
+			end;
+
+			if mode=2 then do;	/*	if in inc plot mode, check ourselves	*/
+				if STM.EXIT.CHECK<>0 then do;
+					if (mode=2)
+					then call pc(sp);	/*	lift pen at end of inc plot mode	*/
+					alpha_mode;			/*	to clear point mode, just in case	*/
+					vector_mode;
+					call blockmode_off;
+					call data_level(0);
+					call viewport(left.rect.minx+1,left.rect.maxx-1,left.rect.miny+1,left.rect.maxy-1);
+					transparent_mode;
+					new.poly.contents = new.poly.contents \ 1;
+					if	(Mouse.Playing <> 1)
+					&	(Mouse.Playing <> 2)
+					&	(Landscape.Adjust = 0)
+					then call mouse.switch(1);
+					return 1;	/*	note: leave "stm.is.drawing = 1", we'll be back to finish drawing	*/
+				end;
+			end;
+		end;
+
+		if (mode=2)
+		then call pc(sp);	/*	lift pen at end of inc plot mode	*/
+		alpha_mode;			/*	get out of inc plot mode (maybe)	*/
+		transparent_mode;
+		vector_mode;
+		call blockmode_off;
+		if x < display.width then do;			/*	did not draw to end of display	*/
+			call ERASE.SAMPLES(x,display.width-1,channel);	/*	erase noise to end of viewport	*/
+		end;
+
+		transparent_mode;
+		vector_mode;
+		call data_level(0);
+		call viewport(left.rect.minx+1,left.rect.maxx-1,left.rect.miny+1,left.rect.maxy-1);
+		transparent_mode;
+		stm.is.drawing = 0;
+		return 0;
+	end DRAW.SAMPLES.MG600;
+
+	/*	$subtitle Draw Sound Display	*/
+
+	DRAW.SOUND.DISPLAY: proc(base) returns (fixed) swapable;	/*	draws sound display from a given point	*/
+		dcl base	fixed array;		/*	specified starting sector of sound file block in poly memory	*/
+
+		/*	Returns 0 if normal exit else 1 if STM.EXIT.CHECK exit	*/
+
+		cpos(22,46);	//	Position for the patch assignment message
+		ps('Partial ');
+		pnum(find.partial+1,0);	//	print partial number
+		pc(a.colon);
+		if (tds.line# ilt 9) pc(a.space);	//	print leading space for 1-9
+		pnum(tds.line#+1,0);						//	print patch list number
+		ps('  ');
+		ps(TDS.PATCH.STR);
+		POS.STM.ALPHA.CURSOR();	//	Don't leave the cursor at the end of the patch message
+
+		if stm.disp.message<>0 then do;	/*	first erase an error message if one is there	*/
+			vector_mode;
+			call data_level(1);
+			call DISPLAY.SOUND.FILE.MESSAGE(stm.disp.message);	/*	erase the previous message	*/
+			vector_mode;
+			call data_level(0);
+			stm.disp.message=0;			/*	indicate message is no longer displayed	*/
+			transparent_mode;
+		end;
+
+		if DRAW.SOUND.FILE.NAME(FNBUF)<>0 then return 1;
+		if DRAW.SOUND.FILE.CAPTION		<>0 then return 1;
+		if DRAW.CROSSFADE					<>0 then return 1;
+		if DRAW.SOUND.FILE.LENGTH		<>0 then return 1;
+		if DRAW.SOUND.FILE.RATE			<>0 then return 1;
+
+		if compare_times(cursor.time,tot.time,3)>0 then do;	/*	if the cursor is beyond the length of the sound file	*/
+			call ERASE.GRAPHICS.CURSORS(stm.graphx,2);
+			stm.graphx = COMPUTE_PIXEL_NUMBER(tot.time);
+			call DRAW.GRAPHICS.CURSORS(stm.graphx,2);
+			call COPY_TIME(tot.time,cursor.time);			/*	set cursor time to end of sound file	*/
+		end;
+
+		if DRAW.CURSOR.TIME					<>0 then return 1;
+		if DRAW.SAMPLE.LEVEL					<>0 then return 1;
+
+		if DRAW.LANDSCAPE.CONTROL			<>0 then return 1;
+		if DRAW.TIME.LABELS					<>0 then return 1;
+		if DRAW.SOUND.FILE.SYMBOLS(BASE)	<>0 then return 1;
+		if mg600 then do;
+			if DRAW.RESOLUTION				<>0 then return 1;
+		end;
+		if locked<>0 then do;				/*	if a locked sound file draw the name above the right channel window and erase right label	*/
+			call ERASE.RIGHT.CHANNEL.LABEL;
+			if stereo
+			then call ERASE.RIGHT.CHANNEL.SYMBOLS;	/*	if the current sound file is stereo, erase the symbols over the right channel display	*/
+			if DRAW.LOCK.NAME					<>0 then return 1;
+		end;
+
+		call window (0,display.width,1,pixel.samples+1);	/*	vertical mapping is never 0 and difference is 127	*/
+
+		if mg600 then do;
+			call COMPUTE.PLOT.INFO(base);
+			if DRAW.SAMPLES.MG600(0) <> 0 then return 1;
+			if (stereo<>0) or (locked<>0) then do;
+				call COMPUTE.PLOT.INFO(base);
+				if DRAW.SAMPLES.MG600(1)<>0 then return 1;
+			end;
+			if (inc.mouse) then do;
+				if	(mouse.cursor.type = 0)
+				&	(Mouse.Playing <> 1)
+				&	(Mouse.Playing <> 2)
+				&	(landscape.adjust = 0)
+				then call mouse.switch(1);
+				else if (mouse.playing=1)\(mouse.playing=2)
+				then call PERFORM.MOUSE.PLAYBACK(1);
+				else if landscape.adjust<>0				/*	if in the middle of adjusting landscape	*/
+				then call ADJUST.LANDSCAPE.DISPLAY(1);
+			end;
+		end;
+		else do;
+			call COMPUTE.PLOT.INFO(base);
+			if DRAW.SAMPLES.VT640<>0 then return 1;
+		end;
+
+		return 0;
+
+	end DRAW.SOUND.DISPLAY;
+

@@ -1,0 +1,590 @@
+/* AUD-CUE7   $TITLE  ROUTINES FOR SHUTTLE SCROLL BAR
+
+   Modified:
+   02/06/92 - cj  - Activated DSP scrubbing from q-page
+   07/29/88 - cj  - Changed Link fine bar if applicable to not reset
+                    fine bar positions if showing wave frame and it
+                    does not need to move it.   Results in more
+                    useful wave display.
+   03/31/88 - MWH - Erase wave and redraw when it becomes invalid
+   
+*/
+
+
+/* $page - deposit shuttle time display */
+
+/* Deposit shuttle time display is passed a 32-bit msec time relative */
+/* to the current mapping.  This routine sets the time display field  */
+/* to show that time with respect to the current project              */
+
+DEPOSIT.SHUTTLE.TIME.DISPLAY:proc (time) public swapable;
+   dcl time         array;
+
+   dcl new      (1) fixed;
+   dcl temp.time(1) fixed;
+
+   if  (Current.Cue.Audition<>0) 
+   then do; 
+      /* offset from current sync time */
+      call SUB32(time,Cue.In.Time,temp.time);
+      /* add (positive or negative) offset to trigger time */
+      call ADD32(temp.time, Cue.Trig.Time, new);
+   end;
+   else do;
+      /* add display offset (usually a negative number) to get with */
+      /* respect to current project                                 */
+      call ADD32(time, Cue.Time.Display.Offset, new);
+   end;
+
+   if ((new(0) < 0) || (COM16(zero.time, new) == lw#igt))
+	STR32(0,zero.time,new);
+
+   disable.deposits = 1;
+   call Deposit.32Bit.MSEC(Shuttle.Time.Display,new,Zero.Zero);
+   disable.deposits = 0;
+   
+end DEPOSIT.SHUTTLE.TIME.DISPLAY;
+
+
+/* $page - routines to display scroll bar positions */
+
+/* Display fine scroll bar sets the fine scroll bar */
+/* to visually match the passed time                */
+
+/* routine does not change any scroll bar in or out */
+/* times                                            */
+
+Display.Fine.Scroll.Bar:proc(time) swapable;
+   dcl time array;
+   dcl i    fixed;
+
+   i = Times.To.Percent(AEE.Fine.In.Time,time,AEE.Fine.Out.Time);
+
+   if i <> Fetch.Scroll.Bar(Shuttle.Fine.Bar)
+   then do;
+      Disable.Deposits = true;
+      call Deposit.Scroll.Bar(Shuttle.Fine.Bar,i);
+      Disable.Deposits = false;
+   end;
+
+end Display.Fine.Scroll.Bar;
+
+/* $page - flag coarse scroll bar */
+
+/* routine will quickly plot the moving flag */
+/* that tracks the current play position     */
+/* on the coarse scroll bar                  */
+
+dcl Coarse.Bar.Flag.Pos  fixed;    /* holds pixel position */
+dcl Coarse.Bar.In.Flag   fixed;    /* of assorted flags    */
+dcl Coarse.Bar.Out.Flag  fixed;
+dcl Coarse.Bar.Ein.Flag  fixed;
+dcl Coarse.Bar.Eout.Flag fixed;
+dcl Coarse.Bar.In.Box    fixed;
+dcl Coarse.Bar.Out.Box   fixed;
+dcl Edit.Line.Center.Pix fixed;    /* center of edit line  */
+dcl Edit.Line.Radius     fixed;    /* radius, in pixels    */
+dcl Magnifier.Shadow.Len fixed;
+
+dcl Display.Symbols      fixed;    /* zero if desired      */
+dcl Display.Edits        fixed;    /* zero if desired      */
+dcl Symbol.Stack.Size    fixed;
+
+Flag.Coarse.Scroll.Bar: proc (time) public swapable;
+   dcl time     array;
+   dcl i        fixed;
+   dcl tmp  (1) fixed;
+   dcl y        fixed;
+
+   Transmit:proc (x,y);
+      dcl (x,y) fixed;
+      call pc(SP        + shr(y,5));  /* hi y */
+      call pc(ASC.GRAVE + (y&31));    /* lo y */
+      call pc(SP        + shr(x,5));  /* hi x */
+      call pc(ASC.AT    + (x&31));    /* lo x */
+   end Transmit;
+
+   Connect:proc(x1,y1,x2,y2);
+      dcl x1      fixed;
+      dcl y1      fixed;
+      dcl x2      fixed;
+      dcl y2      fixed;
+
+      call pc(GS);        /* lift/vector mode */
+      call Transmit(x1,y1);
+      call Transmit(x2,y2);
+
+   end Connect;
+
+   Draw.Flag:proc(x,y);
+      dcl (x,y) fixed;
+
+      call connect(x,y+1,
+                   x,y+4);
+      call connect(x-3,y+5,
+                   x+3,y+5);
+      call pc(GS);                      /* lift   */
+   end Draw.Flag;
+
+
+   if Shuttle.Group = 0 then return;
+
+   if COM16(0,time) = lw#ieq then i=0;     /* 0,0 to erase flag */
+   else do;
+
+      i = Times.To.Percent(AEE.Shuttle.In.Time,time,AEE.Shuttle.Out.Time);
+
+      i = COMPUTE.SCROLL.BAR.BOX.POSITION (Shuttle.Coarse.Bar,i);
+
+   end;
+
+   y = FETCH.OBJECT.INFO(Shuttle.Coarse.Bar,O#ULY);
+
+   if i <> Coarse.Bar.Flag.Pos   /* move it */
+   then do;
+
+      VECTOR_MODE;               /* vector      */
+      CALL DATA_LEVEL(2);        /* compl       */
+
+      alpha_mode;                /* char size   */
+      call pc(ESC); 
+      call pc(SCOLON);
+
+      call Check.Next.Event;
+
+      if Coarse.Bar.Flag.Pos <> 0
+      then do;                     /* erase old flag */
+
+         call Draw.Flag(Coarse.Bar.Flag.Pos,y);
+
+         call Check.Next.Event;
+
+      end;
+
+      Coarse.Bar.Flag.Pos = i;
+
+      if Coarse.Bar.Flag.Pos <> 0
+      then do;                     /* draw new flag */
+
+         call Draw.Flag(Coarse.Bar.Flag.Pos,y);
+
+         call Check.Next.Event;
+
+      end;
+
+      CALL DATA_LEVEL(0);
+      TRANSPARENT_MODE;
+
+   end;
+
+end Flag.Coarse.Scroll.Bar;
+
+/* $page - Display coarse scroll bar */
+
+Display.Coarse.Scroll.Bar:proc(time)  swapable;
+   dcl time     array;
+   dcl i        fixed;
+
+   i = Times.To.Percent(AEE.Shuttle.In.Time,time,AEE.Shuttle.Out.Time);
+
+   if i <> Fetch.Scroll.Bar(Shuttle.Coarse.Bar)
+   then do;
+      Disable.Deposits = true;
+      call Deposit.Scroll.Bar(Shuttle.Coarse.Bar,i);
+      Disable.Deposits = false;
+   end;
+
+   call Flag.Coarse.Scroll.Bar(Zero.Zero);   /* and remove real-time flag on set of box position */
+
+end Display.Coarse.Scroll.Bar;
+
+
+/* $page - Draw axes on coarse bar */
+
+/* draw axis on shuttle bar */
+
+Draw.Coarse.Scroll.Bar.Axes: proc  swapable;
+   dcl i        fixed;
+   dcl j        fixed;
+   dcl y        fixed;
+   dcl minp     fixed;
+   dcl maxp     fixed;
+   dcl pixels   fixed;
+
+   y    = FETCH.OBJECT.INFO(Shuttle.Coarse.Bar,O#ULY);
+   minp = FETCH.OBJECT.INFO(Shuttle.Coarse.Bar,O#ULX)
+        + SB.HArrowpix + shr(SB.HWidth,1);
+   maxp = FETCH.OBJECT.INFO(Shuttle.Coarse.Bar,O#LRX)
+        - SB.HArrowpix - shr(SB.HWidth,1);
+
+   pixels = maxp-minp;
+
+   VECTOR_MODE;               /* vector */
+   CALL DATA_LEVEL(2);        /* compl  */
+
+   do i=0 to 10;      /* 0 to # of divisions */
+      load  i;
+      uload 5;        /* # of divisions/2    */
+      mul  pixels;
+      mwait;
+      div 10;         /* # of divisions      */
+
+      j = res;
+
+      CALL CONNECT(minp+j,y+1,
+                   minp+j,y+2);
+
+   end;
+
+   CALL DATA_LEVEL(0);
+   TRANSPARENT_MODE;
+
+end Draw.Coarse.Scroll.Bar.Axes;
+
+
+/* $page - scroll bar playback subroutines */
+
+/* all times are 32-bit milliseconds with respect to */
+/* the current cue                                   */
+
+Play.Point.From.Percent:proc(percent,switch,time,result) swapable;
+   dcl percent fixed;      /* pass percentage, 0 - 1000 */
+   dcl switch  fixed;      /* switch setting            */
+   dcl time    fixed;      /* real time                 */
+   dcl result  array;      /* computed time             */
+
+   dcl dsp.running fixed external;
+   //dcl send.to.dsp.subroutine proc(fixed,fixed,fixed) external;
+
+   Shuttle.Percentage = percent;
+
+   call Compute.Time.From.Percent
+        (Shuttle.Percentage,
+         AEE.Fine.In.Time,AEE.Fine.Out.Time,result);
+         
+   if DTD.Play.State <> 7 then do;
+      call Set.DTD.Play.Tracks(Current.Cue.Drive.Bits);
+      call Load.DTD.Temp.Cue  (Current.Cue.Ptr       ); /* send over current cue */
+      call Send.To.Lod        (DTD.Scrolling.Off, 0  );
+      //if dsp.running <> 0
+      //then call send.to.dsp.subroutine(70,0,Scsi.Ptr);
+   end;
+
+   call Play.DTD.At.Point(result,switch,time,1);
+
+end Play.Point.From.Percent;
+
+/* $page - animate fine bar */
+
+/* this routine performs the real time animation of the */
+/* fine shuttle bar.   it very quickly scans the        */
+/* mouse information and sends it over to the dtd       */
+
+Animate.Fine.Bar:proc swapable;
+   dcl (i,j,k)                   fixed;
+   dcl (stk) (num.of.get.events) fixed;
+   dcl (miny,maxy)               fixed;
+   dcl (minp,maxp)               fixed;
+   dcl (mins,maxs)               fixed;
+   dcl (pixels)                  fixed;
+   dcl (evt)                     fixed;
+   dcl (disp)                    fixed;
+   dcl (orig)                    fixed;
+   dcl (exit)                    fixed;
+   dcl (p)                       fixed;
+   dcl (t)                       fixed;
+   dcl (switch)                  fixed;
+   dcl (waste)  (1)              fixed;
+
+   /* get serious here */
+
+   /* begin by disabling all other events */
+
+   do i=1 to num.of.get.events;
+      stk(i) = get.item.enabled(i);
+      get.item.enabled(i)=0;
+   end;
+
+   miny = FETCH.OBJECT.INFO(Shuttle.Fine.Bar,O#LRY);
+   maxy = FETCH.OBJECT.INFO(Shuttle.Fine.Bar,O#ULY);
+   minp = FETCH.OBJECT.INFO(Shuttle.Fine.bar,O#ULX);
+   maxp = FETCH.OBJECT.INFO(Shuttle.Fine.bar,O#LRX);
+   disp = FETCH.OBJECT.INFO(Shuttle.Fine.Bar,O#SBAR.Pos)
+        + minp + SB.HArrowpix + shr(SB.Hwidth,1);
+   orig = disp;
+   p    = disp;
+   t    = FETCH.OBJECT.INFO(Shuttle.Fine.Bar,O#SBAR.Percent.Time);
+
+   mins = minp + SB.HArrowpix + shr(SB.HWidth,1);
+   maxs = maxp - SB.HArrowpix - shr(SB.HWidth,1);
+
+   pixels = maxs-mins;
+
+   call Get_enable(Get.Mouse.Movement);
+   call Get_enable(Get.Mouse.Button);
+
+   exit = 0;
+
+   switch = Fine.Bar.Play.Code;
+
+   vector_mode;         /* draw */
+   call data_level(2);  /* complement */
+
+   /* send first boxmove out here */
+
+   load  (p-mins);
+   uload shr(pixels,1);
+   mul   1000;
+   mwait;
+   div   pixels;
+
+   i = res;  /* result is 0-1000 percent */
+
+   if i <> Shuttle.Percentage then do;
+      call Play.Point.From.Percent(i,switch,t,waste);
+   end;
+
+   do while exit = 0;
+      
+      evt = Get.Next.Event;      /* get mouse movement or button */
+
+      if evt = Get.Mouse.Button  /* mouse button - return it to   */
+      then do;                   /* get event for deposit routine */
+         exit = 1;
+         new.mouse.button = next.event.info;
+      end;
+
+      else do;                   /* process movements             */
+
+         disable;
+         p = Mouse.X;
+         t = Mouse.Real.Milliseconds;
+         enable;
+    
+         if   p < mins
+         then do;                               
+            p = mins;
+            Mouse.X = p;
+         end;
+         else if p > maxs
+         then do;
+            p = maxs;
+            Mouse.X = p;
+         end;
+
+         load  (p-mins);
+         uload shr(pixels,1);
+         mul   1000;
+         mwait;
+         div   pixels;
+
+         i = res;  /* result is 0-1000 percent */
+
+         if i <> Shuttle.Percentage then do;
+            call Play.Point.From.Percent(i,switch,t,waste);
+         end;
+
+         Mouse.Y = miny + shr(SB.HWidth,1);
+
+         if p <> disp then do;     /* Position has changed */
+            run.syn = 0;
+            call connect(disp,maxy-1,disp,miny+1);
+            disp = p;
+            call connect(disp,maxy-1,disp,miny+1);
+            run.syn = 1;
+         end;
+      end;
+
+   end;
+
+   /* return box tab (middle) line) to original position */
+   /* so that it gets erased when animate box            */
+   /* is removed by get.scroll.bar                       */
+
+   if orig <> disp then do;
+      call connect(disp,maxy-1,disp,miny+1);
+      disp = orig;
+      call connect(disp,maxy-1,disp,miny+1);
+   end;
+
+   call data_level(0);  
+   transparent_mode;
+
+   /* re-enable for events */
+
+   do i=1 to num.of.get.events;
+      get.item.enabled(i)=stk(i);
+   end;
+
+end Animate.Fine.Bar;
+
+/* $page - preview scroll bar mouse position */
+
+/* when the shuttle scroll bar is selected,  we will actually */
+/* look at the mouse position at that time.   we will         */
+/* immediately issue the play command at that time,           */
+/* assuming the first box move will come where the mouse      */
+/* is now.                                                    */
+
+Preview.Scroll.Bar.Percent:proc(id) swapable;
+   dcl id          fixed;  /* pass id of scroll bar */
+   dcl i           fixed;  /* only works for horizontal scroll bars for now */
+   dcl (minp,maxp) fixed;
+   dcl (mins,maxs) fixed;
+
+   dcl pixels      fixed;
+
+   minp = FETCH.OBJECT.INFO(id,O#ULX);   /* left edge of sbar */
+   maxp = FETCH.OBJECT.INFO(id,O#LRX);   /* rite edge of sbar */
+
+   mins = minp + SB.HArrowpix + shr(SB.HWidth,1);  /* left box center pix */
+   maxs = maxp - SB.HArrowpix - shr(SB.HWidth,1);  /* rite box center pix */
+
+   pixels = maxs-mins;
+
+   i = Mouse(Press.X);     /* get mouse where it was pressed */
+
+   if i<minp+SB.Harrowpix then return -1; /* must be in arrow region   */
+   if i>maxp-SB.Harrowpix then return -1; /* must be in arrow region   */
+
+   if i<mins then i = mins;
+   if i>maxs then i = maxs;
+
+   load  (i-mins);
+   uload shr(pixels,1);
+   mul   1000;
+   mwait;
+   div   pixels;
+
+   return res;  /* result is 0-1000 percent */
+
+end Preview.Scroll.Bar.Percent;
+
+/* $page - Link.Fine.Bar.If.Applicable */
+
+/* this routine is called whenever the position and or times of   */
+/* the coarse scroll bar is changed.   it recomputes in/out times */
+/* for the fine coarse bar according to the switch settings       */
+
+/* it is passed the time that corresponeds to the coarse bar      */
+/* position                                                       */
+
+/* note: it does not reset the fine bar box position              */
+
+Link.Fine.Bar.If.Applicable: proc (time,force) swapable;
+   dcl time    array;   /* time to center fine bar around (anchor time) */
+   dcl force   fixed;   /* force change even if new time is on the      */
+                        /* fine bar,  for example when changing the     */
+                        /* fine bar scale                               */
+
+   /* Use the system routine to compute the fine bar scrub position.    */
+   /* If this results in a change in position,  redraw our wave display */
+   /* if needed.                                                        */
+
+   if Set.DTD.Fine.Scrub.Bar (Time, Force) <> 0
+   then do;
+
+      /* Quickly erase the fine bar waveshape display if it is no       */
+      /* longer valid so we do not scrub over an obsolete display:      */
+
+      if Fine.Shuttle.Wave = 1              /* Wave display is up       */
+      then call Invalidate.Wave.Display(0); /* Redraw fine wave display */
+   end;                                 
+
+end Link.Fine.Bar.If.Applicable;
+
+/* $page - routines to update time display, coarse bar, fine bar displays */
+
+Update.Shuttle.For.New.Anchor: proc public swapable;
+
+   if Shuttle.Group = 0 then return;
+
+   /* Present new anchor time if not displaying time in real time: */
+
+   if DTD.Play.State <> 2
+   then call DEPOSIT.SHUTTLE.TIME.DISPLAY(AEE.Shuttle.Anchor.Time);
+
+   call Display.Coarse.Scroll.Bar(AEE.Shuttle.Anchor.Time);     /* present coarse bar      */
+   call Display.Fine.Scroll.Bar  (AEE.Shuttle.Anchor.Time);     /* show it                 */
+
+end Update.Shuttle.For.New.Anchor;
+
+Update.Shuttle.Fine.Bar.Region: proc public swapable;
+
+   if Shuttle.Group = 0 then return;
+
+   /* Invalidate wave area if we are showing wave:  */
+
+   if Fine.Shuttle.Wave = 1                /* if wave display is up      */
+   then call Invalidate.Wave.Display(0);   /* Redraw coarse wave display */
+
+   call Display.Fine.Scroll.Bar(AEE.Shuttle.Anchor.Time);     /* present coarse bar      */
+end Update.Shuttle.Fine.Bar.Region;
+
+Update.Shuttle.Coarse.Bar.Region: proc public swapable;
+
+   if Shuttle.Group = 0 then return;
+
+   /* Invalidate wave area if we are showing wave:  */
+
+   if Coarse.Shuttle.Wave = 1              /* if wave display is up      */
+   then call Invalidate.Wave.Display(1);   /* Redraw coarse wave display */
+
+   call Display.Coarse.Scroll.Bar(AEE.Shuttle.Anchor.Time);     /* present coarse bar      */
+
+   call Set.Shuttle.Flags.And.Edits;       /* the flags too              */
+end Update.Shuttle.Coarse.Bar.Region;
+
+/* $page set.anchor time */
+
+/* set anchor time is used to set the anchor time for the */
+/* shuttle.   it is passed the time,  and a bit that      */
+/* can be set to stop playing                             */
+
+SET.ANCHOR.TIME: proc (pos, StopPlayback) swapable;
+   dcl pos           array;
+   dcl StopPlayback  fixed;  /* true to stop playback */
+
+   if StopPlayback <> 0
+   then do;
+      call Stop.DTD.Playback;    /* box positions below  */
+   end;
+
+   /* Use system routine to set the anchor point & generate the    */
+   /* necessary events.  Our screen will be updated shortly:       */
+
+   call Set.DTD.Scrub.Anchor.Point(pos);
+
+end SET.ANCHOR.TIME;
+
+/* $page - routine to set up scroll bar edit flags */
+
+/* Set.Shuttle.Flags.And.Edits is called to    */
+/* draw the edit in/out flags,  the cue in/out */
+/* flags,  and the edit point markers on top   */
+/* of the shuttle bar                          */
+
+/* it starts the process going.  actual        */
+/* drawing occurs while system is waiting      */
+/* for user input                              */
+
+/* Draw.New.AEE.Flags.And.Edits is set to 1    */
+/* whenever the display needs refreshing       */
+
+/* It is set to 2 when the in/out times        */
+/* and edit in/out times have been checked     */
+
+/* It is set to 3 when the new edit flag       */
+/* bit map has been computed.                  */
+
+/* It is set back to 0 when the screen is      */
+/* up to date                                  */
+
+/* these contortions are done to make the      */
+/* drawing process interruptable               */
+
+Set.Shuttle.Flags.And.Edits:proc PUBLIC swapable;
+
+   Draw.New.AEE.Flags.And.Edits = 1;
+
+end Set.Shuttle.Flags.And.Edits;

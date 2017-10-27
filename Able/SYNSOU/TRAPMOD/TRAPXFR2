@@ -1,0 +1,1122 @@
+/*	:SYNSOU:TRAPMOD:TRAPXFR2  $TITLE  ROUTINES TO HANDLE BLOCK TRANSFERS OF ABLE DATA STRUCTS	*/
+
+/*
+Modified:
+1999/03/29 - TY  - Changed call to "Append.Sequencer.Tempo.Map.Record" in "Write.Tempo.Records".
+						 Changed call to "Append.Sequencer.Meter.Map.Record" in "Write.Meter.Records".
+1994/12/13 - PF  - Don't scroll sequence after events write
+1994/12/06 - PF  - Keep native_offset out of protocol
+1992/06/05 - PF  - Optimize inserting notes
+1992/02/26 - PF  - Add read/write of tempo/meter maps
+1992/02/20 - PF  - Set RUN.SYN off during call to LOCATE.DTD.CUE
+1992/02/18 - PF  - Begin tempo/meter map block transer
+1992/02/15 - pf  - Speed up block sequence downloading over protocol
+1992/01/10 - PF  - Add read and write of timbres
+1992/01/09 - PF  - Cleaned up reading/writing cues
+1991/12/30 - PF  - Set correct type when writing cue event
+1991/12/06 - PF  - Setup event basics before calling event routines
+1991/12/06 - PF  - Skip over rest records when reading events
+1991/11/30 - PF  - Added read of Cue Events
+1991/11/30 - PF  - Deal with zero.time offset and all lengths correctly
+1991/11/30 - PF  - Added Send.Unknown.Addr.Response
+1991/11/14 - PF  - Created this source file
+*/
+
+/*	literals defining nodes on Able data structure tree	*/
+
+dcl n#able					lit  ' 1';	/*	top of hierarchy tree				*/
+dcl n#sequence				lit  ' 1';	/*	sequence header info					*/
+dcl n#tracks				lit  ' 1';	/*	list of tracks with minimal info	*/
+dcl n#events				lit  ' 1';	/*	track events							*/
+
+/*	block transfer byte lengths	*/
+
+dcl l#addr					lit ' 56';	/*	byte length of standard address - count + 13 levels	*/
+dcl l#standard_header	lit ' 66';	/*	length of standard xfer header	*/
+dcl l#buf_header			lit '4 + l#standard_header';	/*	our buffer header includes super/subtype word and tag	*/
+dcl l#sequence_header	lit '186';	/*	length of seq header record	*/
+dcl l#tracks_info			lit ' 10';	/*	length of tracks info record	*/
+dcl l#track_header		lit ' 68';	/*	length of track header record	*/
+dcl l#cue_record			lit '176';	/*	length of cue event record	*/
+dcl l#note_record			lit ' 16';	/*	length of regular note record	*/
+dcl l#rte_record			lit ' 16';	/*	length of real time effect record	*/
+dcl l#ram_cue_record		lit ' 42';	/*	length of poly ram event	*/
+dcl l#ilp_record			lit ' 12';	/*	length of independent loop record	*/
+dcl l#tempo_record		lit ' 24';	/*	length of tempo record	*/
+dcl l#meter_record		lit ' 60';	/*	length of meter record	*/
+dcl max.xfer.length		lit '10000';	/*	maximum byte count for transfer block size	*/
+
+/*	string length lits	*/
+
+dcl l#name					lit ' 52';	/*	protocol allows for 52 bytes	*/
+dcl l#caption				lit ' 52';
+
+/*	type literals	*/
+
+dcl xt#note					lit '  1';	/*	regular note event type identifier	*/
+dcl xt#rte					lit '  2';	/*	real time effect	*/
+dcl xt#cue					lit '  3';	/*	dtd cue	*/
+dcl xt#ram_cue				lit '  4';	/*	poly ram cue	*/
+dcl xt#ilp					lit '  5';	/*	synclavier independent loop	*/
+
+/*	location literals	*/
+
+dcl loc#status				lit '  2';	/*	location of status word	*/
+dcl loc#size				lit '  3';	/*	location of size word	*/
+dcl loc#count				lit ' 33';	/*	location of record count	*/
+dcl loc#data				lit ' 35';	/*	start of data records	*/
+
+
+/*	short cut lits for save/restore mam/mal routines	*/
+
+dcl sav.ptrs(1)	fixed;
+dcl save				lit 'call save.mam.mal(sav.ptrs)';
+dcl restore			lit 'call restore.mam.mal(sav.ptrs)';
+
+/*	Transfer routines for Able data structure addressing	*/
+
+Read.Data: proc (des,tag,length) swapable;
+	dcl des			fixed;
+	dcl tag			fixed;
+	dcl length		fixed;
+	dcl useblock	fixed;
+	dcl datasize	fixed;
+	dcl pointer		fixed;
+	dcl my.buf(40)	fixed;
+
+	/*	build protocol packets in internal memory for speed - avoid copying in and back out again	*/
+
+	write("313") = addr(my.buf(0));
+	write("373") = 0;							/*	length - set later	*/
+	write("373") = des;						/*	set destination		*/
+
+	if length IGT 60 then do;				/*	begin blocking if need to	*/
+		useblock = 1;
+		write("373") = T#Net_Block | T#Net_Block_Start;
+		write("373") = tag;					/*	tag for block transfer	*/
+		write("373") = length;				/*	data bytes for blocks	*/
+	end;
+
+	write(MAM) = XFER.PTR;					/*	set up to read data from xfer buffer	*/
+
+	do while pointer ILT length;			/*	until all data has been read	*/
+
+		datasize = length - pointer;				/*	compute bytes left to process	*/
+		if datasize > 60 then datasize = 60;	/*	but limit to 62 per packet	*/
+
+		rpc(shr(datasize,1));						/*	repeat counter on words!	*/
+		write("373") = read(mdi);					/*	read data from xfer buf into my.buf	*/
+
+		pointer = pointer + datasize;				/*	update byte pointer	*/
+
+		my.buf(0) = shl(read("313") - addr(my.buf(0)),1);	/*	compute byte len of this packet	*/
+
+		if (useblock & (pointer = length))		/*	set end of block bit for	*/
+		then do;											/*	last block	*/
+			my.buf(P#Type) = my.buf(P#Type) | T#Net_Block_Last;
+		end;
+
+		call SEND.PROTOCOL.PACKET.WITH.RETRY(addr(my.buf(0)),0,10000);
+
+		//	Create possible header for next block in case there is more to send
+		if (useblock) & (pointer <= 62) then do;	/*	packet just sent was first block of a block transfer	*/
+			my.buf(P#Type) = T#Net_Block;				/*	set continuation type for subsequent packets	*/
+			my.buf(P#Data) = tag;						/*	tag for block transfer	*/
+			my.buf(P#Data + 1) = 0;						/*	reserved	*/
+		end;
+
+		write("313") = addr(my.buf(P#Data + 2));	/*	set up for write of more data	*/
+	end;
+
+	return 1;
+
+end Read.Data;
+
+/*	This routine builds the data in response to the req for: Able:Sequence.	*/
+/*	The repsonse consists of select data from the sequence header of the		*/
+/*	current Synclavier sequence.															*/
+
+Read.Sequence.Header: proc (des,tag) swapable;
+	dcl des	fixed;
+	dcl tag	fixed;
+	dcl length	fixed;
+
+	move: proc (wrd,count);
+		dcl wrd	fixed;
+		dcl count	fixed;
+		dcl savmam	fixed;
+		dcl savmal	fixed;
+
+		savmam = read(MAM);
+		savmal = read(MAL);
+
+		write(MAM) = BAS.PTR;
+		write(MAL) = wrd;
+
+		write("313") = addr(misc.buf(0));
+		rpc(count);
+		write("373") = read(mdi);
+
+		write(MAM) = savmam;
+		write(MAL) = savmal;
+
+		/*	now write info back to xfer buf	*/
+
+		write("313") = addr(misc.buf(0));
+		rpc(count);
+		write(mdi) = read("373");
+	end;
+
+
+	/*	compute byte length of "block" transfer	*/
+
+	length = l#buf_header						/*	total length of header stuff	*/
+			 + l#sequence_header;				/*	and one record of sequence header info	*/
+
+	write(MAM) = XFER.PTR;						/*	now build transfer block in xfer buffer	*/
+	write(mdi) = T#Data_Read;					/*	begin of block transfer data bytes	*/
+	write(mdi) = tag;								/*	tag	*/
+	write(mdi) = s#good_status;				/*	status - begin of data xfer standard header	*/
+	write(mdi) = 0;								/*	size	*/
+	write(mdi) = length - 4;
+	write(mdi) = 0;								/*	begin of addr - num levels	*/
+	write(mdi) = 2;
+	write(mdi) = 0;								/*	Able	*/
+	write(mdi) = 1;
+	write(mdi) = 0;								/*	Sequence	*/
+	write(mdi) = 1;
+
+	rpc(22);											/*	zero out the rest of the addr	*/
+	write(mdi) = 0;
+
+	write(mdi) = 0;								/*	record count	*/
+	write(mdi) = 1;
+
+	/*	begin of actual sequence header record	*/
+
+	write(mdi) = l#sequence_header;			/*	record size	*/
+
+	call move(SEQ.SCALE,14);					/*	get scale,speed,click	*/
+	call move(SEQ.SMODE,15);					/*	smpte mode thru num.seq.params	*/
+	write(mdi) = AEE.Current.Project.Rate;	/*	current DTD project rate	*/
+	call move(SEQ.OCTRATIO,6);					/*	octave ratio thru loop start	*/
+	call move(SEQ.POLY.FREQ.TABLE,1);		/*	get item	*/
+	call move(SEQ.CAPTS,40);					/*	the sequencer caption	*/
+	call move(SEQ.MIDINET,16);					/*	and the midinet filename	*/
+
+	/*	now send the thing out using block transfer mode	*/
+
+	return Read.Data(des,tag,length);
+
+end Read.Sequence.Header;
+
+
+Send.Data.Write.Answer: proc (des,tag,status) swapable;
+	dcl des		fixed;
+	dcl tag		fixed;
+	dcl status	fixed;
+
+	write(mam) = misc.ptr;
+
+	write(mdi) = L#Data_Write;
+	write(mdi) = des;
+	write(mdi) = T#Data_Write;
+	write(mdi) = tag;
+	write(mdi) = status;
+
+	call SEND.PROTOCOL.PACKET.WITH.RETRY(misc.ptr,1,10000);
+
+	return 1;
+
+end Send.Data.Write.Answer;
+
+
+save.mam.mal: proc (ptrs);
+	dcl ptrs	array;
+
+	ptrs(0) = read(mam);
+	ptrs(1) = read(mal);
+end;
+
+
+restore.mam.mal: proc (ptrs);
+	dcl ptrs	array;
+
+	write(mam) = ptrs(0);
+	write(mal) = ptrs(1);
+end;
+
+
+Write.Sequence.Header: proc (des,tag) swapable;
+	dcl des			fixed;
+	dcl tag			fixed;
+	dcl count		fixed;
+	dcl i				fixed;
+	dcl x				fixed;
+	dcl buf(48)		array;
+	dcl status		fixed;
+	dcl misc(3)		fixed;
+
+	status = s#good_status;				/*	assume no errors	*/
+
+	write(mam) = XFER.PTR;				/*	point to actual sequence header data	*/
+	x	 = read(mdi);						/*	skip super/sub	*/
+	tag = read(md );						/*	get correct tag for return reply	*/
+
+	write(mal) = loc#data;				/*	point to actual data	*/
+
+	x = read(mdi);							/*	skip record size	*/
+
+	do i = 0 to 11;						/*	get scale passed in	*/
+		buf(i) = read(mdi);
+	end;
+	save; call Write.Seq.Scale(buf,0,12);
+	restore;
+
+	x = read(mdi);							/*	read speed	*/
+	save; call Write.Seq.Speed(x);
+	restore;
+
+	x = read(mdi);							/*	get old style click rate	*/
+	save; call Write.Seq.Click(x);
+	restore;
+
+	x = read(mdi);							/*	smpte mode	*/
+	save; call Write.Seq.SMode(x);
+	restore;
+
+	do i = 0 to 2;							/*	smpte offset	*/
+		buf(i) = read(mdi);
+	end;
+	save; call Write.Seq.Smpte(buf);
+	restore;
+
+	x = read(mdi);							/*	old style beats per measure	*/
+	save; call Write.Seq.BPM(x);
+	restore;
+
+	buf(0) = read(mdi);					/*	mark start time	*/
+	buf(1) = read(mdi);
+	save; call Write.Seq.Mark.Start(buf);
+	restore;
+
+	x = read(mdi);							/*	footage mode	*/
+	save; call Write.Seq.Footage.Mode(x);
+	restore;
+
+	misc(0) = read(mdi);					/*	footage display offset	*/
+	misc(1) = read(mdi);
+	misc(2) = read(mdi);
+	save; call Write.Seq.Footage.Display.Offset(misc);
+	restore;
+
+	misc(0) = read(mdi);					/*	smpte display offset	*/
+	misc(1) = read(mdi);
+	save; call Write.Seq.Smpte.Display.Offset(misc);
+	restore;
+
+	x = read(mdi);							/*	smpte display on/off	*/
+	save; call Write.Seq.Smpte.Display(x);
+	restore;
+
+	x = read(mdi);							/*	skip aee.project.rate - read only	*/
+
+	x = read(mdi);							/*	ocatve ratio	*/
+	save; call Write.Seq.Oratio(x);
+	restore;
+
+	x = read(mdi);							/*	loop	*/
+	save; call Write.Seq.Loop(x);
+	restore;
+
+	misc(0) = read(mdi);					/*	loop times	*/
+	misc(1) = read(mdi);
+	misc(2) = read(mdi);
+	misc(3) = read(mdi);
+	save; call Write.Seq.Loop.Times(loc(addr(misc(0))),loc(addr(misc(2))));
+	restore;
+
+	x = read(mdi);							/*	poly freq table	*/
+	save; call Write.Seq.Poly.Freq(x);
+	restore;
+
+	call COPY.IN(addr(misc.buf(0)), 40);	/*	sequence caption	*/
+	save; call Write.Seq.Caption(misc.buf);
+	restore;
+
+	call COPY.IN(addr(misc.buf(0)), 16);	/*	midinet filename	*/
+	save; call Write.Seq.MIDInet.Filename(misc.buf);
+	restore;
+
+	call Send.Data.Write.Answer(des,tag,status);
+
+	return 1;
+
+end Write.Sequence.Header;
+
+
+Write.Track.Header: proc (des,tag,track) swapable;
+	dcl des			fixed;
+	dcl tag			fixed;
+	dcl track		fixed;
+	dcl status		fixed;
+	dcl (x,y)		fixed;
+	dcl start(1)	fixed;
+	dcl len(1)		fixed;
+
+	status = s#good_status;				/*	assume no errors	*/
+
+	write(mam) = XFER.PTR;				/*	point to packet in xmem	*/
+	x	 = read(mdi);						/*	skip super/sub	*/
+	tag = read(md );						/*	get correct tag for return reply	*/
+
+	write(mam)=trk.head;					/*	See if track header exists	*/
+	write(mal)=track;
+	if read(md)=0 then do;						/*	no track header	*/
+		if ALLOCATE.TRK.HEADER(track) = 0	/*	try to allocate one	*/
+		then do;
+			status = b#complete;			/*	clear success bit	*/
+			call Send.Data.Write.Answer(des,tag,status);
+			return 1;
+		end;
+		call COPY.TIMBRE(ALWAYS.EMPTY.TRACK,track);	/*	put null timbre on new track	*/
+	end;
+
+	write(mam) = XFER.PTR;				/*	point to actual sequence header data	*/
+	write(mal) = loc#data;
+
+	x = read(mdi);							/*	skip record size	*/
+	x = read(mdi);							/*	and track type	*/
+	x = read(mdi);							/*	and event count msb/lsb	*/
+	x = read(mdi);
+
+	x = read(mdi);							/*	read midi routing	*/
+	save; call Write.Trk.MIDI.Routing(track, x);
+	restore;
+
+	x = read(mdi);							/*	read track volume	*/
+	save; call Write.Trk.Volume(track, x);
+	restore;
+
+	x = read(mdi);							/*	read multi left routing	*/
+	y = read(mdi);							/*	and right too	*/
+	save; call Write.Trk.Routing(track, x,y);
+	restore;
+
+	x = read(mdi);							/*	read track pan	*/
+	save; call Write.Trk.Pan(track, x);
+	restore;
+
+	x = read(mdi);							/*	read ocatve ratio	*/
+	save; call Write.Trk.Octave.Ratio(track, x);
+	restore;
+
+	x = read(mdi);							/*	read start transposition	*/
+	save; call Write.Trk.Xpos(track, x);
+	restore;
+
+	x = read(mdi);							/*	read ilp present	*/
+	save; call Write.Trk.ILP(track, x);
+	restore;
+
+	start(0) = read(mdi);				/*	read ilp times	*/
+	start(1) = read(mdi);
+	len  (0) = read(mdi);
+	len  (1) = read(mdi);
+	save; call Write.Trk.ILP.Times(track, start,len);
+	restore;
+
+	x = read(mdi);							/*	read midi controller filter	*/
+	save; call Write.Trk.MIDI.Filter(track, x);
+	restore;
+
+	x = read(mdi);							/*	read cue output	*/
+	save; call Write.Trk.Cue.Output(track, x);
+	restore;
+
+	call COPY.IN(addr(misc.buf(0)), 17);	/*	track name	*/
+	save; call Write.Trk.Name(track, misc.buf);
+	restore;
+
+	call Send.Data.Write.Answer(des,tag,status);
+
+	return 1;
+
+end Write.Track.Header;
+
+
+dcl Erase.Tempo.Map.Info proc external;
+dcl Erase.Meter.Map.Info proc external;
+
+Write.Tempo.Records: proc (des,tag) swapable;
+	dcl des			fixed;
+	dcl tag			fixed;
+	dcl status		fixed;
+	dcl x				fixed;
+	dcl record#(1)	fixed;
+	dcl numrecs		fixed;
+	dcl rnum			fixed;
+	dcl data.ptr	fixed;
+	dcl record(shr(l#tempo_record,1)-1)	fixed;
+
+	status = s#good_status;				/*	assume no errors	*/
+
+	call Erase.Tempo.Map.Info;			/*	Erase current Tempo Map	*/
+
+	write(mam) = XFER.PTR;				/*	point to packet in xmem	*/
+	x	 = read(mdi);						/*	skip super/sub	*/
+	tag = read(md );						/*	get correct tag for return reply	*/
+
+	write(mal) = loc#count;				/*	point to record count	*/
+	x = read(mdi);							/*	skip record count msb	*/
+	numrecs = read(mdi);					/*	get number of records	*/
+
+	data.ptr = read(mal);				/*	save position - pointing at begin of data	*/
+
+	call STR32(0,0,record#);			/*	init record # to zero	*/
+
+	do rnum = 0 to numrecs - 1;		/*	process all records passed in	*/
+
+		write(mam) = XFER.PTR + shr(data.ptr,8);	/*	point to current place holder in xfer.ptr	*/
+		write(mal) = data.ptr;
+
+		write("313") = addr(record(0));
+		rpc(shr(l#tempo_record,1));
+		write("373") = read(mdi);
+
+		//	x = Append.Sequencer.Tempo.Map.Record(record#,loc(addr(record(2))));
+		x = Append.Sequencer.Tempo.Map.Record(loc(addr(record(2))));
+
+		if x = (-1)	/*	give error if out of memory	*/
+		then do;
+			status = status & (not b#success);	/*	clear success bit from return status	*/
+			call Erase.Tempo.Map.Info;				/*	clear any partial map which may have been written	*/
+			call Send.Data.Write.Answer(des,tag,status);	/*	send response to protocol	*/
+			return(TRUE);
+		end;
+
+		call ADD16(1,record#);
+		data.ptr = data.ptr + shr(l#tempo_record,1);		/*	advance our pointer to next record	*/
+
+	end;
+
+	call Send.Data.Write.Answer(des,tag,status);
+
+	return(TRUE);
+
+end Write.Tempo.Records;
+
+
+Write.Meter.Records: proc (des,tag) swapable;
+	dcl des			fixed;
+	dcl tag			fixed;
+	dcl status		fixed;
+	dcl x				fixed;
+	dcl record#(1)	fixed;
+	dcl numrecs		fixed;
+	dcl rnum			fixed;
+	dcl data.ptr	fixed;
+	dcl record(shr(l#meter_record,1)-1)	fixed;
+
+	status = s#good_status;				/*	assume no errors	*/
+
+	call Erase.Meter.Map.Info;			/*	Erase current Meter Map	*/
+
+	write(mam) = XFER.PTR;				/*	point to packet in xmem	*/
+	x	 = read(mdi);						/*	skip super/sub	*/
+	tag = read(md );						/*	get correct tag for return reply	*/
+
+	write(mal) = loc#count;				/*	point to record count	*/
+	x = read(mdi);							/*	skip record count msb	*/
+	numrecs = read(mdi);					/*	get number of records	*/
+
+	data.ptr = read(mal);				/*	save position - pointing at begin of data	*/
+
+	call STR32(0,0,record#);			/*	init record # to zero	*/
+
+	do rnum = 0 to numrecs - 1;		/*	process all records passed in	*/
+
+		write(mam) = XFER.PTR + shr(data.ptr,8);	/*	point to current place holder in xfer.ptr	*/
+		write(mal) = data.ptr;
+
+		write("313") = addr(record(0));
+		rpc(shr(l#meter_record,1));
+		write("373") = read(mdi);
+
+		//	x = Append.Sequencer.Meter.Map.Record(record#,loc(addr(record(2))));
+		x = Append.Sequencer.Meter.Map.Record(loc(addr(record(2))));
+
+		if x = (-1)	/*	give error if out of memory	*/
+		then do;
+			status = status & (not b#success);	/*	clear success bit from return status	*/
+			call Erase.Meter.Map.Info;				/*	clear any partial map which may have been written	*/
+			call Send.Data.Write.Answer(des,tag,status);	/*	send response to protocol	*/
+			return(TRUE);
+		end;
+
+		call ADD16(1,record#);
+		data.ptr = data.ptr + shr(l#meter_record,1);		/*	advance our pointer to next record	*/
+
+	end;
+
+	call Send.Data.Write.Answer(des,tag,status);
+
+	return(TRUE);
+
+end Write.Meter.Records;
+
+dcl temp.note.trk	fixed															external;
+dcl erase.track	proc (fixed)												external;
+dcl bounce.down	proc (fixed,fixed,fixed,fixed) returns (fixed)	external;
+
+Write.Sequence.Events: proc (des,tag,track,in,out) swapable;
+	dcl des			fixed;
+	dcl tag			fixed;
+	dcl track		fixed;
+	dcl in			array;
+	dcl out			array;
+	dcl len(1)		fixed;
+	dcl dur(1)		fixed;
+	dcl (x,y)		fixed;
+	dcl numrecs		fixed;
+	dcl rnum			fixed;
+	dcl rsize		fixed;
+	dcl type			fixed;
+	dcl key#			fixed;
+	dcl vel			fixed;
+	dcl event (Event.Record.Size-1)	fixed;
+	dcl status		fixed;
+	dcl data.ptr	fixed;
+	dcl count		fixed;
+	dcl last.time(1)		fixed;
+	dcl (w1,w2,w3,w4)		fixed;
+	dcl native_offset(1)	fixed;
+	dcl tt(1)				fixed;
+	dcl bounce.trk			fixed;
+
+	dcl FETCH.DTD.CUE.IN.SAMPLES	proc (fixed,array) returns (fixed)	external;
+
+	if play <> 0 then do;				/*	make sure sequencer is stopped	*/
+		call stop.sequencer;
+	end;
+
+	tt(0) = play.time.msb;				/*	latch current time to restore after edit	*/
+	tt(1) = play.time.lsb;
+
+	write(mam) = XFER.PTR;				/*	point to actual sequence header data	*/
+	x	 = read(mdi);						/*	skip super/sub	*/
+	tag = read(md );						/*	get correct tag for return reply	*/
+
+	write(mal) = loc#count;				/*	point to record count	*/
+
+	x = read(mdi);							/*	skip record count msb	*/
+	numrecs = read(mdi);					/*	get number of records	*/
+
+	data.ptr = read(mal);				/*	save position - pointing at begin of data	*/
+
+	in(1) = in(1) + zero.time;			/*	add zero.time offset to incoming times	*/
+	if in(1) ilt zero.time				/*	check for wrap on lsb	*/
+	then do;
+		in(0) = in(0) + 1;
+		if in(0) = 0 then do;			/*	check for msb wrap error	*/
+			in(0) = "177777";				/*	limit to max_int32	*/
+			in(1) = "177777";
+		end;
+	end;
+
+	out(1) = out(1) + zero.time;		/*	add zero.time offset to incoming times	*/
+	if out(1) ilt zero.time				/*	check for wrap on lsb	*/
+	then do;
+		out(0) = out(0) + 1;
+		if out(0) = 0 then do;			/*	check for msb wrap error	*/
+			out(0) = "177777";			/*	limit to max_int32	*/
+			out(1) = "177777";
+		end;
+	end;
+
+	call SUB32(out,in,len);				/*	compute len of punch out	*/
+
+	write(mam) = trk.head;				/*	get current number of notes on track	*/
+	write(mal) = track;
+	if read(md) <> 0 then do;
+		write(mam) = read(md);
+		write(mal) = thd.nn.msb;
+		x = read(mdi);
+		y = read(mdi);
+	end;
+
+	/*	erase specified region of track	*/
+
+	status = PUNCH.NOTES.FROM.TRK(track,in(0),in(1),len(0),len(1),0,0);
+
+	write(mam) = trk.head;				/*	see if number of events on track has changed	*/
+	write(mal) = track;
+	if  (read(md) <> 0)					/*	track exists	*/
+	and (status   <> 0)					/*	and no errors in punch	*/
+	then do;									/*	check number of notes again	*/
+		write(mam) = read(md);
+		write(mal) = thd.nn.msb;
+		if (read(mdi) <> x)
+		or (read(mdi) <> y)				/*	some events may have been deleted	*/
+		then do;								/*	check for gargabe collect of event area	*/
+			call Stop.Sequencer;			/*	stop sequencer for the garbage collect	*/
+			call Garbage.Collect.Event.Area(track);
+		end;
+	end;
+
+	write(mam) = trk.head;
+	write(mal) = temp.trk;				/*	global temporary track	*/
+	if (read(md) <> 0) then do;		/*	make sure temp.trk is empty	*/
+		call erase.track(temp.trk);
+	end;
+	bounce.trk = 0;						/*	assume we won't need to bounce tracks together after placing events	*/
+
+	if (status <> 0)						/*	no errors yet	*/
+	then do rnum = 0 to numrecs - 1;	/*	process all records passed in	*/
+
+		write(mam) = XFER.PTR + shr(data.ptr,8);	/*	point to current place holder in xfer.ptr	*/
+		write(mal) = data.ptr;
+
+		rsize	 = read(mdi);				/*	get size of this record	*/
+		type	 = read(mdi);				/*	event type	*/
+		in(0)	 = read(mdi);
+		in(1)	 = read(mdi);
+		out(0) = read(mdi);
+		out(1) = read(mdi);
+		call SUB32(out,in,dur);			/*	compute event duration	*/
+
+		if type = xt#note then do;		/*	handle regular notes		*/
+
+			key# = shr(read(md),8);
+			vel  = read(mdi) & 255;
+
+			type = Event.Type.Note;						/*	set type to note	*/
+
+			call Get.Default.Event(event,type);		/*	Initialize event record	*/
+
+			/*	Fill temporary event record with the data passed in	*/
+			event(Event.Track#) = track;
+			call copy32(in,loc(addr(event(Event.Time.Msb))));
+			call add16(ZERO.TIME,loc(addr(event(Event.Time.Msb))));	/*	Add "ZERO.TIME" offset	*/
+
+			if (last.time(0) <> event(Event.Time.Msb))
+			or (last.time(1) <> event(Event.Time.Lsb))
+			then do;
+				count = 0;
+				last.time(0) = event(Event.Time.Msb);
+				last.time(1) = event(Event.Time.Lsb);
+			end;
+			else count = count + 1;
+
+			event(Event.Time.Count)	= count;
+			event(Event.Type)			= type;
+			event(Event.Key#)			= key#;
+			call copy32(dur,loc(addr(event(Event.Duration.Msb))));
+			event(Event.Volume)		= vel;
+			call STR32(0,0,loc(addr(event(Event.In.Msb))));
+			call COPY32(dur,loc(addr(event(Event.Out.Msb))));
+
+			event(Event.W3) = (event(Event.W3) & "177400") | vel;	/*	stuff in low byte	*/
+			event(Event.W4) = (event(Event.W4) & "377");				/*	preserve lower half of word - clear guitar volume byte	*/
+
+			temp.note.trk = temp.trk;			/*	activate global variable for optimized note inserts	*/
+			bounce.trk = temp.note.trk;		/*	set so tracks get merged below	*/
+
+		end;
+
+		else if type = xt#rte then do;
+
+			key# = shr(read(md),8);
+			vel  = read(mdi) & 255;
+
+			w1 = out(0);								/*	get raw data w1 - w4	*/
+			w2 = out(1);
+			w3 = read(mdi);
+			w4 = read(mdi);
+
+			type = Event.Type.Rte;					/*	set type to real time effect	*/
+
+			call Get.Default.Event(event,type);	/*	Initialize event record	*/
+
+			/*	Fill temporary event record with the data passed in	*/
+
+			event(Event.Track#) = track;										/*	track number	*/
+			call copy32(in,loc(addr(event(Event.Time.Msb))));			/*	start time of ilp	*/
+			call add16(ZERO.TIME,loc(addr(event(Event.Time.Msb))));	/*	Add "ZERO.TIME" offset	*/
+
+			event(Event.W1) = w1;
+			event(Event.W2) = w2;
+			event(Event.W3) = w3;
+			event(Event.W4) = w4;
+
+			temp.note.trk = temp.trk;			/*	activate global variable for optimized note inserts	*/
+			bounce.trk = temp.note.trk;		/*	set so tracks get merged below	*/
+
+		end;
+
+		else if type = xt#cue then do;
+
+			save;
+
+			type = Event.Type.Event;					/*	set type to complex cue event	*/
+
+			call Get.Default.Event(event,type);		/*	Initialize event record	*/
+
+			/*	Fill temporary event record with the data passed in	*/
+			event(Event.Track#) = track;
+			call copy32(in,loc(addr(event(Event.Time.Msb))));
+			call add16(ZERO.TIME,loc(addr(event(Event.Time.Msb))));	/*	Add "ZERO.TIME" offset	*/
+
+			if (last.time(0) <> event(Event.Time.Msb))
+			or (last.time(1) <> event(Event.Time.Lsb))
+			then do;
+				count = 0;
+				last.time(0) = event(Event.Time.Msb);
+				last.time(1) = event(Event.Time.Lsb);
+			end;
+			else count = count + 1;
+
+			event(Event.Time.Count)	= count;
+			event(Event.Type)			= type;
+			call copy32(dur,loc(addr(event(Event.Duration.Msb))));
+
+			event(Event.Mark.Msb) = out(0);
+			event(Event.Mark.Lsb) = out(1);
+
+			restore;
+			event(Event.In.Msb  ) = read(mdi);
+			event(Event.In.Lsb  ) = read(mdi);
+			event(Event.Out.Msb ) = read(mdi);
+			event(Event.Out.Lsb ) = read(mdi);
+			event(Event.Fade.In ) = read(mdi);
+			event(Event.Fade.Out) = read(mdi);
+			event(Event.Volume)	 = read(mdi);
+			event(Event.SVol)		 = read(mdi);
+			event(Event.EVol)		 = read(mdi);
+			x							 = read(mdi);		/*	track bits are read only	*/
+			x							 = read(mdi);		/*	skip original duration		*/
+			x							 = read(mdi);
+			x							 = read(mdi);		/*	and native sync	*/
+			x							 = read(mdi);
+			native_offset(0)		 = read(mdi);		/*	get native disk offset constant in samples	*/
+			native_offset(1)		 = read(mdi);
+
+			call COPY.IN(addr(event(Event.Cue.Name)),	Event.Cue.Max.Words);	/*	event name		*/
+			call COPY.IN(addr(event(Event.Caption)),	Event.Cap.Max.Words);	/*	caption name	*/
+
+			x = run.syn;						/*	save state of run.syn global	*/
+			run.syn = 0;						/*	try to speed up send.to.lod	*/
+
+				event(Event.Cue.Id) = LOCATE.DTD.CUE(loc(addr(event(Event.Cue.Name))));
+
+				/*	Lookup cue info so we can override native_offset with our known value	*/
+				if Fetch.DTD.cue.in.samples(event(Event.Cue.Id),misc.buf) <> 0 then do;
+
+					call sub32(loc(addr(misc.buf(CUE.S.MSB		  ))),	/*	compute positive offset from event.in.s#.msb to cue.s.msb	*/
+								  loc(addr(misc.buf(EVENT.IN.S#.MSB))),
+								  native_offset);
+				end;
+				else do;
+					call str32(0,0,native_offset);
+				end;
+
+			run.syn = x;						/*	restore run.syn state	*/
+
+			/*	remap passed mark and in/out times from msec to sample#	*/
+
+			call Signed.MSEC.To.DTD.Sample.#(loc(addr(event(Event.Mark.Msb))),
+														CF#DUR,
+														SAMP.SPEED,
+														AEE.Current.Project.Rate,
+														zero.zero,loc(addr(event(Event.Mark.Msb))));
+			call add32(loc(addr(event(Event.Mark.Msb))),	/*	restore offset from start of event to current cue in time	*/
+						  native_offset,
+						  loc(addr(event(Event.Mark.Msb))));
+
+			call Signed.MSEC.To.DTD.Sample.#(loc(addr(event(Event.In.Msb))),
+														CF#DUR,
+														SAMP.SPEED,
+														AEE.Current.Project.Rate,
+														zero.zero,loc(addr(event(Event.In.Msb))));
+			call add32(loc(addr(event(Event.In.Msb))),	/*	restore offset from start of event to current cue in time	*/
+						  native_offset,
+						  loc(addr(event(Event.In.Msb))));
+
+			call Signed.MSEC.To.DTD.Sample.#(loc(addr(event(Event.Out.Msb))),
+														CF#DUR,
+														SAMP.SPEED,
+														AEE.Current.Project.Rate,
+														zero.zero,loc(addr(event(Event.Out.Msb))));
+			call add32(loc(addr(event(Event.Out.Msb))),	/*	restore offset from start of event to current cue in time	*/
+						  native_offset,
+						  loc(addr(event(Event.Out.Msb))));
+
+		end;
+
+		else if type = xt#ram_cue then do;
+
+			save;
+
+			key# = shr(read(md),8);
+			vel  = read(mdi) & 255;
+
+			type = Event.Type.Poly;						/*	set type to poly ram event	*/
+
+			call Get.Default.Event(event,type);		/*	Initialize event record		*/
+
+			/*	Fill temporary event record with the data passed in	*/
+			event(Event.Track#) = track;
+			call copy32(in,loc(addr(event(Event.Time.Msb))));
+			call add16(ZERO.TIME,loc(addr(event(Event.Time.Msb))));	/*	Add "ZERO.TIME" offset	*/
+
+			if (last.time(0) <> event(Event.Time.Msb))
+			or (last.time(1) <> event(Event.Time.Lsb))
+			then do;
+				count = 0;
+				last.time(0) = event(Event.Time.Msb);
+				last.time(1) = event(Event.Time.Lsb);
+			end;
+			else count = count + 1;
+
+			event(Event.Time.Count)	= count;
+			event(Event.Type)			= type;
+			call copy32(dur,loc(addr(event(Event.Duration.Msb))));
+
+			restore;											/*	point back to our pos in xfer buffer	*/
+			event(Event.Mark.Msb) = read(mdi);
+			event(Event.Mark.Lsb) = read(mdi);
+			event(Event.In.Msb  ) = read(mdi);
+			event(Event.In.Lsb  ) = read(mdi);
+			event(Event.Out.Msb ) = read(mdi);
+			event(Event.Out.Lsb ) = read(mdi);
+			event(Event.Fade.In ) = read(mdi);
+			event(Event.Fade.Out) = read(mdi);
+			event(Event.Volume)	 = read(mdi);
+			event(Event.SVol)		 = read(mdi);
+			event(Event.EVol)		 = read(mdi);
+			x							 = read(mdi);		/*	skip track bits	*/
+			x							 = read(mdi);		/*	priority	*/
+			x							 = read(mdi);		/*	original duration-read only	*/
+			x							 = read(mdi);		/*	native sync-read only	*/
+			event(Event.Key#)		 = read(mdi);		/*	for ram events key# holds tuning correction (-4800 to +4800)	*/
+			event(Event.LE.Msb)	 = read(mdi);		/*	loop end time	*/
+			event(Event.LE.Lsb)	 = read(mdi);
+			event(Event.LL.Msb)	 = read(mdi);		/*	loop length	*/
+			event(Event.LL.Lsb)	 = read(mdi);
+
+			call COPY.IN(addr(event(Event.Cue.Name)), Event.Cue.Max.Words);	/*	get sound file name	*/
+
+			/*	add zero.time offset to other passed times	*/
+
+			call add16(ZERO.TIME,loc(addr(event(Event.Mark.Msb))));
+			call add16(ZERO.TIME,loc(addr(event(Event.In.Msb  ))));
+			call add16(ZERO.TIME,loc(addr(event(Event.Out.Msb ))));
+
+			temp.note.trk = temp.trk;				/*	activate global variable for optimized note inserts	*/
+			bounce.trk = temp.note.trk;			/*	set so tracks get merged below	*/
+
+		end;
+
+		else if type = xt#ilp then do;			/*	independent loop	*/
+
+			type = Event.Type.ILP;					/*	set type to independent loop	*/
+
+			call Get.Default.Event(event,type);	/*	Initialize event record	*/
+
+			/*	Fill temporary event record with the data passed in	*/
+
+			event(Event.Track#) = track;										/*	track number		*/
+			call copy32(in,loc(addr(event(Event.Time.Msb))));			/*	start time of ilp	*/
+			call add16(ZERO.TIME,loc(addr(event(Event.Time.Msb))));	/*	Add "ZERO.TIME" offset	*/
+			call copy32(dur,loc(addr(event(Event.Duration.Msb))));	/*	duration of ilp	*/
+
+		end;
+
+		data.ptr = data.ptr + shr(rsize,1);		/*	advance our pointer to next record	*/
+
+		if (rnum = numrecs - 1)						/*	check for last record to place		*/
+		then last.event = true;						/*	set flag to activate clean up stuff after event place	*/
+		else last.event = false;
+
+		/*	Now, try to place the new event in the sequence	*/
+		call Place.Event.In.Sequence(event);
+
+		temp.note.trk = 0;							/*	very important to leave this set to zero!!!	*/
+
+	end;
+
+	if (bounce.trk <> 0)								/*	using insert optimization	*/
+	then do;
+		call copy.timbre(track,bounce.trk);			/*	make sure timbres match first	*/
+		call bounce.down(bounce.trk,track,1,0);	/*	merge the temp track notes with real destination	*/
+	end;
+
+	if (status <> 0)
+	then status = s#good_status;
+	else status = b#complete;
+
+	/*	call scroll.seq(tt(0), tt(1), 0);	*/		/*	reposition sequencer to time latched above	*/
+
+	call Send.Data.Write.Answer(des,tag,status);
+
+	return(TRUE);
+
+end Write.Sequence.Events;
+
+
+/*	This routine takes care of all needs in copying a timbre from	*/
+/*	the protocol into the current sequence (or keyboard).				*/
+
+Write.Track.Timbre: proc (des,tag,track) swapable;
+	dcl des				fixed;
+	dcl tag				fixed;
+	dcl track			fixed;
+	dcl status			fixed;
+	dcl records			fixed;
+	dcl (i,j,k,l,m)	fixed;
+	dcl x					fixed;
+	dcl temp.buf(12)	fixed;
+	dcl new.t#			fixed;
+	dcl old.t#			fixed;
+
+	status = s#good_status;				/*	assume no errors	*/
+
+	write(mam) = XFER.PTR;				/*	point to packet in xmem	*/
+	x	 = read(mdi);						/*	skip super/sub	*/
+	tag = read(md );						/*	get correct tag for return reply	*/
+
+	write(mam)=trk.head;					/*	see if track header exists	*/
+	write(mal)=track;
+	if read(md)=0 then do;						/*	no track header	*/
+		if allocate.trk.header(track) = 0	/*	try to allocate one	*/
+		then do;										/*	couldn't get a header	*/
+			status = b#complete;					/*	clear success bit	*/
+			call Send.Data.Write.Answer(des,tag,status);	/*	send back response	*/
+			return (true);
+		end;
+	end;
+
+	write(mam) = XFER.PTR;				/*	point back to our data buffer	*/
+	write(mal) = loc#count;				/*	point to record count	*/
+	x			  = read(mdi);				/*	skip msb	*/
+	records	  = read(md);				/*	get record count	*/
+
+	if records > 0 then do;				/*	if we have a valid timbre record	*/
+		write(mal) = loc#data;			/*	point to the record	*/
+		x = read(mdi);						/*	skip record size		*/
+		save;									/*	now pointing at start of timbre - load current mam/mal pointers into sav.ptrs	*/
+	end;
+
+	/*	store and clear necessary items in dest track head	*/
+
+	write(mam) = trk.head;
+	write(mal) = track;
+	write(mam) = read(md);				/*	point to dest track head	*/
+
+	write(mal)=thd.live.rtes;			/*	copy current thd.live.rtes in case midi is triggering track	*/
+	do i=0 to 7;temp.buf(i)=read(mdi);end;
+
+	write(mal)=thd.tvol;				temp.buf( 8)=read(md);	/*	save these 4 values since	*/
+	write(mal)=thd.midi;				temp.buf( 9)=read(md);	/*	MOVE.TIMBRE.TO will trash them	*/
+	write(mal)=thd.active.midi.rtes;	temp.buf(10)=read(md);
+	write(mal)=thd.midi.path;			temp.buf(11)=read(md);
+	write(mal)=thd.midx;		       	temp.buf(12)=read(md);
+
+	write(mal)=thd.stimb;				write(md)=0;	/*	clear out existing trk info	*/
+	write(mal)=thd.ctimb;				write(md)=0;
+	write(mal)=thd.lp.ctimb;			write(md)=0;
+	write(mal)=thd.ils.ctimb;			write(md)=0;
+	write(mal)=thd.ile.ctimb;			write(md)=0;
+
+	write(mal)=thd.usage;
+	do i=0 to thd.usage.len-1; write(mdi)=0; end;	/*	clear out usage table too	*/
+
+	call setup.floppy.cache;				/*	set up cache if needed (for following call to MOVE.TIMBRE.TO)	*/
+	call mount.optical.volume;				/*	also cache opt disk if needed	*/
+
+	display.ebl = 0;							/*	suppress displays during this copy	*/
+
+	if (recd) & (recd.trk <> 0) then do;
+		call stop.record;						/*	stop recording on timbre recall		*/
+		call display.sequencer.status;
+	end;
+
+	if track < num.kbd.tracks then do;	/*	copying timbre to a keyboard timbre	*/
+		if (records > 0)						/*	we have a valid timbre to write	*/
+		then call move.timbre.to(sav.ptrs(0),sav.ptrs(1),track);	/*	move from protocol buffer to keyboard	*/
+		else call move.timbre.to(nul.ptr,0,track);	/*	write null timbre	*/
+
+		if length.overflow <> 0 then do;	/*	cannot continue - out of memory	*/
+			edit.error = E#NOROOM;			/*	set global status	*/
+			status = b#complete;				/*	clear our success bit	*/
+			call Send.Data.Write.Answer(des,tag,status);	/*	send response	*/
+			return (true);
+		END;
+
+		call Send.Data.Write.Answer(des,tag,status);	/*	success - send good response	*/
+		return (true);
+	END;
+
+	/*	else copying timbre to a sequencer track destination	*/
+
+	new.t# = find.usable.dest;				/*	figure out position for new timbre	*/
+
+	if (records > 0)							/*	protocol passed in a real timbre	*/
+	then call move.timbre.to(sav.ptrs(0),sav.ptrs(1),new.t#);	/*	move from protocol buffer to destination	*/
+	else call move.timbre.to(nul.ptr,0,new.t#);	/*	make copy of null timbre	*/
+
+	if length.overflow <> 0 then do;		/*	ran out of memory	*/
+		edit.error = E#NOROOM;				/*	set global status	*/
+		status = b#complete;					/*	clear our success bit	*/
+		call Send.Data.Write.Answer(des,tag,status);
+		return (true);
+	end;
+
+	new.t# = check.for.redundant.timbre(track,new.t#);	/*	make sure we only have 1 copy of the timbre	*/
+	old.t# = trk.head.lookup(track,thd.stimb);			/*	get original timbre# for this track	*/
+
+	if new.t# <> old.t# then do;								/*	timbre numbers are different	*/
+
+		call trk.head.store(track,thd.stimb,new.t#);		/*	save new timbre# to track locations	*/
+		write(mal)=thd.ctimb;	  write(md)=new.t#;
+		write(mal)=thd.lp.ctimb;  write(md)=new.t#;
+		write(mal)=thd.ILP;
+		if read(md) <> 0 then do;								/*	set vars if ilp on our track	*/
+			write(mal)=thd.ils.ctimb; write(md)=new.t#;
+			write(mal)=thd.ile.ctimb; write(md)=new.t#;
+		end;
+
+		/*	keep the usage counter info correct	*/
+
+		if (old.t# >= num.kbd.tracks)							/*	track actually had a timbre	*/
+		then call dealloc.timbre.uses(track);				/*	account for timbres no longer used by this trk	*/
+
+		call trk.head.store(track,thd.usage,new.t#);		/*	new.timbre use	*/
+		write(md) = 1;												/*	just one use	*/
+
+		call alloc.timbre.uses(track);	/*	account for new timbre on trk	*/
+
+		call compute.arlist;					/*	set up thd.cue.track, ribbon lists	*/
+	end;
+
+	display.ebl = 1;							/*	allow displays now	*/
+
+	do i = 0 to 7;
+		call trk.head.store(track,thd.live.rtes + i,temp.buf(i));
+	end;
+	call trk.head.store(track,thd.tvol,				  temp.buf( 8));	/*	restore other items to their	*/
+	call trk.head.store(track,thd.midi,				  temp.buf( 9));	/*	original values	*/
+	call trk.head.store(track,thd.active.midi.rtes,temp.buf(10));
+	call trk.head.store(track,thd.midi.path,		  temp.buf(11));
+	call trk.head.store(track,thd.midx,            temp.buf(12));
+
+	floppy.cache.valid = 0;						/*	done with floppy cache	*/
+	call disable_cache(floppy.cache.num);	/*	disable cache	*/
+	optical.disk.ready = 0;
+
+	call Send.Data.Write.Answer(des,tag,status);
+
+	return (true);
+
+end Write.Track.Timbre;
+

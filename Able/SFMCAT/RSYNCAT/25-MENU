@@ -1,0 +1,562 @@
+/* 25-MENU  $TITLE  Menu Driver and Update Routines */
+
+/* Copyright (c) 1984 by New England Digital Corporation */
+
+/* This program represents proprietary information and may not be released
+   publically without written permission from New England Digital Corp. */
+
+change_parameter:  proc(code,str) boolean;
+   dcl code fixed;
+   dcl str  fixed array;
+   dcl j    floating;
+   dcl i    fixed;
+
+   do case code; /* branch on parameter to change */
+      do; /* 0: pitch of sound */
+         j=str.to.flt(str);
+         if (error.flag<>0)
+         or ((error.flag=0) and ((j>9.03076) or (j<0.0))) then do;
+            pcmd(' Unable to set PITCH CLASS NUMBER to "'); r_video(str); r_video('". ');
+         end;
+         if error.flag=0 then do; /* good number found */
+            if j>9.03076  then do;
+               nl; r_video(' Greatest pitch class number allowed is 9.03076 (20 kHz). ');
+            end;
+            else if j<0.0 then do;
+               nl; r_video(' Smallest pitch class number allowed is 0.00 (32.7 Hz). ');
+            end;
+            else pcn=j;
+         end;
+      end; /* of 0 */
+
+      do; /* 1: pitch window */
+         j=str.to.flt(str);
+         i=int(j+.5); /* convert to integer percentage */
+         if (error.flag<>0)
+         or ((error.flag=0) and ((i<0) or (i>50))) then do;
+            pcmd(' Unable to set PITCH WINDOW to "'); r_video(str); r_video('". ');
+         end;
+         if error.flag=0 then do;
+            if i<0 then do;
+               nl; r_video(' Pitch window cannot be narrower than zero percent. ');
+            end;
+            else if i>50 then do;
+               nl; r_video(' Pitch window cannot be wider than 50 percent. ');
+            end;
+            else pitch.window=i;
+         end;
+      end; /* of 1 */
+
+      track.pitch=track.pitch xor 1; /* 2: toggle track pitch flag */
+
+      do; /* 3: number of harmonics */
+         i=str.to.fix(str);
+         if (error.flag<>0)
+         or ((error.flag=0) and ((i<0) or (i>ncoefs.max))) then do;
+            pcmd(' Unable to set NUMBER OF HARMONICS to "'); r_video(str); r_video('". ');
+         end;
+         if error.flag=0 then do;
+            if i<0 then do;
+               nl; r_video(' System cannot extract fewer than zero harmonics. ');
+            end;
+            else if i>ncoefs.max then do;
+               nl; r_video(' System cannot extract more than 128 harmonics. ');
+            end;
+            else ncoefs.use=i;
+         end;
+      end; /* of 3 */
+
+      use.phase=use.phase xor 1; /* 4: toggle use phase flag */
+
+      /* $PAGE */
+
+      do; /* 5: harmonic noise floor */
+         i=str.to.fix(str);
+         if (error.flag<>0)
+         or ((error.flag=0) and ((i<0) or (i>1000))) then do;
+            pcmd(' Unable to set HARMONIC NOISE FLOOR to "'); r_video(str); r_video('". ');
+         end;
+         if error.flag=0 then do;
+            if i<0 then do;
+               nl; r_video(' Noise floor cannot be lower than zero. ');
+            end;
+            else if i>1000 then do;
+               nl; r_video(' Noise floor cannot exceed 1000. ');
+            end;
+            else noise.floor=i;
+         end;
+      end; /* of 5 */
+   end; /* of do case on parameter to change */
+   error.flag=0; /* reset error flag */
+end change_parameter;
+
+/* $SUBTITLE  Error Display Routines */
+
+ERROR_COUNT:  PROC FIXED; /* RETURNS ERRORS IN ANALYSIS OF CURRENT TIMBRE */
+   DCL (CNT,I) FIXED;
+
+   CNT=0;
+   DO I=0 TO FRAMES-1; /* LOOP OVER FRAMES IN CURRENT TIMBRE */
+      IF ANALYSIS.STATUS(I)<>0 THEN CNT=CNT+1; /* HAVE A FRAME WITH ERRORS */
+   END;
+
+   RETURN CNT;
+END ERROR_COUNT;
+
+DISPLAY_ERRORS:  PROC; /* GIVES ERROR REPORT */
+   DCL TOT.ERR  FIXED;
+   DCL LINE.POS FIXED;
+   DCL (I,J,K)  FIXED;
+
+   TOT.ERR=ERROR_COUNT; /* get total error count */
+   IF TOT.ERR>0 THEN DO; /* PRINT ERROR REPORT */
+      clear; r_video(' *** Error Report for Analysis of Sound File '); 
+      r_video(timbre.name); r_video(' *** ');
+      do i=0 to 1; /* draw header for error messages */
+         if i then j=40; /* offset for second column */
+         call pos(3,1+j);  ps('Frame ');
+         call pos(4,1+j);  ps('Number');
+         call pos(5,1+j);  ps('------');
+         call pos(3,9+j);  ps('Pitch');
+         call pos(4,9+j);  ps('Error');
+         call pos(5,9+j);  ps('-----');
+         call pos(3,16+j); ps('Harmonics');
+         call pos(4,16+j); ps('  Error');
+         call pos(5,16+j); ps('---------');
+         call pos(3,27+j); ps('Length');
+         call pos(4,27+j); ps('Error');
+         call pos(5,27+j); ps('------');
+      end;
+
+      call set_scroll(6,20);
+      line.pos=6; k=0; /* init error count to zero */
+      DO I=0 TO FRAMES-1; /* LOOP OVER FRAMES IN TIMBRE */
+         IF ANALYSIS.STATUS(I)<>0 THEN DO; /* HAD SOME SORT OF ERROR ON THIS FRAME */
+            if k then j=40; /* offset for second column */
+            else      j=0;
+
+            call pos(line.pos,3+j); pnum(i);
+
+            IF (ANALYSIS.STATUS(I)&PITCH.ERR)<>0 THEN DO; /* CYCLE LEN EXCEEDED PITCH WINDOW */
+               call pos(line.pos,11+j); ps('X');
+            END;
+
+            IF (ANALYSIS.STATUS(I)&BAND.LIMIT)<>0 THEN DO; /* HAD TO LIMIT HARMONICS */
+               call pos(line.pos,20+j); ps('X');
+            END;
+
+            IF (ANALYSIS.STATUS(I)&LENGTH.ERR)<>0 THEN DO; /* FRAME WAS TOO LONG */
+               call pos(line.pos,29+j); ps('X');
+            END;
+
+            if (tot.err>30) and ((k mod 30)=0) then do; /* time to pause */
+               pcmd(' Press <RETURN> for next page of Error Report. ');
+               wait.for.scan=0;
+               do while wait.for.scan=0;
+               	  interp_run_host_at_level();
+               end; /* wait until <RETURN> pressed */
+               wait.for.scan=0; in.buf(0)=0; /* reset */
+               pcmd(''); /* get rid of prompt */
+               tot.err=tot.err-30; /* decrement errors left */
+            end;
+            if k then do; /* update current line position */
+               if line.pos<20 then line.pos=line.pos+1; nl;
+            end;
+            k=k+1; /* increment error count */
+         END; /* OF HAD SOME ERROR ON THIS FRAME */
+      END; /* OF LOOP OVER FRAMES IN TIMBRE */
+      call set_scroll(1,24);
+   END; /* OF ERRORS TO REPORT */
+END DISPLAY_ERRORS;
+
+/* $SUBTITLE  Menu Display Routines */
+
+dcl SPEC_COORDS      data ( 4, 1, 8,78); /* coordinates of system specification box */
+dcl COM_COORDS       data ( 9, 1,20,37); /* coordinates of system command box */
+dcl PARM_COORDS      data ( 9,38,20,78); /* coordinates of analysis parameter box */
+
+DRAW_SPEC_BOX:  proc; /* draws system specification box */
+   dcl (row,col) fixed;
+
+   call box(spec_coords(1),spec_coords(0),spec_coords(3),spec_coords(2));
+   call pos(spec_coords(0),60); ps(rel.date);
+   row=spec_coords(0)+1; col=spec_coords(1)+2;
+   call pos(row,col);
+   r_video(' System Specifications: ');
+
+   col=spec_coords(1)+27;
+   call pos(row  ,col); ps(' Synclavier Timbre Analysis Program');
+   call pos(row+1,col); ps(' Frames Available:  '); pnum(avail.frames);
+   call pos(row+2,col); ps(' Current Timbre:    ');
+   if timbre.name(0)<>0 then do;
+      ps(timbre.name); ps('  ('); pnum(frames); ps(' Frames)       ');
+   end;
+   else ps('None                         ');
+end DRAW_SPEC_BOX;
+
+DRAW_COMMAND_BOX:  proc; /* draws menu box for system commands */
+   dcl (row,col) fixed;
+
+   call box(com_coords(1),com_coords(0),com_coords(3),com_coords(2));
+   row=com_coords(0)+1; col=com_coords(1)+2;
+   call pos(row,col);
+   r_video(' System Commands: ');
+   row=row+2;
+   if have.sound then do; /* can analyze a sound file */
+      call pos(row,col); ps(' <KP1>   Analyze File '); 
+      r_video(' '); r_video(f.name); r_video(' ');
+      row=row+1;
+   end;
+   call pos(row  ,col); ps(' <KP2>   Save Analyzed Timbre');
+   call pos(row+1,col); ps(' <KP3>   Recall Existing Timbre');
+   call pos(row+2,col); ps(' <KP4>   Display Analysis Errors');
+
+   call pos(row+4,col); ps(' <PF2>   Overlay to Synclavier');
+   call pos(row+5,col); ps(' <PF4>   Return  to SFM');
+   call pos(row+6,col); ps('<BREAK>  Return  to Monitor');
+end DRAW_COMMAND_BOX;
+
+DRAW_PARM_BOX:  proc; /* draws analysis parameters box */
+   dcl (row,col) fixed;
+
+   call box(parm_coords(1),parm_coords(0),parm_coords(3),parm_coords(2));
+   row=parm_coords(0)+1; col=parm_coords(1)+2;
+   call pos(row,col); 
+   r_video(' Analysis Parameters: ');
+   row=row+2;
+   if have.sound then do;
+      call pos(row  ,col); ps('Approximate Pitch of Sound:');
+      call pos(row+1,col); ps('Pitch Window:');
+      row=row+2;
+   end;
+   call pos(row  ,col); ps('Use Raw Pitch:');
+   call pos(row+1,col); ps('Number of Harmonics:');
+   call pos(row+2,col); ps('Use Raw Phases:');
+   call pos(row+3,col); ps('Harmonic Noise Floor:');
+end DRAW_PARM_BOX;
+
+/* $SUBTITLE  Main Menu Driver Routine */
+
+MAIN_MENU:  procedure(protection);
+   dcl protection       boolean; /* set true to get PROPRIETARY blurb */
+   dcl (ROW,COL)        fixed;
+   dcl (CHANGE,C)       fixed;
+   dcl ROW.TERMINATED   fixed;
+   dcl (status,i,j)     fixed;
+   dcl (x,y)            fixed; /* screen pos temps */
+   dcl STR (20)         fixed;
+   dcl timbre.too.long  data(' Timbre is too long for Synclavier software. ');
+   dcl not.enough.mem   data(' Not enough memory for Synclavier software. ');
+   dcl old.software     data(' Software is incompatible with system software. ');
+   dcl not.xpl.program  data(' System file is not an XPL program. ');
+
+   put_menu:  proc; /* draws main elements of menu */
+      clear; keypad_application; call pos(2,1); ps(DOUBLE_WIDE);
+      psr('New England Digital Resynthesis System');
+      transparent_mode;
+      if protection then do;
+         protection=false; /* a one time only message */
+         pcmd(' This program is proprietary information of and copyright (c) 1984 by ');
+         nl; r_video(' New England Digital Corporation, White River Junction, Vermont, USA. ');
+      end;
+
+      call DRAW_SPEC_BOX; /* draw system specifications box */
+      call DRAW_COMMAND_BOX; /* draw system commands box */
+      call DRAW_PARM_BOX; /* draw analysis parameters box */
+   end put_menu;
+
+   call put_menu; /* draw menu for first time */
+
+   PFKEY=0; AUX.KEY=0; WAIT.FOR.SCAN=0;
+   in.buf(0)=0; shold=rhold;
+
+   col=parm_coords(3)-9; /* initial current pos */
+   row=parm_coords(0)+3;
+   x=col; y=row;
+   CHANGE=true; ROW.TERMINATED=0;
+
+   do forever; /* main loop */
+      call update.clock.time; /* update the elapsed time counter */
+
+      if BREAK.RCVD<>0 then do; /* quit to monitor */
+         clear; call tty_wait; call exit(0);
+      end;
+
+      y=parm_coords(0)+5;
+      if not have.sound then y=y-2;
+      if (row<>y) and (row<>(y+2)) /* special toggle parameters */
+      then call DUMP_HOLD; /* echo any input chars */
+      else shold=rhold; /* ignore all chars to echo when on line 16 or 18 */
+
+      if CHANGE then do;
+         y=parm_coords(0)+3; x=parm_coords(3)-9;
+         if have.sound then do;
+            call pos(y  ,x-1); call fprint(PCN,1,5); /* print pitch class number */
+            call pos(y+1,x  ); pnum(pitch.window); ps(' %'); ps(SPACE_5); /* print pitch window percent */
+            y=y+2;
+         end;
+         call pos(y  ,x); if track.pitch then ps('Yes'); else ps('No '); /* print state of pitch tracking */
+         call pos(y+1,x); pnum(ncoefs.use); ps(SPACE_5); /* print number of coefs to extract */
+         call pos(y+2,x); if (use.phase) then ps('Yes'); else ps('No ');
+         call pos(y+3,x); pnum(noise.floor); ps(SPACE_5); /* print harmonic noise floor */
+         call pos(row,col); /* put cursor back on proper line */
+         CHANGE = false;
+      end;
+
+      /* $PAGE */
+
+      y=parm_coords(0)+5; if not have.sound then y=y-2; /* for toggled parms */
+
+      /* This next case deals with the escape sequence sent by the
+         Macintosh emulation program when it starts up.  IN_CHAR in 01-IO
+         stuffs the command buffer with "CAT" to force SFM to draw the
+         catalog screen.  RESYN has to redraw the main menu if it can. */
+
+      if  ((in.buf(0)=3) /* check to see if the command is "CAT" */
+      and (byte(in.buf,0)=A.C)
+      and (byte(in.buf,1)=A.A)
+      and (byte(in.buf,2)=A.T)
+      and (WAIT.FOR.SCAN=1)) /* this is set to force a CR */
+      then do;
+         call put_menu; /* redraw the menu */
+         CHANGE = true; /* force the parameters to be drawn */
+         in.buf(0)=0; /* reset the buffer */
+         wait.for.scan=false; /* ready to scan again */
+      end;
+
+      else
+      if  (in.buf(0)<>0)
+      and ((PFKEY<>0) or (AUX.KEY=1) or (AUX.KEY=6) or (AUX.KEY=7)
+      or  (WAIT.FOR.SCAN<>0)
+      or  (UD.ARROW<>0) or (RL.ARROW<>0)
+      or  ((row=y) or (row=(y+2)))) /* toggled parameter lines */
+      then ROW.TERMINATED=row; /* any of these conditions will terminate line */
+
+      else
+      if   (in.buf(0)=0)
+      and  ((RL.ARROW<>0) or (WAIT.FOR.SCAN<>0))
+      and  ((row=y) or (row=(y+2))) /* toggled parameter lines */
+      then ROW.TERMINATED=row; /* any of these conditions will terminate line */
+
+      else do;
+         WAIT.FOR.SCAN=0; RL.ARROW=0;
+      end;
+
+      if ROW.TERMINATED<>0 then do; /* one line of input has been entered */
+         if not have.sound then row.terminated=row.terminated+2; /* correct for missing parms */
+         x=row.terminated-(parm_coords(0)+3); /* compute parameter number */
+         if in.buf(0)>40 then in.buf(0)=40; /* limit length of input line */
+         call strcpy(str,in.buf); /* make copy of input buffer */
+
+         call change_parameter(x,str); /* handle input line */
+
+         CHANGE         = true; /* redraw values */
+         ROW.TERMINATED = 0; /* reset value */
+         RL.ARROW       = 0; /* reset flags */
+         WAIT.FOR.SCAN  = 0;
+         in.buf(0)      = 0; /* rezero input buffer */
+      end;
+
+      if (not CHANGE) and (in.buf(0)=0) then do; /* okay to do other operations */
+
+         if UD.ARROW<>0 then do;
+            row = row-UD.ARROW;
+            if have.sound then y=parm_coords(0)+8; /* compute max line on parm menu */
+            else               y=parm_coords(0)+6;
+            if      row>y                  then row=y; /* apply limits to cursor movement */
+            else if row<(parm_coords(0)+3) then row=parm_coords(0)+3;
+            UD.ARROW=0;
+            pcmd(''); call pos(row,col);
+         end;
+
+         /* $PAGE */
+
+         if (PFKEY<>0) or (AUX.KEY<>0) then do; /* handle PFKEY and AUX.KEY commands */
+            if PFKEY=2 then begin; /* PF2:  Overlay to Synclavier RTP */
+               if frames=0 then call zero_timbre; /* set up sine wave timbre */
+               if examount=0 /* see if overlay will work */
+               then status=can.overlay(core(loc.p2+1),core(loc.p2),timbre.len,0,databuf1);
+               else status=can.overlay(core(loc.p2+1),core(loc.p2),0,shr(timbre.len+255,8),databuf1);
+               
+               if status<>0 then do case abs(status+1);
+                  pcmd(old.software);    /* -1 */
+                  pcmd(not.enough.mem);  /* -2 */
+                  pcmd(timbre.too.long); /* -3 */
+                  pcmd(not.enough.mem);  /* -4 */
+                  pcmd(timbre.too.long); /* -5 */
+                  pcmd(not.xpl.program); /* -6 */
+                  pcmd(not.xpl.program); /* -7 */
+               end;
+               else do; /* okay to do overlay */
+                  if frames<>0 then do;
+                     pcmd(' Please wait...Setting up Synclavier timbre. ');
+                     call bind_timbre; /* apply any limits as determined by analysis parms */
+                     if debug<>0 then call display.timbre(free.base);
+                  end;
+                  if examount=0 then do; /* slide timbre up in memory as high as possible */
+                     c=0; i=free.base+free.len-1; j=free.base+timbre.len-1;
+                     do while c ILT timbre.len;
+                        core(i-c)=core(j-c); c=c+1;
+                     end;
+                     timbre.ptr=free.base+free.len-timbre.len;
+                  end;
+                  else timbre.ptr=free.base; /* reset ptr to start of timbre */
+                  clear;
+                  if timbre.name(0)<>0 then do;
+                     ps('Resynthesis of timbre from sound file "');
+                     ps(timbre.name); psr('" is now complete.');
+                  end;
+                  else psr('No timbre resynthesized.  Default timbre used.');
+                  psr('Starting the Synclavier (r).  Please wait...');
+                  call put.timbre.in.xmem; /* write timbre to xmem if exists */
+                  call syn_overlay(core(loc.p2+1),core(loc.p2),core(loc.p2-1));
+               end; /* okay to do overlay */
+            end; /* of PF2 pressed -- overlay to Synclavier */
+
+            else if PFKEY=4 then do; /* PF4:  Return to SFM */
+               call openfile(SFM.FILE,loc.p1,1);
+               status=can.overlay(f#ms_sector,f#ls_sector,256,0,databuf1);
+               if status<>0 then do case abs(status+1);
+                  pcmd(old.software);    /* -1 */
+                  pcmd(not.enough.mem);  /* -2 */
+                  pcmd(timbre.too.long); /* -3 */
+                  pcmd(not.enough.mem);  /* -4 */
+                  pcmd(timbre.too.long); /* -5 */
+                  pcmd(not.xpl.program); /* -6 */
+                  pcmd(not.xpl.program); /* -7 */
+               end;
+               else do; /* okay to do overlay */
+                  pcmd(' Press <RETURN> to return to SFM or any other key to cancel command. ');
+                  in.buf(0)=0;
+                  /* first loop until a character or <return> is typed */
+                  do while (in.buf(0)=0) and (wait.for.scan=0);
+                     interp_run_host_at_level();
+                  end;
+                  if wait.for.scan=1 /* <return> was typed */
+                  then call sfm_overlay(0);
+                  else pcmd('');
+               end;
+            end; /* of return to SFM */
+
+            /* $PAGE */
+
+            else if AUX.KEY<>0 then do case AUX.KEY-7;
+               if have.sound then do; /* AUX.KEY=7 --> KP1:  Start analysis */
+                  if frames<>0 then do; /* double check so user doesn't glom existing timbre */
+                     pcmd(' Press <RETURN> to start new analysis or any other key to cancel command. ');
+                     in.buf(0)=0;
+                     do while (in.buf(0)=0) and (wait.for.scan=0);
+                        interp_run_host_at_level();
+                     end; /* loop until a character or <return> is typed */
+                  end;
+                  if (frames=0) or (wait.for.scan=1) then do; /* <return> was typed */
+                     wait.for.scan=0; /* reset */
+                     do c=0 to avail.frames-1; analysis.status(c)=0; end; /* reset error flags */
+                     call init.clock.time;
+                     ncoefs.stored=0; /* re-initialize */
+                     call analyze_timbre;
+                     call strcpy(timbre.name,f.name);
+                     call put_menu; change=true;
+                     pcmd(' Analysis complete.  Press PF2 to overlay to Synclavier. ');
+                  end;
+                  else pcmd('');
+               end; /* of start analysis */
+
+               do; /* AUX.KEY=8 --> KP2:  Save an Analyzed Timbre to Disk */
+                  if timbre.name(0)<>0 then do; /* have some frames to save */
+                     pcmd(' Enter name of file to store timbre in, or <RETURN> to cancel --> ');
+                     in.buf(0)=0; /* zero out input buf */
+                     do while wait.for.scan=0;
+                     	call dump_hold;
+						interp_run_host_at_level();
+                     end; /* wait until <return> entered */
+                     if in.buf(0)<>0 then do; /* save a file */
+                        if in.buf(0)>8 then in.buf(0)=8; /* limit length of filename */
+                        call strcpy(str,in.buf); /* put filename into temp */
+                        status=save_timbre(str); /* try to save timbre */
+                        if status=0 then do; /* was able to save timbre */
+                           pcmd(' '); reverse(1); pnum(frames); reverse(0);
+                           r_video(' timbre frames successfully written to file "');
+                           r_video(str); r_video('". ');
+                        end;
+                        else do; /* error in save routine */
+                           if status=1 
+                           then pcmd(' No space in current catalog to store analyzed timbre data. ');
+                           else do; pcmd(' "'); r_video(str); r_video('" is not a valid filename. '); end;
+                        end;
+                     end;
+                     else pcmd('');
+                  end;
+                  else pcmd(' You do not have a current timbre to save. ');
+               end; /* of save analyzed timbre */
+
+               do; /* AUX.KEY=9 --> KP3:  Load a Precomputed Timbre from Disk */
+                  pcmd(' Enter name of timbre file to load, or <RETURN> to cancel --> ');
+                  in.buf(0)=0; /* zero out input buf */
+                  do while wait.for.scan=0;
+                  	 call dump_hold;
+				     interp_run_host_at_level();
+                  end; /* wait until <return> entered */
+                  if in.buf(0)<>0 then do; /* recall a timbre */
+                     if in.buf(0)>8 then in.buf(0)=8; /* limit length of filename */
+                     call strcpy(str,in.buf); /* put filename into temp */
+                     status=recall_timbre(str); /* try to recall a timbre */
+                     if status=0 then do; /* was able to get timbre */
+                        call draw_spec_box; change=true; /* redraw specification and parameter menus */
+                        pcmd(' Successfully loaded '); reverse(1); pnum(frames);
+                        r_video(' timbre frames from file "'); r_video(str); r_video('". ');
+                     end; /* of 0 */
+                     else do; /* had some error */
+                        pcmd(' File "'); r_video(str); r_video('" ');
+                        do case(status-1);
+                           r_video('not found in current catalog. ');
+                           r_video('is not a Resynthesis timbre file. ');
+                           r_video('is not the correct format for this program. ');
+                           r_video('is too long to recall. ');
+                        end;
+                     end; /* of had some error */
+                  end;
+                  else pcmd('');
+               end; /* of recall existing timbre */
+
+               /* $PAGE */
+
+               do; /* AUX.KEY=10 --> KP4:  Display analysis errors */
+                  if timbre.name(0)<>0 then do; /* have some timbre */
+                     if error_count>0 then do; /* print out errors in analysis of current timbre */
+                        call display_errors;
+                        pcmd(' Press <RETURN> to return to main menu. ');
+                        wait.for.scan=0;
+                        do while (wait.for.scan=0);
+                           interp_run_host_at_level();
+                        end; /* wait for <RETURN> */
+                        call put_menu; change=true; /* redraw entire menu */
+                     end;
+                     else do;
+                        pcmd(' No errors occurred during analysis of sound file "');
+                        r_video(timbre.name); r_video('". ');
+                     end;
+                  end;
+                  else pcmd(' Cannot display errors.  You do not have a current timbre. ');
+               end; /* of display errors */
+
+               if debug<>0 then do; /* AUX.KEY=11 --> KP5:  Display Timbre in Memory */
+                  if timbre.name(0)<>0 then do; /* have some timbre */
+                     call display.timbre(free.base); /* print timbre to terminal */
+                     call put_menu; change=true; /* redraw entire menu */
+                  end;
+                  else pcmd(' You do not have a current timbre. ');
+               end; /* of display timbre */
+            end; /* of branch on AUX.KEY entered */
+
+            PFKEY=0; AUX.KEY=0; WAIT.FOR.SCAN=0; BREAK.RCVD=0;
+            in.buf(0)=0; /* clear out chars in input buffer */
+            shold=rhold; /* clear out chars to echo */
+            call pos(row,col); /* restore cursor to correct position */
+         end; /* of some PFKEY or AUX.KEY has been pressed */
+      end; /* of okay to do other operations */
+      
+      interp_run_host_at_level();
+
+   end; /* of main loop */
+end MAIN_MENU;

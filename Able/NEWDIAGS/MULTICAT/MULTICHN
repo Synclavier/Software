@@ -1,0 +1,814 @@
+/*
+New England Digital Corporation
+Multi-channel testing program
+Written May 1986, WSL
+
+Modification history:
+  05/01/89     WSL  Fixed program so new MC routes properly after power-up (I hope).
+  07/27/89     WSL  Corrected page/scroll for mono poly voices
+  04/01/89     WSL  Added determine MT2 type for remap of FM voices.
+  01/09/89     WSL  Updated for mono voices (DDV rev s3 half stuffed).
+  01/06/89     WSL  Updated for new non-inverting MT2/FM
+  1986 - 1988  WSL  As needed for diagnostic releases, two poly bins, etc.
+  1986         WSL  Re-written because MT1MAY's source code was lost.
+*/
+configuration modelC, noMULDIV, memory 32*1024;
+
+insert ':newdiags:datelit';
+insert ':-xpl:asciidef';                  /* ascii definitions       */
+insert ':-xpl:termutil';                  /* terminal utilities      */
+insert ':-xpl:intrprtr';                  /* terminal utilities      */
+
+insert ':newdiags:sysinit';
+insert ':newdiags:MULTICAT:fmvlib1';                         /* fm voice library        */
+insert ':newdiags:MULTICAT:psvlib1';                         /* poly voice library      */
+insert ':newdiags:MULTICAT:multilib';                        /* multi-chan library      */
+insert ':newdiags:MULTICAT:multifm1';                        /* fm voice routing lib.   */
+insert ':newdiags:MULTICAT:multips1';                        /* poly voice routing lib. */
+
+/* no more inserts follow */
+
+/***************************************************************************/
+/* Remove inserts 'fmvlib1' & 'multifm1' and un-comment this code to remove
+   FM support.
+
+dcl count_fm_voices    lit '0';
+dcl determine_mt2_type lit '';
+dcl num_fmv            fixed;
+dcl fm_map(63)         fixed;
+fm_turn_on:  proc(chan,pan,vol);  dcl (chan,pan,vol) fixed; end fm_turn_on;
+fm_turn_off: proc(chan);          dcl (chan)         fixed; end fm_turn_off;
+fm_init:     proc;                                          end fm_init;
+map_fm:      proc;                                          end map_fm;
+
+dcl init_fm_wave lit 'call #init_fm_wave';
+#init_fm_wave: proc(wave);  dcl wave fixed; end #init_fm_wave;
+
+End of dummy FM code */
+/***************************************************************************/
+
+/***************************************************************************/
+/**************************     Literals     *******************************/
+dcl output_mode   lit  '0';        /* denotes dc output short/open   test  */
+dcl level_mode    lit  '1';        /* denotes sine output level test       */
+
+dcl dc_low     lit  '0';           /* waveform types for poly and FM */
+dcl dc_hi      lit  '1';
+dcl sine       lit  '2';
+
+/***************************************************************************/
+/*************************     Variables     *******************************/
+dcl (i,j,k)         fixed;         /* counters                      */
+dcl chr             fixed;         /* holds character from terminal */
+dcl (bin#,bin_base) fixed;
+
+dcl page            boolean;
+
+
+/***************************************************************************/
+heading: proc(mode);
+  dcl mode fixed;
+
+  clear_screen;
+  pos(23,10);  pstring('<P> - page on/off      <Return> - return to command screen');
+  pos(1,17);
+  if mode = output_mode then pstring('("-" = OK,  "X" = shorted,  "space" = missing)');
+  else pstring('("-" = OK,  "L" = low level   "H" = high level');
+  pos(3,0);
+  pstringr('voice      MT1                    1 1 1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2 2 2 3 3 3');
+  pstringr('card  chan card 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2');
+  pstringr('--------------------------------------- track outputs -------------------------');
+end heading;
+
+/***************************************************************************/
+dcl display_menu lit 'call #display_menu';
+#display_menu: proc;
+  dcl i fixed;
+  dcl map_err boolean;
+
+  clear_screen;
+  do i = 1 to 10000; chr = peek; end;
+  if chr <> "H04" then do;
+    pos(1,20);
+    if (read("51") & shl(1,11)) = 0 then do;     /* if D32X is not  present   */
+       pstring('D32X card missing or faulty');   /* send message to terminal  */
+       pstring('  -Test aborted');
+       flush_term;
+       call exit(0);                             /* abort test                */
+    end;
+
+    write(con)="20";                             /* check MT3                 */
+    if not (read(mtdat)) then do;                  /* if no response then       */
+       pstring('MT3 card missing or faulty');    /* send message to terminal  */
+       flush_term;
+       call exit(0);                             /* abort test                */
+    end;
+  end;
+  clear_typeahead;
+
+  pos(1,25); pstring('Multi-Channel Test ');
+  display_release_date;
+  pos(2,25); pstring('-----------------------------');
+
+  pos(4,5);  pstring('System Configuration:');
+
+  pos(5,7);
+  if num_fmv > 0 then do;                    /* if some initialized then   */
+    pnum(num_fmv/2,2);                       /* show how many FM voices    */
+    pstring(' FM voices present ');
+  end;
+  else pstring('No FM voices present ');
+
+  pos(6,7);
+  if poly_exists then do;
+     initialize_poly_wave(dc_low);
+     pnum(total_poly_voices,2);                     /* show how many PS voices    */
+     pstring(' Poly voices present');
+  end;
+  else pstring('No Poly voices in system');
+
+  pos(8,7); pnum(num_output,2); pstring(' Multi-channel outputs');
+
+  pos(13,22); pstring('A.  Display FM voice routing map');
+  pos(14,22); pstring('B.  Display PS voice routing map');
+  pos(15,22); pstring('C.  Test multi-channel output routing');
+  pos(23,19); pstring('Select a command or press <Break> to exit ');
+
+end #display_menu;
+
+/***************************************************************************/
+outtest: proc;
+  dcl (h, i, j, k, l, m, ii)	fixed;
+  dcl (chan_num, card_num)		fixed;
+  dcl exit							boolean;
+
+  dcl print_crap	lit 'false';
+  dcl nop			lit 'do l = 0 to 15; interp_usleep(1); end';
+
+  /************************************************************************/
+  dcl check_terminal lit 'call check_term';
+
+  check_term: proc;
+    dcl chr fixed;
+
+    interp_run_host_non_timer();
+
+    chr = peek;
+    if chr <> -1 then do;
+      chr = rchar;
+      if chr = cr then exit = true;
+      if (chr = asc.p) or (chr = lower.p) then
+        if page = true then page = false; else page = true;
+    end;
+  end check_term;
+
+  /************************************************************************/
+	exit = false;                              /* clear exit flag             */
+	page = false;                              /* clear page flag             */
+	enable;												// had better be on...
+
+	clear_screen;
+	call heading(output_mode);                 /* display heading             */
+
+	write(con) = "21";                         /* select mt operations         */
+
+	do while not exit;                         /* do until <RETURN> pressed   */
+	  i = 0;                                   /* i runs thru FM voices       */
+	  h = 0;                                   /* h counts lines on screen    */
+
+	  check_terminal;                          /* check terminal for input    */
+
+	  if (print_crap != false) pstringr('Checking for FM');
+
+	  do while (i < num_fmv) & not exit;       /* do for each FM voice        */
+
+		if ((print_crap != false) && (i == 0)) pstringr('Testing FM');
+
+		 check_terminal;                        /* check terminal for input    */
+		 ii = fm_map (i);                       /* get mt input chan from map  */
+		 do k = 0 to num_output-1;              /* loop over mt output channels*/
+			stat(k) = 0;                         /* set status to 0 -no connect */
+		 end;
+
+		 if (i&1)=0 then call fm_turn_on(i,0,255);     /* turn on channel i full left */
+		 else call fm_turn_on(i&"HFFFE",63,255);       /* turn on channel i full right*/
+
+		 if ii >= 0 then do;                    /* if input exists then do     */
+			do j = 0 to num_output-1;            /* loop over mt output chans   */
+				write(mtdat) = vcon \ shl(j,8) \ ii;/* connect input ii to output j*/
+				nop;                              /* delay for voice to start up */
+				if (read(mtdat)) then do;           /* if connected to output then */
+					if stat(j) = 0 then stat(j)=1; /* set status to show connect  */
+					do k = 0 to num_output-1;      /* loop over mt output channels*/
+						if (j<>k) then do;          /* if not the same channel     */
+							if ii=0 then write(mtdat) = vcon \ shl(k,8) \ 1; /* input 1 to output k */
+							else         write(mtdat) = vcon \ shl(k,8) \ 0; /* input 0 to output k */
+							nop;                     /* delay for voice to start    */
+							if (read(mtdat)) then do;  /* error, voice at > 1 output  */
+								stat(j) = -1; stat(k) = -1;
+							end;
+							if ii=0 then write(mtdat) = vcoff \ shl(k,8) \ 1; /* cancel voice */
+							else         write(mtdat) = vcoff \ shl(k,8) \ 0;
+						end;
+					end;
+				end; /* if read(mtdat) */
+				write(mtdat) = vcoff \ shl(j,8) \ ii;   /* connect input ii to voice off */
+			end;
+
+			pstring('FM');                            /* display 'FM'            */
+			chan_num = int(i/2);                      /* compute channel number  */
+			card_num = 2*(int(chan_num/8));           /* compute fm card number  */
+			if i & 1 then card_num = card_num + 1;    /* if right then next card */
+			pnum(card_num,2); pstring(' ');           /* display card number     */
+			pnum(chan_num,2);                         /* display channel number  */
+			if (i & 1) then pstring('R: ');
+			else pstring('L: ');
+			pnum(int(ii/8),2); pstring(',');          /* display mt card number  */
+			pnum((ii mod 8),1); pstring(' ');         /* display card input #    */
+
+			do j = 0 to num_output-1;                 /* do for each multi output*/
+				if stat(j) = 0  then pstring('  ');    /* if no connection ...    */
+				if stat(j) = 1  then pstring(' -');    /* if O.K. ...             */
+				if stat(j) = -1 then pstring(' X');    /* if shorted              */
+				if stat(j) <> 1 then page = true;
+			end;
+			crlf;
+			call fm_turn_off(i);                         /* turn channel off        */
+		 end;
+		 else do;                                    /* no mt input for channel */
+			pstring('FM');                            /* display FM              */
+			chan_num = int(i/2);                      /* compute channel number  */
+			card_num = 2*(int(chan_num/8));           /* compute card number     */
+			if i & 1 then card_num = card_num + 1;    /* if right then next card */
+			pnum(card_num,2); pstring(' ');           /* display FM card number  */
+			pnum(chan_num,2);                         /* display channel number  */
+			if (i & 1) then pstring('R: ');
+			else pstring('L: ');
+			if ii = -2 then pstring(' X,X      MT1 input shorted');
+			else pstring(' X,X      Voice does not route to an MT input');
+			crlf;
+		 end;
+		 h = h + 1;                                    /* count line on screen    */
+		 if (h >= 16) \ (h >= num_fmv) then do;        /* if 16 lines or all chans*/
+			if page then do;
+				chr = rchar;
+				if (chr = asc.p) or (chr = lower.p) then page = false;
+				if chr = cr then exit = true;
+			end;
+			do h = 0 to 200;                            /* hold screen for 4 secs  */
+				check_terminal;                           /* check terminal for input*/
+        Really.Do.Delay(2);
+        Really.Run.Host();
+			end;
+			clear_screen;
+			call heading(output_mode);
+			pos(6,0);
+			h = 0;
+		 end;
+
+	  i = i + 1;
+	  end; /* of loop over synth voices */
+
+
+	  /******************  Poly voice output test  *****************************/
+	  if (print_crap != false) pstringr('Checking for Poly');
+
+	  write(con) = "21";                       /* select mt operations         */
+	  do bin# = 0 to #_poly_bins - 1;
+		 bin_base = bin# * 64;
+		 i = 0;                                    /* i runs thru PS channels     */
+
+		check_terminal;                         /* check terminal for input    */
+
+		if ((print_crap != false) && (bin# == 0)) pstringr('Testing Bin 0');
+
+		 do while (i < 2* #_poly_voices(bin#)) & not exit; /* do for each poly channel    */
+			check_terminal;                         /* check terminal for input    */
+
+		  if ((print_crap != false) && (bin# == 0) && (i == 0)) pstringr('Looking up info for Channel 0');
+
+			if (mono_poly_voices & ((i & 1)=0))
+				then i = i + 1;                      /* skip right channels      */
+			ii = ps_map(bin_base + i);              /* get mt input from map       */
+			do k = 0 to num_output-1;               /* loop over mt output channels*/
+			  stat(k) = 0;                          /* set status = 0 - no connect */
+			end;
+
+			if (i&1)=0 then call poly_turn_on(bin#,shr(i,1), 0,4095);
+			else call poly_turn_on(bin#,shr(i,1),4095,4095);
+
+			if ii >= 0 then do;                     /* if input exists             */
+			  if ((print_crap != false) && (bin# == 0) && (i == 0)) pstringr('Found Channel 0 Input');
+			  write(con)="21";                      /* select MT operations        */
+			  do j = 0 to num_output-1;             /* loop over mt output channels*/
+				  write(mtdat) = vcon \ shl(j,8) \ ii; /* connect input ii to output j*/
+				  nop;                               /* delay for voice to start    */
+				  if (read(mtdat)) then do;
+					  if stat(j) = 0 then stat(j)=1;
+					  do k = 0 to num_output-1; /* loop over mt output channels */
+						  if (j<>k) then do; /* if other channel */
+							  if ii=0 then write(mtdat) = vcon \ shl(k,8) \ 1; /* input 1 to output k */
+							  else         write(mtdat) = vcon \ shl(k,8) \ 0; /* input 0 to output k */
+							  nop;
+							  if (read(mtdat)) then do;
+								  stat(k) = -1; stat(j) = -1;
+							  end;
+							  if ii=0 then write(mtdat) = vcoff \ shl(k,8) \ 1; /* cancel voice */
+							  else         write(mtdat) = vcoff \ shl(k,8) \ 0;
+						  end;
+					  end;
+				  end; /* of primary connection present */
+				  write(mtdat) = vcoff \ shl(j,8) \ ii; /* connect input i' to voice off */
+			  end; /* loop over mt output channels */
+
+			  pstring('PS');                         /* display PS                 */
+			  pnum(int(int(i/2)/4),2); pstring(' '); /* display PS voice card #    */
+			  pnum(int((bin_base + i)/2),2);         /* display channel number     */
+			  if (i & 1) then pstring('R: ');
+			  else pstring('L: ');
+			  pnum(int(ii/8),2); pstring(',');       /* display mt card number     */
+			  pnum((ii mod 8),1); pstring(' ');      /* display mt card input #    */
+
+			  do j = 0 to num_output-1;              /* do for each multi output   */
+				  if stat(j) = 0 then  pstring('  '); /* if no connection ...       */
+				  if stat(j) = 1 then  pstring(' -'); /* if O.K. ...                */
+				  if stat(j) = -1 then pstring(' X'); /* if shorted ...             */
+				  if stat(j) <> 1 then page = true;
+			  end;
+			  crlf;
+			  call poly_turn_off(bin#,shr(i,1));
+			end;
+			else do;                                 /* no mt input number in map  */
+			  if ((print_crap != false) && (bin# == 0) && (i == 0)) pstringr('Channel 0 Input Missing');
+			  pstring('PS');                         /* display PS                 */
+			  pnum(int(int(i/2)/4),2); pstring(' '); /* display voice card number  */
+			  pnum(int((bin_base + i)/2),2);         /* display channel number     */
+			  if (i & 1) then pstring('R: ');
+			  else pstring('L: ');
+			  if ii = -2 then pstring(' X,X      MT1 input shorted');
+			  else pstring(' X,X      Voice does not route to an MT input');
+			  crlf;
+			end; /* else */
+			h = h + 1;
+
+			if (h >= 16) or (i = ((2 * #_poly_voices(bin#)) - 1) ) then do;
+			  if page then do;
+				  if (print_crap != false) pstringr('Waiting for page');
+				  chr = rchar;
+				  if (chr = asc.p) or (chr = lower.p) then page = false;
+				  if chr = cr then exit = true;
+			  end;
+        do h = 0 to 200;                            /* hold screen for 4 secs  */
+          check_terminal;                           /* check terminal for input*/
+          Really.Do.Delay(2);
+          Really.Run.Host();
+        end;
+			  clear_screen;
+			  call heading(output_mode);
+			  pos(6,0);
+			  h = 0;
+			end;
+
+			i = i + 1;
+		 end; /* do while */
+	  end; /* do for each bin */
+	  
+	end;  /*do forever*/
+end outtest;
+
+/***************************************************************************/
+outlev: proc;
+  dcl (chr,g,h,i,j,k,ii) fixed;
+  dcl (delay,chan_num,card_num) fixed;
+  dcl (halt,exit) boolean;
+  dcl (lowvol,hivol,ps_lowvol,ps_hivol) fixed;
+  /*************************************************************************/
+  dcl check_terminal lit 'call check_term';
+
+  check_term: proc;
+    dcl chr fixed;
+
+    chr = peek;
+    if chr <> -1 then do;
+      chr = rchar;
+      if chr = cr then exit = true;
+      if (chr = asc.p) or (chr = lower.p) then
+        if page = true then page = false; else page = true;
+    end;
+  end check_term;
+
+  /*************************************************************************/
+  connected: proc returns (fixed);
+    dcl timeout fixed;
+    dcl there boolean;
+
+    write(con) = "21";
+    there = false;
+    timeout = 1000;
+    do while timeout > 0;
+     if (read(mtdat)) then return true;           /* if connected to output then */
+     timeout = timeout - 1;
+    end;
+
+    return false;
+  end connected;
+  /*************************************************************************/
+
+	clear_screen;
+
+	crlf; pstring('The level test uses different volume values for FM and Poly to try to find gain');
+	crlf; pstring('problems in the multichannel system. First a voice is turned on with a volume');
+	crlf; pstring('just high enough to trip the comparator on the MT2. If the voice is not found,');
+	crlf; pstring('it is marked as low. Then the voice is turned on with a volume just below that');
+	crlf; pstring('which should trip the comparator. If the voice is found, it is marked as high.');
+	crlf; pstring('FM volume values are 0-255, Poly volume values are 0-4095. One final note: Some');
+	crlf; pstring('Synclaviers may have nothing wrong with them and still have problems with this');
+	crlf; pstring('test. That''s why you can''t see this test from the main menu.');
+	crlf;
+
+	if num_fmv > 0 then do;
+	  crlf; pstring('Enter the FM volume setting for ''Low'' level test. For most systems, the value');
+	  crlf; pstring('should be about 60. Increasing this number should decrease the number of ''L'' ');
+	  crlf; pstring('warnings given by the level test for FM. : ');
+	  lowvol = getnum; crlf;
+
+	  crlf; pstring('Enter the FM volume setting for ''High'' level test. For most systems, the value');
+	  crlf; pstring('should be about 30. Decreasing this number should decrease the number of ''H''');
+	  crlf; pstring('warnings given by the level test for FM. : ');
+	  hivol = getnum;  crlf;
+	end;
+
+	if total_poly_voices > 0 then do;
+	  crlf; pstring('Enter the Poly volume setting for ''Low'' level test. For systems with new MT1s,');
+	  crlf; pstring('the value should be about 250, old MT1s about 800. Increasing this number should');
+	  crlf; pstring('decrease the number of ''L'' warnings given by the level test for poly. : ');
+	  ps_lowvol = getnum;  crlf;
+
+	  crlf; pstring('Enter the Poly volume setting for ''High'' level test. For systems with new MT1s,');
+	  crlf; pstring('the value should be about 150, old MT1s about 500. Decreasing this number should');
+	  crlf; pstring('decrease the number of ''H'' warnings given by the level test for poly. : ');
+	  ps_hivol = getnum;
+	end;
+
+	page = false;
+	exit = false;                              /* clear exit flag             */
+	halt = false;                              /* clear halt flag             */
+	clear_screen;
+	call heading(level_mode);                              /* display heading             */
+
+	init_fm_wave(sine);
+	if total_poly_voices > 0 then initialize_poly_wave(sine);
+	write(con)="21";                           /* select MT operations        */
+
+	do while not exit;                         /* do until <RETURN> pressed   */
+	  i = 0;                                   /* i runs thru FM voices       */
+	  h = 0;                                   /* h counts lines on screen    */
+	  do while (i < num_fmv) & not exit;       /* do for each FM voice        */
+
+		 check_terminal;
+		 ii = fm_map (i);                       /* get mt input chan from map  */
+		 do k = 0 to num_output-1;              /* loop over mt output channels*/
+			stat(k) = -1;                        /* set status to -1 low vol */
+		 end;
+
+		 if (i&1)=0 then call fm_turn_on(i,0,lowvol);     /* turn on channel i full left */
+		 else call fm_turn_on(i&"HFFFE",63,lowvol);       /* turn on channel i full right*/
+
+		 pstring('FM');                            /* display 'FM'            */
+		 chan_num = int(i/2);                      /* compute channel number  */
+		 card_num = 2*(int(chan_num/8));           /* compute fm card number  */
+		 if i & 1 then card_num = card_num + 1;    /* if right then next card */
+		 pnum(card_num,2); pstring(' ');           /* display card number     */
+		 pnum(chan_num,2);                         /* display channel number  */
+		 if (i & 1) then pstring('R: ');
+		 else pstring('L: ');
+
+		 if ii >= 0 then do;                    /* if input exists then do     */
+			do j = 0 to num_output-1;            /* loop over mt output chans   */
+				write(mtdat) = vcon \ shl(j,8) \ ii;/* connect input ii to output j*/
+				if connected then stat(j) = 0;           /* if connected to output then */
+				write(mtdat) = vcoff \ shl(j,8) \ ii;   /* connect input ii to voice off */
+			end;
+
+			if (i&1)=0 then call fm_turn_on(i,0,hivol);     /* turn on channel i full left */
+			else call fm_turn_on(i&"HFFFE",63,hivol);       /* turn on channel i full right*/
+			do delay = 1 to 10000; end;
+			do j = 0 to num_output-1;            /* loop over mt output chans   */
+				write(mtdat) = vcon \ shl(j,8) \ ii;/* connect input ii to output j*/
+				if connected then stat(j) = 1;  /* if connected to output then */
+				write(mtdat) = vcoff \ shl(j,8) \ ii;   /* connect input ii to voice off */
+			end;
+
+			pnum(int(ii/8),2); pstring(',');          /* display mt card number  */
+			pnum((ii mod 8),1); pstring(' ');         /* display card input #    */
+
+			do j = 0 to num_output-1;                 /* do for each multi output*/
+				if stat(j) = 0  then pstring(' -');    /* if no connection ...    */
+				if stat(j) = 1  then pstring(' H');    /* if O.K. ...             */
+				if stat(j) = -1 then pstring(' L');    /* if shorted              */
+				if stat(j) <> 0 then page = true;
+			end;
+		 end;
+		 else do;                                    /* no mt input for channel */
+			if ii = -2 then pstring(' X,X      MT1 input shorted');
+			else pstring(' X,X      Voice does not route to an MT input');
+		 end;
+		 crlf;
+		 h = h + 1;                                    /* count line on screen    */
+		 if (h >= 16) \ (h >= num_fmv) then do;        /* if 16 lines or all chans*/
+			if page then do;
+			  chr = rchar;
+			  if chr = cr then exit = true;
+			  if (chr = asc.p) or (chr = lower.p) then page = false;
+			end;
+			else do delay = 1 to 10000; end;
+			clear_screen;
+			call heading(level_mode);
+			pos(6,0);
+			h = 0;
+		 end;
+
+		 call fm_turn_off(i);
+		 do  g = 0 to 1000; end;
+		 i = i + 1;
+	  end; /* of loop over synth voices */
+
+	  /*******************  Poly voice level test  *****************************/
+	  do bin# = 0 to (#_poly_bins - 1);
+		 bin_base = bin# * 64;
+		 i = 0;                                    /* i runs thru PS channels     */
+		 do while (i < 2* #_poly_voices(bin#)) & not exit;      /* do for each poly channel    */
+			check_terminal;
+			if (mono_poly_voices & ((i & 1)=0))
+				then i = i + 1;                     /* skip right channels        */
+			ii = ps_map(bin_base + i);             /* get mt input chan from map */
+			do k = 0 to num_output-1;              /* loop over mt output chans  */
+			  stat(k) = -1;                        /* set status to -1 low vol   */
+			end;
+
+			if (i&1)=0 then call poly_turn_on(bin#,shr(i,1),0,ps_lowvol);
+			else call poly_turn_on(bin#,shr(i,1),4095,ps_lowvol);
+
+			pstring('PS');                         /* display PS                 */
+			pnum(int(int(i/2)/4),2); pstring(' '); /* display PS voice card #    */
+			pnum(int((bin_base + i)/2),2);         /* display channel number     */
+			if (i & 1) then pstring('R: ');
+			else pstring('L: ');
+
+			if ii >= 0 then do;                     /* if input exists             */
+			  write(con)="21";                      /* select MT operations        */
+			  do j = 0 to num_output-1;             /* loop over mt output channels*/
+				 write(mtdat) = vcon \ shl(j,8) \ ii; /* connect input ii to output j*/
+				 if connected then stat(j) = 0;
+				 write(mtdat) = vcoff \ shl(j,8) \ ii; /* connect input i' to voice off */
+			  end; /* loop over mt output channels */
+
+			  if (i&1)=0 then call poly_turn_on(bin#,shr(i,1),0,ps_hivol);
+			  else call poly_turn_on(bin#,shr(i,1),4095,ps_hivol);
+
+			  do delay = 1 to 10000; end;
+			  do j = 0 to num_output-1;            /* loop over mt output chans   */
+				  write(mtdat) = vcon \ shl(j,8) \ ii;/* connect input ii to output j*/
+				  if connected then stat(j) = 1;  /* if connected to output then */
+				  write(mtdat) = vcoff \ shl(j,8) \ ii;   /* connect input ii to voice off */
+			  end;
+
+			  pnum(int(ii/8),2); pstring(',');       /* display mt card number     */
+			  pnum((ii mod 8),1); pstring(' ');      /* display mt card input #    */
+
+			  do j = 0 to num_output-1;              /* do for each multi output   */
+				  if stat(j) = 0 then  pstring(' -'); /* if no connection ...       */
+				  if stat(j) = 1 then  pstring(' H'); /* if O.K. ...                */
+				  if stat(j) = -1 then pstring(' L'); /* if shorted ...             */
+				  if stat(j) <> 0 then page = true;
+			  end;
+			end;
+			else do;                                 /* no mt input number in map  */
+			  if ii = -2 then pstring(' X,X      MT1 input shorted');
+			  else pstring(' X,X      Voice does not route to an MT input');
+			end; /* else */
+			crlf;
+			h = h + 1;
+
+			if (h >= 16) or (i = ((2 * #_poly_voices(bin#)) - 1) ) then do;
+			  if page then do;
+				 chr = rchar;
+				 if (chr = asc.p) or (chr = lower.p) then page = false;
+				 if chr = cr then exit = true;
+			  end;
+			  else do delay = 1 to 10000; end;
+			  clear_screen;
+			  call heading(level_mode);
+			  pos(6,0);
+			  h = 0;
+			end;
+
+			call poly_turn_off(bin#,shr(i,1));
+			do  g = 0 to 10000; end;
+			i = i + 1;
+		 end; /* do while poly*/
+	  end; /* bin loop */
+	end;  /*do while not exit*/
+	if mt2_type = inverting then  init_fm_wave(dc_low);  /* restore dc waveform */
+	else init_fm_wave(dc_hi);
+end outlev;
+
+/***************************************************************************/
+debug: proc;
+  dcl (i,j,k) fixed;
+  dcl chr fixed;
+  dcl (chan,pan,freq,mtin,mtout,vol) fixed;
+  dcl menu_max lit 'asc.f';
+  dcl flag boolean;
+
+  clear_screen;
+  pos(2,30); pstring('Multi-Channel Debug');
+  pos(3,30); pstring('-------------------');
+
+  pos(5,25);  pstring('A. Connect input to output');
+  pos(6,25);  pstring('B. Disconnect input');
+  pos(7,25);  pstring('C. Clear all inputs');
+  pos(8,25);  pstring('D. Connect an input to each output');
+  pos(9,25);  pstring('E. Change FM volume');
+  pos(10,25); pstring('F. MT3 debugger');
+  pos(22,25); pstring('Press <RETURN> to quit');
+
+  call fm_init;
+  vol = 255; pan = 0;
+  NEWVOL:;
+  init_fm_wave(sine);
+  do chan = 0 to 14 by 2;
+   call fm_turn_on(chan,pan,vol);
+  end;
+
+  do forever;
+    chr = rchar;
+    if chr = cr then goto dexit;
+    if chr >= lower.a then chr = chr - "40";
+    if (chr >= asc.a) & (chr <= menu_max) then chr = chr - asc.a;
+
+    do case chr;
+
+      do; /* connect */
+        pos(20,10); pstring('MT input ? '); mtin = getnum;
+        if (mtin < 0) or (mtin > 7) then mtin = 0;
+        pos(20,10); erase_line;
+        pstring('MT output ? '); mtout = getnum;
+        if (mtout < 0) or (mtout > 7) then mtout = 0;
+        mtin = mtin + 8;
+        pos(20,10); erase_line;
+        write(con) = "21"; /* select MT ops */
+        write(mtdat) = vcon \ shl(mtout,8) \ mtin;
+      end;
+
+      do; /* disconnect */
+         pos(20,10); pstring('MT input ? '); mtin = getnum;
+         if (mtin < 0) or (mtin > 7) then mtin = 0;
+         pos(20,10); erase_line;
+         mtin = mtin + 8;
+         write(mtdat) = vcoff \ mtin;
+      end;
+
+      do; /* clear */
+         pos(20,10); pstring('Clearing all voice routings...');
+         flush_term;
+         do i = 8 to 15;
+           write(mtdat) = vcoff \ i;
+         end;
+
+         do j = 1 to 20;
+           do i = 1 to 20000; end;
+         end;
+         pos(20,10); erase_line;
+      end;
+
+      do; /* send a voice out each output */
+        pos(20,10); pstring('Sending a voice out each output...');
+        flush_term;
+        write(con) = "21"; /* select MT ops */
+        do i = 0 to 7;
+          write(mtdat) = vcon \ shl(i,8) \ (i+8);
+        end;
+        do j = 1 to 20;
+          do i = 1 to 20000; end;
+        end;
+        pos(20,10); erase_line;
+      end;
+
+      do;
+        pos(20,10); pstring('New FM voice volume? ');
+        vol = getnum;
+        if (vol < 0) or (vol > 255) then vol = 255;
+        pos(20,10); erase_line;
+        goto NEWVOL;
+      end;
+
+      do;
+        pos(20,10); pstring('MT3 debug');
+        write(con) = "21";
+        chr = peek;
+        do while chr = -1;
+          chr = peek;
+
+          do i = 0 to 128;
+            do j = 0 to 63;
+              write(mtdat) = vcon \ shl(j,8) \ i;
+              do k = 1 to 15; end;
+              flag = read(mtdat);
+            end;
+          end;
+
+        end;
+        chr = rchar;
+        pos(20,10); erase_line;
+      end;
+
+    end; /* case */
+  end;
+
+  dexit:;
+  call fm_init;
+  if mt2_type = inverting then  init_fm_wave(dc_low);  /* restore dc waveform */
+  else init_fm_wave(dc_hi);
+end debug;
+
+/***************************************************************************/
+/*************************   MAIN PROGRAM   ********************************/
+/***************************************************************************/
+clear_screen;  pos(1,5);
+pstring('If this line remains on the screen then the d160 is missing or faulty.');
+flush_term;
+call fm_init;
+num_fmv = count_fm_voices;
+clear_screen;
+
+write(con) = "21";                      /* select mt operations         */
+do i = 0 to 255;                        /* loop over mt input channels  */
+   write(mtdat) = vcon \ shl(7,8) \ i;  /* route voice i to output 7    */
+end;
+do i = 0 to 100; Really.Do.Delay(1); Really.Run.Host(); end;
+do i = 0 to 255;                            /* loop over mt input channels  */
+   write(mtdat) = vcoff \ shl(7,8) \ i;     /* turn off routing for input   */
+end;
+do j = 0 to 100; Really.Do.Delay(1); Really.Run.Host(); end;
+
+if poly_exists then initialize_poly_wave(dc_hi);
+do bin# = 0 to (#_poly_bins - 1);
+  bin_base = bin# * 64;
+  do i = 0 to (#_poly_voices(bin#) - 1);
+     /*call poly_turn_on(bin#,i,0,4095);   */ /* pan it to left */
+     call poly_turn_on(bin#,i,4095,4095); /* pan it to right */
+     call poly_turn_off(bin#,i);
+  end;
+end;
+
+bin# = 0;
+
+if num_fmv > 0 then do;
+  determine_mt2_type;
+  if mt2_type = inverting then  init_fm_wave(dc_low);  /* restore dc waveform */
+  else init_fm_wave(dc_hi);
+  call map_fm;
+end;
+
+if poly_exists then initialize_poly_wave(dc_low);
+mono_poly_voices = false;
+if total_poly_voices > 0 then call map_poly;
+
+display_menu;
+
+do forever;                                  /* do forever (until <BREAK>) */
+  ckread;
+  chr = peek;                                /* check type-ahead buffer    */
+  if chr <> -1 then do;                      /* if there's a character then*/
+    chr = rchar;                             /* put character in ch        */
+    if chr = 0 then call exit(0);            /* if <BREAK> then exit       */
+    if chr = "H04" then do;                  /* control-d for debug        */
+      call debug;
+      clear_typeahead;
+      display_menu;
+    end;
+    if chr = "H0C" then do;                  /* control-l  for level test */
+      call outlev;
+      clear_typeahead;
+      display_menu;
+    end;
+    if (chr = asc.a) or (chr = lower.a) then do;
+        determine_mt2_type;
+        if mt2_type = inverting then  init_fm_wave(dc_low);  /* restore dc waveform */
+        else init_fm_wave(dc_hi);
+        call map_fm;                          /* <A> map FM voices          */
+        display_menu;
+    end;
+    if (chr = asc.b) or (chr = lower.b) then do;
+        call map_poly;                          /* <B> map PS voices          */
+        display_menu;
+    end;
+    if (chr = asc.c) or (chr = lower.c) then do;
+        call outtest;                        /* <C> multichn output test   */
+        display_menu;
+    end;
+  end; /* if chr <> -1 */
+end;
+
+

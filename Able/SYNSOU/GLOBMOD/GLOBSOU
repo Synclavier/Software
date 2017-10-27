@@ -1,0 +1,502 @@
+/* GLOBSOU   $TITLE  GLOBAL PRIMITIVE ITEMS
+
+   Modified:
+   11/15/91 - PF  - Added XFER.PTR
+   02/28/91 - MWH - Add AEE's 20 saved mark points to the protocol
+   07/10/90 - pf  - added some meter map globals
+   05/31/90 - cj  - added sampled.move, sampled.move.speed
+   09/01/89 - MWH - Add total FM voices variable
+   06/20/89 - MWH - Add SCRUB.PTR
+   05/03/89 - TSS - Moved SFD.PTR, SFD.LEN to ODISKSOU
+   02/21/89 - SGS - Added SFD.PTR, SFD.LEN
+   03/14/89 - PF  - added Packet.bas.ptr and Packet.free.ptr
+   01/27/89 - MWH - Add SECT.PTR
+   10/19/88 - TSS - changed inc.protocol to inc.pro
+   10/15/88 - TSS - Added code to handle STOP.HELD over RS-232 protocol
+   09/22/88 - PF  - MOVED DCL OF AEE.SCREEN.STATE HERE FROM AUDMOD:AUD-MAIN
+   09/21/88 - TSS - Added dcl for DIAGNOSICS.ENABLED
+   09/14/88 - TSS - ADDED DCL FOR PACKET.PTR
+*/
+
+MODULE GLOBMOD;
+
+   INSERT ':SYNLITS:COMLITS';   /* ALL MODULES MUST INSERT COMLITS    */
+   INSERT ':SYNLITS:GLOBLITS';  /* PRACTICALLY ALL WILL WANT GLOBLITS */
+   INSERT ':SYNLITS:SYSLITS';   /* UPPER MEMORY LITS                  */
+	INSERT ':SYNLITS:ASCIILIT';
+	
+   INSERT ':SYNMODS:XMEMDCL';
+	INSERT ':SYNMODS:TTYDCL';
+
+   INSERT ':SYNAUXS:GMODLITS';  /* LITS SPECIFICALLY FOR OUR MODULE   */
+   INSERT ':SYNAUXS:ERRLITS';
+   INSERT ':SYNAUXS:PROLITS';
+	
+	INSERT ':-XPL:MESSAGES';
+	INSERT ':-XPL:INTRPRTR';
+	
+   DCL MODC              FIXED PUBLIC;   /* 1 = MODC PROCESSOR IN SYSTEM       */
+   DCL EXAMOUNT          FIXED PUBLIC;   /* SECTORS OF EXTERNAL MEMORY AVAIL   */
+   DCL D54BITS           FIXED PUBLIC;   /* D54 INTERRUPT ENABLE BITS          */
+   DCL SYSTEM.VOICES     FIXED PUBLIC;   /* HOLDS # OF VOICES          */
+   DCL FM.VOICES         FIXED PUBLIC;   /* HOLDS # OF FM VOICES       */
+   DCL DIAGNOSTICS.ENABLED FIXED PUBLIC; /* 1 = DIAGNOSTICS ENABLED (4X PROGRAM) */
+   DCL MAX.DIAGNOSE.VOICES FIXED PUBLIC; /* THE MAGIC "WRAP" NUMBER FOR INCREMENTING THROUGH VOICES TO TEST */
+
+   /*** LPG "Mark" bug fix of 10/13/87.  Begin inclusion here ***/
+
+   /*  POWER.OFF TELLS THE STATE OF THE VELOCITY KEYBOARD:
+    *     0     = NORMAL, POWER IS ON
+    *     1-999 = POWER IS GOING OFF (COUNTS UP TO 1000 )
+    *     1000  = POWER IS STILL OFF (STEADY-STATE OFF)
+    *     1001-1999 = POWER IS COMING BACK ON (COUNTS UP TO 1999)
+    *     1999  = POWER IS STAYING ON; NEXT LOOP STATE WILL BE ZERO AGAIN
+    */
+   DCL POWER.OFF         FIXED PUBLIC;  /* NON-ZERO IF POWER IS OFF   */
+
+   /*** LPG "Mark" bug fix of 10/13/87.  End inclusion here ***/
+
+   DCL MISC.BUF (256-1)  FIXED PUBLIC;  /* USED EVERYWHERE            */
+
+   DCL PACKET.BAS.PTR    FIXED PUBLIC;  /* ROTARY BUFFER FOR PROTOCOL PACKETS */
+   DCL PACKET.FREE.PTR   FIXED PUBLIC;  /* POINTER TO NEXT AVAILABLE PACKET SECTOR */
+   DCL EXTBUF.PTR        FIXED PUBLIC;  /* EXTERNAL MEMORY BUFFER     */
+   DCL PACKET.PTR        FIXED PUBLIC;  /* BUFFER FOR PROTOCOL PACKETS */
+   DCL MISC.PTR          FIXED PUBLIC;  /* BUFFER FOR OUT GOING PACKETS */
+   DCL SECT.PTR          FIXED PUBLIC;  /* BUFFER FOR SETBUF DURING D115 DOWNLOAD */
+   DCL LOCATE.STACK.PTR  FIXED PUBLIC;  /* BUFFER FOR SAVED MARK POINTS */
+   DCL SCRUB.PTR         FIXED PUBLIC;  /* BUFFER TO SAVE START SCRUB PACKET IF DTD NOT READY */
+   DCL XFER.PTR          FIXED PUBLIC;  /* BUFFER TO BUILD AND RECEIVE TRANSFER BLOCKS */
+	DCL LCAP.PTR			 FIXED PUBLIC;  /* FOR RECEIPT OF LONG CAPTION STRINGS */
+   DCL PCACHE.PTR        FIXED PUBLIC;  /* FOR PROTOCOL CACHING OF DIRECTORY */
+   DCL TBANKNAME.PTR		 FIXED PUBLIC;	 /* HOLDS PARTIAL TREE NAME OF TIMBRE BANK FILE */
+   DCL SPACENAME.PTR		 FIXED PUBLIC;	 /* HOLDS PARTIAL TREE NAME OF SEQUENCE WORKSPACE FOLDER */
+
+	DCL OMSMIDI.PTR   	 FIXED PUBLIC;	 /* POINTS TO 2 XMEM SECTORS FOR OMS MIDI INPUT DATA */
+
+
+   /* SPECIAL SYNCLAVIER VARIABLES PUT HERE */
+   /* TO SIMPLIFY MODULE CONSTRUCTION       */
+
+   /* NEEDED BY GET NEXT EVENT:             */
+
+   DCL PLAY    FIXED PUBLIC;   /* SET TRUE IF SEQUENCER IS RUNNING    */
+   DCL RECD    FIXED PUBLIC;   /* RECORDING                           */
+   DCL MOVE    FIXED PUBLIC;   /* FF/REWIND                           */
+   DCL PNCH    FIXED PUBLIC;   /* PUNCHING IN                         */
+
+   DCL SAMPLED.ACTUAL.PLAY.TIME.MSB FIXED PUBLIC; /* SAMPLED ONCE PER MAIN LOOP */
+   DCL SAMPLED.ACTUAL.PLAY.TIME.LSB FIXED PUBLIC; /* CORRESPOND TO THE ACTUAL   */
+   DCL SAMPLED.ACTUAL.PLAY.TIME.ACU FIXED PUBLIC; /* MICROSECOND SPEED ACCUMULATOR */
+   DCL SAMPLED.ACTUAL.NEXT.CLICK    FIXED PUBLIC; /* VALUES OF PLAY TIME VARS   */
+   DCL SAMPLED.ACTUAL.BEAT.NUMBER   FIXED PUBLIC; /* AT START OF MAIN LOOP      */
+
+   DCL SAMPLED.MOVE                 FIXED PUBLIC; /* PROVIDE SAMPLED VERSIONS OF FF/REW VARIABLES SO */
+   DCL SAMPLED.MOVE.SPEED           FIXED PUBLIC; /* INTRTP ROUTINE CAN ESTIMATE SEQUENCER MOTION    */
+
+   DCL SAMPLED.ACTUALLY.EMIT.CLICK  FIXED PUBLIC;
+
+   DCL SAMPLED.ACTUAL.SEQUENCE.TIME.MSB FIXED PUBLIC;  /* COMPUTED ONCE PER MAIN LOOP */
+   DCL SAMPLED.ACTUAL.SEQUENCE.TIME.LSB FIXED PUBLIC;
+
+   DCL SAMPLED.REAL.TIME.OF.PRIOR.CLICK.LSB FIXED PUBLIC;
+   DCL SAMPLED.REAL.TIME.OF.NEXT.CLICK.LSB  FIXED PUBLIC;
+
+   /* Boundaries for time windows in CHECK.WINDOW.BOUNDARIES */
+
+   dcl CURSOR.SCROLL.BEGIN (1) fixed public,   /* HOLD REAL TIMES (NOT */
+       CURSOR.SCROLL.END   (1) fixed public,   /* SEQUENCE TIMES).     */
+       SCREEN.SCROLL.BEGIN (1) fixed public,
+       SCREEN.SCROLL.END   (1) fixed public;
+
+
+   DCL (TRD.PTR,TRD.LEN) FIXED PUBLIC;  /* SEC # IN XMEM FOR TERMINAL DISP   */
+
+   DCL (WITHIN.SCAN)     FIXED PUBLIC;  /* NEEDED BY MONO MOD  */
+
+   DCL TOK.PTR           FIXED PUBLIC;  /* BYTE PTR INTO TOKEN */
+   DCL TOKEN   (64)      FIXED PUBLIC;  /* GLOBAL STRING BUFFER */
+   DCL FNBUF   ( 4)      FIXED PUBLIC;  /* GLOBAL FILE NAME BUFFER - length word + 8 bytes; remember XPL adds one word */
+   DCL LNBUF   (64)      FIXED PUBLIC;  /* GLOBAL LONG FILE NAME BUFFER 128 character C string (with null) with able 16-bit byte length; remember XPL adds one word */
+   DCL ERTYP             FIXED PUBLIC;  /* GLOBAL HOLDS CODE FOR CURRENT ERROR STATUS */
+   DCL ERSYM(MESSAGE_BUF_SIZE/2) FIXED PUBLIC;  /* HOLDS STRING ASSOCIATED WITH CURRENT ERROR */
+   DCL VK.ERROR.CODE     FIXED PUBLIC;  /* CODED IDENT OF VK ERROR MESSAGE DISPLAYED */
+
+   DCL HEXPOWERS DATA PUBLIC (4096,256,16,1);
+   DCL POWERS    DATA PUBLIC (10000,1000,100,10,1);
+   DCL BITS      DATA PUBLIC (1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768);
+   DCL R.LOOK    DATA PUBLIC (2,4,8,64,128,16);    /* MAPS RTE.DATA TO BITS */
+
+   dcl AEE.Screen.State  fixed PUBLIC;  /*  0 = AEE never has been activated  */
+                                        /*  1 = AEE is now running            */
+                                        /* -1 = AEE was run but is closed now */
+
+   /* $PAGE - ALLOCATE FOR INTERNAL & EXTERNAL MEMORY */
+
+
+   /* EXAMOUNT - STARTS AT TOP OF MEMORY                    */
+   /* TRD.PTR  - ALLOC.EXT WILL ABORT IF REACHES BELOW THIS */
+
+   ALLOC.EXAMOUNT:PROC(NUM) PUBLIC SWAPABLE;  /* ALLOCATE & ZERO OUT EXTERNAL MEMORY */
+      DCL (I,J,NUM) FIXED;
+
+      IF (EXAMOUNT ILT TRD.PTR) THEN DO; /* OUT OF ROOM */
+         RETURN 0;
+      END;
+
+      IF (EXAMOUNT-TRD.PTR) ILT NUM THEN DO; /* OUT OF ROOM */
+         RETURN 0;
+      END;
+
+      EXAMOUNT=EXAMOUNT-NUM;
+
+      WRITE(MAM)=EXAMOUNT;
+      DO I=0 TO NUM-1;                       /* ZERO OUT    */
+         IF (INC.POLY)\(MODC<>0)
+         THEN DO;
+            RPC 256;
+            WRITE(MDI)=0;
+         END;
+         ELSE DO J=0 TO 63;
+            WRITE(MDI)=0; WRITE(MDI)=0;
+            WRITE(MDI)=0; WRITE(MDI)=0;
+         END;
+      END;
+
+      RETURN EXAMOUNT;
+
+   END ALLOC.EXAMOUNT;
+
+
+   STOP.HELD:PROC PUBLIC SWAPABLE; /* RETURNS TRUE IF STOP BUTTON HELD */
+      DCL I FIXED;
+      DCL CHECK.FOR.PROTOCOL.STOP.BUTTON PROC EXTERNAL;
+      DCL NEW.ORK FIXED EXTERNAL;
+
+		interp_run_host_250();										// run mac periodically even if doing a long operation (e.g. copying memory)
+		
+		if (interp_poll_for_stop(0) != 0)						// interp request to stop audition
+			return 1;
+		
+	   if ((NUM.OF.D50.IN.CHARS != 0                 )		/* if break received from toiminal */
+		&&  (next.d50.in.char    == ASC.CALL.TERMINATE))
+		then do;
+			call get.next.d50.in.char;
+			return 1;
+		end;
+
+      IF INC.PRO THEN DO;
+         I = CHECK.FOR.PROTOCOL.STOP.BUTTON;
+         IF I<>0 THEN RETURN 1;
+      END;
+
+      IF POWER.OFF <> 0 THEN RETURN 0;
+
+      IF (NEW.ORK == 1) THEN DO;  /* ORK */
+         DISABLE;                 /* AVOID CLOCK INTERRUPTS FOR THE MOMENT */
+         WRITE(CREG)=  "020";     /* FIRST STOP THE WRITE IN PROGRESS */
+         WRITE(CREG)=2\"010";     /* SET UP ADDRESS */
+         WRITE(CREG)=2\"110";     /* NOW READ THEM FIRST */
+         I=READ(DREG);            /* AND READ NEW SETTING */
+         WRITE(CREG)=2\"010";     /* AND OFF WITH READ */
+         ENABLE;                  /* CAN SCAN THE KEYBOARD NOW */
+         IF (I&2)<>0 THEN RETURN 1;
+         ELSE RETURN 0;
+      END;
+      ELSE DO;
+         DISABLE;                    /* IN CASE KEYBOARD SCAN           */
+         WRITE(CREG)=1;              /* TURN OFF READ                   */
+         WRITE(DREG)="600"\8;        /* REQUEST DATA FOR RECORDER PANEL */
+         PULSE_EXWR;
+         I=READ(DREG);               /* READ NEW DATA */
+         WRITE(CREG)=1;              /* REMOVE READ */
+         ENABLE;
+         IF (I&2)<>0 THEN RETURN 1;
+         ELSE             RETURN 0;
+      END;
+   END STOP.HELD;
+
+   SET.ERROR: PROC (CODE,STR) PUBLIC SWAPABLE; /* SETS ERTYP & SAVES ERROR STRING IN ERSYM */
+      DCL CODE FIXED;     /* ERROR TYPE CODE */
+      DCL STR  ARRAY;     /* STRING TO APPEND TO STANDARD ERROR MESSAGE */
+
+      IF (ERTYP = 0      ) /* IF NO ERROR DISPLAYED                     */
+      OR (ERTYP = ERR.VKE) /* IF ERROR WAS FROM VK WINDOW DISPLAY       */
+      THEN DO;             /* THEN SHOW THIS ERROR MESSAGE              */
+         ERTYP=CODE;       /* SAVE IN GLOBAL FOR DISPLAY ROUTINES       */
+
+         ERSYM(0)=STR(0);
+         IF ERSYM(0) IGT MESSAGE_BUF_SIZE THEN ERSYM(0)=MESSAGE_BUF_SIZE; /* LIMIT MESSAGE LENGTH */
+
+         DO CODE=1 TO SHR(ERSYM(0)+1,1); /* COPY CHARS INTO ERROR MESSAGE STRING BUFFER */
+            ERSYM(CODE)=STR(CODE);
+         END;
+      END;
+
+   END SET.ERROR;
+
+
+/* $page - stack routines - save and recall internal pdl from external memory */
+
+   measure.pdl:proc public swapable;
+      dcl (i,j) fixed;
+
+      /* get pointer to end of variable area: */
+
+      if inc.poly=0 then return 0;
+
+      i=core(c#contab + c#vstart) + core(c#contab + c#vlngth);
+      j=i;
+
+      disable;
+      do while core(j)=0;
+         j=j+1;
+      end;
+      enable;
+
+      return pdl.size - (j-i);
+   end measure.pdl;
+
+   zero.pdl:proc public swapable;
+      dcl i fixed;
+
+      /* get pointer to end of variable area: */
+
+      if inc.poly=0 then return;   /* poly sampling means model c compilation */
+
+      i=core(c#contab + c#vstart) + core(c#contab + c#vlngth);
+
+      /* now zero out stack */
+
+      disable;
+      do while i ilt read("312");
+         core(i)=0;
+         i=i+1;
+      end;
+      enable;
+
+   end zero.pdl;
+
+   dcl stack.xmem.ptr  fixed static;
+   dcl stack.xmem.len  fixed static;
+
+   /* NOTE !!! - push.pdl and pop.pdl can only be called from recursive */
+   /* procedures that declare at least one recursive variable inside    */
+   /* themselves                                                        */
+
+   push.pdl.to.xmem.routine:proc(arg) public swapable;
+      dcl arg fixed;      /* pass read("312") */
+      dcl i   fixed;
+      dcl j   fixed;
+      dcl len fixed;
+
+      if inc.poly=0 then return;   /* poly sampling means model c compilation */
+
+      arg = arg + 1;               /* point to recursive frame pointer of calling procedure */
+
+      if core(arg) ilt arg then stop;  /* must not be frame pointer */
+
+      arg = core(arg)+1;          /* point to return frame for calling procedure - plus 1 for post decrement */
+
+      i=core(c#contab + c#vstart) + core(c#contab + c#vlngth) + pdl.size;
+
+      if i ilt arg then stop;
+
+      len = i-arg;                /* length of pdl we don't need in internal memory any more */
+
+      write(mam)=stack.xmem.ptr + shr(stack.xmem.len,8);
+      write(mal)=stack.xmem.len;
+
+      if stack.xmem.len+10+len igt stack.xmem.wrds then do;
+         stack.xmem.len=stack.xmem.len+1;
+         write(md )=0;
+         write("50")=7;
+         return;
+      end;
+
+      call copy.out(arg,len);
+      write(mdi)=len;
+      stack.xmem.len=stack.xmem.len+len+1;
+
+      j=arg-read("312");   /* length of stack we must preserve   */
+      write("313")=i-j;    /* save new stack pointer computation */
+
+      call blockmove(loc(read("312")),loc(i-j),j); /* copy up in memory */
+      write("312")=read("313");
+      goto a;a:;                                   /* tell compiler all registers are trashed */
+
+      /* adjust frame pointer for for push.pdl stack frame */
+      core(read("312")+1) = core(read("312")+1) + len;
+
+      return;
+   end push.pdl.to.xmem.routine;
+
+
+   pop.pdl.from.xmem.routine:proc public swapable;
+      dcl i   fixed;
+      dcl j   fixed;
+      dcl len fixed;
+
+      if inc.poly=0 then return;       /* poly sampling means model c compilation */
+
+      if stack.xmem.len=0 then stop;   /* sys prog error - pop called before push */
+
+      stack.xmem.len = stack.xmem.len - 1; /* account for length          */
+
+      i=core(c#contab + c#vstart) + core(c#contab + c#vlngth) + pdl.size;
+      j=i-read("312");                 /* length of stack in use now      */
+
+      write(mam)=stack.xmem.ptr + shr(stack.xmem.len,8);
+      write(mal)=stack.xmem.len;
+      len=read(md);                          /* length of stack to restore */
+
+      if len=0 then return;                  /* means ran out of room during push */
+
+      /* use some static variables here */
+      /* since the recursive ones move  */
+
+      diskio.info(0) = read("312")+1;          /* pointer to current stack */
+      diskio.info(1) = read("312")-len+1;      /* where to move it to      */
+      diskio.info(2) = j-1;                    /* length (words) to copy   */ /* copy one less because unused stack word holds blockmoves return address */
+      write("313")   = addr(diskio.info(0));
+
+      write("312")=read("312")-len;          /* at this point,  all our variables are gonzo */
+      call blockmove(loc(read("373")),loc(read("373")),read("373"));
+      goto a;a:;                             /* tell compiler all registers are trashed */
+
+      stack.xmem.len = stack.xmem.len - len;  /* account for length          */
+      write(mam)=stack.xmem.ptr + shr(stack.xmem.len,8);
+      write(mal)=stack.xmem.len;
+
+      call copy.in(i-len,len);
+
+      /* adjust frame pointer for for pop.pdl stack frame */
+      core(read("312")+1) = core(read("312")+1) - len;
+
+      return;
+
+   end pop.pdl.from.xmem.routine;
+
+   /* $PAGE - INITIALIZATION OF GLOBAL MODULE */
+
+   GLOBINIT:PROC SWAPABLE;
+
+      ENABLE;                 /* LET THERE BE NO DOUBT ABOUT IT - INTERRUPTS ARE ON!! */
+
+      MEM.SIZ  = MEMORY.SIZE; /* FROM SYSTEM CONFIG AREA       */
+
+      /* CHECK FOR MOD B/M0G127HD C */
+
+      WRITE("300")=0;       /* IM(0) TO R0                     */
+      WRITE("210")=0;       /* IM(0) TO ADD0  (CLEARS CARRY)   */
+      WRITE("270")=5;       /* IM(5) TO ADC0  (ADD WITH CARRY) */
+      IF (READ("300")<>0)
+      THEN MODC=1;          /* RESULT IS 0 ON MODEL B (5 ON MODEL C) */
+
+      EXAMOUNT = CORE(LOC.EMSIZE) - CORE(CORE(1)+C#SWPLEN);	/* GET AMOUNT OF EXTERNAL MEMORY AVAILABLE */
+		
+		EXTBUF.PTR     = ALLOC.EXAMOUNT(EXTBUF.LEN); /* DISK BUFFER IN EXT MEMORY */
+      stack.xmem.ptr = alloc.examount(shr(stack.xmem.wrds+255,8));
+
+      POWER.OFF=1000;       /* STEADY-STATE OFF; SKIP KEYBOARD SCAN FOR NOW */
+
+   END;
+
+	#if (false)
+	//	checksum_swapfile() and checksum_objcode() are used only during debugging to help locate
+	//	where certain areas of memory get corrupted.  Please retain this for possible future use.
+
+	checksum_swapfile: proc public;	//	not swapping to minimize changing where the crash occurs
+		dcl checksum	 fixed static;	//	holds value of checksum across loop iterations
+		dcl sector		 fixed static;	//	current sector of extmem
+		dcl limit		 fixed static;	//	first sector above swap file
+		dcl buffer(255) fixed static;	//	internal memory buffer to copy each sector of extmem to
+		insert ':SYNLITS:L#ASM.0';		//	TY's pseudo assembly language literals
+
+		//	set up initial conditions
+		checksum = 0;
+		limit		= core(loc.emsize);							//	loc.emsize is an aritmetic expression, so avoid having to recalculate with each iteration
+		sector	= limit - core(c#contab + c#swplen);	//	start of the swap file in external memory
+		write(reg_dst|r13) = addr(buffer(0));				//	avoid having to look this up with each iteration
+
+		while (sector != limit)
+		{
+			import(sector,0,buffer,256);						//	copy current sector to internal memory buffer
+	
+			write(load_acc|a0) = checksum;					//	reload checksum from previous iteration
+			write(load_acc|a1) = read(reg_src|r13);		//	reload addr(buffer(0))
+			write("10")			 = 255;							// repeat the next instruction 256 times
+			write(add|a0)		 = read(mem_src|incr|r1);	//	accumulate checksum
+			checksum				 = read(reg_src|r0);			//	stash checksum before paving a0 with the following increment
+
+			sector = sector + 1;
+		}
+		send checksum;												//	show me the result
+	end checksum_swapfile;
+
+	checksum_objcode: proc public;
+		dcl i	fixed static;
+		insert ':SYNLITS:L#ASM.0';	//	TY's pseudo assembly language literals
+
+		//	checksum system code
+		//	set up initial conditions
+		write(5) = 0;
+		write(reg_dst|r13) = 2;									//	location of first word of system code
+
+		do i = 2 to c#contab - 1;
+			write(4) = read(reg_src|incr|r13);				//	use current word of internal memory as addend then increment address
+			write(6) = 1;											//	initiate add
+		end;
+		send read(5),;												//	show me the result
+
+		//	checksum config table
+		//	set up initial conditions
+		write(5) = 0;
+		write(reg_dst|r13) = c#contab;						//	location of first word of config table
+
+		do i = read(reg_src|r13) to read(reg_src|r13) + c#conlen - 1;
+			write(4) = read(reg_src|incr|r13);				//	use current word of internal memory as addend then increment address
+			write(6) = 1;											//	initiate add
+		end;
+		send read(5),;												//	show me the result
+
+		//	checksum string and data constants
+		//	set up initial conditions
+		write(5) = 0;
+		write(reg_dst|r13) = c#contab + c#conlen;			//	location of first word of string and data constants
+
+		do i = read(reg_src|r13) to core(c#contab + c#rtploc) - 1;
+			write(4) = read(reg_src|incr|r13);				//	use current word of internal memory as addend then increment address
+			write(6) = 1;											//	initiate add
+		end;
+		send read(5),;												//	show me the result
+
+		//	checksum runtime system code
+		//	set up initial conditions
+		write(5) = 0;
+		write(reg_dst|r13) = core(c#contab + c#rtploc);	//	location of first word of runtime system code
+
+		do i = read(reg_src|r13) to core(c#contab + c#objloc) - 1;
+			write(4) = read(reg_src|incr|r13);				//	use current word of internal memory as addend then increment address
+			write(6) = 1;											//	initiate add
+		end;
+		send read(5),;												//	show me the result
+
+		//	checksum object code
+		//	set up initial conditions
+		write(5) = 0;
+		write(reg_dst|r13) = core(c#contab + c#objloc);	//	location of first word of object code
+
+		do i = read(reg_src|r13) to core(c#contab + c#swploc)-1;
+			write(4) = read(reg_src|incr|r13);				//	use current word of internal memory as addend then increment address
+			write(6) = 1;											//	initiate add
+		end;
+		send read(5);												//	show me the result
+
+	end checksum_objcode;
+
+	#endif
+
+   CALL GLOBINIT;
+
+END GLOBMOD;

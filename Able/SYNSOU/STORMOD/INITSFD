@@ -1,0 +1,119 @@
+/* INITSFD  $TITLE - Routines to hook SFD routines and objects into a screen
+
+   Modified:
+   07/03/89 - SGS - moved initialization of SFDDlgGrp to Set.SFD.Misc
+   03/02/89 - SGS - author
+   
+*/
+
+/* $SUBTITLE */
+
+/* This procedure will not resize the TRD area to make room  */
+/* or initialize it to 0's. That must be done before calling */
+/* this routine.  Returns amount allocated (0 if none).      */
+
+Get.SFD.Reserved.Sectors: proc returns (fixed) public swapable;
+   // Provide space for long file names if running on interpreter
+   if (interp_is_running != 0)
+      return (SFD.Used.Sectors + SFD.Name.Sectors);
+   else
+      return (SFD.Used.Sectors);
+end Get.SFD.Reserved.Sectors;
+
+Get.SFD.Memory: proc (StartPtr) returns (fixed) public swapable;
+   dcl StartPtr     fixed; /* sector ptr to display memory */
+
+   /* directory memory must be within the TRD area (?) */
+   if (((StartPtr+Get.SFD.Reserved.Sectors()) igt (TRD.PTR+TRD.LEN))
+   or  (StartPtr ilt TRD.PTR)) then
+      return (0);
+   else 
+      return (Get.SFD.Reserved.Sectors());
+
+end Get.SFD.Memory;
+
+/* $SUBTITLE */
+
+/* Any screen using SFD code should call this proc to set up */
+/* hooks                                                     */
+Set.SFD.Misc: proc (MiscId,ErrRow,ErrCol) public swapable;
+   dcl MiscId    fixed;  /* id of misc group - should deal with mousehole, Screen.Event.Code = get.program.exit */
+   dcl ErrRow    fixed;  /* where to put error msgs in case we get one */
+   dcl ErrCol    fixed;  /* while in an SFD dialog                     */
+
+   call PID(SFDDlgGrp,-1);
+   call PID(SFDMiscGrp,MiscId);
+   call PID(SFDErrRow,ErrRow);
+   call PID(SFDErrCol,ErrCol);
+
+end Set.SFD.Misc;
+
+/* $SUBTITLE */
+
+Set.SFD.Dialog.Row: proc (Row) public swapable;
+   dcl Row          fixed;
+
+   call PID(SFDDlgRow,Row);
+end Set.SFD.Dialog.Row;
+
+/* $SUBTITLE */
+
+/* Returns in Ids the screen manager ids of things defined   */
+/* using the SFD code.  These include: the group id of each  */
+/* window defined, the object id of the table in each window,*/
+Get.SFD.Ids: proc (Ids) public swapable;
+   dcl Ids   array; /* output array:    */
+                    /* Ids( 0) = Number of windows defined        */
+                    /* Ids( 1) = Group id of 1st window           */
+                    /* Ids( 2) = Object id of table in 1st window */
+                    /* Ids( 3) = Object id of Fold-out button in 1st window */
+                    /* Ids( 4) = Object id of Audition button in 1st window */
+                    /* Ids( 5) = Group id of 2nd window           */
+                    /* Ids( 6) = Object id of table in 2nd window */
+                    /* ...                                        */
+   dcl (i,j) fixed;
+   dcl Base  fixed;
+
+   j=0;
+   do i = 0 to Max.Open.Windows-1;
+      Base=i*State.Stride; /* compute ptr into state memory table */
+      write(mam)=State.Base+shr(Base+S#DirTable,8);
+      write(mal)=Base+S#DirTable;
+
+      if read(md)<>0 then do;  /* every defined window has a defined table */
+         Ids((j*4)+1) = GRP$Window+i;  /* window id */
+         Ids((j*4)+2) = read(md);      /* table  id */
+
+         write(mam)   = State.Base+shr(Base+S#DirTableFoldOut,8);
+         write(mal)   = Base + S#DirTableFoldOut;
+         Ids((j*4)+3) = read(md);      /* fold-out button id */
+
+         write(mam)   = State.Base+shr(Base+S#DirTableAudition,8);
+         write(mal)   = Base + S#DirTableAudition;
+         Ids((j*4)+4) = read(md);      /* audition button id */
+         j = j+1;
+      end;
+   end;
+
+   Ids(0) = j;
+
+end Get.SFD.Ids;
+
+/* $SUBTITLE */
+
+Initialize.Sound.Directory.Info:  proc swapable;
+   dcl i fixed;
+
+   /* initialize the memory blocks (for sfr screen only) */
+   do i=0 to sfr#MemTotalLength-1;
+      call PID(sfr#MemBase+i,-1);     /* write pattern of -1's */
+   end;
+
+   /* initialize the DC blocks (for both sfr and archive screens) */
+   do i=0 to DC#TotalLength-1;
+      call PID(DC#Base+i,(i&1)*(-1)); /* write alternating pattern of (0,-1) */
+   end;
+
+end Initialize.Sound.Directory.Info;
+
+call Initialize.Sound.Directory.Info;

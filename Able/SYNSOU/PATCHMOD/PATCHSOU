@@ -1,0 +1,314 @@
+/*	$TITLE  :SYNSOU:PATCHMOD:PATCHSOU  - Module for: Patch Assignment Screen
+
+Modified:
+1999/10/13 - TY  - Added code to recalculate BASE.LINE and #YPOS when entering the
+						 patch assignment screen, since the L-page can now alter TDS.LINE#
+1988/06/29 - MWH - Remove unused inserts
+1987/02/23 - eg  - created this file
+*/
+
+module patchmod;
+   insert ':synlits:alltlits';  /* get all terminal literals */
+	insert ':SYNLITS:L#ASM.0';		//	TY's pseudo assembly language literals
+
+   insert ':-xpl:catrout';      /* get catalog routines           */
+   insert ':-xpl:intrprtr';     /* get interpreter interface      */
+
+   insert ':synmods:linkdcl';   /* contains parse.synclavier.parm */
+   insert ':synmods:dirdcl';    /* subcat directory               */
+   insert ':synmods:stordcl';   /* sound file directory           */
+   insert ':synmods:indexdcl';  /* for mount optical volume       */
+   insert ':synmods:globdcl';
+   insert ':synmods:mathdcl';
+   insert ':synmods:polydcl';
+   insert ':synmods:monodcl';
+   insert ':synmods:parmdcl';
+   insert ':synmods:ttydcl';
+   insert ':synmods:plotdcl';
+   insert ':synmods:errdcl';
+   insert ':synmods:getvdcl';  
+   insert ':synmods:filedcl';
+
+   insert ':synmods:scrndcl';
+   insert ':synmods:d40dcl';
+   insert ':synmods:tformdcl';
+   insert ':synmods:getdcl';
+   insert ':synmods:tprimdcl';
+   insert ':synmods:moussdcl';
+
+   insert ':synrdcls:03-pdcls';
+   insert ':synrdcls:04-sdcls';
+   insert ':synrdcls:05-bdcls';
+   insert ':synrdcls:11-tdcls';
+   insert ':synlits:synclits';
+
+
+   /* get source files            */
+   insert ':synsou:patchmod:550-assn';
+
+   /* $PAGE - driver for Patch Assignment Screen */
+
+   dcl patch.screen.active  fixed public;
+   dcl patch.screen.partial fixed public;
+   dcl patch.screen.frame   fixed public;
+   
+   PATCH.ASSIGNMENT.SCREEN:proc (arg) public swapable; /* S.ASSIGN.PATCH */
+      dcl arg     fixed;                /* argument - must pass 0 for now */
+      dcl code    fixed;                /* code returned by get.next.event */
+
+		//	Since the L-page may have altered TDS.LINE# since the last time this screen was in use,
+		//	we must recalculate the following two variables each time this screen is entered.
+		load TDS.LINE#; div 10; #YPOS = rem;	//	#YPOS = TDS.LINE# mod 10;
+		BASE.LINE = TDS.LINE# - #YPOS;
+
+      call PRINT.ASSIGNMENT.MENU;       /* present new patch list display, stay in this state */
+      call POS.ASSIGNMENT.CURSOR; 
+
+      EXIT.MY.SCREEN   = 0;             /* clear these flags before loop */
+      GOTO.THIS.SCREEN = 0;
+
+      do while EXIT.MY.SCREEN = 0;      /* wait for exit condition       */
+		
+			// Publish row & line for interchange file recall
+			if (input.state == s.assign.patch)
+			{
+				patch.screen.active  = true;
+   			patch.screen.partial = find.partial();
+				patch.screen.frame   = base.line+#ypos+1;
+            interp_patch_screen_active(patch.screen.active, patch.screen.partial, patch.screen.frame);
+			}
+
+			call ENABLE_SEVERAL_GETS (get.in.char,				/*	get in.chars		*/
+											  get.mouse.button,		/*	get mouse buttons	*/
+											  get.ertyp,				/*	errors				*/
+											  get.prm.info);			/*	timbre parameter change	*/
+			call GET_ENABLE			 (get.poly.contents);
+			call GET_ENABLE			 (get.new.timbre.info);	/*	new kbd timbre/partial	*/
+
+			code = GET.NEXT.EVENT;									/*	get event			*/
+
+			call DISABLE_SEVERAL_GETS(get.in.char,
+											  get.mouse.button,
+											  get.ertyp,
+											  get.prm.info);
+			call GET_DISABLE			 (get.poly.contents);
+			call GET_DISABLE			 (get.new.timbre.info);
+
+			patch.screen.active = false;
+         interp_patch_screen_active(0,0,0);
+
+			do case (code-1);
+
+            do;                 /* input character received */
+               if next.event.info >= asc.call.convert
+               then call RETURN.TO.PREV.STATE;
+               else call ASSIGNMENT.MENU.INPUT(in.chin,next.event.info);           
+            end;
+
+            if next.event.info=2 then do; /* 1 */   /* look for release of middle button */
+               call ASSIGNMENT.MENU.MOUSE.POS(mouse(release.x),mouse(release.y));
+            end;
+
+            ;                        /* mouse movement not used */
+
+            do;                      /* new timbre info         */
+               call check.base.line;         /* get basex                         */
+               call remove.err;              /* remove earlier error if menu frame set up */
+               call print.partial.info;      /* display info for selected partial. set up input state depending on timbre type */
+            end;
+
+            ;                           /* unused event code       */
+            ;                           /* new seq info not used   */
+            ;                           /* no play scrolling       */
+            ;                           /* entry writes no effect  */
+
+            call PRINT.PATCH.KNOB.INFO; /* tds update (new.prm) - redraw semitone & lengths */
+
+            ;                           /* dtd info - nothing      */
+
+            do;                         /* new poly contents       */
+               if (next.event.info & 2) <> 0
+               then do;
+                  call print.mem.left;          /* print memleft/check for reload */
+                  if (input.state=s.assign.synth)
+                  then call print.partial.info;    /* redraw screen to position cursor */
+                  else if input.state=s.assign.patch
+                  then call POS.ASSIGNMENT.CURSOR; /* and restart input line */
+               end;
+            end;
+
+            do;                        /* error message to display */
+               if next.event.info then do;
+                  call DISPLAY.ERROR.MESSAGE(latched.ertyp,10,36);  /* ertyp - display error here */
+                  call POS.ASSIGNMENT.CURSOR;
+               end;
+            end;
+
+            ;                          /* nothing on ork/smpte */
+
+         end;                          /* of do case           */
+
+      end;                             /* of wait for exit     */
+
+      EXIT.MY.SCREEN   = 0;            /* clear flag after loop */
+
+      return GOTO.THIS.SCREEN;
+
+   end PATCH.ASSIGNMENT.SCREEN;
+
+   /* $PAGE - driver for Keyboard Patch Assignment Screen */
+
+   KBD.PATCH.ASSIGNMENT.SCREEN:proc (arg) public swapable; /* S.PATCH */
+      dcl arg     fixed;                /* argument - must pass 0 for now */
+      dcl code    fixed;                /* code returned by get.next.event */
+
+      call PRINT.PATCH.DISPLAY;
+
+      EXIT.MY.SCREEN   = 0;             /* clear these flags before loop */
+      GOTO.THIS.SCREEN = 0;
+
+      do while EXIT.MY.SCREEN = 0;      /* wait for exit condition       */
+
+			call ENABLE_SEVERAL_GETS (get.in.char,			/*	get in.chars		*/
+                                  get.mouse.button, /* get mouse buttons */
+                                  get.new.timbre.info,0);
+
+         code = GET.NEXT.EVENT;                     /* get event         */
+
+         call DISABLE_SEVERAL_GETS(get.in.char,      
+                                  get.mouse.button, 
+                                  get.new.timbre.info,0);
+
+         do case (code-1);
+
+            do;                        /* input character received */
+               if next.event.info >= asc.call.convert
+               then call RETURN.TO.PREV.STATE;
+               else do;                                     
+                  if (next.event.info="20")                          /* CTRL-P: print hardcopy of screen */
+                  or (next.event.info=asc.p) or (next.event.info=lower.p)          /* or regular P */
+                  then do;
+                     if D40_PRESENT<>0                 /* if device available */
+                     then call SCREEN_DUMP;             
+                     else call no.printer;
+                  end;
+                  else do;
+                     if next.event.info<>esc then call remove.err;
+                     if      next.event.info=esc  then call RETURN.TO.PREV.STATE; /* return to Main Menu */
+                     else if next.event.info=cret then do;
+                        goto.this.screen=s.assign.patch;
+                        exit.my.screen=true;
+                     end;
+                     else if  (next.event.info>=asc.1) 
+                          and (next.event.info<=asc.4) then do;
+                             call SELECT.PARTIAL(next.event.info-asc.1);               /* select new partial */
+                             call PRINT.PATCH.DISPLAY;   /* updated display for new partial */
+                     end;
+                  end;
+               end;
+            end;
+
+            if next.event.info=2 then do;    /* look for release of middle button */
+               if mouse.hole(mouse(release.x),mouse(release.y)) then do;
+                  goto.this.screen=s.assign.patch;    /* returning to Assignment Menu */
+                  exit.my.screen=true;
+               end;
+            end;
+
+            ;                          /* mouse movement not used */
+            call PRINT.PATCH.DISPLAY;  /* timbre recall           */
+            ;                          /* psfree not displayed    */
+            ;                          /* new seq info not used   */
+            ;                          /* no play scrolling       */
+            ;                          /* entry writes no effect  */
+            ;                          /* tds update - nothing    */
+            ;                          /* dtd info - nothing      */
+            ;                          /* poly change - nothing   */
+            ;                          /* no errors available     */
+            ;                          /* nothing on ork/smpte    */
+
+         end;                          /* of do case           */
+
+      end;                             /* of wait for exit     */
+
+      EXIT.MY.SCREEN   = 0;            /* clear flag after loop */
+
+      return GOTO.THIS.SCREEN;
+
+   end KBD.PATCH.ASSIGNMENT.SCREEN;
+
+   /* $PAGE - driver for Patch Assignment Help Screen */
+
+   ASSIGNMENT.HELP.SCREEN:proc (arg) public swapable; /* S.ASSIGN.INST */
+      dcl arg     fixed;                /* argument - must pass 0 for now */
+      dcl code    fixed;                /* code returned by get.next.event */
+
+      call ASSIGNMENT.MENU.INSTRUCTIONS;       
+
+      EXIT.MY.SCREEN   = 0;             /* clear these flags before loop */
+      GOTO.THIS.SCREEN = 0;
+
+      do while EXIT.MY.SCREEN = 0;      /* wait for exit condition       */
+
+			call ENABLE_SEVERAL_GETS (get.in.char,			/*	get in.chars		*/
+                                  get.mouse.button, /* get mouse buttons */
+                                  get.ertyp,        /* errors            */
+                                  get.new.timbre.info);
+
+         code = GET.NEXT.EVENT;                     /* get event         */
+
+         call DISABLE_SEVERAL_GETS(get.in.char,      
+                                  get.mouse.button, 
+                                  get.ertyp,
+                                  get.new.timbre.info);
+
+         do case (code-1);
+
+            do;                        /* input character received */
+               if next.event.info >= asc.call.convert
+               then call RETURN.TO.PREV.STATE;
+               else do;                                     
+                  if (next.event.info="20")                          /* CTRL-P: print hardcopy of screen */
+                  or (next.event.info=asc.p) or (next.event.info=lower.p)          /* or regular P */
+                  then do;
+                     if D40_PRESENT<>0                 /* if device available */
+                     then call SCREEN_DUMP;             
+                     else call no.printer;
+                  end;
+                  else if (next.event.info=esc) or (next.event.info=cret) then do;
+                     goto.this.screen=s.assign.patch;   /* returning to Assignment Menu */
+                     exit.my.screen=true;
+                  end;
+               end;
+            end;
+
+            if next.event.info=2 then do;    /* look for release of middle button */
+               if mouse.hole(mouse(release.x),mouse(release.y)) then do;
+                  goto.this.screen=s.assign.patch;
+                  exit.my.screen=true;
+               end;
+            end;
+
+            ;                          /* mouse movement not used */
+            ;                          /* name                    */
+            ;                          /* psfree not displayed    */
+            ;                          /* new seq info not used   */
+            ;                          /* no play scrolling       */
+            ;                          /* entry writes no effect  */
+            ;                          /* tds update - nothing    */
+            ;                          /* dtd info - nothing      */
+            ;                          /* poly change - nothing   */
+            ;                          /* no error mesage         */
+            ;                          /* nothing on ork/smpte */
+
+         end;                          /* of do case           */
+
+      end;                             /* of wait for exit     */
+
+      EXIT.MY.SCREEN   = 0;            /* clear flag after loop */
+
+      return GOTO.THIS.SCREEN;
+
+   end ASSIGNMENT.HELP.SCREEN;
+
+end patchmod;

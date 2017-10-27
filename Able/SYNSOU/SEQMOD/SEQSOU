@@ -1,0 +1,1452 @@
+/*	$TITLE - :SYNSOU:SEQMOD:SEQSOU - Module of useful routines to use with sequences	*/
+
+/*
+Modified:
+1998/05/16 - TY  - Split SCALE.RTE.VAL into SCALE.RTE.TO.PERCENT and SCALE.PERCENT.TO.RTE.
+						 (See explanation at the procedure.)
+1998/05/08 - TY  - Because scaling is used so frequently in the procedures in :SYNSOU:EDITMOD:EDITFNCS,
+						 I've defined a fast general purpose scaling procedure "SRSCALE", both to avoid
+						 unnecessary duplication, and to provide standard rounding.  It works for both signed
+						 and unsigned values, and for both even and odd denominators.  I have placed it here so
+						 that it can be accessed from :SYNSOU:RECMOD:RECSOU and :SYNSOU:AUDMOD:ASEQSOU as well.
+					  - Added a conditional to CONV.RATIO.TO.PERCENT that prevents the possibility of rounding
+						 in the wrong direction when the denominator is odd.
+1998/04/22 - TY  - Removed redundant poop from the last else block of CHANGE.RTE.CODE.
+1998/04/12 - TY  - Rewrote the procedure SCALE.RTE.VAL to allow accurate display and input
+						 of RTEs and velocity values.  The original procedure is commented out.
+1992/02/17 - pf  - Split eventsou into eventsa and eventsb
+1991/10/08-MWH/CJ- Fix protocol deadlock in EditView during PANEL.RESCAN
+1992/04/02 - pf  - Removed prescan offsets in display of rtes
+1991/01/30 - MWH - Report which tracks have had new notes
+1990/11/06 - PF  - Added support for new sustain update record
+1990/10/06 - PF  - Fixed a few problems with Build.Note.Record
+1990/08/27 - PF  - Support all MIDI controllers
+1990/08/14 - TSS - added routine to change a sequencer track output routing
+1989/10/02 - cj  - introduced Screen.Scroll.Begin (etc) fs Screen.Begin
+						 for use with tempo maps.  Also fixed order of MSB/LSB
+						 in Screen & Cursor Begin & End.  Also passed a
+						 sequence time to Scroll.Seq.
+1989/05/25 - cj  - fixed bugs with NOTECOUNT (affected event placing)
+						 in snapshot routine
+1989/05/03 - cj  - set count field during snap shot for better editing
+1989/04/27 - cj  - look up event cue id in expand.event.note correctly
+1989/04/24 - cj  - rewrote expand.cue.note to expand.event.note
+1989/03/14 - tss - Fixed bug in CHANGE.NOTE.START with ILP changes
+1988/10/23 - cj  - called display.sequencer.status in scroll.seq to
+						 get better display during VITC scrolling
+1988/09/04 - cj  - added NOTESKIP capability to snapshot
+1988/08/22 - cj  - implemented SNAP#Ilps, SNAP#Notes in do.snap.shot
+					  - combined aee screen shuffle and recorder screen
+						 shuffle by user of SNAP#NoBackup
+1988/08/17 - CJ  - SET THD.IGNORE FOR DATA TRACKS
+1988/06/30 - MWH - Remove unused inserts
+1988/01/20 - eg  - added scale.rte.val, get.pitch.bend.range
+1987/09/28 - ss  - added aee.seq.screen.snapshot and aee.seq.screen.shuffle
+1987/09/18 - eg  - move scroll.back.1.line and scroll.forward.some.lines to here
+1987/07/23 - cj  - moved snap shot routine to here
+1987/02/23 - eg  - created this file
+*/
+
+module seqmod;
+
+	insert ':synlits:alltlits';	/*	get all terminal literals	*/
+	insert ':synauxs:seqlits';
+	insert ':synmods:globdcl';
+	insert ':synmods:mathdcl';
+	insert ':synmods:xmemdcl';
+	insert ':synmods:loddcl';
+	insert ':synmods:errdcl';
+	insert ':synmods:getvdcl';
+	insert ':synmods:polydcl';
+	insert ':synmods:ttydcl';
+
+	insert ':synmods:tformdcl';
+
+	insert ':synrdcls:03-pdcls';
+	insert ':synrdcls:04-sdcls';
+	insert ':synrdcls:05-bdcls';
+	insert ':synrdcls:11-tdcls';
+	insert ':synrdcls:12-edcls';
+	insert ':synlits:synclits';
+	insert ':-xpl:intrprtr';
+
+	GET.PITCH.BEND.RANGE: proc(trk) returns (fixed) public swapable;
+		dcl trk	fixed;
+		dcl (t,ptr)				fixed;
+
+		t = TRK.HEAD.LOOKUP(trk,thd.ctimb);		/*	get timbre # for this track	*/
+		ptr = TIM.HEAD.LOOKUP(t,tim.tinfo.pointer);
+		if ptr=0
+		then return (200);							/*	default: units are cents (semitones*100)	*/
+		else return (P.LOOKUP(ptr+ti.tbd));		/*	look it up	*/
+
+	end GET.PITCH.BEND.RANGE;
+
+	/*	Given W1-W4, extracts out the duration and returns it as a 32Bit ms. time	*/
+
+	EXTRACT.DUR: proc(rec,dur) public swapable;
+		DCL REC	FIXED ARRAY;		/*	INPUT:  REC HAS W1-W4 (REC(0)=W1)		*/
+		DCL DUR	FIXED ARRAY;		/*	OUTPUT: DUR(0)=DUR.MSB, DUR(1)=DIR.LSB	*/
+		DCL J	FIXED;
+
+		DCL DUR.MSB	LIT 'DUR(0)';
+		DCL DUR.LSB	LIT 'DUR(1)';
+
+		DCL W1	LIT 'REC(0)'; DCL W2	LIT 'REC(1)';
+		DCL W3	LIT 'REC(2)'; DCL W4	LIT 'REC(3)';
+
+		IF (W1&"100000")=0 THEN DO;	/*	NOT AN ALTERNATE FORMAT NOTE RECORD	*/
+			J=SHR(W1,11);							/*	4-BIT EXPONENT FIELD	*/
+			DUR.LSB=SHR(W2, 6);					/*	10-BIT MSEC				*/
+			DUR.LSB=DUR.LSB\SHL(J&3,10);		/*	12 BIT MSEC				*/
+			DUR.MSB=0;								/*	PERFORM SHIFT			*/
+			J=SHR(J,2);
+			DO WHILE J<>0;
+				DUR.MSB=SHL(DUR.MSB,2)\SHR(DUR.LSB,14);
+				DUR.LSB=SHL(DUR.LSB,2);
+				J=J-1;
+			END;
+		END;
+		ELSE DO;										/*	ALTERNATE FORMAT NOTE - DURATION=0	*/
+			DUR.MSB=0; DUR.LSB=0;				/*	SET TO ZERO FOR REMAP CALL BELOW		*/
+		END;
+	end EXTRACT.DUR;
+
+	EXTRACT.KEY: proc(rec) public swapable;
+		DCL REC	FIXED ARRAY;		/*	INPUT:  REC HAS W1-W4 (REC(0)=W1)		*/
+		DCL J	FIXED;
+		DCL KEY	FIXED;				/*	OUTPUT: KEY#	*/
+
+		DCL W1	LIT 'REC(0)'; DCL W2	LIT 'REC(1)';
+		DCL W3	LIT 'REC(2)'; DCL W4	LIT 'REC(3)';
+
+		KEY=(W2 & 63)+12;									/*	GET BASIC KEY # - ADD 1 OCTAVE	*/
+		IF  (W4 & LOWER.KEY)<>0 THEN KEY=KEY-12;	/*	C0 - B0	*/	/*	MAY BE RANDOM # IN CASE OF 4 WORD REST RECORD	*/
+		IF  (W4 & RAISE.KEY)<>0 THEN KEY=KEY+12;	/*	C#6- C7	*/
+
+		RETURN(KEY);
+
+	end EXTRACT.KEY;
+
+	BUILD.NOTE.RECORD: proc (record) public swapable;
+		dcl record	fixed array;	/*	original record	*/
+		dcl dur		fixed;
+		/*
+			creates Sequencer format note record from the passed array, and
+			loads it into #w1-#w4.
+
+			This routine converts the raw data stored in RECORD into a true
+			Synclavier sequencer note record.  Raw data should be passed to
+			routine in RECORD in the following order:
+				RECORD(0)	<-- duration msb				NOTE: duration is in
+				RECORD(1)	<-- duration lsb				sequencer units!!
+				RECORD(2)	<-- pitch (key #)
+				RECORD(3)	<-- switch and flag bits
+				RECORD(4)	<-- real-time effects data
+				RECORD(5)	<-- volume
+		*/
+
+		/*	initialize globals	*/
+		#w1=0; #w2=0; #w3=0; #w4=0;
+
+		/*	calculate duration	*/
+		dur = MSEC.TO.DURATION(record);
+		#w1 = shl((dur&"036000"),1);		/*	load exponent and 2-bit mantissa (msb)	*/
+		#w2 = shl( dur, 6);					/*	load rest of mantissa				*/
+
+		/*	determine note record size, 2-word or 4-word record	*/
+		if ((record(2)<12)					/*	pitch out of range for 2-word rec	*/
+		or (record(2)>72)
+		or (record(3)<>0)						/*	non zero switch bits	*/
+		or (record(4)<>rte.max)				/*	non-default velocity	*/
+		or (record(5)<>0))					/*	some volume data to store	*/
+		then do;									/*	need a 4-word record	*/
+			#w1=#w1\1;
+		end;
+
+		/*	calculate pitch	*/
+		record(2)=record(2)-12;							/*	subtract off octave	*/
+
+		if ((#w1&1)=0)										/*	currently on a 2 word note record	*/
+		then #w2=(#w2&"177700")\record(2);			/*	insert pitch as is	*/				/*	the &"177700" is redundant here since #w2 was initialized	*/
+
+		else do;												/*	set up key# and other data for 4 word record	*/
+			if record(2)<0									/*	pitch is in lowest allowed octave	*/
+			then do;
+				#w2=(#w2&"177700")\(record(2)+12);	/*	correct for octave offset	*/		/*	ditto &"177700"	*/
+				#w4=(#w4&"177477")\LOWER.KEY;			/*	set special bits	*/					/*	ditto (#w4&"177477")\	*/
+			end;
+			else if record(2)>60							/*	pitch is in highest allowed octave	*/
+			then do;
+				#w2=(#w2&"177700")\(record(2)-12);	/*	correct for octave offset	*/		/*	ditto &"177700"	*/
+				#w4=(#w4&"177477")\RAISE.KEY;			/*	set special bits	*/					/*	ditto (#w4&"177477")\	*/
+			end;
+			else do;											/*	pitch is in normal range	*/
+				#w2=(#w2&"177700")\record(2);			/*	correct for octave offset	*/		/*	ditto &"177700"	*/
+				#w4=#w4&"177477";							/*	turn off any RAISE\LOWER bits	*/	/*	ditto this entire line	*/
+			end;
+
+			/*	set up switch & flag bits and rte data	*/
+			#w3 = shl(record(3),8)\record(4);
+
+			/*	set up volume	*/
+			#w4 = #w4\vel.note\shl(record(5),8);
+		end;
+
+	end BUILD.NOTE.RECORD;
+
+	SCROLL.SEQ: proc(msb,lsb,code) public swapable;	/*	only called when play=0	*/
+		dcl (msb,lsb)	fixed;
+		dcl code			fixed;	/*	0 = real; 1 = sequence time	*/
+
+		if play<>0 then return 0;
+
+		/*	Scroll.Seq is passed a sequence time.  Map it to a real time	*/
+		/*	for positioning the sequencer:											*/
+
+		if code = 1
+		then call Map.Sequence.Time.To.Real.Time(loc(addr(msb)), loc(addr(msb)));
+
+		if ((msb ilt play.time.msb)				/*	if old time <= now	*/
+		or ((msb  =  play.time.msb)
+		and (lsb ILE play.time.lsb)))				/*	then back up to old time	*/
+		then do;											/*	if equal, backing up sets up # variables	*/
+			move.speed = -2000;
+			move = 1;
+			call REBUILD.EVENT.QUEUE;
+			call DISPLAY.SEQUENCER.STATUS;		/*	show REWIND		*/
+			call BACKUP.SEQUENCER(msb,lsb);
+			call STOP.MOVE;							/*	stop REWIND		*/
+			call BROADCAST.MTC;
+		end;
+		else do;
+			move = 1; move.speed = +2000;
+			call DISPLAY.SEQUENCER.STATUS;		/*	show FORWARD	*/
+			call ADVANCE.SEQUENCER(msb,lsb);
+			move = 0; move.speed = 0;
+			call BROADCAST.MTC;
+		end;
+		call DISPLAY.SEQUENCER.STATUS;			/*	clear FORWARD & REWIND	*/
+
+	END SCROLL.SEQ;
+
+	/*	$subtitle - Routines to change aspects of note records	*/
+
+	/*	$SUBTITLE - Routine to check if it is ok to make a change to a sequence
+						To be ok, 1 of 2 conditions must be true.
+
+		Either 1. Both the current play time and the time of the note to be
+					 inserted are before the time of the loop end.
+
+		Or		 2. Both the play time and the new note are in the same
+					 iteration of the loop.
+
+		These conditions must be met in order to insure that insert.note.record
+		works properly, as it is easily confused by independent loops.
+
+		Returns a 1 if conditions are met, 0 otherwise.
+	*/
+
+	OK.TO.EDIT: proc(trk,msb,lsb) swapable;
+		dcl (trk,msb,lsb)	fixed;
+		dcl (countin.msb,	countin.lsb)	fixed;
+		dcl (looplen.msb,	looplen.lsb)	fixed;
+		dcl (lp.end.msb,	lp.end.lsb)		fixed;
+		dcl (lp.start.msb,lp.start.lsb)	fixed;
+
+		if trk = 0 then return 0;				/*	no track?						*/
+
+		write(mam) = trk.head;					/*	track header area				*/
+		write(mal) = trk;							/*	load absolute track#			*/
+		#ptr = read(md);							/*	point to track header for this track	*/
+
+		if #ptr = 0 then return 0;				/*	no track head					*/
+
+		write(mam) = #ptr;
+		write(mal) = thd.ilp;
+
+		if read(mdi)=0 then return 1;			/*	no loop - ok to edit			*/
+
+		countin.msb = read(mdi);				/*	find where ilp starts		*/
+		countin.lsb = read(mdi);
+		looplen.msb = read(mdi);				/*	find ilp length				*/
+		looplen.lsb = read(md );
+
+		lp.end.msb = countin.msb + looplen.msb;	/*	calculate loop end	*/
+		lp.end.lsb = countin.lsb + looplen.lsb;
+		if lp.end.lsb ilt looplen.lsb
+		then lp.end.msb = lp.end.msb + 1;
+
+		write(mal) = thd.nmsb;
+		if (((read(md) igt lp.end.msb))		/*	if play time is after loop end...	*/
+		or  ((read(mdi) = lp.end.msb)
+		and  (read(md) igt lp.end.lsb)))
+
+		or (((msb igt lp.end.msb))				/*	...or new time is after loop end...	*/
+		or  ((msb  =  lp.end.msb)
+		and  (lsb igt lp.end.lsb)))
+		then do;										/*	then we must check further	*/
+
+			lp.start.msb = countin.msb;		/*	set up loop start	*/
+			lp.start.lsb = countin.lsb;
+			write(mal) = thd.nmsb;
+			do while ((lp.end.msb ilt read(md))	/*	do while loop end < play time	*/
+			or			((lp.end.msb  =  read(mdi))
+			and		 (lp.end.lsb ilt read(md))));
+				lp.start.msb = lp.end.msb;			/*	advance to next iteration of loop	*/
+				lp.start.lsb = lp.end.lsb;
+				lp.end.msb = lp.end.msb + looplen.msb;
+				lp.end.lsb = lp.end.lsb + looplen.lsb;
+				if lp.end.lsb ilt looplen.lsb
+				then lp.end.msb = lp.end.msb + 1;
+				write(mal) = thd.nmsb;
+			end;
+
+			if ((trk.head.lookup(trk, thd.lmsb) ilt lp.start.msb)	/*	if last play time < loop start	*/
+			or ((trk.head.lookup(trk, thd.lmsb)  =  lp.start.msb)
+			and (trk.head.lookup(trk, thd.llsb) ilt lp.start.lsb)))
+
+			or ((msb ilt lp.start.msb)		/*	...or new note time < loop start	*/
+			or ((msb  =  lp.start.msb)
+			and (lsb ilt lp.start.lsb)))
+
+			or ((msb igt lp.end.msb)		/*	...or new note time > loop end	*/
+			or ((msb  =  lp.end.msb)
+			and (lsb igt lp.end.lsb)))
+			then do;								/*	then can't edit (condition 2 fails)	*/
+				call NO.EDIT.OUTSIDE.LOOP;
+				return 0;
+			end;
+			else return 1;						/*	within loop - ok to edit	*/
+		end;
+
+		else return 1;							/*	first iteration of ilp - ok to edit	*/
+
+	end OK.TO.EDIT;
+
+	/*	General Routine to Alter the Start Time of a Note	*/
+
+	CHANGE.NOTE.START: proc (new.start.time,ripple) public swapable;	/*	changes start time of note in sequence	*/
+		dcl (new.start.time)		fixed array;				/*	new 32-bit start time		*/
+		dcl ripple					fixed;						/*	0=> no ripple,1=>ripple,2=>ripple w/verify	*/
+		dcl (temp,trk,i)			fixed;
+		dcl (len.msb,len.lsb)	fixed;						/*	length of time to insert	*/
+		dcl (ils.msb,ils.lsb,ile.msb,ile.lsb)	fixed;	/*	loop start and end times	*/
+		dcl (looplen.msb,looplen.lsb)				fixed;	/*	loop length	*/
+		dcl (original.msb,original.lsb)			fixed;	/*	holds time for ripple back	*/
+		dcl (play.msb,play.lsb)						fixed;
+
+		dcl msb	lit 'new.start.time(0)';
+		dcl lsb	lit 'new.start.time(1)';
+
+		/*	NOTE: This routine expects the global # sequencer variables to be
+					set up and pointing to the note to be changed before
+					it is called.
+					Returns 1 if ok, 0 if problems occurred.
+		*/
+
+		if (ripple=0) then do;					/*	not a ripple edit	*/
+
+			#w1 = (#w1 & "174001");				/*	clear out old time					*/
+
+			if (isa.ilp.note != false) then do;	/*	ilp's are handled specially		*/
+				if play<>0 then do;
+					call no.edit.while.play;	/*	can't edit loops while playing	*/
+					return 0;
+				end;
+				play.msb = play.time.msb;		/*	save current position	*/
+				play.lsb = play.time.lsb;
+
+				if #trk<>0 then do;								/*	track is selected				*/
+					write(mam) = trk.head;						/*	track header area				*/
+					write(mal) = #trk;							/*	load absolute track#			*/
+					#ptr = read(md);								/*	point to track header for this track	*/
+					if #ptr<>0 then do;							/*	if track exists...			*/
+						write(mam) = #ptr;
+						write(mal) = thd.ilpctr;				/*	find out how many iterations we are into the loop	*/
+						if (read(md)<>0) then do;				/*	only allow this edit in the first iteration	*/
+							call iteration.error;
+							return 0;
+						end;
+						write(mal) = thd.ilp;
+						if read(mdi)<>0 then do;				/*	if an ilp exists		*/
+							ils.msb = read(mdi);
+							ils.lsb = read(mdi);
+							looplen.msb = read(mdi);			/*	find ilp length		*/
+							looplen.lsb = read(md );
+							ile.msb = (ils.msb+looplen.msb);	/*	calculate loop end	*/
+							ile.lsb = (ils.lsb+looplen.lsb);
+							if ile.lsb ilt ils.lsb
+							then ile.msb=ile.msb+1;
+						end;
+					end;
+					end;
+
+				if ((#w1 & "174001") = "110001")	/*	if changing end loop time...	*/
+				then do;
+					ile.msb = msb;
+					ile.lsb = lsb;
+				end;
+				else do;									/*	changing start loop time		*/
+					ils.msb = msb;
+					ils.lsb = lsb;
+				end;
+
+				if ((ils.msb igt ile.msb)			/*	test for inverse loop error	*/
+				or ((ils.msb  =  ile.msb)
+				and (ils.lsb igt ile.lsb)))
+				then do;
+					call INVERSE.ERROR;
+					return 0;
+				end;
+
+				trk=#trk;	/*	save var since play.initialize can trash it	*/
+				call REMOVE.ILP.FROM.TRACK(trk);
+				call PLAY.INITIALIZE;
+				i = i\ CREATE.ILP.ON.TRACK(trk, ils.msb, ils.lsb, ile.msb, ile.lsb);
+				call SCROLL.SEQ(play.msb,play.lsb,0);		/*	move back to where we were before edit	*/
+			end;
+			else do;													/*	normal note	*/
+				if OK.TO.EDIT(#trk,msb,lsb)=0 then return 0;
+				call REMOVE.NOTE.RECORD;						/*	get rid of this note	*/
+				i = INSERT.NOTE.RECORD(msb,lsb);				/*	insert the updated note info	*/
+			end;
+		end;
+		else do;											/*	ripple = 1 or 2	*/
+			if play<>0 then do;
+				call no.edit.while.play;
+				return 0;
+			end;
+
+			play.msb = play.time.msb;				/*	save current position	*/
+			play.lsb = play.time.lsb;
+
+			if ((msb IGT #nmsb)						/*	if person is adding time	*/
+			or ((msb  =  #nmsb)
+			and (lsb IGE #nlsb)))
+			then do;
+				len.msb=msb-#nmsb;					/*	find amount of time to insert	*/
+				if lsb ilt #nlsb then len.msb=len.msb-1;
+				len.lsb=lsb-#nlsb;
+				call INSERT.TIME.AT.POINT(#nmsb,#nlsb,len.msb,len.lsb);
+				call GARBAGE.COLLECT.TRK(#trk);
+				call PLAY.INITIALIZE;
+			end;
+			else do;										/*	person is removing time			*/
+				original.msb = #nmsb; original.lsb=#nlsb;		/*	store current time	*/
+				/*	backup until we are pointing at a note with a time which is
+					less than the time entered by the user	*/
+				do while (#anyr<>0)
+					and ((msb ILT #lmsb)
+					or  ((msb = #lmsb) and (lsb ILE #llsb)));
+
+					call BACKUP.TO.PRIOR.NOTE;
+					call LOOK.UP.NOTE.INFO;			/*	load w1-w4	*/
+
+					if ISA.NORMAL.OR.ILP.NOTE=true then do;
+						/*	we must have hit a "real" note before backing up all the way, so stop here	*/
+						len.msb=original.msb-#nmsb;
+						if (original.lsb ilt #nlsb) then len.msb=len.msb-1;
+						len.lsb=original.lsb-#nlsb;
+						/*	if len.lsb=0 then len.msb=len.msb-1;	*/	/*	want len to be 1ms less	*/
+						/*	len.lsb = len.lsb-1;							*/
+						call ADVANCE.TO.NEXT.NOTE;
+						call DELETE.TIME.AT.POINT(#lmsb,#llsb,len.msb,len.lsb);
+						call GARBAGE.COLLECT.TRK(#trk);
+						call PLAY.INITIALIZE;
+						call SCROLL.SEQ(play.msb,play.lsb,0);			/*	move back to where we were before edit	*/
+						return 1;	/*	done	*/
+					end;
+				end;
+
+				/*	if we are here, then we have backed up past time entered
+					by the person, so we have enough time to ripple back to
+					the time entered.	*/
+
+				len.msb=original.msb-msb;
+				if original.lsb ilt lsb then len.msb=len.msb-1;
+				len.lsb=original.lsb-lsb;
+				call DELETE.TIME.AT.POINT(msb,lsb,len.msb,len.lsb);
+				call GARBAGE.COLLECT.TRK(#trk);
+				call PLAY.INITIALIZE;
+			end;
+			call SCROLL.SEQ(play.msb,play.lsb,0);	/*	move back to where we were before edit	*/
+		end;													/*	else ripple=true	*/
+		return i;											/*	holds status of ptr changes	*/
+
+	end CHANGE.NOTE.START;
+
+	/*	$SUBTITLE  General Routine to Alter the Pitch of a Note	*/
+
+	CHANGE.NOTE.PITCH: proc (new.pitch)	fixed public swapable;	/*	changes pitch of note displayed under cursor	*/
+		dcl new.pitch	fixed;	/*	new pitch (key#: 0 to max.key#)	*/
+		dcl i				fixed;	/*	status flag to be returned	*/
+		dcl (msb,lsb)	fixed;	/*	temps to hold time	*/
+
+		/*	NOTE: This routine expects the global # sequencer variables to be
+					set up and pointing to the note to be changed before
+					it is called.
+					Returns 1 if ok, 0 if problems occurred.
+		*/
+
+		if OK.TO.EDIT(#trk,#nmsb,#nlsb)=0 then return 0;
+
+		#w1=#w1&"174001";									/*	clear out time								*/
+		msb=#nmsb; lsb=#nlsb;							/*	save time in case remove trashes it	*/
+
+		if  ((#w1&1)=0)									/*	if it was a 2-word and needs to be a 4-word record	*/
+		and ((new.pitch<12) or (new.pitch>72))
+		then do;
+			#w1=#w1\1;
+			#w3=rte.max;
+			#w4=vel.note;
+		end;
+
+		new.pitch=new.pitch-12;							/*	subtract off octave				*/
+
+		if ((#w1&1)=0)										/*	currently on a 2 word note record	*/
+		then #w2=(#w2&"177700")\new.pitch;
+		else do;												/*	change key# of 4 word record	*/
+			if new.pitch<0									/*	pitch is in lowest allowed octave	*/
+			then do;
+				#w2=(#w2&"177700")\(new.pitch+12);	/*	correct for octave offset	*/
+				#w4=(#w4&"177477")\LOWER.KEY;			/*	set special bits	*/
+			end;
+			else if new.pitch>60							/*	pitch is in highest allowed octave	*/
+			then do;
+				#w2=(#w2&"177700")\(new.pitch-12);	/*	correct for octave offset	*/
+				#w4=(#w4&"177477")\RAISE.KEY;			/*	set special bits	*/
+			end;
+			else do;											/*	pitch is in normal range	*/
+				#w2=(#w2&"177700")\new.pitch;			/*	correct for octave offset	*/
+				#w4=#w4&"177477";							/*	turn off any RAISE\LOWER bits	*/
+			end;
+		end;
+
+		call REMOVE.NOTE.RECORD;						/*	get rid of "old" version of this note	*/
+		i = INSERT.NOTE.RECORD(msb,lsb);				/*	insert the updated note info	*/
+
+		return i;
+	end CHANGE.NOTE.PITCH;
+
+	/*	$SUBTITLE  General Routine to Alter the Duration of a Note	*/
+
+	CHANGE.NOTE.DURATION: proc (new.dur,dur.or.end) public swapable;	/*	changes duration of note in sequencer	*/
+		dcl (new.dur)	fixed array;	/*	new 32-bit duration	*/
+		dcl dur.or.end	boolean;			/*	0=>new.dur is a duration; 1=>new.dur is an end time	*/
+		dcl hrs			fixed;
+		dcl dur			fixed;
+
+		dcl msb	lit 'new.dur(0)';
+		dcl lsb	lit 'new.dur(1)';
+
+		/*	NOTE: This routine expects the global # sequencer variables to be
+					set up and pointing to the note to be changed before
+					it is called.
+					Returns 1 if ok, 0 if problems occurred.
+		*/
+
+		if OK.TO.EDIT(#trk,#nmsb,#nlsb)=0 then return 0;
+
+		if (dur.or.end=1) then do;			/*	if end time...	*/
+
+			if ((msb igt #nmsb)				/*	make sure end time is after start time	*/
+			or ((msb  =  #nmsb)
+			and (lsb ige #nlsb)))
+			then do;
+				msb = msb - #nmsb;			/*	duration = time entered - start time	*/
+				if lsb ilt #nlsb then msb = msb - 1;
+				lsb = lsb - #nlsb;
+			end;
+			else do;
+				call inverse.error;
+				return 0;
+			end;
+		end;
+
+		dur=MSEC.TO.DURATION(new.dur);
+
+		#w1 = (#w1 & "103777") \ shl((dur&"036000"),1);	/*	load exponent and 2-bit mantissa (msb)	*/
+		#w2 = (#w2 &	  "77") \ shl( dur, 6);				/*	load rest of mantissa						*/
+
+		write(mam) = nah.ptr+#sec;								/*	replace 2 words	*/
+		write(mal) = #wrd;
+		write(mdi) = #w1;
+		write(mdi) = #w2;
+
+		/*	Create a system event when we change the duration of a note:	*/
+
+ 		interp_seq_dirtyness(1);
+
+		new.seq.info = new.seq.info \ 4;	/*	NEW CONTENTS OF NOTE BLOCKS	*/
+		write(MAM) = D115D.Note.Change.Tracks;
+		write(MAL) = #trk;					/*	Remember track # on new.seq.info	*/
+		write(MD) = "177777";				/*	"new notes" OR "new timbre"		*/
+
+		return 1;
+
+	end CHANGE.NOTE.DURATION;
+
+	/*	THIS PROCEDURE SCALES A SIGNED FIXED POINT VALUE WITH THE FOLLOWING
+		ROUNDING CHARACTERISTICS:
+		1) FOR EVEN DENOMINATORS, A RESULT AT THE HALFWAY POINT ROUNDS UP.
+		2) FOR NEGATIVE VALUES, "ROUNDING UP" MEANS MORE NEGATIVE.
+	*/
+	SRSCALE: proc (value,numerator,denominator)	fixed public SWAPABLE;
+		dcl (value,numerator,denominator)	fixed;
+
+		value=value*numerator/denominator;	/*	DO SIGNED ARITHMETIC	*/
+
+		/*	NOW ROUND USING THE REMAINDER FROM THE D4567	*/
+		if (value < 0)	{if (shl(rem,1) igt denominator) value = value+1;}
+		else				{if (shl(rem,1) ige denominator) value = value+1;}
+		return value;
+	end SRSCALE;
+
+	SCALE.RTE.TO.PERCENT: proc(val)	fixed public SWAPABLE;
+		dcl val	fixed;
+		load val; mul 1000; mwait; div rte.max;	//	scale value from 0-rte.max to 0-1000
+		if (shl(rem,1) ige rte.max) load res+1;	//	round
+		return res;
+	end SCALE.RTE.TO.PERCENT;
+
+	SCALE.PERCENT.TO.RTE: proc(val)	fixed public SWAPABLE;
+		dcl val	fixed;
+		load val; mul rte.max; mwait; div 1000;	//	scale value from 0-1000 to 0-rte.max
+		if (rem ige 500) load res+1;					//	round (no need to shl(rem,1) since we know the denominator was even)
+		return res;
+	end SCALE.PERCENT.TO.RTE;
+
+	CHANGE.RTE.VALUE: proc(val) public swapable;
+		dcl val			fixed;
+		dcl (msb,lsb)	fixed;
+
+		/*	NOTE:	This routine expects the global # sequencer variables to be
+					set up and pointing to the note to be changed before it is called.
+					Returns 1 if ok, 0 if problems occurred.
+		*/
+
+		if OK.TO.EDIT(#trk,#nmsb,#nlsb)=0 then return 0;
+
+		if ((#w1&1)=0)										/*	if it was a 2-word and needs to be a 4-word record	*/
+		then do;
+			#w1=#w1\1;
+			#w3=rte.max;
+			#w4=vel.note;
+		end;
+
+		#w1=(#w1&"174001");								/*	clear out time	*/
+		msb=#nmsb; lsb=#nlsb;							/*	save time in case remove trashes it	*/
+
+		#w3=(#w3&"177400")\val;							/*	store new value (forward direction)	*/
+
+		if (isa.rte.note=true) then do;				/*	make sure we're not changing velocity	*/
+			if ((shr(#w2,6)&3) == 0)					/*	if normal update				*/
+//			or ((shr(#w2,6)&3) == 2)					/*	or pressure update			*/
+			or ((shr(#w2,6)&3) == 3)					/*	or midi update					*/
+
+//			if ((shr(#w2,6)&3) != 1)					/*	if not a toggle update		*/
+			then #w4=(#w4&255)\(shl(val,8));			/*	store new value (reverse)	*/
+		end;
+
+		call REMOVE.NOTE.RECORD;						/*	get rid of "old" version of this note	*/
+		call INSERT.NOTE.RECORD(msb,lsb);			/*	insert the updated note info	*/
+		#nmsb=msb; #nlsb=lsb;							/*	restore times	*/
+
+	end CHANGE.RTE.VALUE;
+
+	CHANGE.RTE.CODE: proc(rte.code) public swapable;
+		dcl rte.code				fixed;	/*	indicates whether record is ped1, ped2, modw, etc....	*/
+		dcl (i,pitch,msb,lsb)	fixed;
+
+		/*	NOTE:	This routine expects the global # sequencer variables to be
+					set up and pointing to the note to be changed before
+					it is called.
+					Returns 1 if ok, 0 if problems occurred.
+		*/
+
+		if OK.TO.EDIT(#trk,#nmsb,#nlsb)=0 then return 0;
+
+		msb=#nmsb; lsb=#nlsb;								/*	save time in case remove trashes it	*/
+		#w1 = 1;
+
+		if (rte.code=11) then do;							/*	sustain update record	*/
+			#w2 = shl(11,6);									/*	set up update type		*/
+			#w3 = (shl(b.upd,8));							/*	set value to 0				*/
+			#w4 = vel.note;
+		end;
+		else if (rte.code=10) then do;					/*	midi controller update		*/
+			pitch=CONV.STR.TO.FIXED(token,0,0);			/*	get midi controller number	*/
+			if ertyp=0 then do;
+				if (pitch > 127) then pitch = 127;
+				else if (pitch < 0) then pitch = 0;
+
+				#w2 = shl(pitch\"200",8);					/*	controller number with midi flag set	*/
+				#w3 = shl(b.upd,8);
+				#w4 = vel.note;
+			end;
+		end;
+		else if (rte.code=9) then do;						/*	system exclusive record	*/
+			#w2 = shl(7,6);									/*	set up update type		*/
+			#w3 = (shl(b.upd,8));							/*	set value to 0				*/
+			#w4 = vel.note\(shl(1,8));
+		end;
+		else if (rte.code=8) then do;						/*	midi update record	*/
+			#w2 = shl(3,6);									/*	set up update type	*/
+			#w3 = (shl(b.upd,8));							/*	set program to 0 (displays as 1)	*/
+			#w4 = vel.note\(shl(1,8));
+		end;
+		else if (rte.code=7) then do;						/*	pressure update record	*/
+			#w2 = shl(2,6);									/*	set up update type		*/
+			#w3 = (#w3&255)\(shl(b.upd,8));
+			#w4 = vel.note;
+			if token(0) <> 0 then do;
+				do i=0 to 3;
+					call pbyte(token,i,byte(token,i+2));	/*	move key to beginning of token	*/
+				end;
+				token(0)=token(0)-2;
+				pitch=CONV.STR.TO.KEY#(token);
+				call CHANGE.NOTE.PITCH(pitch);				/*	change pitch for pressure update	*/
+			end;
+		end;
+		else if (rte.code=6) then do;						/*	toggle bits				*/
+			#w2 = shl(1,6);									/*	set up update type	*/
+			#w3 = shl(b.upd,8);
+			#w4 = vel.note;
+		end;
+		else do;
+			#w2 = (shl(rte.code,8));						/*	set up rte.code	*/
+			#w3 = shl(b.upd,8);
+			#w4 = vel.note;
+		end;
+
+		call REMOVE.NOTE.RECORD;							/*	get rid of "old" version of this note	*/
+		call INSERT.NOTE.RECORD(msb,lsb);				/*	insert the updated note info	*/
+		#nmsb=msb; #nlsb=lsb;								/*	restore times		*/
+	end CHANGE.RTE.CODE;
+
+	SET.SEQUENCER.OUTPUT.ROUTING: proc (track,left,right)	fixed public swapable;
+		dcl track	fixed;	/*	Which track	*/
+		dcl left		fixed;	/*	Left channel	*/
+		dcl right	fixed;	/*	Right channel or zero if same as left	*/
+		dcl dtd_out	fixed;	/*	DTD output channel	*/
+
+		dcl Reset.Bits	fixed external;
+		dcl SEQ.REFRESH	fixed external;
+
+		if right = 0 then right = left;	/*	If nothing different given; use right for both	*/
+
+		if (track < 0)
+		OR (track >= first.lod.track)
+		then return(TRUE);					/*	Bad parameters; quit	*/
+
+		WRITE(MAM)=TRK.HEAD;
+		WRITE(MAL)=track;
+		if READ(MD) = 0						/*	If no track head, ignore request	*/
+		then return(TRUE);
+
+		dtd_out = left;						/*	Limit to the available DTD outputs	*/
+		if dtd_out > Dtd.Num.Voices then dtd_out = Dtd.Num.Voices;
+
+		if left	> multi.max then left  = multi.max;
+		if right	> multi.max then right = multi.max;
+
+		if multi.there <> 0
+		AND ((TRK.HEAD.LOOKUP(track,THD.NN.MSB)<>0)		/*	non-empty, non-Q	*/
+		OR   (TRK.HEAD.LOOKUP(track,THD.NN.LSB)<>0)		/*	track: get mc #	*/
+		OR   (track = 0))											/*	or keyboard			*/
+		then do;
+			call TRK.HEAD.STORE(track,THD.TROU,(shl((64|(left-1)),8) | (64|(right-1))));
+			reset.bits	 = reset.bits | r.multi;			/*	force update of hardware	*/
+			new.seq.info = new.seq.info | 8;					/*	New constants: update screen if there	*/
+			seq.refresh	 = seq.refresh | 64;					/*	Update AEE sequence panel, if there	*/
+		end;
+
+		/*	Rout DTD outputs the same way for the track (covers a cue track)	*/
+		if (Dtd.Num.Voices <> 0) then do;
+
+			if dtd_out <> 0
+			then dtd_out = 128 + (dtd_out - 1);				/*	Set 128 bit for dtd	*/
+
+			/*	store dtd value in both halves for now	*/
+
+			call TRK.HEAD.STORE(track,THD.CUE.OUT,dtd_out | shl(dtd_out,8));
+			new.seq.info = new.seq.info | 8;					/*	New constants: update screen if there	*/
+			seq.refresh  = seq.refresh | 64;					/*	Update AEE sequence panel, if there		*/
+
+			NEW.MOTION				  = 1;	/*	SEND NEW CUE TRACK CONSTANTS			*/
+			NEW.CUE.TRACK.SETTINGS = 1;	/*	OVER AFTER NEW ROUTING ASSIGNMENT	*/
+
+		end;	/*	of dtd output routing	*/
+
+		return(TRUE);
+
+	end SET.SEQUENCER.OUTPUT.ROUTING;
+
+	/*	recorder screen snap shot routine	*/
+
+	dcl (trkindex)	(15)	fixed public;	/*	actual track #s for Recorder Display	*/
+	dcl #count				fixed public;
+
+	GET.SNAPSHOT.INFO:proc(memptr,trk,trkindex,row) public swapable;
+		dcl memptr		fixed;	/*	xmem ptr		*/
+		dcl trk			fixed;	/*	log trk #	*/
+		dcl trkindex	array;	/*	index			*/
+		dcl row			fixed;	/*	log row		*/
+
+		if (row ige 15) then return 0;
+		if (trk ige 16) then return 0;
+
+		write(mam)=memptr+trk;
+		write(mal)=index.start+row;
+
+		if read(md)=0 then return 0;		/*	note has been shuffled down	*/
+
+		write(mal)=read(md);
+
+		if read(mdi)=0 then return 0;		/*	no note in this space			*/
+
+		#nmsb	= read(mdi);
+		#nlsb	= read(mdi);
+		#lmsb	= read(mdi);
+		#llsb	= read(mdi);
+		#w1	= read(mdi);
+		#w2	= read(mdi);
+		#w3	= read(mdi);
+		#w4	= read(mdi);
+		#anyr	= read(mdi);
+		#anyf	= read(mdi);
+		#trk	= read(mdi);
+		#wrd	= read(mdi);
+		#sec	= read(mdi);
+		#count= read(mdi);
+
+		/*	now set up #ptr	*/
+
+		write(mam)=trk.head;
+		write(mal)=#trk;
+		#ptr=read(md);
+
+		return 1;
+
+	end GET.SNAPSHOT.INFO;
+
+	ERASE.SNAPSHOT.AREA: proc (memptr,#trks) public swapable;
+		dcl memptr	fixed;
+		dcl #trks	fixed;
+		dcl (i,j)	fixed;
+
+		if (#trks igt 16) then return 0;
+
+		do i = 0 to #trks-1;
+			write(mam) = memptr+i;	/*	point to sector where old snapshot is		*/
+			do j = 0 to 15;			/*	clear out first word of each note block	*/
+				write(mal) = j*16;
+				write(md) = 0;
+			end;
+			write(mal)=index.start;	/*	and index											*/
+			do j = 0 to 15;
+				write(mdi)=256 + j*16;
+			end;
+		end;
+
+		return 1;
+
+	end ERASE.SNAPSHOT.AREA;
+
+	dcl Cursor.Begin (1)	fixed public,		/*	These variables hold the actual	*/
+		 Cursor.End   (1)	fixed public,		/*	sequence times of the points		*/
+		 Screen.Begin (1)	fixed public,		/*	in question.							*/
+		 Screen.End   (1)	fixed public;
+
+	DO.SNAP.SHOT: proc (xmem.ptr,#trks,trkindex,time.msb,time.lsb,#rows,format) swapable;
+
+		dcl xmem.ptr	fixed;
+		dcl #trks		fixed;
+		dcl trkindex	array;
+		dcl time.msb	fixed;
+		dcl time.lsb	fixed;
+		dcl #rows		fixed;
+		dcl format		fixed;
+		dcl MaxSkips	fixed;
+		dcl NoteCount	fixed static;
+
+		dcl (i,j,k)	fixed;
+
+		/*	see if current note is desired in current	*/
+		/*	display format:									*/
+
+		is.what.we.want:proc(format);
+			dcl format	fixed;
+
+			if isa.rest.note <> 0				/*	If is a rest note, then		*/
+			then return 0;							/*	we don't want it for sure.	*/
+
+			if isa.ilp.note then do;			/*	if loop note, return		*/
+				if (format&snap#ilps) <> 0		/*	it if we want to see		*/
+				then return 1;						/*	them.							*/
+			end;
+
+			else if isa.rte.note then do;		/*	if isa rte note, then	*/
+				if (format&snap#rtes) <> 0		/*	return it if we want		*/
+				then return 1;						/*	to see them.				*/
+			end;
+
+			else do;									/*	else must be a real		*/
+				if (format&snap#notes) <> 0	/*	note.  Return it if		*/
+				then return 1;						/*	we are interested			*/
+			end;
+
+			return 0;
+
+		end is.what.we.want;
+
+		/*	back up to prior note of desired format:	*/
+
+		backup.to.format:proc(format);
+			dcl format	fixed;
+
+			do while 1;
+
+				call backup.to.prior.note;			/*	Get next prior note of any	*/
+															/*	type.								*/
+
+				call look.up.note.info;				/*	Get info about note			*/
+
+				if isa.rest.note = 0					/*	If not a rest note, maybe	*/
+				then do;									/*	it is what we want			*/
+
+					NoteCount = NoteCount - 1;		/*	keep correct if backing		*/
+															/*	up through a chord.  If		*/
+															/*	we are not backing up		*/
+															/*	through a chord then the	*/
+															/*	random # we just generated	*/
+															/*	will be corrected when		*/
+															/*	we go forward.					*/
+
+					if isa.ilp.note then do;			/*	if loop note, return	*/
+						if (format&snap#ilps) <> 0		/*	it if we want to see		*/
+						then return;						/*	them.							*/
+					end;
+
+					else if isa.rte.note then do;		/*	if isa rte note, then	*/
+						if (format&snap#rtes) <> 0		/*	return it if we want		*/
+						then return;						/*	to see them.				*/
+					end;
+
+					else do;									/*	else must be a real		*/
+						if (format&snap#notes) <> 0	/*	note.  Return it if		*/
+						then return;						/*	we are interested			*/
+					end;
+
+				end;
+
+				if #anyr=0 then return;				/*	If at start of sequence,	*/
+															/*	better stop there.			*/
+			end;
+		end backup.to.format;
+
+		advance.to.format:proc(format);
+			dcl format	fixed;
+
+			do while 1;
+
+				if isa.rest.note = 0					/*	advance note count if		*/
+				then NoteCount = NoteCount + 1;	/*	skipping a real note			*/
+
+				call advance.to.next.note;			/*	Get next next note of any	*/
+															/*	type.								*/
+
+				if (#nmsb <> #lmsb)					/*	if it was at a different	*/
+				or (#nlsb <> #llsb)					/*	time, reset note count		*/
+				then NoteCount = 0;
+
+				if #anyf=0 then return;				/*	If at end of sequence,		*/
+															/*	better stop there.			*/
+
+				call look.up.note.info;				/*	Get info about note			*/
+
+				if isa.rest.note = 0					/*	If not a rest note, maybe	*/
+				then do;									/*	it is what we want			*/
+
+					if isa.ilp.note then do;			/*	if loop note, return		*/
+						if (format&snap#ilps) <> 0		/*	it if we want to see		*/
+						then return;						/*	them.							*/
+					end;
+
+					else if isa.rte.note then do;		/*	if isa rte note, then	*/
+						if (format&snap#rtes) <> 0		/*	return it if we want		*/
+						then return;						/*	to see them.				*/
+					end;
+
+					else do;									/*	else must be a real		*/
+						if (format&snap#notes) <> 0	/*	note.  Return it if		*/
+						then return;						/*	we are interested			*/
+					end;
+
+				end;
+			end;
+		end advance.to.format;
+
+		/*	Initialize Screen.Begin, Screen.End if needed:	*/
+
+		if (format&snap#begs)<>0 then do;
+			call STR32(0,	 0, Screen.Begin);
+			call STR32(-1,	-1, Screen.End  );
+		end;
+
+		do i = 0 to #trks-1;					/*	for each logical track		*/
+
+			write(mam) = xmem.ptr+i;		/*	point to workspace			*/
+			do j = 0 to 14;					/*	initialize to empty			*/
+				write(mal) = j*16;			/*	index into info block		*/
+				write(md)  = 0;				/*	zero out first word			*/
+			end;									/*	to indicate empty.			*/
+
+			#trk = trkindex(i);				/*	set global track pointer	*/
+
+			if #trk<>0 then do;				/*	track is selected				*/
+
+				if LOAD.SEQ.GLOBALS(#trk)<>0 then do;
+
+					if #wrd <> 0 then do;	/*	there are notes on track	*/
+
+						/*	skip ahead to where the cursor is		*/
+						/*	in case the user has scrolled ahead:	*/
+
+						do while (#anyf <> 0)				/*	position sequencer at	*/
+						and (((#nmsb ilt time.msb))		/*	first note at or after	*/
+						or   ((#nmsb  =  time.msb)			/*	specified time,			*/
+						and	(#nlsb ilt time.lsb)));		/*	regardless of what we	*/
+							call advance.to.next.note;		/*	are looking for.			*/
+						end;										/*	But note:  we could be	*/
+																	/*	sitting in the middle	*/
+																	/*	or a chord here.			*/
+
+						/*	back up to first note that is BEFORE time.		*/
+						/*	this would represent the note that is currently	*/
+						/*	playing.  This way, we will always get the		*/
+						/*	first note of a chord, regardless of where		*/
+						/*	the sequencer is sitting at:							*/
+
+						do while (#anyr <> 0)
+						and (((#nmsb igt time.msb))
+						or   ((#nmsb  =  time.msb)
+						and	(#nlsb ige time.lsb)));
+							call backup.to.format(format);
+						end;
+
+						/*	if precise snapshot desired (ie show no lines if	*/
+						/*	after end of track), then scroll forward				*/
+						/*	to find first note that is in the display				*/
+						/*	region:															*/
+
+						if (format & snap#nobackup) <> 0
+						then do;
+
+							/*	position sequencer at very first note at	*/
+							/*	this time to get the correct notecount:	*/
+
+							do while (#anyf <> 0)
+							and (((#nmsb ilt time.msb))
+							or   ((#nmsb  =  time.msb)
+							and	(#nlsb ilt time.lsb)));
+								call advance.to.next.note;
+							end;
+
+							NoteCount = 0;			/*	set notecount now		*/
+
+							/*	now position sequencer at the first note	*/
+							/*	of the DESIRED FORMAT at or after the		*/
+							/*	time:													*/
+
+							if #anyf <> 0			/*	if there is a note	*/
+							then do;					/*	here, check type		*/
+								call look.up.note.info;
+								if (is.what.we.want(format) = 0)
+								then call advance.to.format(format);
+							end;
+
+							/*	advance forward to specific note at this start	*/
+							/*	time if desired (allows precise positioning		*/
+							/*	of sequence display when several events start	*/
+							/*	at the same time:											*/
+
+							j = shr(format,8);		/*	Extract NOTESKIP field	*/
+							if j <> 0 then do;		/*	if any, check it			*/
+
+								k = 0;					/*	initialize counter		*/
+
+								do while (#anyf <> 0)
+								and		(j		 <> 0)
+								and		(#nmsb =  time.msb)
+								and		(#nlsb =  time.lsb);
+									call advance.to.format(format);
+									j = j - 1;
+									k = k + 1;
+								end;
+
+								if k > MaxSkips then MaxSkips = k;
+
+							end;
+
+						end;
+
+						/*	else back up (if at end of track) to see where	*/
+						/*	the last note is:											*/
+
+						else do;
+							if  (#anyf = 0)				/*	if no notes after us		*/
+							and (#anyr <>0)				/*	but is a note behind us	*/
+							then do;							/*	back up 1 to get last note on track	*/
+								call backup.to.format(format);
+							end;
+						end;
+
+						/*	back up one more note to set Screen.Begin	*/
+						/*	so we know when to scroll backwards			*/
+
+						if (format&snap#begs)<>0 then do;
+
+							if #anyr <> 0 then do;		/*	one more behind us	*/
+								call backup.to.format(format);
+
+								/*	May have run into beginning of track but not	*/
+								/*	find what we want.  Time would be strange	*/
+								/*	in this case if we were in the middle of		*/
+								/*	in ilp.  Handle smartly:							*/
+
+								if (is.what.we.want(format) <> 0)
+								then do;
+
+									#msb=#nmsb;				/*	get time 1 msec +	*/
+									#lsb=#nlsb+1;
+									if #lsb=0 then #msb=#msb+1;
+
+									if ((#msb igt Screen.Begin(0)))
+									or ((#msb  =  Screen.Begin(0))
+									and (#lsb igt Screen.Begin(1)))
+									then do;
+										Screen.Begin(0)=#msb;
+										Screen.Begin(1)=#lsb;
+									end;
+								end;
+
+								call advance.to.format(format);
+							end;
+						end;
+
+						/*	Get correct note to display:	*/
+
+						if (#anyf <> 0)
+						then do;
+							call LOOK.UP.NOTE.INFO;				/*	load w1-w4	*/
+							if (is.what.we.want(format) = 0)
+							then call advance.to.format(format);
+						end;
+
+						j = 0;			/*	scan off rows of real notes or rtes	*/
+						do while (j < #rows) and (#anyf <> 0);
+
+							write(mam) = xmem.ptr + i;
+							write(mal) = j * 16;
+							write(mdi) = 1;						/*	indicates something is here	*/
+							write(mdi) = #nmsb;
+							write(mdi) = #nlsb;
+							write(mdi) = #lmsb;
+							write(mdi) = #llsb;
+							write(mdi) = #w1;
+							write(mdi) = #w2;
+							write(mdi) = #w3;
+							write(mdi) = #w4;
+							write(mdi) = #anyr;
+							write(mdi) = #anyf;
+							write(mdi) = #trk;
+							write(mdi) = #wrd;
+							write(mdi) = #sec;
+							if (format & snap#nobackup) <> 0	/*	save note count	*/
+							then write(mdi) = NoteCount;		/*	for AEE only.	*/
+							else write(mdi) = 0;					/*	else store 0's	*/
+							write(mdi) = 0;
+							j = j+1;									/*	increment real note counter	*/
+
+							call advance.to.format(format);
+						end;
+
+						/*	now find next real note displayed			*/
+						/*	to set Screen.End.  Screen.End may be		*/
+						/*	further modified during the shuffle			*/
+
+						if (format&snap#begs)<>0 then do;
+
+							/*	Set screen end to point to the next	*/
+							/*	note of the desired format:			*/
+
+							if #anyf<>0 then do;
+
+								if ((#nmsb ilt Screen.End(0)))
+								or ((#nmsb	=	Screen.End(0))
+								and (#nlsb ilt Screen.End(1)))
+								then do;
+									Screen.End(0)=#nmsb;
+									Screen.End(1)=#nlsb;
+								end;
+							end;
+						end;
+					end;
+				end;
+			end;
+		end;
+
+		return MaxSkips;
+
+	end do.snap.shot;
+
+	/*	$PAGE - ROUTINE TO PUT DISPLAY LINES IN THE CORRECT ORDER BY TIME	*/
+
+	recorder.screen.shuffle: proc (xmem.ptr,#trks,trkindex,#rows,format) swapable;
+		dcl (xmem.ptr)	fixed;
+		dcl (#trks	 )	fixed;
+		dcl trkindex	array;
+		dcl #rows		fixed;
+		dcl format		fixed;
+
+		dcl (i,j,k)	fixed;
+
+		do i = 0 to #trks-1;
+			write(mam) = xmem.ptr+i;			/*	index into column	*/
+			write(mal) = index.start;			/*	point to first word of index for this track	*/
+			write(md)  = 256 + 0;				/*	initialize to point at first note	*/
+		end;
+
+		/*	loop over each column, construct index entry for next column	*/
+
+		do i = 0 to #rows-1;							/*	sort each row				*/
+
+			/*	find earliest time of all 3 tracks	*/
+
+			#msb = (-1); #lsb = (-1);				/*	initialize to largest #		*/
+
+			do j = 0 to #trks-1;						/*	find earliest					*/
+
+				write(mam) = xmem.ptr+j;
+				write(mal) = index.start+i;		/*	look at start of index for this track	*/
+
+				if read(md) = 0 then do;			/*	0 indicates end of track	*/
+					write(mal) = index.start+i+1;	/*	point at next index entry	*/
+					write(md) = 0;						/*	zero it out						*/
+				end;
+
+				else do;									/*	we have a note here			*/
+					k = read(md) & 255;				/*	extract pointer				*/
+					write(mal) = k;
+					if read(md) = 0 then do;		/*	no note exists					*/
+						write(mal) = index.start+i;
+						write(mdi) = 0;				/*	this one is empty				*/
+						write(md)  = 0;				/*	so is next one					*/
+					end;
+					else do;								/*	check for earliest time		*/
+						write(mal) = k+1;
+						#nmsb = read(mdi);			/*	get nmsb and nlsb for this note	*/
+						#nlsb = read(mdi);
+
+						if ((#nmsb ilt #msb))
+						or ((#nmsb	=	#msb)
+						and (#nlsb ilt #lsb))
+						then do;
+							#msb = #nmsb;				/*	this note is earliest		*/
+							#lsb = #nlsb;
+						end;
+					end;
+				end;
+			end;
+
+			/*	loop over tracks to shuffle	*/
+
+			do j = 0 to #trks-1;
+
+				write(mam) = xmem.ptr+j;		/*	point to start of index for this column (track)	*/
+				write(mal) = index.start+i;
+				k = read(md);
+
+				if k <> 0 then do;
+					write(mal) = (k&255) + 1;
+					#nmsb = read(mdi);
+					#nlsb = read(md);
+
+					/*	if starting times equal, keep note on	*/
+					/*	this row											*/
+
+					if (#nmsb = #msb) and (#nlsb = #lsb) then do;
+						write(mal) = index.start + i + 1;
+						write(md)  = k + 16;
+					end;
+
+					/*	else shuffle this note down to		*/
+					/*	next row by advancing pointer			*/
+
+					else do;							/*	shuffle	*/
+						write(mal) = index.start + i;
+						write(mdi) = 0;			/*	blank		*/
+						write(md)  = k;
+					end;
+				end;
+			end;
+
+			if (format&snap#runs)<>0 then call run.syn.loop;
+
+		end;
+
+		/*	find earliest of any notes we did not display	*/
+		/*	to set Screen.End											*/
+
+		if (format&snap#begs)<>0 then do;
+
+			do i = 0 to #trks-1;
+				write(mam) = xmem.ptr+i;				/*	index into column		*/
+				write(mal) = index.start + #rows;	/*	check last index		*/
+				if (read(md)<>0) then do;				/*	more notes left		*/
+					if (read(md)&255)<index.start		/*	means at least one	*/
+					then do;									/*	note got tossed		*/
+						write(mal)=read(md)&255;		/*	point to it	*/
+						if read(mdi)<>0 then do;		/*	means was a real note	*/
+							#nmsb=read(mdi);
+							#nlsb=read(md );
+							if ((#nmsb ilt Screen.End(0)))
+							or ((#nmsb	=	Screen.End(0))
+							and (#nlsb ilt Screen.End(1)))
+							then do;
+								Screen.End(0)=#nmsb;
+								Screen.End(1)=#nlsb;
+							end;
+						end;
+					end;
+				end;
+			end;
+
+			/*	Set up sequence times in real time units, and also	*/
+			/*	initialize cursor boundaries as well					*/
+
+			call Map.Sequence.Time.To.Real.Time(Screen.Begin,Screen.Scroll.Begin);
+			if Screen.End(0) = (-1)
+			then call STR32(-1, -1, Screen.Scroll.End);
+			else call Map.Sequence.Time.To.Real.Time(Screen.End,Screen.Scroll.End);
+			call COPY32(Screen.Begin,			Cursor.Begin		 );
+			call COPY32(Screen.End,				Cursor.End			 );
+			call COPY32(Screen.Scroll.Begin,	Cursor.Scroll.Begin);
+			call COPY32(Screen.Scroll.End,	Cursor.Scroll.End	 );
+		end;
+
+	end recorder.screen.shuffle;
+
+	/*	routine to take a snapshot of the sequencer	*/
+
+	/*	pass:	ptr to xmem to store data (1 sector per track	*/
+	/*			# of tracks to scan (1-16)								*/
+	/*			trkindex lookup array									*/
+	/*			start time msb, lsb										*/
+	/*			# of rows to scan (1-15)								*/
+	/*			format control bits										*/
+
+	recorder.screen.snapshot: proc (xmem.ptr,#trks,trkindex,
+											  time.msb,time.lsb,
+											  #rows,format) public swapable;
+
+		dcl xmem.ptr	fixed;
+		dcl #trks		fixed;
+		dcl trkindex	array;
+		dcl time.msb	fixed;
+		dcl time.lsb	fixed;
+		dcl #rows		fixed;
+		dcl format		fixed;
+
+		if (#trks igt 16) then return 0;
+		if (#rows igt 15) then return 0;
+
+		call do.snap.shot(xmem.ptr,#trks,trkindex,time.msb,time.lsb,#rows,format);
+
+		if (format&snap#runs)<>0 then call run.syn.loop;
+
+		call recorder.screen.shuffle (xmem.ptr,#trks,trkindex,#rows,format);
+
+		if (format&snap#runs)<>0 then call run.syn.loop;
+
+		return 1;
+
+	end recorder.screen.snapshot;
+
+	AEE.seq.screen.snapshot: proc (xmem.ptr,#trks,trkindex,
+											 time.msb,time.lsb,
+											 #rows,format) public swapable;
+
+		dcl xmem.ptr	fixed;
+		dcl #trks		fixed;
+		dcl trkindex	array;
+		dcl time.msb	fixed;
+		dcl time.lsb	fixed;
+		dcl #rows		fixed;
+		dcl format		fixed;
+		dcl i				fixed;
+
+		if (#trks igt 16) then return -1;
+		if (#rows igt 15) then return -1;
+
+		i = do.snap.shot(xmem.ptr,#trks,trkindex,time.msb,time.lsb,#rows,format);
+
+		if (format&snap#runs)<>0 then call run.syn.loop;
+
+		call recorder.screen.shuffle (xmem.ptr,#trks,trkindex,#rows,format);
+
+		if (format&snap#runs)<>0 then call run.syn.loop;
+
+		return i;
+
+	end AEE.seq.screen.snapshot;
+
+	SCROLL.BACK.1.LINE: proc(time) public swapable;
+		dcl time	array;	/*	time of the top row of the screen, 0-ms, 1-ls	*/
+
+		call COPY32(Screen.Begin, Time);
+
+		if ((time(0)\time(1)) <> 0)
+		then call SUB16(1, time);
+
+		/*	Create an able screen event to force a new update:	*/
+
+		new.ABLE.seq.info = new.ABLE.seq.info \ 4;
+	end SCROLL.BACK.1.LINE;
+
+	SCROLL.FORWARD.SOME.LINES: proc(xmem.ptr, #trks, time, #lines) public swapable;
+		dcl xmem.ptr	fixed;
+		dcl #trks	fixed;		/*	number of displayed tracks	*/
+		dcl time		array;		/*	time of the top row of the screen, 0-ms, 1-ls	*/
+		dcl #lines	fixed;		/*	number of lines to scroll forward	*/
+		dcl trk		fixed;
+
+		do trk = 0 to #trks-1;
+			write(mam) = xmem.ptr+trk;
+			write(mal) = #lines * 16;			/*	#lines rows * 16 words/note info	*/
+
+			if read(mdi) <> 0 then do;
+				time(0)=read(mdi);				/*	reset screen boundaries	*/
+				time(1)=read(md );
+
+				time(1) = time(1)+1;				/*	32 bit increment			*/
+				if time(1) ILT 1 then do;
+					time(0) = time(0)+1;
+				end;
+			end;
+		end;
+
+		/*	create an ABLE sequence event when we scroll so that			*/
+		/*	the screen refreshes:													*/
+
+		new.ABLE.seq.info = new.ABLE.seq.info \ 4;	/*	re snap shot	*/
+
+	end SCROLL.FORWARD.SOME.LINES;
+
+	insert ':synsou:seqmod:seqsoua';
+	insert ':synsou:seqmod:eventsa';
+	insert ':synsou:seqmod:eventsb';
+
+end seqmod;

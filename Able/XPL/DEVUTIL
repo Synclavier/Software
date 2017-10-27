@@ -1,0 +1,787 @@
+/* $title Device Utilities */
+
+/*
+ Modification history:
+    17 Jul 90 - LSS - support for 5-inch magneto optical devices
+*/
+
+/* This module contains the following catalog utilities:
+.    FLOPPY (level)              - returns TRUE if the specified LEVEL is a floppy
+.    WINCHESTER (level)          - returns TRUE if the specified LEVEL is a Winchester
+.    TAPE (level)                - returns TRUE if the specified LEVEL is a tape
+.    OPTICAL (level)             - returns TRUE if the specified LEVEL is an optical
+.    TRIGGER_MOTOR (level)       - triggers the motor on the specified floppy
+.    DISK_CHECK (level)          - checks if a disk is in the specified drive
+.    GET_DEVICE (devname, tape)  - returns level of DEVNAME; ignores tapes if TAPE is false
+.    FIND_TYPE (D107_#, drive)   - polls IMI Winchester to determine its type
+.    POLL_WINCHESTERS (config, len) - returns IMI Winchester configuration (LEN is length of CONFIG)
+.    FIND_OPTICAL (devadr)       - detects what type of optical drive is on system
+.    FIND_WIN_SIZE (devadr, ptr) - stores size of given SCSI winchester in config area provided
+.    POLL_SCSI (config, len)     - returns SCSI configuration (LEN is length of CONFIG)
+*/
+
+module device_handlers;
+configuration modelC, MulDiv;					/* use Model C code & mul/div hardware 	*/
+
+insert ':-xpl:literals';		/* get general literals */
+insert ':-xpl:asciilit';		/* get ASCII literals */
+insert ':-xpl:syslits';			/* get system literals */
+insert ':-xpl:scsirout';		/* get scsi drivers */
+insert ':-xpl:catrout';			/* unfortunately, this is needed for alternate catalog checks - take out if this goes to high memory (and put SYSLITS back) */
+insert ':-xpl:devutil';			/* get our own literals */
+insert ':-xpl:scsicmds';		/* get mid-level SCSI commands */
+insert ':-xpl:intrprtr';		/* interpreter interface */
+
+begin;
+
+dcl d#protect lit '"2"'; /* set in value returned by DISK_CHECK if disk is write-protected */
+
+floppy: proc(level) boolean public; /* return TRUE if the specified LEVEL is a floppy */
+   dcl level fixed; /* the level to test */
+
+   if      level = -2 then level = shr(core(loc.pcat + 1), 8); /* map path to device */
+   else if level = -1 then level = shr(a#ms_sector, 8); /* map alternate to device */
+
+   return ((level = 2) or (level = 3) or (level = 4) or (level = 5) /* return TRUE if it's a floppy */
+   or ((level = 0) and ((systyp = 0) or (systyp = 2))) or ((level = 1) and ((curtyp = 0) or (curtyp = 2))));
+end floppy;
+
+winchester: proc(level) boolean public; /* return TRUE if the specified LEVEL is a winchester */
+   dcl level fixed; /* the level to test */
+
+   if      level = -2 then level = shr(core(loc.pcat + 1), 8); /* map path to device */
+   else if level = -1 then level = shr(a#ms_sector, 8); /* map alternate to device */
+
+   return ((level = 6) or (level = 7) or ((level = 0) and (systyp = 1)) or ((level = 1) and (curtyp = 1))); /* return TRUE if it's a winchester */
+end winchester;
+
+tape: proc(level) boolean public; /* return TRUE if the specified LEVEL is a tape */
+   dcl level fixed; /* the level to test */
+
+   if      level = -2 then level = shr(core(loc.pcat + 1), 8); /* map path to device */
+   else if level = -1 then level = shr(a#ms_sector, 8); /* map alternate to device */
+
+   return ((level = 8) or (level = 9) or ((level = 0) and (systyp = 3)) or ((level = 1) and (curtyp = 3))); /* return TRUE if it's a tape */
+end tape;
+
+optical: proc(level) boolean public; /* return TRUE if the specified LEVEL is an optical */
+   dcl level fixed; /* the level to test */
+
+   return ((level = 10) or (level = 11)); /* return TRUE if it's an optical */
+end optical;
+
+/* $subtitle Low-Level Check For Floppy Disk In Drive */
+
+d100_disk_check: proc(drive) boolean; /* see if disk is in drive (returns TRUE if it is) */
+	dcl drive		fixed;	/*	drive number	*/
+	dcl state		fixed;	/*	save processor state here	*/
+	dcl one_second	fixed;	/*	number of clock ticks in one second		*/
+	dcl two_second	fixed;	/*	number of clock ticks in two seconds	*/
+	dcl i				fixed;
+
+	dcl d100	lit '"100"';
+	dcl d104	lit '"104"';
+
+   one_second = 100*d03_speed; /* compute clock ticks in one second */
+   two_second = 200*d03_speed;
+	
+	if (interp_is_running <> 0) // wait longer on interpreter since we sometimes miss index pulses...
+		one_second = one_second * 4;
+		
+   state = read(r14); 			 /* get processor state */
+   disable; 						 /* disable interrupts */
+
+	while (read(d03))				 // clean up pending d3 interrupts
+		write(d03) = 0;
+		
+   i = 0;
+   do while (i < two_second) and (read(d100));
+     if read(d03) then do; i = i + 1; write(d03) = 0; end;
+	end; 							  /* wait for busy in case of restore */
+
+   write(d100) = "HD0";      /* generate forced interrupt        */
+   write(d104) = drive;      /* to get index pulse back in sw    */
+
+   i = 0;
+   do while ((i < one_second) and ((read(d100) and "2") = 0)); /* wait for             */
+      if read(d03) then do; i = i + 1; write(d03) = 0; end;
+   end;
+
+   do while ((i < one_second) and ((read(d100) and "2") <> 0)); /* two changes in index */
+      if read(d03) then do; i = i + 1; write(d03) = 0; end;
+   end;
+
+   do while ((i < one_second) and ((read(d100) and "2") = 0)); /* pulse                */
+      if read(d03) then do; i = i + 1; write(d03) = 0; end;
+   end;
+
+   write(r14) = state; write(pcw) = state; /* restore processor state */
+
+   if i = one_second then return (false); /* timed out */
+   else                   return (true or (shr(read(d100), 6 - 1) and d#protect)); /* OR in write protect bit */
+end d100_disk_check;
+
+d110_disk_check: proc(drive) boolean; /* see if disk is in drive (returns TRUE if it is) */
+   dcl drive      fixed; /* drive number */
+   dcl state      fixed; /* save processor state here */
+   dcl one_second fixed; /* number of clock ticks in one second */
+   dcl i          fixed;
+
+   dcl d100   lit '"110"';
+   dcl d104   lit '"114"';
+
+   one_second = 100*d03_speed; /* compute clock ticks in one second */
+   state = read(r14); /* get processor state */
+   disable; /* disable interrupts */
+
+   do while (read(d100)); end; /* wait for busy in case of restore */
+
+   write(d100) = "HD0";      /* generate forced interrupt        */
+   write(d104) = drive;      /* to get index pulse back in sw    */
+
+   i = 0;
+   do while ((i < one_second) and ((read(d100) and "2") = 0)); /* wait for             */
+      if read(d03) then do; i = i + 1; write(d03) = 0; end;
+   end;
+
+   do while ((i < one_second) and ((read(d100) and "2") <> 0)); /* two changes in index */
+      if read(d03) then do; i = i + 1; write(d03) = 0; end;
+   end;
+
+   do while ((i < one_second) and ((read(d100) and "2") = 0)); /* pulse                */
+      if read(d03) then do; i = i + 1; write(d03) = 0; end;
+   end;
+
+   write(r14) = state; write(pcw) = state; /* restore processor state */
+
+   if i = one_second then return (false); /* timed out */
+   else                   return (true or (shr(read(d100), 6 - 1) and d#protect)); /* OR in write protect bit */
+end d110_disk_check;
+
+/* $subtitle Start Up Floppy, Floppy Disk Checking, & Get Device */
+
+trigger_motor: proc(level) public; /* start up floppy motor */
+   dcl level fixed;
+
+   do case (level + 2); /* map special catalogs to actual devices */
+      level = shr(core(loc.pcat + 1), 8); /* -2: map path to device */
+      level = shr(a#ms_sector, 8); /* -1: map alternate to device */
+      level = shr(core(loc.scat + 1), 8); /* 0: get actual level of system device */
+      level = shr(core(loc.ucat + 1), 8); /* 1: get actual level of user device */
+   end; /* of mapping special catalogs */
+
+   do case (level - 2); /* branch on device */
+      write("104") = 0; /* F0 */
+      write("104") = 1; /* F1 */
+      write("114") = 0; /* R0 */
+      write("114") = 1; /* R1 */
+   end; /* of branch on device */
+end trigger_motor;
+
+disk_check: proc(level) boolean public; /* check for a disk in LEVEL */
+   dcl level    fixed; /* level to poll */
+   dcl device   fixed; /* device number of device to check */
+   dcl drive    fixed; /* drive number on device */
+
+   if ((level = 8) or (level = 9)) then return (true); /* no floppies in tape drives */
+
+   if      level = -2 then level = shr(core(loc.pcat + 1), 8); /* map path to device */
+   else if level = -1 then level = shr(a#ms_sector, 8); /* map alternate to device */
+
+   level = find_device (level); /* find the device */
+
+   if level <> 0 then do; /* the device is configured */
+      device = (core(level + s#devtyp) and "17"); /* remove drive number from device */
+      drive = (shr(core(level + s#devtyp), 4) and "17"); /* drive number on device */
+
+      if      device = 0 then return (d100_disk_check (drive)); /* floppy */
+      else if device = 2 then return (d110_disk_check (drive)); /* remote */
+      else                    return (true); /* all other devices are there */
+   end;
+   else return (false); /* if not configured, how can there be a floppy in the drive? */
+end disk_check;
+
+get_device: proc(ibuf, tape.drive) fixed public; /* accept a device specifier and return its level number */
+   dcl ibuf       fixed array; /* entered response */
+   dcl tape.drive boolean; /* TRUE if tape drive is an allowable input */
+   dcl (i, j)     fixed;
+
+   dcl names   data (10, a.s or shl(a.c, 8), a.c or shl(a.c, 8), /* SC, CC */
+                         a.f or shl(a.0, 8), a.f or shl(a.1, 8), /* F0, F1 */
+                         a.r or shl(a.0, 8), a.r or shl(a.1, 8), /* R0, R1 */
+                         a.w or shl(a.0, 8), a.w or shl(a.1, 8), /* W0, W1 */
+                         a.t or shl(a.0, 8), a.t or shl(a.1, 8)); /* T0, T1 */
+
+   if ibuf (0) <> 2 then return (-1); /* if not two chars long, not a device name */
+
+   i = (ibuf (1) and "177737"); /* uppercase first letter of potential device name */
+
+   do j = 1 to names (0); /* search for a match */
+      if i = names (j) then do; /* if we found a match */
+         if (((j = 9) or (j = 10)) and (not tape.drive)) /* if tape drive and tape drive excluded */
+         then return (-1); /* no match */
+         else return (j - 1); /* return device number */
+      end; /* of found a match */
+   end; /* of search for a match */
+
+   return (-1); /* not a device name */
+end get_device;
+
+/* $subtitle Poll Winchester Drives for their Configuration */
+
+dcl maxi_config data public (shl("2", 8), 8, 77,  shl(8, 8) or 2); /* maxifloppy  config */
+dcl mini_config data public (          0, 5, 35,  shl(5, 8) or 3); /* minifloppy  config */
+dcl dmin_config data public (          0, 5, 80,  shl(5, 8) or 1); /* double mini config */
+dcl smin_config data public (shl("5", 8), 30, 80, shl(15, 8) or 0); /* super mini config */
+
+/*  size codes:               1     2  3     4     5      6      7      8
+    IMI types:             7710, 7720, x, 7740, 5007, 5006H, 5012H, 5018H */
+dcl win_siz data public (8, 500,  933, 0, 1638,  270,   289,   594,   899); /* total cylinders */
+dcl win_cyl data public (8,  40,   40, 0,   40,   40,    40,    40,    40); /* sectors/cylinder */
+
+/* SCSI types:       CDC WREN II  Maxtor 1140
+   Total Cylinders:          913         1523
+   Sectors/Cylinder:         144          144 */
+
+find_type:  proc(ctlr,drive) public; /* find type code of winchester */
+   dcl (ctlr,drive,i) fixed; /* controller number 0-7, drive 0 or 1 */
+   write("105")=ctlr;
+   if (read("105")&"10")=0 then return 0; /* no D107 controller here */
+   if (read("106")&"10")<>0 then return 0; /* no win controller connected to D107 controller */
+   if (read("106"))<>0 then do; /* reset it */
+      write("50")=7;
+      write("106")=32; write("106")=128;
+      do while read("106")<>0; end;
+   end;
+   write("106")=128; write("106")=0;
+   write("107")=0; /* send null command */
+   i=read("107"); /* get return code */
+   do while read("106")<>0; end; /* wait for ready to come back */
+   if i<>0 then do; /* MFM controller */
+      write("107")=shl(drive,8); /* send null command to drive in question - this hangs IMI's if no drive there! */
+      i=read("107"); /* get return code */
+      do while read("106")<>0; end; /* wait for ready to come back */
+      if (i&"200")<>0 then return 0; /* no drive connected to controller */
+      return 9; /* for now, there is only one type of drive attached to an MFM controller */
+   end; /* of MFM controller */
+   write("107")=15+shl(drive,8); /* ask drive to return its type code */
+   i=read("107")&255; /* read drive type (lowest byte only) */
+   if ((i&"17")=5) and ((i&"360")>0) then i=5+shr(i,5); /* decode H series */
+   do while (read("106")&2)<>0; end;
+   write("106")=128; write("106")=0; /* reset the D107 */
+   do while read("106")<>0; end;
+   if (i=3) or (i IGT 8) then i=0; /* map invalid types to zero */
+   return i;
+end find_type;
+
+poll_winchesters:  proc(list, list_size) public; /* determine the config by polling and store in list */
+   dcl list      fixed array; /* list to store configuration in */
+   dcl list_size fixed; /* length of list */
+   dcl ptr       fixed; ptr = 0; /* pointer into list */
+
+   check.drive:  proc; /* check if a second 5007 series drive is on-line */
+      dcl (i, j) fixed;
+      write("107")="H100"+2; write("107")=0; /* try to read sector zero of the specified drive */
+      i=read("107")&255; /* read the return code */
+      if i<128 then do;
+         do i=0 to 255; j=read("107"); end;
+         i=5; /* indicates second 5" drive */
+      end;
+      else do;
+         write("106")=32; write("106")=128; /* reset the drive */
+         do while (read("106")<>0); end;
+         write("106")=0;
+         i=0; /* no drive there */
+      end;
+      do while (read("106")<>0); end;
+      return i;
+   end check.drive;
+
+   store.drive:  proc(siz, cyl, controller, drive); /* store data for drive into LIST */
+      dcl (siz, cyl, controller, drive) fixed;
+      if ((ptr + s#blklen ile list_size) and (siz <> 0)) then do; /* if list isn't full and non-zero drive size */
+         list (ptr + s#devtyp) = 1; /* assume W0 (type 1, drive 0) */
+         list (ptr + s#seccyl) = cyl; /* save sectors/cylinder */
+         list (ptr + s#totcyl) = siz; /* save total cylinders */
+         list (ptr + s#devadr) = (shl(drive, 8) or controller); /* save device address */
+         ptr = ptr + s#blklen; /* point to next block in LIST */
+      end;
+   end store.drive;
+
+   dcl (i,j,k)  fixed;
+   do i=0 to list_size-1; list(i)=s#freblk; end;
+
+   do i=0 to 7; /* loop over controller addresses */
+      j=find_type(i,0); /* check type of drive 0 */
+
+      k=0; /* assume no second drive */
+      if j>5 then k=find_type(i,1); /* must check for second drive (50xxH only) */
+      else if j=5 then k=check.drive; /* must check for second drive (5007 series only) */
+
+      if j>0 then call store.drive(win_siz(j),win_cyl(j),i,0); /* store drive 0 */
+      if k>0 then call store.drive(win_siz(k),win_cyl(k),i,1); /* store drive 1 */
+   end; /* of loop over addresses */
+end poll_winchesters;
+
+/* $subtitle Poll SCSI Devices */
+
+/* This procedure is used to poll all the SCSI busses attached to the host
+   and construct a configuration table for those it finds. Right now it will
+   only work for direct access devices (Winchesters) and sequential access
+   devices (tapes). There is some controller-specific code in here to make 
+   the Emulex MD01 disk controller and the NCR ADP-53 tape controller work,
+   so be aware that this routine may not work properly if other controllers
+   are attached to the SCSI bus.
+
+   07/11/90 - LSS - Added LMS 12-inch and 5-inch opticals
+   11/01/86 - KJ0 - Added winchester Common Command Set compatability
+   01/06/86 - KJO - Made winchester size self-configuring
+*/
+
+Find_Optical: proc (DevAdr) returns (fixed) public; /* return type of optical device on system */
+   dcl DevAdr fixed;			/* address of device */
+   dcl Stat        fixed;	/* status */
+   dcl DevType     fixed;	/* optical device type */
+   dcl Buffer(12)  fixed;	/* buffer for data */
+
+   if (read("51") and scsiboard) = 0 then return (-1); /* no SCSI in system */
+
+   Stat = Inquiry(DevAdr,4,Buffer);					/* get inquiry data */
+   if (Stat <> S$Good) then return (-1);			/* no optical there */
+
+   DevType = byte(Buffer,0) & 0x1F;					/* get specific type of optical device */
+
+   if (DevType = 0) then return (1);				/* 5-inch optical device */
+   else if (DevType = 4) then return (0);			/* LMS 12-inch write-once */
+   else return (-1);										/* something unknown? */
+end Find_Optical;
+
+Find_Win_Size: proc(DevAdr, ConfigPtr, InqBuf, CapBuf) returns (fixed) public; /* find size of SCSI winchester */
+   dcl DevAdr      fixed; /* address of device */
+   dcl ConfigPtr   fixed; /* pointer into configuration area */
+	dcl InqBuf		 array; /* inq info returned here */
+	dcl CapBuf		 array; /* capacity info returned here */
+   dcl Stat        fixed; /* status */
+   dcl SecCyl      fixed; /* no. sectors/cylinder */
+   dcl TotCyl      fixed; /* no. cylinders */
+   dcl (MS_Blocks,LS_Blocks) fixed; /* total no. blocks */
+	dcl (BlkSize)   fixed;
+	dcl i           fixed;
+
+	InqBuf(0) = 0;
+	CapBuf(0) = 0;
+   
+	/**** Inquiry ****/
+
+   Stat = Inquiry(DevAdr, INQ_BUF_SIZE_BYTES, InqBuf);	/* start with inquiry		*/
+
+   if Stat <> S$Good then return (Stat); 		/* die; can't do inquiry					*/
+
+  
+   /**** Test Unit Ready ****/
+
+	Stat = TestUnitReady(DevAdr);
+		
+	while (Stat == S$DeviceBusy)					/* device busy (e.g. from spin)			*/
+	{
+		do i=0 to 100;
+			write(3) = 0;
+			interp_run_host_non_timer();
+		end;												/* chill...										*/
+		
+		Stat = TestUnitReady(DevAdr);
+	}
+		
+	if (Stat == S$NotReady)							/* if not ready, spin up					*/
+	{
+		Stat = StartStopUnit(DevAdr, 1, 0);		/* spin up										*/
+		
+		while (Stat == S$DeviceBusy)				/* device busy (e.g. from spin)			*/
+		{
+			do i=0 to 100;
+				write(3) = 0;
+				interp_run_host_non_timer();
+			end;											/* chill...										*/
+		
+			Stat = StartStopUnit(DevAdr, 1, 0);
+		}
+			
+		if (Stat == S$Good)
+		{
+			do i=0 to 100;
+				write(3) = 0;
+				interp_run_host_non_timer();
+			end;											/* chill...										*/
+
+			Stat = TestUnitReady(DevAdr);			/* had best now be ready...				*/
+		}
+	}
+  
+   if Stat <> S$Good then return (Stat);		/* die -> device is not ready				*/
+
+   
+	/**** Read Capacity ****/
+
+   Stat = ReadCapacity(DevAdr,CapBuf);			/* get capacity data 						*/
+   
+	if (Stat != S$Good)								/* better be able to read capacity now	*/
+		return (Stat);
+	
+	if (CapBuf(0) != 8)								/* better have gotten 8 bytes of			*/
+		return (S$IllegalRequest);					/* capacity data as well!!!				*/
+
+   MS_Blocks = shl(byte(CapBuf,0),8) or byte(CapBuf,1); /* get address of last logical block */
+   LS_Blocks = shl(byte(CapBuf,2),8) or byte(CapBuf,3);
+	
+   LS_Blocks = LS_Blocks + 1; 					/* add one to get total no. blocks */
+   if LS_Blocks ilt 1 then MS_Blocks = MS_Blocks + 1;
+
+	BlkSize   = shl(byte(CapBuf,6),8) or byte(CapBuf,7);
+	
+   if (BlkSize == 1024) then do; 				/* if is 1024 byte sectors (e.g., MO) 	*/
+      MS_blocks = MS_blocks + MS_Blocks;		/* double blocks to get sectors */
+      if (LS_Blocks + LS_Blocks) ilt LS_Blocks then MS_Blocks = MS_Blocks + 1;
+      LS_Blocks = LS_Blocks + LS_Blocks;
+   end;
+	
+	/* limit to 24 bits worth of sectors */
+
+	if (MS_Blocks IGE 256)
+	{
+		MS_Blocks = "h00FF";
+		LS_Blocks = "hFFFF";
+	}
+
+	/* Find a sec/cyl word that we can use to manage drive size 		*/
+	/* in two 16-bit words															*/
+	
+	SecCyl = shl(MS_Blocks, 1) + 2;
+	
+	write(5) = LS_Blocks;						/* load # of blocks			*/
+	write(4) = MS_Blocks;
+	write(7) = SecCyl;							/* divide by sec/cyl			*/
+	
+	do while (((read(5) IGT 30000)			/* if cyls > 30000			*/
+	||         (read(4) INE 00000))			/* or remainder				*/
+	&&        (SecCyl < 4000));				/* while < 4000				*/
+		SecCyl = SecCyl + 1;						/* try next number			*/
+		
+		write(5) = LS_Blocks;					/* load # of blocks			*/
+		write(4) = MS_Blocks;
+		write(7) = SecCyl;						/* divide by sec/cyl			*/
+	end;
+	
+	if ((SecCyl == 4000) && (MS_Blocks ILE 65))	/* if no good value	*/
+		SecCyl = 144;								/* use old value of 144		*/
+	
+	write(5) = LS_Blocks;						/* load # of blocks			*/
+	write(4) = MS_Blocks;
+	write(7) = SecCyl;							/* divide by sec/cyl			*/
+	TotCyl   = read(5);
+	
+   core(ConfigPtr + s#seccyl) = SecCyl; 	/* store sectors/cylinder	*/
+   core(ConfigPtr + s#totcyl) = TotCyl; 	/* store total cylinders	*/
+
+   return (S$Good); 								/* return good status		*/
+end Find_Win_Size;
+
+/* Set the size of a chain of winchesters */
+
+dcl Chain_Prob_Adr fixed public;
+
+Set_Win_Chain_Size: proc(dev) returns (fixed) public recursive;	/* set size of specified winchester(s) in config table */
+   dcl dev         fixed; 					/* device to confirm */
+   dcl ptr         fixed; 					/* pointer into configuration table for this device */
+   dcl win_type    fixed; 					/* device type found */
+   dcl zero_config boolean; 				/* TRUE to zero out remaining drives */
+   dcl (totsecMSW,totsecLSW) fixed; 	/* total sectors on this device */
+   dcl (msw,lsw)   fixed;
+   dcl done        boolean;
+   dcl i           fixed;
+	dcl Which       fixed;
+   
+	dcl inqbuf(INQ_BUF_SIZE_BYTES/2) fixed;
+	dcl capbuf(4)                    fixed;
+	
+	
+	S$SenseKey = S$Good;						/* assume we will succeed 	*/
+	
+	if (dev == 6) Which = m#w0_ej;		/* get which publish bit	*/
+	else          Which = m#w1_ej;		/* to use						*/
+	
+	core(loc.monbits) = core(loc.monbits) & (~Which);	/* assume device is not removable */
+  
+   ptr = find_device(dev); 				/* get device */
+
+   if ptr = 0 then return (S$Good); 	/* not configured; done */
+
+   win_type = core(ptr + s#devtyp); 	/* get winchester type */
+
+   if (shr(win_type,8) and "17") <> 1 then return (S$Good); /* only set configuration for SCSI winchester drives (e.g. skip if IMI) */
+ 
+   win_type = win_type and "377"; /* ignore winchester drive type */
+
+   zero_config = false; 					/* allow configuration to be set */
+   totsecMSW = 0; totsecLSW = 0; 		/* no sectors allocated yet */
+
+   do while (core(ptr + s#devtyp) and "377") = win_type; /* loop until device type changes (not W0 or W1 anymore) */
+
+      if (shr(core(ptr + s#devtyp),8) and "17") <> 1 then do; /* not a SCSI drive */
+			core(loc.monbits) = core(loc.monbits) & (~Which);
+         return (S$BadDevice); /* die */
+      end;
+
+      i = Find_Win_Size(core(ptr + s#devadr), ptr, inqbuf, capbuf); /* get capacity information */
+
+      if i <> S$Good then do;								/* error occurred */
+			S$SenseKey = i;
+			Chain_Prob_Adr = core(ptr + s#devadr);
+
+			if ((S$SenseKey == S$NotReady)				/* if not ready */
+			&&  (inqbuf(0) > 3)								/* but got inquriy data */
+			&&  ((byte(inqbuf, 1) & 128) != 0)			/* and is removable media */
+			&&  (totsecMSW == 0)								/* and is first one in */
+			&&  (totsecLSW == 0))							/* chain	*/
+				core(loc.monbits) = core(loc.monbits) | Which;	/* set to removable so RTP can mount it */
+			else
+				core(loc.monbits) = core(loc.monbits) & (~Which);
+         
+			zero_config = true; /* zero-out the size field on all remaining drives */
+      end; /* error processing */
+
+      if zero_config then do; /* zero out the size field for this drive */
+         core(ptr + s#seccyl) = 0;
+         core(ptr + s#totcyl) = 0;
+      end;
+      else do; /* truncate the size field, if need be */
+			
+			/* if device has removable media, flag that fact for our use in processing eject */
+			/* and other commands.   In case of concatenated media, all media must be			*/
+			/* removable (dare to try that configuration, will you?)									*/
+			
+			if ((inqbuf(0) >= 2) && ((byte(inqbuf, 1) & 128) != 0))	/* RMB set					*/
+			{
+				if (totsecMSW == 0 && totsecLSW == 0)				/* first winch in chain			*/
+					core(loc.monbits) = core(loc.monbits) | Which;
+				
+				if (systyp != 0)											/* if winchester-based system	*/
+					PreventAllow(core(ptr + s#devadr), 1);			/* lock media in for our use	*/
+				else															/* else if floppy based,		*/
+					PreventAllow(core(ptr + s#devadr), 0);			/* release drive after reboot	*/
+			}																	/* from diag floppy				*/
+			
+			else
+				core(loc.monbits) = core(loc.monbits) & (~Which);
+			
+         done = false; /* not done yet */
+         do while not done; /* make sure this drive will not cause device to exceed 2^24 sectors */
+            write("5") = core(ptr + s#totcyl); /* calculate the number of sectors on this drive: */
+            write("6") = core(ptr + s#seccyl); /* sectors = cylinders * sectors/cylinder */
+            msw = read("4"); /* store this sector total */
+            lsw = read("5");
+
+            msw = totsecMSW + msw; /* add the new sectors to the current sector total for this device */
+            lsw = totsecLSW + lsw;
+            if lsw ilt totsecLSW then msw = msw + 1;
+
+            /* if new sector total is greater than 2^24, this drive must be truncated */
+            if (msw ige 256) then do;
+               msw = "h00FF" - totsecMSW; /* calculate sectors allowed on this drive: */
+					lsw = "hFFFF" - totsecLSW;
+
+               write("5") = lsw; /* new sector total for this drive */
+               write("4") = msw;
+               write("7") = core(ptr + s#seccyl); /* divide by sectors/cylinder */
+               core(ptr + s#totcyl) = read("5"); /* store the new number of cylinders */
+               done = false; /* must do it again */
+               zero_config = true; /* zero-out the size on the rest of the drives */
+            end;
+            else done = true; /* no problem */
+         end; /* while */
+
+         totsecMSW = msw; /* store the new sector total on this device */
+         totsecLSW = lsw;
+      end;
+
+      ptr = ptr + s#blklen; /* next configuration entry */
+   end; /* looping over drives */
+
+	return (S$SenseKey);
+end Set_Win_Chain_Size;
+
+Poll_Scsi: procedure(Buffer, BufLen) public; /* Poll SCSI devices */
+   dcl Buffer       fixed array; /* Buffer containing device list */
+   dcl BufLen       fixed;       /* Length of Buffer */
+   dcl D24ID        fixed;       /* D24 board to use */
+   dcl Target       fixed;       /* Target ID to use */
+   dcl Lun          fixed;       /* Logical Unit Number to use */
+   dcl Ptr          fixed;       /* Pointer into Buffer */
+
+   dcl inqbuf(INQ_BUF_SIZE_BYTES/2) fixed;
+	dcl capbuf(4)                    fixed;
+  
+   /* An optical device currently must be at this SCSI location */
+   dcl opt_address lit '((D24ID=0) and (Target=1) and (LUN=0))';
+
+   /* This procedure attempts to connect to the SCSI device specified
+      by the global variables D24ID, INITIATOR, TARGET and LUN. If
+      connection can be made, an entry is made for that device in the
+      configuration buffer. */
+
+   PollDevice: procedure;
+      dcl DevType      fixed;              /* SCSI device type */
+      dcl DevAdr       fixed;              /* SCSI device address */
+      dcl Sense        fixed;              /* Extended Sense Key */
+      dcl Stat         fixed;              /* Status Word */
+      dcl i            fixed;
+
+      DevAdr = shl(Lun,8) or shl(D24ID,4) or (Target); 		 /* construct SCSI device address */
+
+		Sense = Inquiry(DevAdr, INQ_BUF_SIZE_BYTES, inqbuf);	 /* see if device exists */
+		
+		if Sense = S$D24NotThere then do;       /* D24 board selected is not present in computer */
+			Target = 8;                       	 /* Skip remaining targets */
+			Lun = 8;                          	 /* Skip remaining LUNS */
+			return;
+		end;
+
+		if Sense = S$SelFailed then do;         /* SCSI device did not respond */
+			Lun = 8;                          	 /* Skip remaining LUNS */
+			return;
+		end;
+
+      if Sense <> S$Good then return;   	    /* LUN not there or some other error occurred */
+
+		DevType = byte(inqbuf,0) & 0x1F;			 /* extract peripheral device type */
+		
+		Sense = TestUnitReady(DevAdr);			 /* see if device is ready */
+		
+		if ((Sense != S$Good)						 /* return here if device is not ready, except	*/
+		&&  (not opt_address))						 /* for the presumed optical disk...				*/
+			return;
+		
+      if (ptr + s#blklen) ile BufLen then do; /* there is room in buffer */
+
+         if DevType = 0 then do;					 /* Direct Access Devices */
+            if opt_address then do;				 /* we have a 5-inch optical */
+               Stat = Find_Win_Size(DevAdr, addr(Buffer(0)) + ptr, inqbuf, capbuf); /* find optical media size */
+               if Stat <> S$Good then return;
+
+               Buffer(ptr + s#devtyp) = ("H400" or "H100" or 4); /* 5-inch optical, SCSI device, optical logical device */
+               Buffer(ptr + s#devadr) = DevAdr; /* SCSI device address */
+               ptr = ptr + s#blklen;            /* point to next block in buffer */
+            end;
+            else do;										/* we have a Winchester */
+               Stat = Find_Win_Size(DevAdr,addr(Buffer(0)) + ptr, inqbuf, capbuf); /* find winchester size */
+               if Stat <> S$Good then return;
+
+               Buffer(ptr + s#devtyp) = ("H100" or 1); /* SCSI device, Winchester logical device */
+               Buffer(ptr + s#devadr) = DevAdr; /* SCSI device address */
+               ptr = ptr + s#blklen;            /* point to next block in buffer */
+            end;
+         end; /* of Direct Access Devices */
+
+         else if DevType = 1 then do;			 /* Sequential Access Devices */
+            Buffer(ptr + s#devtyp) = "H303";  /* High Density and Speed, Tape logical device */
+            Buffer(ptr + s#seccyl) = 18688;   /* No. logical blocks per track */
+            Buffer(ptr + s#totcyl) = 1;       /* No. tracks on tape */
+            Buffer(ptr + s#devadr) = DevAdr;  /* SCSI device address */
+            ptr = ptr + s#blklen;             /* point to next block in buffer */
+         end;
+
+         else if DevType = 4 then do;			 /* LMS 12-inch optical drive */
+            Buffer(ptr + s#devtyp) = ("H100" or 4); /* SCSI device, optical logical device */
+            Buffer(ptr + s#seccyl) = 1000;	 /* ? */
+            Buffer(ptr + s#totcyl) = 2048;	 /* ? */
+            Buffer(ptr + s#devadr) = DevAdr;	 /* SCSI device address */
+            ptr = ptr + s#blklen;       		 /* point to next block in buffer */
+         end;
+      end; /* room in buffer */
+   end PollDevice;
+
+   /*** Main Procedure Code ***/
+
+   do Lun = 0 to BufLen - 1;               	/* Initialize buffer to all free blocks */
+      Buffer(Lun) = s#freblk;
+   end;
+
+   Ptr = 0;
+
+   D24ID = 0;
+   do while D24ID == 0;                    	/* look only at board 0 */
+
+      Target = 0;
+      do while Target < S.Initiator;         /* Try every possible target on the SCSI bus */
+
+         Lun = 0;
+         do while Lun == 0;                	/* Try only lun 0... */
+
+            call PollDevice;               	/* Poll this device */
+
+            Lun = Lun + 1;
+         end;
+
+         Target = Target + 1;
+      end;
+
+      D24ID = D24ID + 1;
+   end;
+
+end Poll_Scsi;
+
+
+/* Handy routine to fetch the Inquiry name of a SCSI device */
+/* and return it in an XPL string for printing, or other	   */
+/* devious purposes...													*/
+
+fetch_inq_name:   proc(DevAdr, NamBuf) public recursive;
+	dcl DevAdr 									fixed;
+	dcl NamBuf									array;
+	dcl InqBuf(NAM_BUF_SIZE_BYTES+8) 	fixed;
+	dcl (i,j)									fixed;
+	
+	NamBuf(0) = 0;
+	
+	if (Inquiry(DevAdr, NAM_BUF_SIZE_BYTES+8, InqBuf) != S$Good)
+		return;
+
+	if (inqbuf(0) > 8)					/* extract name	*/
+	{
+		i = 8;
+		
+		while (i < InqBuf(0) && (i-8) < NAM_BUF_SIZE_BYTES)
+		{
+			j = byte(inqbuf, i);			/* get inq name	*/
+			
+			if (j < 32 || j >= 127)		/* make sure is	*/
+				j = 32;						/* printable...	*/
+				
+			pbyte(NamBuf, i-8, j);
+			i = i + 1;
+			
+			NamBuf(0) = i-8;
+		}
+	}
+end fetch_inq_name;
+
+fetch_level_name:   proc(Level, NamBuf) public recursive;
+	dcl Level   								fixed;
+	dcl NamBuf									array;
+	dcl i											fixed;
+
+	NamBuf(0) = 0;
+	
+	i = find_device	(level);						/* find the device 	*/
+
+	if (i == 0)											/* not there...		*/
+		return;
+	
+	if (shr(core(i + s#devtyp), 8) == 0)		/* non-scsi?			*/
+		return;
+	
+	fetch_inq_name(core(i + s#devadr), NamBuf);
+end fetch_level_name;
+
+end;
+
+end device_handlers;

@@ -1,0 +1,73 @@
+/* Interpreter Interface */
+
+Module interpreter_module;
+	insert ':-xpl:syslits';
+	insert ':-xpl:intrprtr';
+	
+	begin;
+		dcl	interp_is_running fixed public;
+   		dcl real.milliseconds fixed public;
+		dcl time_count		  fixed;
+
+		// Main code - insert early!!!!
+		interp_set_revision(INTERP_REVISION_LEVEL);				// tell host what revision level we require
+
+		if ((read("51") & 0x8000) != 0)							// if d57 available...
+		{
+			if ((read("57") & 0x8000) != 0)						// then check interpreter
+				interp_is_running = TRUE;
+		}
+		
+		// Routine: timeshare_with_host
+		// Runs host periodically.  Trys to return at task level.
+		// This routine is called periodically when doing time-consuming computations (like when
+		// reversing a sound file).
+		timeshare_with_host:proc public;
+			interp_run_host_250();								// make sure host gets time every 250 msecs
+		end timeshare_with_host;
+
+		// Flush terminal output to screen.  Called before starting a time-consuming operation to make
+		// sure status messsages appear.
+		flush_termulator_output_to_host:proc public;
+			interp_flush_char_output();							// have interpreter flush all characters to output buffer
+			interp_run_host_non_timer();                        // exit. termulator may run at this time.
+		end flush_termulator_output_to_host;
+
+        // Run host; return at non-timer level
+        interp_run_host_non_timer:proc public;
+            interp_run_host();
+            interp_check_interrupts();
+
+            // Wait to be woken on non-timer.
+            while (interp_current_level(0) == 1) {
+                interp_run_host();
+                interp_check_interrupts();
+            }
+        end interp_run_host_non_timer;
+
+        // interp_run_host_250
+        interp_run_host_250:proc public;
+            // Nothing unless main loop (no kernel) or UI thread in kernel
+            if (interp_current_level(0) < 3)
+                return;
+
+            interp_run_host_250_call();
+
+            while (interp_current_level(0) < 3)
+                interp_run_host();
+
+        end interp_run_host_250;
+
+        interp_run_host_at_level:proc public;
+            dcl i fixed;
+
+            i = interp_current_level(0);
+
+            interp_run_host();
+
+            while (interp_current_level(0) != i) {
+                interp_run_host();
+            }
+        end interp_run_host_at_level;
+    end;
+end interpreter_module;

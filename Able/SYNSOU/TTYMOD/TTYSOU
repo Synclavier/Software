@@ -1,0 +1,1047 @@
+/*	:SYNSOU:TTYMOD:TTYSOU  $TITLE  Interrupt Driven Terminal I/O Package
+
+Modified:
+1999/12/15 - TY  - Minor efficiency changes to SET.SCROLLING.REGION
+1990/11/15 - TSS - Removed TERMULATOR.BACKGROUND reference (made compiles blow up)
+1990/10/18 - TSS - Removed dependency on the protocol library
+1990/01/23 - MWH - add trap to debugger
+1989/06/30 - cj  - checked use.protocol.for.d50
+1989/06/09 - TSS - Made some more changes to improve response of clavier button panel
+1989/06/08 - TSS - Made changes to improve response of clavier button panel
+1989/05/02 - TSS - Merged PNUMHEX routine
+1989/04/28 - MWH - Support for multiple D115 boards & channels; timeouts
+1989/03/02 - TSS - Added message to allow Termulator to enable ABLE protocol xmit
+1989/01/20 - MWH - Fix interrupt status in SEND.PROTOCOL.PACKET
+1989/01/13 - PF  - add FAST.SEND.PROTOCOL.PACKET routine
+1988/11/14 - MWH - Don't log output of frequent SYNC messages
+1988/11/09 - MWH - Clean up messages and update lengths
+1988/10/13 - MWH - Add RS422 output driver
+1988/10/12 - TSS - Enabled timeout logic for protocol messages
+1988/09/22 - cj  - disabled some stuff in save.cursor because it
+						 does not work with the pericom. Was causing
+						 smgr bug with **READY
+1988/09/24 - TSS - Cleaned up TTIINT interrupt & started using INC.PROTOCOL literal
+1988/09/21 - MWH - Add protocol emulator
+1988/09/14 - TSS - Added code to process prototype protocol messages
+1988/07/07 - TSS - Fixed bug in FKey processing with Termulator
+1988/06/23 - TSS - Fixed bug in mapping of Mac FKeys
+1988/05/28 - TSS - Added FLUSH.FKEYS.FROM.D50.BUF routine
+1988/05/24 - TSS - added code to read Macintosh FKeys
+1988/05/24 - LSS - Macintosh support: broke up TTY.INIT, added refresh
+1988/05/05 - CJ  - Fixed Restore Cursor Bug
+1988/03/31 - TSS - Modify routines to support MAC II mouse via Termulator
+1987/01/29 - BSW - Terminal I/O Package into a module
+1987/02/11 - MPB - Set.Term.Attr Changes
+*/
+
+Module TTYMOD;
+	insert ':-xpl:intrprtr';		/*	interpreter interface	*/
+	insert ':synlits:comlits';		/*	compilation literals		*/
+	insert ':synlits:globlits';	/*	global literals			*/
+	insert ':synlits:asciilit';	/*	ascii code literals		*/
+	insert ':synlits:syslits';		/*	system literals			*/
+	insert ':synauxs:prolits';		/*	SyncNet protocol driver literals	*/
+	insert ':synlits:cplits';		/*	D115 comm proc lits		*/
+	insert ':synauxs:ttylits';		/*	terminal i/o specific literals	*/
+	insert ':synauxs:traplits';	/*	packet definitions		*/
+
+	insert ':synmods:globdcl';		/*	for alloc.examount, powers	*/
+	insert ':synmods:getvdcl';		/*	for new.in.char				*/
+	insert ':synmods:mousrdcl';	/*	some mouse dcls				*/
+	insert ':synmods:xmemdcl';		/*	for copy.in						*/
+
+	insert ':synauxs:mouselit';	/*	include mouse lits directly	*/
+
+	/*	following extracted from ':synmods:prodcl'	*/
+	dcl protocol.in.ptr				fixed external;	/*	ext mem buffer for D50 protocol input stream	*/
+	dcl p.in.wptr						fixed external;	/*	ptr to next free loc in input buffer			*/
+	dcl p.in.rptr						fixed external;	/*	ptr to next good message byte to be read		*/
+	dcl p.in.prior						fixed external;
+	dcl protocol.out.ptr				fixed external;	/*	ext mem buffer for protocol output stream	*/
+	dcl use.protocol.for.d50		fixed external;	/*	use protocol for d50 output	*/
+	dcl num.of.new.packets			fixed external;	/*	number of unprocessed D50 packets in buffer	*/
+	dcl ok.to.xmit.mac.protocol	fixed external;	/*	Set if Mac II wants protocol info	*/
+	dcl disable.protocol.output	fixed external;	/*	set to non-zero to stop output processing	*/
+
+	/*	10 - 21 - 87 - output buffer enlarged to 64 characters to handle	*/
+	/*	all the characters for audio event editor flag  (was 16)				*/
+
+	dcl tinlen	lit	' 16';	/*	16 char input buffer			*/
+
+	dcl (num.of.d50.in.chars)	fixed	public;	/*	# of d50 input chars in input buffer	*/
+	dcl (next.d50.in.char)		fixed	public;	/*	used to peek ahead at next character	*/
+	dcl (char.time)				fixed	public;	/*	time of character returned	*/
+
+	dcl (img.ptr)					fixed	public;	/*	(4) external memory sectors set during inititialization for screen dump image	*/
+	dcl (screen.x, screen.y)	fixed	public;	/*	character x,y location in screen image dump array	*/
+	dcl (scroll.top,scroll.bottom)	fixed;	/*	current top and bottom rows of scrolling region (0 to 23)	*/
+	dcl attr.state							fixed;	/*	Bits 0 = Inverse; 1 = Alt; 2 = Flash; 3 = Underline	*/
+
+	dcl (adm)				fixed	public;	/*	true for adm terminal	*/
+	dcl (vt100)				fixed	public;	/*	set for vt100,mg600,dg640,vt640	*/
+	dcl (mg600)				fixed	public;	/*	true for mg600 terminal	*/
+	dcl (dq640)				fixed	public;	/*	true for dq640 terminal	*/
+	dcl (vt640)				fixed	public;	/*	true for vt640 terminal	*/
+	dcl (gtype)				fixed	public;	/*	graphics type				*/
+
+	dcl screen.width		fixed	public;	/*	screen width  in pixels	*/
+	dcl screen.height		fixed	public;	/*	screen height in pixels	*/
+	dcl char.width			fixed	public;	/*	char width  in pixels (alpha mode)	*/
+	dcl char.height		fixed	public;	/*	char height in pixels (alpha mode)	*/
+	dcl tchar.width		fixed	public;	/*	transparent mode character width in pixels	*/
+	dcl tchar.height		fixed	public;	/*	transparent mode character height in pixels	*/
+
+	dcl ch.mode				fixed	public;	/*	0=normal chars active, 1=alternate chars active	*/
+	dcl screen.dump		fixed	public;	/*	1 => screen dump feature is on. 0 => off		*/
+	dcl err.displayed		fixed	public;	/*	0=> no error on screen, 1=> error displayed	*/
+
+	dcl run.syn						fixed	public;	/*	set to 1 to allow calls to RUN.SYN.LOOP, 0 to disallow	*/
+	dcl num.of.d50.out.chars	fixed	public;	/*	num of chars in d50 output buffer	*/
+
+	dcl stopped							fixed;	/*	for ctrl-s, ctrl-q from terminal		*/
+	dcl (busy)							fixed;	/*	true when output is active	*/
+	dcl (rptr,sptr)					fixed;	/*	pointers into output rotary buffer	*/
+	dcl pbuf (shr(tty.buf.len,1))	fixed;	/*	output rotary buffer		*/
+	dcl (tinptr,totptr)				fixed;	/*	in & out rotary pointer for input buffer	*/
+	dcl tibuf  (shr(tinlen,1))		fixed;	/*	input character buffer	*/
+	dcl titime (tinlen-1)			fixed;	/*	time of input character	*/
+
+	boot_tty: proc;						/*	start up tty - MUST CALL WITH INTERRUPTS OFF	*/
+		if rptr<>sptr then do;
+			write("50") = byte(pbuf,rptr);	/*	write out the byte				*/
+			rptr=(rptr+1)&(tty.buf.len-1);	/*	bump and wrap read pointer		*/
+			busy=1;									/*	mark busy if character sent	*/
+			num.of.d50.out.chars=num.of.d50.out.chars - 1;
+		end;
+		else busy=0;
+	end boot_tty;
+
+	/*	$page - tty input interrupt	*/
+
+	dcl protocol.trap		fixed	public;	/*	For protocol emulator	*/
+	dcl xpl.trap			fixed	public;	/*	For the XPL debugger	*/
+	dcl mac.esc.seq		fixed	public;	/*	MAC is getting an ESC sequence	*/
+	dcl ignore.mac.mouse	fixed	public;	/*	Throw away MAC mouse reports	*/
+
+	WHEN TTIINT THEN BEGIN;	/*	HANDLE TERMINAL CHARACTER	*/
+		dcl (ch,esc.rcvd)			fixed;
+		dcl mouse.report.type	fixed;
+		dcl mouse.bptr				fixed;
+		dcl esc.seq.msb			fixed;
+		dcl char.time				fixed;	/*	time at which interrupt was serviced	*/
+
+		dcl timeout.enabled		lit '1';
+		dcl receiving.protocol.message	fixed;
+		dcl last.time							fixed;
+		dcl checksum							fixed;
+		dcl message.len						fixed;
+		dcl received.len						fixed;
+		dcl (saved.mam,saved.mal)			fixed;
+
+		ABORT.PROTOCOL.MESSAGE: PROC;
+			RECEIVING.PROTOCOL.MESSAGE = 0;
+			P.IN.WPTR = P.IN.PRIOR;			/*	RESET TEMP BUFFER PTR	*/
+		END ABORT.PROTOCOL.MESSAGE;
+
+		ch = rcvdcharacter;	/*	get 8 bit char	*/
+		char.time = real.milliseconds;
+
+		if ch="23" then do;
+			stopped=1;
+			return;									/*	CTRL-S:  XOFF	*/
+		end;
+
+		if ch="21" then do;						/*	CTRL-Q:  XON	*/
+			if (stopped<>0) then do;			/*	restart output	*/
+				if  (busy=0)						/*	if not busy		*/
+				and (use.protocol.for.d50=0)	/*	or using RS422	*/
+				then call boot_tty;				/*	then start it	*/
+				stopped=0;
+			end;
+			return;									/*	ignore extra CTRL-Q's	*/
+		end;
+
+		if ch="34" then do;						/*	For protocol emulator	*/
+			protocol.trap = 1;					/*	Set on CTRL-\	*/
+			return;									/*	Otherwise, ignore char	*/
+		end;
+
+		if ch="35" then do;						/*	For XPL debugger	*/
+			xpl.trap = 1;							/*	Set on CTRL-]		*/
+			return;									/*	Otherwise, ignore char	*/
+		end;
+
+		IF INC.PRO & (RECEIVING.PROTOCOL.MESSAGE<>0)
+		THEN DO;									/*	GOT ANOTHER BYTE OF MESSAGE	*/
+
+			IF (TIMEOUT.ENABLED&((CHAR.TIME-LAST.TIME) IGT 20))	/*	TIMEOUT ERROR - CHARS SHOULD COME IN A BURST	*/
+			OR ((CH&128)=0) THEN DO;							/*	FRAMING ERROR - SHOULD ALWAYS HAVE MSB SET	*/
+				CALL ABORT.PROTOCOL.MESSAGE;
+				GOTO NORMAL.PROCESSING;							/*	TRY TO GET BACK IN SYNC	*/
+			END;
+
+			LAST.TIME = CHAR.TIME;								/*	SAVE TIME OF THIS BYTE	*/
+			CH = CH & "177";										/*	EXTRACT VALID DATA	*/
+
+			IF RECEIVING.PROTOCOL.MESSAGE>0 THEN DO;		/*	READING PACKET DATA	*/
+				IF ((P.IN.WPTR+1)&(PROTOCOL.IN.LEN-1)) <> P.IN.RPTR
+				THEN DO;												/*	ROOM TO BUFFER ANOTHER BYTE	*/
+					SAVED.MAM = READ(MAM);						/*	SAVE MAM & MAL PTRS	*/
+					SAVED.MAL = READ(MAL);
+
+					WRITE(MAM)=PROTOCOL.IN.PTR+SHR(P.IN.WPTR,8);	/*	POINT TO INPUT BUFFER	*/
+					WRITE(MAL)=P.IN.WPTR;
+
+					IF RECEIVING.PROTOCOL.MESSAGE=1 THEN DO;		/*	THIS IS THE LENGTH BYTE	*/
+						RECEIVING.PROTOCOL.MESSAGE = 2;		/*	NOW READY TO GET ACTUAL DATA	*/
+						CHECKSUM = CH;								/*	INITIALIZE CHECKSUM	*/
+						MESSAGE.LEN = CH;
+						IF MESSAGE.LEN = 0 THEN MESSAGE.LEN = 128;
+						WRITE(MD)=MESSAGE.LEN+1;				/*	SAVE LEN IN BUFFER (INCLUDING LENGTH WORD ITSELF)	*/
+						RECEIVED.LEN = 0;							/*	RESET COUNTER	*/
+					END;
+					ELSE DO;
+						CHECKSUM = CHECKSUM + CH;				/*	ACCUMULATE CHECKSUM	*/
+
+						IF RECEIVED.LEN = 0
+						THEN WRITE(MD) = P#RS232_NODE;		/*	SAVE SOURCE ADDRESS FOR THIS PACKET	*/
+						ELSE WRITE(MD) = CH;						/*	SAVE DATA IN BUFFER	*/
+
+						RECEIVED.LEN = RECEIVED.LEN + 1;
+						IF RECEIVED.LEN = MESSAGE.LEN THEN DO;	/*	GOT OUR N DATA BYTES	*/
+							RECEIVED.LEN = 0;							/*	RESET COUNTER	*/
+							RECEIVING.PROTOCOL.MESSAGE = (-1);	/*	NOW GET CHECKSUM	*/
+						END;
+					END;
+
+					P.IN.WPTR = (P.IN.WPTR + 1) & (PROTOCOL.IN.LEN-1);	/*	ADVANCE TEMP BUFFER PTR	*/
+					WRITE(MAM) = SAVED.MAM;							/*	RESTORE MAM & MAL PTRS	*/
+					WRITE(MAL) = SAVED.MAL;
+				END;														/*	OF ROOM IN BUFFER TO STORE BYTE	*/
+
+				ELSE DO;													/*	BUFFER OVERRUN	*/
+					CALL ABORT.PROTOCOL.MESSAGE;
+				END;
+			END;													/*	OF RECEIVING PACKET DATA	*/
+
+			ELSE DO;												/*	RECEIVING CHECKSUM	*/
+				IF RECEIVED.LEN = 0
+				THEN CHECKSUM = CHECKSUM - SHL(CH,7);	/*	SUBTRACT OFF MSB	*/
+				ELSE CHECKSUM = CHECKSUM - CH;			/*	SUBTRACT OFF LSB	*/
+
+				RECEIVED.LEN = RECEIVED.LEN + 1;
+
+				IF RECEIVED.LEN = 2 THEN DO;				/*	GOT BOTH CHECKSUM BYTES	*/
+					IF CHECKSUM=0 THEN DO;					/*	GOOD CHECKSUM	*/
+						NUM.OF.NEW.PACKETS = NUM.OF.NEW.PACKETS + 1;	/*	GOT ANOTHER GOOD PACKET	*/
+						P.IN.PRIOR = P.IN.WPTR;				/*	UPDATE LAST END PTR	*/
+					END;
+					ELSE DO;										/*	CHECKSUM ERROR	*/
+						P.IN.WPTR = P.IN.PRIOR;				/*	RESET TEMP BUFFER PTR	*/
+					END;
+					RECEIVING.PROTOCOL.MESSAGE = 0;
+				END;
+			END;													/*	OF CHECKSUM HANDLER	*/
+
+			RETURN;
+		END;														/*	OF RECEIVING PROTOCOL MESSAGE	*/
+
+		if MOUSE.PORT.IS.D50 = 0
+		then ch = ch & "177";	/*	mask off parity	*/
+
+		IF MAC.ESC.SEQ <> 0 THEN DO;				/*	SCANNING TERMULATOR MOUSE REPORT	*/
+
+			IF ESC.SEQ.MSB <> (CH&128)				/*	BYTE HAS MSB SET INCORRECTLY	*/
+			THEN DO;										/*	THIS IS A FRAMING ERROR	*/
+				GOTO CLEAN.UP.AFTER.ERROR;			/*	SOMEWHAT FRIENDLIER RECOVERY	*/
+			END;
+
+			CH = CH & "177";							/*	NOW GET RID OF MSB	*/
+
+			IF MAC.ESC.SEQ = 1 THEN DO;			/*	LOOKING FOR COMMAND CODE	*/
+				IF INC.PRO & (CH = ASC.Z)
+				THEN DO;										/*	RECEIVING A PROTOCOL COMMAND	*/
+					RECEIVING.PROTOCOL.MESSAGE = 1;	/*	WAITING FOR PROTOCOL BYTES	*/
+					MAC.ESC.SEQ = 0;						/*	RESET STATE FLAG	*/
+					LAST.TIME = CHAR.TIME;				/*	INITIALIZE TIMER	*/
+					RETURN;
+				END;
+				ELSE IF (CH>=LOWER.E) AND (CH<=LOWER.L) THEN DO;
+					MAC.ESC.SEQ = 0;						/*	RESET STATE FLAG	*/
+					CH=ASC.FKEY1 + (CH - LOWER.E);	/*	MAP TO FUNCTION KEY (FKEY1 - FKEY8)	*/
+					GOTO HANDLE.CHAR;						/*	PROCESS LIKE A NORMAL CHARACTER	*/
+				END;
+				ELSE IF (CH>=ASC.E) AND (CH<=ASC.L) THEN DO;
+					MAC.ESC.SEQ = 0;						/*	RESET STATE FLAG	*/
+					CH=ASC.FKEY9 + (CH - ASC.E);		/*	MAP TO FUNCTION KEY (FKEY8 - FKEY16)	*/
+					GOTO HANDLE.CHAR;						/*	PROCESS LIKE A NORMAL CHARACTER	*/
+				END;
+				ELSE IF INC.PRO & (CH = ASC.Y)		/*	THIS MEANS TERMULATOR WANTS	*/
+				THEN DO;										/*	WANTS PROTOCOL FROM US	*/
+					MAC.ESC.SEQ = 0;						/*	RESET STATE FLAG	*/
+					OK.TO.XMIT.MAC.PROTOCOL = 1;		/*	ABLE CAN NOW SEND PROTOCOL TO MAC	*/
+					NEW.CLAVIER.INFO = (-1);			/*	SET BITS TO DO FULL REFRESH	*/
+				END;
+				ELSE DO;
+					MOUSE.REPORT.TYPE = CH - ASC.0;	/*	GET COMMAND NUMBER		*/
+					MAC.ESC.SEQ = 2;						/*	NOW SCAN REPORT INFO		*/
+				END;
+			END;
+
+			ELSE IF MAC.ESC.SEQ = 2 THEN DO;			/*	GET REPORT INFO	*/
+				IF MOUSE.REPORT.TYPE = 0 THEN DO;	/*	GETTING CURSOR & BUTTON REPORT	*/
+					IF MOUSE.BPTR ILT 5 THEN DO;		/*	LIMIT INFO TO SIZE OF BUFFER	*/
+						IF IGNORE.MAC.MOUSE = 0 THEN
+						MOUSE.BUFFER (MOUSE.BPTR) = CH;	/*	SAVE REPORT BYTE		*/
+						MOUSE.BPTR = MOUSE.BPTR + 1;		/*	ADVANCE BUFFER PTR	*/
+					END;
+					IF MOUSE.BPTR IGE 5					/*	HAVE RECEIVED COMPLETE DATA PACKET	*/
+					THEN MAC.ESC.SEQ = 3;				/*	NOW LOOKING FOR REPORT TERMINATION CHAR	*/
+				END;
+			END;
+
+			ELSE IF MAC.ESC.SEQ = 3 THEN DO;		/*	EXPECTING MOUSE REPORT TERMINATE CHAR	*/
+				IF CH = ASC.M THEN DO;				/*	THIS IS IT!! PROCESS CURSOR REPORT	*/
+					IF IGNORE.MAC.MOUSE = 0			/*	IF WE'RE NOT IGNORING THE MAC	*/
+					THEN DO;
+						NEW.MOUSE.MOVEMENT = 1;		/*	SET FLAG TO DENOTE MOUSE CURSOR POS CHANGE	*/
+						MOUSE.XMIT.DONE = 1;			/*	HAVE RECEIVED MOUSE REPORT	*/
+						CALL MOUSE.SCAN.AND.POLL;	/*	PROCESS MOUSE.BUFFER INFO - INTERRUPTS SHOULD BE OFF HERE	*/
+					END;
+				END;
+				ELSE DO;									/*	FRAMING ERROR IN MOUSE REPORT	*/
+					CLEAN.UP.AFTER.ERROR:
+
+					ESC.RCVD	= (CH = ESC);			/*	TRY TO PROCESS ESC AS START OF NEW SEQUENCE	*/
+				END;
+
+				MAC.ESC.SEQ	= 0;						/*	RESET STATE VAR	*/
+				MOUSE.BPTR	= 0;						/*	EMPTY INPUT BUFFER	*/
+			END;
+
+			RETURN;										/*	AVOID NORMAL CHAR PROCESSING	*/
+		END;
+
+		NORMAL.PROCESSING:
+
+		IF ((CH & "177") = ESC) AND (ESC.RCVD = 0) THEN DO;	/*	FIRST ESCAPE	*/
+			ESC.RCVD=1;
+			ESC.SEQ.MSB = (CH & 128);			/*	IF HIGH BIT IS SET ON ESC - OTHER BYTES SHOULD ALSO HAVE BIT SET	*/
+			RETURN;									/*	SET FLAG, RETURN	*/
+		END;
+
+		IF ESC.RCVD<>0 THEN DO;					/*	CHECK CHARACTER AFTER ESCAPE	*/
+
+			IF ((CH & "177") = ASC.EXCLAM) THEN DO;	/*	RECEIVING A MOUSE CURSOR REPORT	*/
+				IF ESC.SEQ.MSB = (CH&128)		/*	BYTE HAS MSB SET CORRECTLY	*/
+				THEN MAC.ESC.SEQ = 1;			/*	START REPORT SCAN PROCESS	*/
+
+				ESC.RCVD		= 0;					/*	RESET FLAG	*/
+				MOUSE.BPTR	= 0;					/*	CLEAR MOUSE INPUT BUFFER	*/
+				RETURN;
+			END;
+
+			IF (CH=ASC.LBR) THEN RETURN;		/*	IGNORE [ AFTER ESC	*/
+			IF (CH=ASC.BSL) THEN RETURN;		/*	BACK SLASH				*/
+			IF (CH=ASC.O)	 THEN RETURN;		/*	IGNORE O AFTER ESC	*/
+			ESC.RCVD=0;								/*	RESET FLAG				*/
+
+			IF (CH=ASC.A) OR (CH=LOWER.A) THEN CH=U.ARR;			/*	ESC A = CURSOR UP		*/
+			ELSE IF (CH=ASC.B) OR (CH=LOWER.B) THEN CH=D.ARR;	/*	ESC B = CURSOR DOWN	*/
+			ELSE IF (CH=ASC.C) OR (CH=LOWER.C) THEN CH=R.ARR;	/*	ESC C = CURSOR RIGHT	*/
+			ELSE IF (CH=ASC.D) OR (CH=LOWER.D) THEN CH=L.ARR;	/*	ESC D = CURSOR LEFT	*/
+			ELSE IF (CH=ASC.E) THEN CH=ASC.SCREEN.REFRESH;		/*	ESC [ E - TERMULATOR SCREEN REFRESH CODE	*/
+			ELSE IF (CH=ASC.H) THEN CH=HOME;							/*	ESC H = HOME	*/
+			ELSE IF (CH=ASC.M) THEN CH=ESC;							/*	VT100 ENTER = MAP TO ESC	*/
+			ELSE IF (CH=ESC)	 THEN ;									/*	ESC	= SECOND ESC	*/
+			ELSE IF (CH>="160") AND (CH<="171")
+									 THEN CH=ASC.0+CH-"160";			/*	MAP KEYPAD #'S TO NORMAL #'S	*/
+			ELSE IF (CH="154") THEN CH=COMMA;						/*	MAP KEYPAD COMMA BACK TO NORMAL COMMA	*/
+			ELSE IF (CH="155") THEN CH=ASC.MIN;						/*	MAP KEYPAD MINUS BACK TO NORMAL MINUS	*/
+			ELSE IF (CH="156") THEN CH=DOT;							/*	MAP KEYPAD DECIMAL BACK TO NORMAL DECIMAL	*/
+			ELSE IF (CH>=ASC.P)&(CH<=ASC.S) THEN DO;				/*	CONVERT FROM PF KEYS	*/
+				CH=ASC.PF1+(CH-ASC.P);									/*	PF1, PF2, PF3, PF4	*/
+			END;
+			ELSE IF (CH>=ASC.0)&(CH<=ASC.9) THEN DO;				/*	CONVERT ESC (1,2,3,4)	*/
+				CH=ASC.CALL.CONVERT+(CH-ASC.0);						/*	ESC 1, ESC 2, ESC 3 ... ESC 9	*/
+			END;
+			ELSE DO;										/*	IGNORE UNUSED ESCAPE CODES	*/
+				RETURN;
+			END;
+		END;
+		ELSE IF (CH & 128) <> 0 THEN DO;			/*	IGNORE CHARS WITH MSB SET	*/
+			RETURN;
+		END;
+
+		IF CH=BRK THEN DO;							/*	BREAK - EXIT	*/
+			DO CH=0 TO 10; WRITE(3)=0; END;		/*	WAIT FOR BREAK TO GO AWAY	*/
+			CH=ASC.CALL.TERMINATE;
+			tinptr = totptr;							/*	toss all in buffer on break...	*/
+			num.of.d50.in.chars = 0;
+		END;
+
+		HANDLE.CHAR:									/*	JUMP HERE TO PROCESS VALID CHAR	*/
+
+		IF ((TINPTR+1)&(TINLEN-1))<>TOTPTR THEN DO;	/*	ROOM IN ROTARY BUF	*/
+			CALL PBYTE(TIBUF,TINPTR,CH);					/*	STORE CHARACTER FOR 'TERMINAL' ROUTINE	*/
+			TITIME(TINPTR)=CHAR.TIME;
+			TINPTR=(TINPTR+1)&(TINLEN-1);			/*	INCR ROTARY BUF PTRS	*/
+			NUM.OF.D50.IN.CHARS = NUM.OF.D50.IN.CHARS + 1;
+			IF NUM.OF.D50.IN.CHARS = 1				/*	PUTING FIRST ONE IN THERE	*/
+			THEN NEXT.D50.IN.CHAR  = CH;
+		END;
+	END;		/*	OF TTIINT	*/
+
+	/*	$page - scan next tty input character	*/
+
+	get.next.d50.in.char: proc	PUBLIC swapable;
+		dcl i	fixed;
+
+		do while num.of.d50.in.chars=0;				/*	wait for user to type a character	*/
+			chill.out.and.run.syn();
+		end;
+
+		i=byte(tibuf,totptr);							/*	get charcter	*/
+		char.time=titime(totptr);						/*	get character time	*/
+
+		disable;												/*	temporarily		*/
+		totptr=(totptr+1)&(tinlen-1);					/*	advance pointer	*/
+		num.of.d50.in.chars = num.of.d50.in.chars - 1;
+		if tinptr<>totptr then do;
+			next.d50.in.char=byte(tibuf,totptr);	/*	get charcter	*/
+		end;
+		else next.d50.in.char=0;						/*	none waiting	*/
+		enable;
+
+		return i;
+
+	end get.next.d50.in.char;
+
+	Flush.Arrow.Keys.From.D50.Buf: proc	public swapable;
+		do while	(Next.D50.In.Char=U.ARR)	/*	flush any arrow keys which	*/
+		or			(Next.D50.In.Char=D.ARR)	/*	are waiting to be processed	*/
+		or			(Next.D50.In.Char=L.ARR)
+		or			(Next.D50.In.Char=R.ARR);
+			call Get.Next.D50.In.Char;			/*	toss the arrow key	*/
+		end;
+
+		if (num.of.d50.in.chars=0) then new.in.char = 0;
+
+	end Flush.Arrow.Keys.From.D50.Buf;
+
+	Flush.FKeys.From.D50.Buf: proc public swapable;
+		do while	(Next.D50.In.Char >= ASC.CALL.CONVERT)
+		and		(Next.D50.In.Char < (ASC.CALL.CONVERT+32));
+			call Get.Next.D50.In.Char;			/*	toss the arrow key	*/
+		end;
+
+		if (num.of.d50.in.chars=0) then new.in.char = 0;
+
+	end Flush.FKeys.From.D50.Buf;
+
+	tty_wait: proc public;						/*	wait for terminal to finish printing	*/
+		do while rptr<>sptr;						/*	loop until all chars outputted	*/
+			interp_run_host_non_timer();     /*	wake up interpreter; run host if no interrupts pending	*/
+		end;
+		flush_termulator_output_to_host();	//	Flush all D50 output to termulator screen
+	end tty_wait;
+
+	run.syn.tty.wait: proc public;
+		do while rptr<>sptr;						/*	wait for empty output buffer	*/
+         chill.out.and.run.syn();         /*	to make for speedy erase		*/
+		end;											/*	of Waiting for trigger...		*/
+		flush_termulator_output_to_host();	//	Flush all D50 output to termulator screen
+	end run.syn.tty.wait;
+
+	when TTOINT then do;							/*	on output done, start next char	*/
+		if  (stopped=0)							/*	if not stopped						*/
+		and (use.protocol.for.d50=0)			/*	and not using RS422				*/
+		then call boot_tty;						/*	then send next character		*/
+		else busy=0;								/*	mark un-busy if stopped			*/
+	end;
+
+	pc: proc(ch) public;							/*	print a character by putting it on list of chars to print	*/
+		dcl ch				fixed;				/*	character	*/
+		dcl screen.image	fixed;
+		dcl i					fixed;
+
+		do while ((sptr+1)&(tty.buf.len-1))=rptr;	/*	there is no space in circ queue	*/
+			/*	protect against several nasty & complex re-entrant situations	*/
+			/*	by keeping protocol from running during PERFORM calls	*/
+
+			disable.protocol.output = disable.protocol.output + 1;
+				chill.out.and.run.syn();		/*	run synclavier program if we are enabled to do so	*/
+			disable.protocol.output = disable.protocol.output - 1;
+		end;
+
+		disable;									/*	during pointer storage	*/
+		call pbyte(pbuf,sptr,ch);			/*	store character in output buffer	*/
+		sptr=(sptr+1)&(tty.buf.len-1);	/*	bump and wrap output pointer		*/
+		num.of.d50.out.chars = num.of.d50.out.chars + 1;
+		if  (stopped=0)						/*	if not stopped				*/
+		and (busy	=0)						/*	and not busy				*/
+		and (use.protocol.for.d50=0)		/*	and not using RS422		*/
+		then call boot_tty;					/*	then start output			*/
+		enable;
+      interp_do_interrupts();          // Push the character out to the interpreter
+
+		if (screen.dump<>0) then do;		/*	screen dump is enabled	*/
+			if ((ch>"37") and (ch<"177"))
+			then begin;							/*	character is printable	*/
+				dcl (save.mam,save.mal)	fixed;
+
+				/*	save the mam and mal ptrs so programmers don't need to worry about them	*/
+				save.mam=read(mam); save.mal=read(mal);
+
+				if ch.mode<>norm then do;				/*	if character mode is not normal (i.e., alternate), map character to ADM equivalent	*/
+					if ((ch>"151") and (ch<"157")) or ((ch>"163") and (ch<"170"))
+					then ch="40";							/*	map upper and lower corners or T's to a space	*/
+					else if ch="161" then ch="55";	/*	map to a minus sign	*/
+					else if ch="170" then ch="174";	/*	map to a vertical bar	*/
+				end;
+				i=screen.y*40+screen.x/2;				/*	find word address of x,y location in screen image dump array	*/
+				if i ilt screen.image.len then do;	/*	check memory bounds if programmer error	*/
+					write(mam)=img.ptr+shr(i,8);		/*	calculate sector address to screen image in external memory (base + offset)	*/
+					write(mal)=i;							/*	point to the screen image word	*/
+					screen.image=read(md);				/*	lookup the contents	*/
+					if screen.x								/*	if x coordinate is odd	*/
+					then screen.image=(screen.image&"377")\shl(ch,8);	/*	update upper byte	*/
+					else screen.image=(screen.image&"177400")\ch;		/*	update lower byte	*/
+					write(md)=screen.image;
+				end;
+				if screen.x<79 then screen.x=screen.x+1;	/*	step x coordinate with cursor excluding auto wrap	*/
+
+				/*	now restore the mam and mal ptrs saved above	*/
+				write(mam)=save.mam; write(mal)=save.mal;
+			end;
+			else if ch="10" then do;	/*	back space	*/
+				if screen.x<>0 then screen.x=screen.x-1;
+			end;
+			else if ch="12" then do;	/*	linefeed	*/
+				if (screen.y<>scroll.bottom) & (screen.y<>23) then screen.y=screen.y+1;
+			end;
+			else if (ch="13") and (adm<>0) then do;	/*	vertical tab -- up 1 line on ADM terminal	*/
+				if screen.y<>0 then screen.y=screen.y-1;
+			end;
+			else if ch="15" then screen.x=0;	/*	carriage return	*/
+		end;
+	end pc;
+
+	pcr: proc public;	/*	prints a carriage return, linefeed	*/
+		dcl save.scr	fixed;
+
+		save.scr=screen.dump;	/*	save the current state of SCREEN.DUMP	*/
+		screen.dump=0;
+		call pc(13); call pc(10);
+		screen.x=0;
+		if (screen.y<>scroll.bottom) & (screen.y<23) then screen.y=screen.y+1;
+		screen.dump=save.scr;	/*	restore SCREEN.DUMP state	*/
+	end pcr;
+
+	ps: proc(str) public;		/*	prints a string	*/
+		dcl str	fixed array;
+		dcl i	fixed;
+		i=0;
+		do i=0 to str(0)-1; call pc(byte(str,i)); end;	/*	print each char	*/
+	end ps;
+
+	psr: proc(str) public;	/*	prints a string followed by a carriage return, linefeed	*/
+		dcl str	fixed array;
+		call ps(str); call pcr;
+	end psr;
+
+	initialize.screen.image: proc public swapable;	/*	fills screen dump image with spaces	*/
+		dcl i	fixed;
+
+		write(mam)=img.ptr;					/*	initialize the screen image array	*/
+		do i=0 to (screen.image.len-1);	/*	fill screen dump image with spaces	*/
+			write(mdi)=shl(sp,8)\sp;		/*	fill both upper and lower bytes		*/
+		end;
+	end initialize.screen.image;
+
+	/*	Set.Term.Attr puts the terminal into the state specified by Attr.Bits.
+		The low eight bits are flag bits for different attributes and the
+		the high eight bits are the desired state of the attribute flag
+		bits below.  Literals for all states are defined in TTYLITS.  A typical
+		call might look like this:
+
+		call Set.Term.Attr(ATTR#Reverse\ATTR#AltIntensity);
+	*/
+
+	set.term.attr: proc (attr.bits) public swapable;
+		dcl i				fixed;
+		dcl new.attr	fixed;
+		dcl attr.char	fixed;
+		dcl attr.bits	fixed;
+		dcl output.str (20)	fixed;
+		dcl save.scr	fixed;
+		dcl first.time	fixed static;
+
+		addchar: proc(chars,blap);
+			dcl chars	fixed array;
+			dcl blap		fixed array;
+			dcl i			fixed;
+
+			if first.time = 0 then do;
+				call pbyte(blap,blap(0),a.semicolon);
+				blap(0) = blap(0) + 1;
+			end;
+			else first.time = 0;
+			do i = 0 to chars(0)-1;
+				call pbyte(blap,blap(0)+i,byte(chars,i));
+			end;
+			blap(0) = blap(0)+chars(0);
+		end addchar;
+
+		if VT100 = 0 then return;	/*	no attributes avail for adm	*/
+
+		first.time = 1;
+		output.str(0) = 0;
+
+		if (attr.bits&Bit7) <> 0 then new.attr = 0;	/*	Check for Normal first	*/
+
+		do i = 0 to 6;	/*	Check attribute bits 0-6	*/
+			if (attr.bits&bits(i)) <> 0
+			then new.attr = (new.attr&not(bits(i)))\(shr(attr.bits&bits(i+8),8));
+		end;
+
+		if VT640 then do;
+			if (attr.state & (not(new.attr)))<>0	/*	if turning off a state	*/
+			then do;
+				call addchar('0',output.str);
+				attr.state = 0;
+			end;
+		end;
+
+		do while new.attr <> attr.state;
+			if		  ((new.attr=0)   ) & (attr.state  <> 0)	then do; call addchar('0',output.str);  attr.state = 0; end;
+			else if ((new.attr&1)<>0) & ((attr.state&1)=0)	then do; call addchar('7',output.str);  attr.state = attr.state\1; end;
+			else if ((new.attr&1) =0) & ((attr.state&1)<>0)	then do; call addchar('27',output.str); attr.state = attr.state&not(1); end;
+			else if ((new.attr&2)<>0) & ((attr.state&2)=0)	then do; call addchar('1',output.str);  attr.state = attr.state\2; end;
+			else if ((new.attr&2) =0) & ((attr.state&2)<>0)	then do; call addchar('22',output.str); attr.state = attr.state&not(2); end;
+			else if ((new.attr&4)<>0) & ((attr.state&4)=0)	then do; call addchar('5',output.str);  attr.state = attr.state\4; end;
+			else if ((new.attr&4) =0) & ((attr.state&4)<>0)	then do; call addchar('25',output.str); attr.state = attr.state&not(4); end;
+			else if ((new.attr&8)<>0) & ((attr.state&8)=0)	then do; call addchar('4',output.str);  attr.state = attr.state\8; end;
+			else if ((new.attr&8) =0) & ((attr.state&8)<>0)	then do; call addchar('24',output.str); attr.state = attr.state&not(8); end;
+		end;
+
+		if output.str(0) > 0 then do;	/*	any changes ?	*/
+			save.scr=screen.dump;		/*	save the current state of SCREEN.DUMP	*/
+			screen.dump=0;					/*	screen dump should ignore characters sent to terminal	*/
+			call pc(27); call ps('['); call ps(output.str); call ps('m');
+			screen.dump=save.scr;		/*	restore SCREEN.DUMP to previous state	*/
+		end;
+	end set.term.attr;
+
+	dcl ALTERNATE_CHARS	data (3,"H281B","H0030");	/*	Invoke special graphics character set for vt100	*/
+	dcl NORMAL_CHARS		data (3,"H281B","H0042");	/*	Invoke standard ascii character set for vt100	*/
+
+	CH.SET: proc(set) public swapable;	/*	puts terminal into NORMAL or ALTERNATE ch mode	*/
+		dcl set			fixed;
+		dcl save.scr	fixed;
+
+		if vt100 then do;
+			save.scr=screen.dump;	/*	save the current state of SCREEN.DUMP	*/
+			screen.dump=0;				/*	screen dump should ignore characters sent to terminal	*/
+			if (set=norm) and (ch.mode<>norm)
+			then call ps(normal_chars);
+			else if (set<>norm) and (ch.mode=norm)
+			then call ps(alternate_chars);
+			ch.mode=set;				/*	set global flag to correct state	*/
+			screen.dump=save.scr;	/*	restore SCREEN.DUMP to previous state	*/
+		end;
+	end CH.SET;
+
+	cpos: proc (ypos,xpos) public swapable;	/*	position cursor on terminal screen	*/
+		dcl (ypos,xpos,z)	fixed;	/*	ypos = lines down the screen.  xpos= columns out	*/
+		dcl save.scr		fixed;
+
+		if (screen.x=xpos) and (screen.y=ypos)	/*	we are already where we	*/
+		then return;									/*	want to be -- all done	*/
+
+		save.scr=screen.dump;			/*	save the current state of SCREEN.DUMP	*/
+		screen.dump=0;						/*	suppress characters so that screen image dump is not updated	*/
+		screen.x=xpos; screen.y=ypos;	/*	update x,y positions for screen image dump array	*/
+
+		if adm<>0 then do;	/*	adm series terminals		*/
+			call pc(esc);		call pc(asc.equ);
+			call pc(sp+ypos);	call pc(sp+xpos);
+		end;
+		else do;					/*	vt100 series terminals	*/
+			call pc(esc); call pc(asc.lbr);
+			if ypos<9 then call pc(asc.1+ypos);
+			else do;
+				load ypos+1; div 10; z=read(4);
+				call pc(asc.0+res); call pc(asc.0+z);
+			end;
+			call pc(scolon);
+			if xpos<9 then call pc(asc.1+xpos);
+			else do;
+				load xpos+1; div 10; z=read(4);
+				call pc(asc.0+res); call pc(asc.0+z);
+			end;
+			call pc(asc.h);
+		end;
+		screen.dump=save.scr;	/*	restore SCREEN.DUMP to previous state	*/
+	end cpos;
+
+	pnum: proc(val,pt) public swapable;	/*	print a positive decimal number (0 to 65535)	*/
+		dcl (val,pt)	fixed;	/*	val: value to print, pt: loc of dec pt, 0=none	*/
+		dcl (go,i,r)	fixed;	/*	pos only, performs left justification	*/
+
+		go=0;
+		do i=0 to 4;							/*	loop over digits	*/
+			r=0;									/*	assume zero		*/
+			if val IGE powers(i) then do;	/*	non-zero digit	*/
+				load val; div powers(i); r=res; val=read(4);
+				go=1;								/*	start printing	*/
+			end;
+			if (i+pt)=5 then call pc(DOT);
+			if (go<>0) or (i=4) or ((i+pt)>=5) then call pc(ASC.0+r);
+		end;										/*	of digit loop	*/
+	end pnum;
+
+	pnumhex: proc(val) public swapable;	/*	print a 16-bit hexidecimal number in the form: HFFFF	*/
+		dcl val		fixed;	/*	val: value to print						*/
+		dcl (i,r)	fixed;	/*	pos only, performs left justification	*/
+
+		call pc(ASC.H);
+		do i=0 to 3;								/*	loop over digits	*/
+			r=0;										/*	assume zero	*/
+			if val IGE hexpowers(i) then do;	/*	non-zero digit	*/
+				load val; div hexpowers(i); r=res; val=read(4);
+				if r > 9 then call pc(ASC.A+(r-10));
+				else			  call pc(ASC.0+r);
+			end;
+			else call pc(ASC.0);
+		end;											/*	of digit loop	*/
+	end pnumhex;
+
+	clear_screen: proc public SWAPABLE;		/*	clear transparent screen only	*/
+		dcl i				fixed;
+		dcl save.scr	fixed;
+
+		call ch.set(0);					/*	set character mode to normal characters as opposed to alternate	*/
+		save.scr=screen.dump;			/*	save the current state of SCREEN.DUMP	*/
+		screen.dump=0;						/*	suppress characters in screen image dump	*/
+		screen.x=0;							/*	initialize x,y screen dump coordinates	*/
+		screen.y=0;
+
+		if adm<>0 then call pc("032");		/*	adm	*/
+		else do;										/*	vt100	*/
+			/*	position cursor to top and erase rest of screen	*/
+			call pc(esc); call pc(asc.lbr);	/*	esc [	*/
+			call pc(asc.h);						/*	H		*/
+			call pc(esc); call pc(asc.lbr);	/*	esc [	*/
+			call pc(asc.j);						/*	J		*/
+			call pc(esc); call pc(asc.equ);	/*	ESC = --> KEYPAD APPLICATION MODE	*/
+		end;	/*	vt100	*/
+
+		call initialize.screen.image;			/*	fill screen dump image with spaces	*/
+		screen.dump=save.scr;					/*	restore SCREEN.DUMP to previous state	*/
+		err.displayed = 0;						/*	no error displayed	*/
+	end clear_screen;
+
+	erase.to.end.of.line: proc public swapable;
+		dcl save.scr	fixed;
+		dcl (i,x,y)		fixed;
+
+		save.scr = screen.dump;			/*	save the current state of SCREEN.DUMP	*/
+		screen.dump = 0;
+		if vt100<>0 then do;
+			call pc(esc); call ps('[K');
+		end;
+		else do;
+			x=screen.x; y=screen.y;
+			do i=x to 79; call pc(sp); end;
+			call cpos(y,x);				/*	restore position	*/
+		end;
+		screen.dump=save.scr;			/*	restore SCREEN.DUMP to previous state	*/
+	end erase.to.end.of.line;
+
+	erase.to.start.of.line: proc public swapable;
+		dcl (i,x,y)		fixed;
+		dcl save.scr	fixed;
+
+		save.scr = screen.dump;			/*	save the current state of SCREEN.DUMP	*/
+		screen.dump = 0;
+
+		if vt100<>0 then do;
+			call pc(esc); call ps('[1K');
+		end;
+		else do;
+			x=screen.x; y=screen.y;
+			call cpos(y,0);
+			do i=0 to x; call pc(sp); end;
+			call cpos(y,x);				/*	restore position	*/
+		end;
+		screen.dump=save.scr;			/*	restore SCREEN.DUMP to previous state	*/
+	end erase.to.start.of.line;
+
+	erase.to.end.of.screen: proc public swapable;
+		dcl save.scr	fixed;
+
+		save.scr = screen.dump;			/*	save the current state of SCREEN.DUMP	*/
+		screen.dump = 0;
+		if vt100<>0 then do;
+			call pc(esc); call ps('[J');
+		end;
+		screen.dump=save.scr;			/*	restore SCREEN.DUMP to previous state	*/
+	end erase.to.end.of.screen;
+
+	erase.to.start.of.screen: proc public swapable;
+		dcl save.scr	fixed;
+
+		save.scr = screen.dump;			/*	save the current state of SCREEN.DUMP	*/
+		screen.dump = 0;
+		if vt100<>0 then do;
+			call pc(esc); call ps('[1J');
+		end;
+		screen.dump=save.scr;			/*	restore SCREEN.DUMP to previous state	*/
+	end erase.to.start.of.screen;
+
+	dcl (#saved.x,#saved.y)	fixed;
+	dcl #saved.attributes	fixed;
+
+	save.cursor: proc public swapable;	/*	save current (x,y) pos and attribute state	*/
+		dcl save.scr	fixed;
+
+		save.scr=screen.dump;				/*	save the current state of SCREEN.DUMP	*/
+		#saved.x=screen.x; #saved.y=screen.y;
+		#saved.attributes=attr.state;
+		if 0 & (vt100<>0) then do;
+			call pc(esc); call pc("67");	/*	ESC 7	*/
+		end;
+		screen.dump=save.scr;				/*	restore SCREEN.DUMP to previous state	*/
+	end save.cursor;
+
+	restore.cursor: proc public swapable;	/*	restore (x,y) pos and attribute state to saved values	*/
+		dcl save.scr	fixed;
+		save.scr=screen.dump;				/*	save the current state of SCREEN.DUMP	*/
+		/*	cj - 12/2/87 - plain turkey does not work on pericom	*/
+		if 0 & (vt100<>0) then do;
+			screen.x=#saved.x; screen.y=#saved.y;
+			attr.state=#saved.attributes;
+			call pc(esc); call pc("70");	/*	ESC 8	*/
+		end;
+		else do;
+			call set.term.attr(shl(#saved.attributes,8)\(#saved.attributes & 127));
+			call cpos(#saved.y,#saved.x);
+		end;
+		screen.dump=save.scr;				/*	restore SCREEN.DUMP to previous state	*/
+	end restore.cursor;
+
+	ERASE.REST.OF.LINE: proc (y1,x1) public swapable;	/*	erase rest of line	*/
+		dcl (y1,x1)		fixed;		/*	starting location from which to erase	*/
+		dcl i				fixed;
+		dcl save.scr	fixed;		/*	current value of screen dump	*/
+
+		if		  y1>23 then y1=23;	/*	keep coordinates within boundaries	*/
+		else if y1<0  then y1=0;
+		if		  x1>78 then x1=78;
+		else if x1<0  then x1=0;
+
+		save.scr=screen.dump;
+
+		if adm<>0 then do;		/*	adm series terminals	*/
+			call cpos(y1,x1);
+			do i=0 to (78-x1); call pc(sp); end;
+		end;
+		else do;						/*	vt100 series terminals	*/
+			call cpos(y1,x1);
+			screen.dump=0;			/*	suppress characters sent to terminal	*/
+			call erase.to.end.of.line;
+			i=screen.y*40+screen.x/2;			/*	find word address of x,y location in screen image dump array	*/
+			write(mam)=img.ptr+shr(i,8);		/*	calculate sector address to screen image in external memory (base + offset)	*/
+			write(mal)=i;							/*	point to the screen image word	*/
+			do i=screen.x to 79 by 2;			/*	fill screen dump image with spaces	*/
+				write(mdi)=shl("40",8)\"40";	/*	fill both upper and lower bytes	*/
+			end;
+		end;
+		screen.dump=save.scr;	/*	restore SCREEN.DUMP to previous state	*/
+	end ERASE.REST.OF.LINE;
+
+	SET.SCROLLING.REGION: proc(top,bottom) public swapable;	/*	set scrolling region by defining top and bottom	*/
+		dcl (top,bottom)	fixed;	/*	top and bottom limits	*/
+		dcl save.scr		fixed;	/*	current value of screen dump	*/
+
+		if vt100<>0 then do;
+			if top = bottom then return;
+
+			if top	 igt 24 then top	  = 24; if top		== 0 then top	  = 1;
+			if bottom igt 24 then bottom = 24; if bottom == 0 then bottom = 1;
+			if bottom ilt top then do;
+				save.scr=bottom; bottom=top; top=save.scr;
+			end;
+
+			scroll.top=top-1; scroll.bottom=bottom-1;
+			screen.x=0; screen.y=0;
+
+			save.scr=screen.dump;
+			screen.dump=0;				/*	suppress characters sent to terminal	*/
+			call pc(esc);
+			call pc(asc.lbr);
+			call pnum(top,0);
+			call pc(scolon);
+			call pnum(bottom,0);
+			call pc(lower.r);
+			screen.dump=save.scr;	/*	restore SCREEN.DUMP to previous state	*/
+		end;
+	end SET.SCROLLING.REGION;
+
+	REVERSE.INDEX: proc public swapable;	/*	move to preceding line	*/
+		/*
+		Move active position to same horizontal position on the preceeding line
+		If the active position is at the top margin, a scroll down is performed
+		*/
+		dcl save.scr		fixed;	/*	current value of screen dump	*/
+		if vt100<>0 then do;
+			if (screen.y>scroll.top) and (screen.y<>0)
+			then screen.y=screen.y-1;
+			save.scr=screen.dump;
+			screen.dump=0;				/*	suppress characters sent to terminal	*/
+			call pc(esc);
+			call pc(asc.m);
+			screen.dump=save.scr;	/*	restore SCREEN.DUMP to previous state	*/
+		end;
+	end REVERSE.INDEX;
+
+	NEXT.LINE: proc public swapable;
+		/*
+		Moves the active position to the first position on the next line downward.
+		If the active position is at the bottom margin, a scroll is performed.
+		*/
+		dcl save.scr	fixed;		/*	current value of screen dump	*/
+
+		if vt100<>0 then do;
+			if (screen.y<scroll.bottom) and (screen.y<>23)
+			then screen.y=screen.y+1;
+			save.scr=screen.dump;
+			screen.dump=0;				/*	suppress characters sent to terminal	*/
+			call pc(esc);
+			call pc(asc.e);
+			screen.dump=save.scr;	/*	restore SCREEN.DUMP to previous state	*/
+		end;
+	end NEXT.LINE;
+
+	REVERSE.VIDEO: proc(state) public swapable;	/*	puts terminal in reverse video or normal state	*/
+		dcl state		fixed;
+		dcl save.scr	fixed;
+
+		if state<>0 then call set.term.attr(ATTR#Reverse);
+		else				  call set.term.attr(ATTR#NoReverse);
+
+	end REVERSE.VIDEO;
+
+	SCROLL.SCREEN: proc (top,bottom,lines) public swapable;
+		dcl top			fixed;	/*	top	 line of region to scroll (0-23)	*/
+		dcl bottom		fixed;	/*	bottom line of region to scroll (0-23)	*/
+		dcl lines		fixed;	/*	number of lines to scroll (+ => up, - => down)	*/
+		dcl i				fixed;
+		dcl (save.top,save.bot)	fixed;
+		dcl save.scr	fixed;
+
+		/*	TOP and BOTTOM cannot be the same	*/
+
+		if (lines=0) or (vt100=0) then return;	/*	nothing to do	*/
+
+		if bottom<top then do;	/*	swap order of values	*/
+			i=top; top=bottom; bottom=i;
+		end;
+
+		save.scr=screen.dump; screen.dump=0;
+		save.top=scroll.top; save.bot=scroll.bottom;
+
+		call save.cursor;
+
+		if top<>bottom then do;							/*	scroll region 2 or more lines	*/
+			call Set.Scrolling.Region(top+1,bottom+1);	/*	scroll desired part of table	*/
+			if lines>0 then do;
+				call cpos(bottom,0);
+				do i=0 to lines-1;
+					call Next.Line;						/*	scroll table up 1 line	*/
+				end;
+			end;
+			else do;
+				call cpos(top,0);
+				do i=0 to abs(lines)-1;
+					call Reverse.Index;					/*	scroll table down 1 line	*/
+				end;
+			end;
+			call Set.Scrolling.Region(save.top+1,save.bot+1);	/*	reset scrolling region to original value	*/
+		end;
+		else do;
+			call cpos(top,0);								/*	just erase the line	*/
+			call erase.to.end.of.line;
+		end;
+
+		call restore.cursor;
+		screen.dump=save.scr;
+
+	end SCROLL.SCREEN;
+
+	/*	$SUBTITLE  TTYMOD Initialization Routines	*/
+
+	initialize.terminal.type: proc public swapable;
+
+		if terminal.type=t#adm3						/*	look up terminal type in configuration	*/
+		then adm=1;										/*	configured for ADM	*/
+		else do;											/*	vt100	*/
+			vt100=1;
+			call pc("33"); call pc("75");			/*	ESC = --> KEYPAD APPLICATION MODE	*/
+		end;
+
+		gtype=terminal.graphics;					/*	get terminal graphics type	*/
+
+		/*	assume we are connected to a Pericom terminal	*/
+
+		screen.width =1023;							/*	set screen info	*/
+		screen.height=779;							/*	to Pericom size	*/
+		char.width	 =13;
+		char.height	 =22;
+		tchar.width	 =120;		/*	Pixels * 10	*/
+		tchar.height =300;
+
+		scroll.top	 = 0;						/*	scroll region starts out to be	*/
+		scroll.bottom=23;						/*	full screen	*/
+
+		if vt100<>0 then do;					/*	have VT100, VT640, DQ640, MG600 or Mac	*/
+			if (terminal.model = t#mg600)
+			or (terminal.model = t#macintosh)
+			then mg600=1;
+			else if (terminal.model = t#vt640)
+			then vt640=1;
+			else if (terminal.model = t#dq640)
+			then dq640=1;
+
+			if (vt640<>0) or (dq640<>0) then do;	/*	reset screen info for VT640 size	*/
+				screen.width =639;
+				screen.height=479;
+				char.width	 =8;
+				char.height	 =14;
+				tchar.width	 =75;	/*	Pixels * 10	*/
+				tchar.height =200;
+			end;
+
+			call pc(27); call ps('[m');	/*	Insure terminal is in normal state	*/
+
+			/*	any other type will fall out here without doing anything	*/
+		end;
+
+		call tty_wait;	/*	let chars finish printing	*/
+
+		screen.dump = 1;
+	end initialize.terminal.type;
+
+	ttyinit: proc swapable;					/*	init tty items	*/
+		img.ptr = alloc.examount(shr(screen.image.len+255,8));			/*	get ext memory for image.ptr	*/
+
+		protocol.in.ptr = alloc.examount(shr(protocol.in.len +255,8));	/*	protocol input buffer	*/
+		protocol.out.ptr= alloc.examount(shr(protocol.out.len+255,8));	/*	protocol output buffer	*/
+
+		call initialize.terminal.type;	/*	set up terminal things	*/
+	end ttyinit;
+
+	call ttyinit;
+
+end TTYMOD;

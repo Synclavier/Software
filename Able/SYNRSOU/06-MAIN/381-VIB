@@ -1,0 +1,272 @@
+/* 381-VIB - PROCESS VIBRATO                */
+
+/*
+   04.4.91 - cj - used SUPR more carefully for Lee Kopp fixes
+   10.9.86 - cj,ts - fixed rank quantized vibrato bug
+   7/28/86 - CJ,KJC - SET STEREO SOUND FILE HZ'S CORRECTLY
+   5/15/86 - "official" creation of release-M modules
+*/
+
+/* ADVANCE PARTIAL/VIBRATO TIMER            */
+/* LOOK UP VIBRATO PARAMS FROM EXT MEMORY   */
+/* PERFORM VIBRATO INITIALIZATION           */
+/* CHECK FOR RAISED VIBRATO                 */
+
+BEGIN;
+
+   IF VIBWD<>0 THEN DO;                             /* VIBRATO COMPUTATION NEEDED */
+     
+      DCL (VIBWAVE)          FIXED;                 /* LOOK UP VIBRATO WAVE */
+      DCL (VIBRATE)          FIXED;                 /* VIB RATE WORD */
+      DCL (CDEP,MDEP)        FIXED;                 /* CARRIER/MOD VIBRATO DEPTH */
+
+      PVIB=PVIB+1; IF PVIB>=3 THEN PVIB=PVIB-3;     /* UPDATE STATE MODULO 3 */
+      IF (PVIB=0) THEN DO;                          /* PROCESS VIBRATO ALTERNATELY */
+
+        WRITE(MAM)=TBP;
+        WRITE(MAL)=TIM.PINFO.POINTERS+PTL;
+        IF (READ(MD)<>0)                        /* SEE IF MOD DEPTH */
+        THEN DO; 
+           I=READ(MD)+PI.MDEP;
+           WRITE(MAM)=PAR.PTR+SHR(I,8); WRITE(MAL)=I;
+           MDEP=READ(MD);                       /* GET MODULATOR DEPTH */
+        END;
+        ELSE MDEP=0;                            /* NO MODULATOR DEPTH */
+
+        I=PTPTR+P.VIBWAVE;
+        WRITE(MAM)=PAR.PTR+SHR(I,8); WRITE(MAL)=I;
+        VIBWAVE=READ(MDI);                      /* GET VIB WAVE  WORD */
+        VIBRATE=READ(MDI);                      /* GET VIB DEPTH WORD */
+        CDEP   =READ(MDI);                      /* GET CARRIER VIBRATO DEPTH */
+                                                /* LEAVE POINTERS SET UP FOR VIBRATO ATTACK READ P.VIBATTACK */
+        IF VIBWD<0 THEN DO;                     /* INITIALIZE VIBRATO STUFF AFTER NOTE HAS STARTED TO REDUCE DELAYS */
+          IF (CDEP\MDEP)=0 THEN VIBWD=0;        /* NO DEPTH - TURN OFF VIBRATO */
+          ELSE DO;                              /* INITIALIZE VIBRATO */
+            VIBMX=SHR(READ(MDI),1);             /* P.VIBATTACK read attack time apparently, then divide by 2 */
+            VIBAC=0; 
+            VBLEV=0;                       /* GET ATTACK DIRECTLY HERE */
+
+            WRITE(MAM)=TBP;
+
+            WRITE(MAL)=TIM.VIB.ATK.LOOK;
+            IF READ(MD)<>0
+            THEN VIBMX=SCALE(VIBMX);       /* SCALE VIB ATTACK FOR RTE'S */
+            VBRAM=0;                       /* INITIALIZE VIBRATO ACCUMULATOR */
+            IF (VIBWAVE&"100")<>0 THEN DO; /* SPECIAL PHASE INIT FOR RAISED VIBRATO */
+              I=(VIBWAVE&"17"); /* GET WAVE TYPE */
+              IF I>4 THEN I=I-5; /* CHANGE TYPE MOD 5 */
+              IF      I=0 THEN VBRAM=7500; /* START RAISED SINE AT 270 DEGS */
+              ELSE IF I=1 THEN VBRAM=7500; /* TRIANGLE 270 */
+              ELSE IF I<5 THEN VBRAM=5000; /* RAMP     180 */
+            END;
+
+            IF VIBMX=0 THEN DO; VIBMX=1; VBLEV=1; END; /* SPECIAL CASE OF 0 ATTACK TIME */
+            WRITE(MAL)=TIM.V.DEPTH.LOOK;
+            IF (READ(MD)<>0) THEN DO;        /* NEW RTE'S CALLED FOR */
+               VIBWD=1+SCALE(1000);          /* SCALE FOR VIB DEPTH */
+            END;
+            ELSE VIBWD=1001;                 /* USE MAX DEPTH IF NO RTE'S */
+
+            WRITE(MAL)=TIM.V.RATE.LOOK;
+            IF (READ(MD)<>0) THEN DO;        /* SCALE VIB RATE */
+               VRAT=SCALE(VIBRATE);
+            END;
+            ELSE VRAT=VIBRATE;               /* USE MAX RATE */
+
+            WRITE(MAL)=TIM.V.MDEPTH.LOOK;
+
+            IF (READ(MD)<>0) THEN DO;        /* SCALE M DEP   */
+               VMDE=SCALE(1000);             /* SCALE MOD DEP */
+            END;
+            ELSE VMDE=1000;                  /* USE MAX       */
+
+            L.V.T=SAMPLED.REAL.MILLISECONDS; /* INITIALIZE L.V.T HERE */
+          END;                     /* OF BEGIN FOR CDEP OF MDEP <> 0 */
+        END;                       /* OF BEGIN FOR VIBRATO INITIALIZATION */
+
+        /* $PAGE - PERFORM ACTIVE VIBRATO */
+
+        /* ADVANCE VIBRATO ATTACK TIMER/VALUE    */
+        /* ADVANCE VIBRATO TIME BASE             */
+        /* SELECT INFO BASED ON VIBRATO TYPE     */
+
+        ELSE DO;                      /* VIBRATO IS ACTIVE - COMPUTE NEXT VALUE */
+          IF VBLEV<VIBMX THEN DO;     /* PERFORM VIBRATO ATTACK */
+            VIBAC=VIBAC+SHR(SAMPLED.REAL.MILLISECONDS-L.V.T,2);
+            LOAD VIBAC-VBLEV; MUL 10; I=RES; DIV VIBMX; I=RES; /* SCALE */
+            IF VIBAC>VIBMX THEN DO; /* LIMIT VIBAC TO THIS */
+              VIBAC=VIBMX; IF I=0 THEN I=1; /* AND GO UP BY ONE */
+            END;
+            VBLEV=VBLEV+I; /* INCREASE ATTACK */
+            IF VBLEV>VIBMX THEN VBLEV=VIBMX;
+          END; /* OF VIBRATO ATTACK */
+
+          K=0; /* ASSUME NO WRAP AROUND */
+          DO I=L.V.T TO SAMPLED.REAL.MILLISECONDS-10 BY 10; /* UPDATE VIB PHASE */
+            VBRAM=VBRAM+VRAT;
+            IF VBRAM>=10000 THEN DO;  /* WRAP AROUND */
+              VBRAM=VBRAM-10000;      /* MOD 10000   */
+              K=1;                    /* SIGNAL THAT WRAP HAS OCCURRED - USED FOR RANDOM */
+            END;
+            L.V.T=L.V.T+10;
+          END; /* OF PHASE UPDATE */
+
+          J=(VIBWAVE&"17"); /* GET TYPE OF VIBRATO WAVE */
+          IF J>4 THEN DO;   /* SPECIAL CASES */
+             IF J<>10 THEN MDEP=CDEP; /* USE MODULATOR DEPTH = CARRIER DEPTH FOR 5+1, 6+1, 7+1, 8+1, 9+1, 11+1 */
+             J=J-5; /* CHANGE TO TYPE MOD 5 */
+          END;
+
+          IF J<5 THEN DO CASE (J); /* COMPUTE VIB FUNCTION (RANDOM HANDLED BELOW) */
+
+            DO; /* SINEWAVE VIBRATO */
+              LOAD VBRAM; MUL 256; I=RES; DIV 10000; /* SCALE TO 0-255 */
+              WRITE(MAM)=STB.PTR+SHR(RES,8); WRITE(MAL)=RES;
+              LOAD READ(MD); MUL 10000; I=RES; DIV 2048; I=RES; /* LOOK UP SINE */
+            END;
+
+            DO; /* TRIANGLE VIBRATO */
+              I=VBRAM+2500; /* CORRECT FOR PHASE ERROR */
+              IF I>=10000 THEN I=I-10000;
+              IF I>=5000  THEN I=10000-I; /* 0-4999, THEN 5000 DOWN TO 1 */
+              I=SHL(I,1); /* PRODUCES 0-9999 TRIANGLE */
+            END;
+
+            DO; /* RAMP WAVE VIBRATO */
+              I=VBRAM+5000; IF I>=10000 THEN I=I-10000;
+            END;
+
+            DO; /* INVERTED RAMP WAVE VIBRATO */
+              I=5000-VBRAM; IF I<0 THEN I=I+10000;
+            END;
+
+            DO; /* SQUARE WAVE VIBRATO */
+              I=0; IF VBRAM>5000 THEN I=9999;
+            END;
+          END; /* OF DO CASE */
+
+          /* $PAGE - VIBRATO (CONTINUED) */
+
+          /* CHECK FOR NEW VALUE NEEDED (ONLY SPORADICALLY IF RANDOM) */
+          /* CORRECT VIBRATO DEPTH FOR VIBRATO ATTACK                 */
+          /* SCALE VIBRATO FOR REAL TIME EFFECTS                      */
+          /* CHECK FOR RAISED/QUANTIZED VIBRATO                       */
+
+          IF (K<>0) OR (J<5) THEN DO;      /* UPDATE VIBVL IF WRAP OR NOT RANDOM */
+            IF J>4 THEN I=RND(10000);      /* TAKE RANDOM SAMPLE */
+            IF (VIBWAVE&"100")=0 THEN I=I-5000;    /* COMPUTE -5000 TO +5000 (CENTERED) = NON-BIASED */
+            IF (VIBWAVE&"20")<>0 THEN I=(-I);      /* INVERT IF BIT SET */
+
+            I=I*VBLEV/VIBMX;                       /* CORRECT FOR VIBRATO ATTACK */
+
+            VIBVL=I*CDEP/5859;                /* STORE -2048 TO +2048 HZ OFFSET */
+            MVIBV=I*MDEP/5859;                /* FOR MODULATOR                  */
+
+            VIBVL=VIBVL*(VIBWD-1)/1000;       /* SCALE FOR NEW RTE'S */
+            MVIBV=MVIBV*(VMDE   )/1000;       /* SCALE FOR NEW RTE'S */
+
+            IF (VIBWAVE&"40")<>0 THEN DO;     /* QUANTIZE VIBRATO WAVE */
+              VIBVL=VIBVL+(1024/24);          /* GO UP HALF A SEMITONE FOR ROUNDING */
+              MVIBV=MVIBV+(1024/24);          /* GO UP 1/2 SEMITONE     */
+              J=SHR(VIBVL,10); K=VIBVL&1023;  /* GET OCTAVE AND FRACTION */
+              IF K>1019 THEN K=1019;          /* LIMIT TO AVOID ROUNDING PROBLEMS */
+              LOAD K; DIV 85;
+              WRITE(MAM)=BAS.PTR;             /* LOOK UP CURRENT SCALE */
+              WRITE(MAL)=RES;
+              VIBVL=SHL(J,10)+READ(MD);       /* CREATE QUANTIZED VERSION */
+              J=SHR(MVIBV,10); K=MVIBV&1023;  /* GET OCTAVE AND FRACTION */
+              IF K>1019 THEN K=1019;          /* LIMIT TO AVOID ROUNDING PROBLEMS */
+              LOAD K; DIV 85;
+              WRITE(MAL)=RES;
+              MVIBV=SHL(J,10)+READ(MD);       /* CREATE QUANTIZED VERSION */
+            END;
+
+            /* $PAGE - VIBRATO (CONTINUED) */
+
+            /* WRITE INFO TO SYNTH HERE IF NO FM */
+
+            IF  (NEW.HZ=0)               /* IF NO NEW FREQUENCY ALREADY REQUIRED (AVOID DUPLICATE FREQUENCY COMPUTATION) */
+            AND ((DO.FM=0)\(MDEP=0))     /* AND IF MODULATOR FREQUENCY NEED NOT BE SET */
+            THEN DO;                     /* COMPUTE FREQUENCY HERE & WRITE OUT FOR CARRIER ONLY TO INCREASE SPEED OF PROGRAM */
+              IF (SUPR&"177400")=0 THEN DO;/* EMIT FREQUENCIES UNLESS SUPPRESSED */
+                 WRITE(MAM)=TBP;
+                 WRITE(MAL)=TIM.LOG.PT+PTL;
+                 I=LOGTBASE+READ(MD)+CURRF+RTUNG+VIBVL; /* OVERALL TUNING, PARTIAL TUNING, CURRENT FREQ PITCH BEND VIBRATO */
+                 IF PLOG<>0 THEN DO;       /* CHECK FOR CHORUS */
+                    WRITE(MAL)=PLOG;
+                    IF RCHOR=10000 THEN    /* USE FULL VALUE */
+                    I=I+READ(MD);          /* ADD IN CHORUS QUICKLY IF NOT SCALED */
+                    ELSE I=I+READ(MD)*RCHOR/10000; /* ELSE USE SIGNED MULTIPLY/DIVIDE HERE */
+                 END;
+                 IF  ((INC.MONO=0)                     /* IF NO SAMPLING AT ALL */
+                 AND  (INC.POLY=0))
+                 OR (MCHN&(B.MONO\B.POLY))=0 THEN BEGIN;    /* OR ORIGINAL SYNTHESIZER - COMPUTE ITEMS */
+                    DCL (FREE.R0)  LIT 'IF 0 THEN WRITE("300")=READ("300")';
+                    CALL COMPUTE.OSYN.FREQ(KEYN,I);
+                    DISABLE;                        /* FOR STORING IN PARTIAL BLOCK */
+                    IF (SUPR&"177400")=0 THEN DO;   /* CHECK SUPR AGAIN IN CASE INTERRUPT        */
+                       FREE.R0;                     /* FOR COMPILER */
+                       WRITE("302")=ADDR(UONU);     /* COPY NOTEADD, NOTENUM, NOTEINC */
+                       FREE.R0;
+                       WRITE("303")=ADDR(NOTEADD);  /* INTO UONU, UNNM, UINC */
+                       WRITE("362")=READ("363");    /* MR3I TO MR2I */
+                       WRITE("362")=READ("363");    /* MR3I TO MR2I */
+                       WRITE("362")=READ("363");    /* MR3I TO MR2I */
+                       WRITE(CHA)=UCHN;
+                       FREE.R0;                     /* FOR COMPILER */
+                       WRITE("302")=ADDR(UONU);     /* COPY NOTEADD, NOTENUM, NOTEINC */
+                       WRITE(FUN)=ONU; WRITE(DAT)=READ("362");
+                       WRITE(FUN)=NNU; WRITE(DAT)=READ("362");
+                       WRITE(FUN)=INC; WRITE(DAT)=READ("362");
+                       IF (SMCHN<>0) THEN DO;       /* UPDATE SPLICE CHANNEL TOO */
+                          WRITE(CHA)=SUCHN;         /* MUST REWRITE INFO IN CASE SECOND SYNTH USED */
+                          FREE.R0;                  /* FOR COMPILER */
+                          WRITE("302")=ADDR(UONU);  /* COPY NOTEADD, NOTENUM, NOTEINC */
+                          WRITE(FUN)=ONU; WRITE(DAT)=READ("362");
+                          WRITE(FUN)=NNU; WRITE(DAT)=READ("362");
+                          WRITE(FUN)=INC; WRITE(DAT)=READ("362");
+                       END;
+                    END;
+                    ENABLE;
+                 END;       /* OF BEGIN FOR ORIGINAL SYNTHESIZER */
+                 ELSE IF (INC.MONO<>0)&((MCHN&B.MONO)<>0) THEN DO;  /* MONO SAMPLING (W. DISK) */
+                    CALL COMPUTE.MSYN.FREQ(I+MRLCH);
+                    UNNM=NOTENUM;                    /* STORE IN PARTIAL BLOCK */
+                    DISABLE;
+                    IF MCHN=MONO.CHAN THEN DO;       /* WE ARE THE OUTPUT CHANNEL */
+                       MONO.PD=NOTENUM;              /* SAVE IN CASE NOTE HAS NOT STARTED */
+                       IF (OUTPUT.ACTIVE<>0) THEN DO;/* WRITE OUT IF WE ARE RUNNING */
+                          WRITE(D66)=8+2;
+                          WRITE(D67)=NOTENUM-2;      /* SET NEW PITCH IF THIS IS UPDATE VS NOTE START */
+                       END;
+                    END;
+                    ENABLE;
+                 END;
+                 ELSE IF (INC.POLY<>0) THEN BEGIN;                  /* MEANS POLY SYNTH */
+                   DCL (FREE.R0)  LIT 'IF 0 THEN WRITE("300")=READ("300")';
+                   CALL COMPUTE.PSYN.FREQ(I+MRLCH);        /* COMPUTE INFO FOR POLY SYNTH */
+                   IF UCHN<>0 THEN NOTEADD=SHL(NOTEADD,1); /* STEREO SOUND FILE - USER LARGER PINC */
+                   DISABLE;
+                   FREE.R0;                        /* FOR COMPILER */
+                   WRITE("302")=ADDR(UONU);        /* COPY NOTEADD, NOTENUM, NOTEINC */
+                   FREE.R0;
+                   WRITE("303")=ADDR(NOTEADD);     /* INTO UONU, UNNM, UINC */
+                   WRITE("362")=READ("363");       /* MR3I TO MR2I */
+                   WRITE("362")=READ("363");       /* MR3I TO MR2I */
+                   WRITE("362")=READ("363");       /* MR3I TO MR2I */
+                   WRITE(PSC)=MCHN; WRITE(PSF)=PSPI;       /* SET UP FOR PHASE INC WRITE */
+                   WRITE(PSD)=0; WRITE(PSD)=NOTEADD;       /* PHASE INC */
+                   WRITE(PSD)=NOTEINC; WRITE(PSD)=NOTENUM; /* INCREMENT, MODULUS */
+                   ENABLE;
+                 END;
+              END;         /* OF UN-SUPPRESSED */
+            END;           /* OF NO/FM - CAN WRITE HZ'S HERE */
+            ELSE NEW.HZ=1; /* USE SET.FREQ ROUTINE FOR MODULATOR VIBRATO */
+          END;             /* OF BEGIN IF NEW FREQ REQUIRED (NON-RANDOM, OR RANDOM CHANGE) */
+        END;               /* HANDLE NON-INITIALIZATION CASE */
+        IF (VRAT>800)\(CDEP>50)\(MDEP>50) 
+        THEN PVIB=(-1);    /* FORCE PROCESS OF VIBRATO NEXT TIME THROUGH IF WIDE OR FAST */
+      END;                 /* OF PVIB=0 CASE */
+   END;                    /* OF CASE FOR VIBWD<>0  */
+
+END;                       /* OF BEGIN */

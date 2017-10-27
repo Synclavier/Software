@@ -1,0 +1,314 @@
+/* 28-MAIN  $TITLE  Driver Code for Main SFM Module */
+
+/* Copyright 1985 by New England Digital Corporation */
+
+dcl one       floating data (1.0);
+dcl valid1(2) fixed;
+dcl np        fixed;
+dcl i         fixed;   
+
+init.high.core.area:  proc (flag) swap; /* initializes high core variables */
+   dcl flag fixed; /* set true to leave FCB #1 alone (warm boot) */
+
+   call openfile(SINTAB.FILE,sintable.loc,1); /* search for and open sine table data file */
+   call openfile(SFM.FILE,loc.p1,1); /* look for SFM startup module */
+
+   do i=0 to ((heading.length+symbol.sectors)*256)-1; core(f.headptr+i)=0; end; /* zero out header area */
+
+   if flag=0 then do;
+      i=file.block.loc;                /* zero out all FCBs */
+      do while i ILT (file.block.loc+max.file.blocks*file.block.len); /* zero FCB table */
+         core(i)=0; i=i+1;
+      end;
+
+      call copy_vector(attack,zero.vector,3);
+      call copy_vector(decay,zero.vector,3);
+      window.number    =1;
+      window.type      =1;
+      window.length    =1024;
+      window.offset    =500;
+      log.mode         =1;
+      call copy_vector(spectral.scale,location(addr(one(0))),2);
+      current.per.index=clock.rate/50; /* for 50 kHz */
+      top.limit        =  32767; /* range of DAC and ADC */
+      bottom.limit     = -32768;
+      line.mode        =0;
+      cursor.on        =1;
+      gain.factor      =0;
+      call copy_vector(location(frequency),location(addr(fourforty(0))),2);
+      amplitude        =32767;
+      if error.flag=0 then core(old.buf)=0; /* zero previous command line */
+      core(hor.time)   =0; core(hor.time+1)=10; core(hor.time+2)=0;
+      bits             =16;
+      fcb.ptr          =file.block.loc; /* point at first FCB */
+      fft.len          =1024;
+      spectral.origin  =0;
+      spectral.range   =20;
+      dac.volume       =255; /* initialize max volume for playback */
+      beep.status      =1; /* initialize to ON */
+      period.index     =current.per.index;
+   end;
+end init.high.core.area;
+
+mem.siz=memory.size; /* look up configured memory size */
+call set_catbuf (addr(catalog_buffer(0)), 0); /* set up a catalog buffer */
+restore.flag = 1; /* initialize */
+
+enable;
+if mem.siz ILT (60*1024) then do; /* SFM needs at least 60K internal memory */
+   ps('System must have at least 60K internal memory to run SFM.'); nl;
+   call tty_wait; call exit(-1); /* quit with stop status */
+end;
+
+i=core(c#contab+c#vstart)+core(c#contab+c#vlngth)+core(c#contab+c#stklen);
+if i IGE ((60*1024)-1928) then do;
+   /* this check will catch errors where the program is too large for 56K systems */
+   ps('SYSTEM PROGRAMMING ERROR:  This module of SFM is too large to run.');
+   call tty_wait; call exit(-1); /* quit with stop status */
+end;
+
+clock.inc=10/d03_speed;                    /* compute real time clock period */
+any.kbd  =(d130_present and d160_present); /* configured for keyboard */
+
+dq640=(terminal.model=t#dq640); /* VT100 (type 3) with graphics 2 is a DQ640 */
+mg600=((terminal.model=t#mg600)  /* VT100 (type 3) with graphics 3 is an MG600 */
+    or (terminal.model=t#macintosh)); /* Mac II is used as MG600 for now */
+
+if dq640 then punits(799,479);
+else          punits(639,479); /* initialize display units */
+
+if shr(core(LOC.UCAT+1),8)<6   /* on a floppy drive */
+then call ENTER_CAT('W0:');    /* enter the winchester */
+
+if any.kbd<>0 then do; /* initialize button panel and display window */
+   if vel.kbd then do; /* velocity keyboard initialization */
+      call clear.display;                      /* clear alpha display */
+      do i=0 to 159; call clear.light(i); end; /* turn off all panel lights */
+   end;
+   else do; /* old keyboard initialization */
+      do i=0 to 15; /* turn off clavier panel lights */
+          write(cr)=i; write(dr)=0;
+          write(cr)=i\"40";
+          write(cr)=i;
+      end;
+   end;
+   call scan.analog.inputs; /* look at input devices */
+   knob.base=knob.pos;      /* initialize knob base position */
+end;
+
+call initialize_fir_buffers;
+
+/* $SUBTITLE Initialization Code Executed Upon First Run of SFM */
+
+if (core(loc.rst) IGT 2) and (sfm.intact=0) then do; /* re-read in the header info for last file if high-core is trashed */
+   if (fcb.ptr=file.block.loc)
+   or (fcb.ptr=(file.block.loc+file.block.len)) 
+   or (fcb.ptr=(file.block.loc+2*file.block.len)) 
+   then do; /* upper memory appears intact */
+      if f.name.bytes<>0 then do;
+         call init.high.core.area(1); /* reset high core area to startup values */
+         compute_f.data.index;
+         call get_head;
+      end;
+      else do; /* no current file */
+         if ovl.error<>0 then error.flag=ovl.error;
+         core(loc.rst)=0;
+      end;
+   end;
+   else core(loc.rst)=0; /* high core is messed up - do a cold boot */
+end;
+
+if core(loc.rst) ILE 2 then do; /* first time run by monitor */
+   call init.high.core.area(0); /* initialize high core variables */
+   /* initialize screen display */
+   clear;
+   viewport(0,#px,0,#py);
+   vector_mode;
+   char_size(1);
+   call #move(0,250);
+   ps('New England Digital');
+   call #move(0,240);
+   call #draw(#px,240);
+   call #move(168,175);
+   ps('Signal File Manager');
+   transparent_mode;
+   call pos(2,60); ps(rel.date);
+   call pos(4,0);
+   psr('Enter any SFM command   (Type MENU for help).');
+   ps ('Use '); if any.kbd<>0 then ps('<PF2> for SYNCLAVIER, or ');
+   ps('<BREAK> to return to Monitor.');
+   if any.kbd=0 then do; /* no keyboard configured */
+      call box(0,21,28,23); /* draw box */
+      call pos(22,2); ps('No Keyboard Support Version');
+   end;
+   else if vel.kbd<>0 then do; /* prompt for velocity keyboard */
+      call box(0,21,35,23); /* draw box */
+      call pos(22,2); ps('Supports Velocity Keyboard Version');
+   end;
+   else do; /* Non-velocity keyboard */
+      call box(0,21,46,23); /* draw box */
+      call pos(22,2); ps('Supports Original Synclavier Keyboard Version');
+   end;
+
+   if error.flag<>0 then do;
+      call pos(1, 0); ps(prompt);
+      call pos(2, 0); ps(prompt);
+      call pos(1, 5); ps(location(old.buf));
+      call pos(1,30); call error(error.flag); /* error position */
+      error.flag=0;
+      call erase_line;
+   end;
+   else do; call pos(1,40); ps('SYSTEM READY'); end;
+   call pos(2,5); /* position for next command */
+end; /* of if running SFM for first time from monitor */
+
+/* read in sine table whenever starting or returning from overlay */
+call read_system_file (SINTAB.FILE,sintable,sintable.len+intpol.len+1); /* for vibrato */
+
+/* $SUBTITLE  Initialization Code Executed Upon Return from Overlay Modules */
+
+if core(loc.rst)=3 then do; /* filter program successful use .DATA */
+   /* compute valid.data, copy some data */
+   file3;
+   np=core(valid.data+1)*sector.size+core(valid.data+2);
+   if (np > nmax/2) or (core(valid.data+1) IGT nmax/2/sector.size) then np=nmax/2;
+   file1; 
+   databuf1(0)=file.data.type\filtered.data;
+   databuf1(1)=period.index;
+   databuf1(2)=nyquist.freq;
+   databuf1(3)=core(octave);
+   databuf1(4)=core(octave+1);
+   call copy_vector(valid1,location(valid.data),3); 
+
+   file2;
+   file.data.type=databuf1(0);
+   period.index=databuf1(1);
+   nyquist.freq=databuf1(2);
+   core(octave)=databuf1(3);
+   core(octave+1)=databuf1(4);
+   databuf1(0)=0; databuf1(1)=0; databuf1(2)=np; /* actual filter length */
+   call add_len_to_len(valid1,databuf1,location(valid.data)); /* new length */
+
+   /* add in origin and end labels, write out new heading */
+   call add_symbol(zero.vector,'ORIGIN');
+   call copy_vector(mark.start,zero.vector,3);     
+   call copy_vector(valid1,zero.vector,3);     
+   valid1(2)=1;
+   call sub_len_from_len(location(valid.data),valid1,valid1);
+   call index_to_time(location(data.end),valid1,period.index);     
+   call add_symbol(location(data.end),'END');
+   call copy_vector(mark.end,location(data.end),3);
+   call copy_vector(location(total.data),location(valid.data),3);
+   call caption_assign('Filtered data');
+   call initialize_display(f.name,1);
+   call status;
+end; /* of successful return from .FIL-x filter program */
+
+else if core(loc.rst) = 4 then do; /* filter program unsuccessful; return to old file */       
+   call initialize_display(f.name,0);
+   if ovl.error<>0 then error.flag=ovl.error; /* use error flag if set */
+   else                 error.flag=e.overflow;
+   call status;
+end;
+
+else if core(loc.rst) = 5 then do; /* spectral program return */
+   call assign(in.buf,location(old.buf)); /* return last command to .SFM-x overlay */
+   call set_scale;
+   call scan_input; /* handle the command */
+end;
+else if core(loc.rst) = 6 then do; /* return from .FUN-x after adding a function */
+   call initialize_display(f.name,1);
+   call status;
+end;
+else if core(loc.rst) = 7 then do; /* error return from .FUN-x and .SPE-x */
+   if ovl.error<>0 then error.flag=ovl.error; /* use error flag if set */
+   else                 error.flag=e.format;
+   call initialize_display(f.name,0);
+   call status;
+end;
+else if core(loc.rst) = 8 then do; /* return from .SPAT-x */
+   call initialize_display(f.name,0);
+   error.flag=ovl.error; /* get error status from overlay error loc */
+   call status;
+end;
+
+else if (core(loc.rst)=9) or (core(loc.rst)=10) then do; /* Returning from .EDIT-x, and .SONO-x */
+   if core(loc.rst)=9 then call file(2,0); /* point at FCB #2 */
+   call initialize_display(f.name,0);
+   error.flag=ovl.error; /* get error status from overlay error location */
+   call status;
+end;
+
+/* $SUBTITLE  Main Loop of SFM */
+
+do while 1; /* MAIN LOOP */
+
+   if break.rcvd<>0 then call stop; /* break key means exit program here */
+
+   if new.note.list(0)=0 then do; /* perform other SFM commands */
+      if display.type=time.display then do; /* move time display cursor */
+         if      ud.arrow= 1 then call scroll_up;
+         else if ud.arrow=-1 then call scroll_down;
+         else if rl.arrow<>0 then call move_cursor;
+         else if pfkey>2     then call change_scale; /* PF3 and PF4 */
+         break.rcvd=0; /* reset break flag */
+      end;
+      else if display.type=real.time then call env_arrow; /* move real time cursor */
+
+      if pfkey=1 then do; /* PF1:  repeat previous command */
+         disable;
+         pfkey=0; /* reset pfkey status -- be careful not to move this statement */
+         call dump_hold;
+         call assign(in.buf,location(old.buf));
+         enable;
+         call pos(2,1);
+         ps(prompt); ps(in.buf);
+         call tty_wait;
+         call scan_input;
+      end;
+
+      if pfkey=2 then do; /* PF2:  overlay to SYNCLAVIER program */
+         if (any.kbd<>0) then do; /* overlay to SYNCLAVIER program */
+            core(loc.synmisc)=0; core(loc.syntimb)=0;
+            core(loc.synseq )=0; core(loc.synmed) =0; /* provide new pointers */
+            core(loc.synstat)=0;
+            core(loc.synret) =LOC.MON;
+            call chain(location(LOC.SYNRTPN), true);  /* chain to correct RTP */
+         end;
+         else error.flag=e.not.available;
+         pfkey=0;
+         call status;
+      end;
+
+      if aux.key<>0 then do; /* call for auxiliary keypad functions */
+         if      aux.key=13 then call peak(0); /* perform function */
+         else if aux.key=14 then call peak(1);
+         aux.key=0; /* clear indicator */
+      end;
+
+      call dump_hold; /* echo any input characters */
+      if wait.for.scan then call scan_input; /* call command parser */
+   end;
+
+   if any.kbd<>0 then do; /* perform keyboard related functions */
+      if ready.to.play<>0 then do; /* poll keyboard for new notes */
+         if new.note.list(0)=0 then do;
+            call scan.new.notes; /* look for new changes in keyboard */
+            new.note.ptr=1;      /* reset ptr to head of new note list */
+         end;
+         if not d66_present then new.note.list(0) = 0; /* can't play without the D66 */
+         if new.note.list(0)<>0 then call playkeyboard; /* play any notes on keyboard */
+      end;
+
+      /* periodically update KNOB.BASE (every 2.00 seconds) */
+      if (milliseconds-p.milliseconds)>2000 then do; /* time for new check */
+         call scan.analog.inputs;
+         if      knob.pos>knob.base then knob.base=knob.base+1;
+         else if knob.pos<knob.base then knob.base=knob.base-1;
+         p.milliseconds=milliseconds; /* sample current time */
+      end;
+   end;
+   
+   interp_run_host_at_level();
+   
+end; /* of do while 1 - main loop */

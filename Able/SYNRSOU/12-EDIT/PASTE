@@ -1,0 +1,809 @@
+/* PASTE  $TITLE  Routines to Perform PASTE/MERGE/FILL Operations */
+
+/*
+   Modified:
+   02/13/91 - cj  - Checked for magic # 6
+   07/17/89 - PF  - Added save and restore of THD.MIDI.PATH in RECALL.TIMBRE.FROM.DISK
+   07/26/88 - eeg - fixed bug w/ cutting & pasting between files w/ more dest trks than source trks
+   03/08/88 - eeg - added ability to paste to different tracks
+   08/28/87 - EEG - added paste.space (inserts time on many tracks)
+   04/29/87 - TSS - CREATED PASTE FILE
+*/
+
+RECALL.TIMBRE.FROM.DISK: PROC(DISKADDR,DISKTIMB,DESTRK,SEQBASE,TIMBMAP) BOOLEAN SWAPABLE;
+   DCL DISKADDR ARRAY; /* 2 WORD DISK PTR TO START OF SEQUENCE */
+   DCL DISKTIMB FIXED; /* WHICH TIMBRE FROM THE DISK TO READ IN */
+   DCL DESTRK   FIXED; /* WHICH TRACK TO READ IT INTO */
+   DCL SEQBASE  FIXED; /* PTR (RELATIVE TO NAH.PTR) TO COPY OF DISK SEQ HEADER */
+   DCL TIMBMAP  FIXED; /* PTR (RELATIVE TO NAH.PTR) TO SECTOR CONTAINING TIMBRES ALREADY CALLED UP */
+
+   DCL (MSB,LSB,PTR)             FIXED;
+   DCL (VOL,MIDI,MRTE,PATH,MIDX) FIXED;
+   DCL MAPPED.TRK                FIXED;
+   DCL LEN                       FIXED;
+
+   /* $PAGE */
+
+   VOL =TRK.HEAD.LOOKUP(DESTRK,THD.TVOL);     /* SAVE THESE 4 VALUES SINCE */
+   MIDI=TRK.HEAD.LOOKUP(DESTRK,THD.MIDI);     /* COPY.TIMBRE CALL TRASHES THEM */
+   MRTE=TRK.HEAD.LOOKUP(DESTRK,THD.ACTIVE.MIDI.RTES);
+   PATH=TRK.HEAD.LOOKUP(DESTRK,THD.MIDI.PATH);
+   MIDX=TRK.HEAD.LOOKUP(DESTRK,THD.MIDX);
+
+   /* SEE IF TIMBRE IS ALREADY SITTING ON A SEQUENCER TRACK */
+
+   WRITE(MAM)=NAH.PTR+TIMBMAP;     /* POINT AT TIMBRE MAP */
+   WRITE(MAL)=DISKTIMB;            /* LOOK FOR REMAP OF THIS TIMBRE */
+
+   IF READ(MD)<>0 THEN DO;         /* TIMBRE HAS ALREADY BEEN READ INTO MEMORY */
+
+      MAPPED.TRK=READ(MD);         /* SAVE REMAP INFO */
+
+      DISPLAY.EBL=0;                       /* SUPPRESS DISPLAYS DURING THIS COPY */
+      LEN=COPY.TIMBRE(MAPPED.TRK,DESTRK);
+      DISPLAY.EBL=1;                       /* ALLOW DISPLAYS NOW */
+
+   END;
+
+   /* $PAGE */
+
+   ELSE DO;                        /* NEED TO READ THE TIMBRE OFF THE DISK */
+      WRITE(MAM)=NAH.PTR+SEQBASE;
+      WRITE(MAL)=SEQ.PAR;
+
+      MSB=DISKADDR(0);
+      LSB=DISKADDR(1)+READ(MD);
+      IF LSB ILT READ(MD) THEN MSB=MSB+1;
+
+      WRITE(MAL)=SEQ.PAR+1;
+
+      CALL PRIME.IO.BUFFER(MSB,LSB,0,
+                           0,READ(MD),
+                           EXTBUF.PTR,EXTBUF.LEN,0);
+
+      CALL FIND.DISK.TIM(DISKTIMB);
+      MSB=DISK.DEV; LSB=DISK.SEC; PTR=BUF.R.PTR; /* SAVE POINTERS */
+      CALL FIND.DISK.TIM(1);                     /* STEP OVER DISK TIMBRE */
+
+      LEN=SHL(DISK.SEC-LSB,8)+BUF.R.PTR-PTR;     /* GET LENGTH OF NEW TIMBRE IN WORDS - NO OVERFLOW PROBLEM HERE */
+
+      /* READ IN TIMBRE FROM DISK */
+
+      LSB=LSB+SHR(PTR,8);                        /* NORMALIZE DISK ADDR OF */
+      IF LSB ILT SHR(PTR,8) THEN MSB = MSB + 1;
+      PTR=PTR&255;                               /* START OF NEW TIMBRE FOR TRK */
+
+      CALL PRIME.IO.BUFFER(MSB,LSB,PTR,
+                           0,SHR(PTR+LEN+255,8),
+                           EXTBUF.PTR,EXTBUF.LEN,0); /* RESET DISK TO START OF TIMBRE */
+
+      DISPLAY.EBL=0;                       /* SUPPRESS DISPLAYS DURING THIS COPY */
+      IF COPY.TIMBRE(-2,DESTRK)=0          /* READ TIMBRE FROM DISK AND SET UP TRK INFO */
+      THEN LEN=0;                          /* THIS MEANS WE HAD AN ERROR */
+      DISPLAY.EBL=1;                       /* ALLOW DISPLAYS NOW */
+
+      WRITE(MAM)=NAH.PTR+TIMBMAP;          /* UPDATE MAP OF RECALLED TIMBRES */
+      WRITE(MAL)=DISKTIMB;                 /* THIS DISK TIMBRE HAS BEEN */
+      WRITE(MD )=DESTRK;                   /* COPIED ONTO THIS TRACK    */
+
+   END;
+
+   CALL TRK.HEAD.STORE(DESTRK,THD.TVOL,VOL ); /* RESTORE TO THEIR */
+   CALL TRK.HEAD.STORE(DESTRK,THD.MIDI,MIDI); /* ORIGINAL VALUES  */
+   CALL TRK.HEAD.STORE(DESTRK,THD.ACTIVE.MIDI.RTES,MRTE);
+   CALL TRK.HEAD.STORE(DESTRK,THD.MIDI.PATH,PATH);
+   CALL TRK.HEAD.STORE(DESTRK,THD.MIDX,MIDX);
+
+   NEW.MOTION             = 1;   /* SEND NEW CUE TRACK CONSTANTS       */
+   NEW.CUE.TRACK.SETTINGS = 1;   /* OVER AFTER TRACK VOLUME CHANGE     */
+
+   IF LEN=0
+   THEN RETURN FALSE;
+   ELSE RETURN TRUE;
+
+END RECALL.TIMBRE.FROM.DISK;
+
+/* $SUBTITLE  ROUTINE TO READ IN A TRK (WITHOUT ITS TIMBRE) FROM A DISK FILE */
+
+RECALL.TRACK.FROM.DISK: PROC(DISKADDR ,DISKTRK, DESTRK, SEQBASE,NAH) BOOLEAN SWAPABLE;
+   DCL DISKADDR ARRAY; /* 2 WORD DISK PTR TO START OF SEQUENCE */
+   DCL DISKTRK  FIXED; /* WHICH TRACK FROM THE DISK TO READ IN */
+   DCL DESTRK   FIXED; /* WHICH SEQUENCER TRACK TO READ IT INTO */
+   DCL SEQBASE  FIXED; /* PTR (RELATIVE TO NAH.PTR) TO COPY OF DISK SEQ HEADER */
+   DCL NAH      FIXED; /* PTR (RELATIVE TO NAH.PTR) TO COPY OF NAH HEADER SECTOR */
+
+   DCL THD                  FIXED; /* PTR (RELATIVE TO NAH.PTR) TO TRK HEAD SECTOR */
+   DCL (TRKOFFS,NAHOFFS)    FIXED;
+   DCL (MSB,LSB)            FIXED;
+   DCL (FREESECS,TRKSECS)   FIXED;
+   DCL NEXT.DISK.NLS        FIXED;
+   DCL (NEXT.NLS,PRIOR.NLS) FIXED;
+   DCL CHECK.ILS.SEC        FIXED;
+   DCL CHECK.ILE.SEC        FIXED;
+
+   QUICK.TRACK.ERASE: PROC(TRK);
+      DCL TRK FIXED;
+
+      WRITE(MAM)=TRK.HEAD;      /* CLEAR PTR IN TRK.HEAD SECTOR */
+      WRITE(MAL)=TRK;
+      WRITE(MD )=0;
+
+      WRITE(MAM)=NAH.PTR;       /* CLEAR PTR IN NAH.PTR SECTOR */
+      WRITE(MAL)=TRK;
+      TRK=READ(MD);             /* GET REL PTR TO TRK HEAD */
+      WRITE(MD )=0;
+
+      CALL DEALLOCATE.NAH.BLOCK(TRK);
+   END QUICK.TRACK.ERASE;
+
+   IF  (DISKTRK >= FIRST.LOD.TRACK) /* IF TRK IS A LOD TRACK */
+   AND (DISKTRK <  LAST.LOD.TRACK)
+   THEN DO;                     /* SELECTIVE TRK RECALL NOT AVAILABLE */
+      RETURN FALSE;             /* CAN'T DO THIS - BOMB OUT */
+   END;
+
+   WRITE(MAM)=NAH.PTR;          /* MAKE SURE DEST TRK IS EMPTY */
+   WRITE(MAL)=DESTRK;           /* TO START WITH               */
+   IF READ(MD)<>0 THEN CALL ERASE.TRACK(DESTRK);
+
+   WRITE(MAM)=NAH.PTR+NAH;
+   WRITE(MAL)=DISKTRK;
+
+   IF READ(MD)=0 THEN DO;        /* DISK TRK IS EMPTY       */
+      RETURN TRUE;
+   END;
+
+   /* $PAGE */
+
+   ELSE DO;
+
+      /* SEE IF WE HAVE ENOUGH MEMORY TO BRING */
+      /* IN THIS TRACK FROM THE DISK SEQUENCE  */
+
+      WRITE(MAM)=NAH.PTR+SEQBASE;       /* LOOK UP OFFSET FROM START OF */
+      WRITE(MAL)=SEQ.NAH;               /* DISK FILE TO START OF NAH    */
+      NAHOFFS=READ(MD);
+
+      WRITE(MAM)=NAH.PTR+NAH;
+      WRITE(MAL)=DISKTRK;
+      TRKOFFS=NAHOFFS+READ(MD);         /* OFFSET PTR TO TRK HEAD FOR OUR TRK */
+
+      MSB=DISKADDR(0);                  /* COMPUTE ABS DISK ADDR OF */
+      LSB=DISKADDR(1)+TRKOFFS;          /* TRK HEAD FOR DESIRED TRK */
+      IF LSB ILT TRKOFFS THEN MSB=MSB+1;
+
+      THD=ALLOCATE.TRK.HEADER(DESTRK);  /* ALLOCATE NLS FOR NEW TRK HEAD */
+
+      IF THD=0 THEN RETURN FALSE;       /* NOT ENOUGH ROOM FOR NEW TRK HEAD */
+
+      CALL EXT.READDATA(MSB,LSB,THD,0,1,0); /* READ IN TRK HEAD */
+
+      THD=THD-NAH.PTR;                    /* CONVERT BACK TO RELATIVE PTR */
+
+      WRITE(MAM)=NAH.PTR+THD;
+      WRITE(MAL)=THD.NN.MSB;
+
+      IF (READ(MDI)\READ(MDI))=0 THEN DO; /* NO REAL NOTES ON THIS TRK */
+         CALL QUICK.TRACK.ERASE(DESTRK);
+         RETURN TRUE;
+      END;
+
+      WRITE(MAM)=NAH.PTR+THD;
+      WRITE(MAL)=THD.NUM.NLS;
+      TRKSECS=READ(MD);                   /* SECTORS NEEDED TO READ IN THIS TRK */
+
+      FREESECS=NAH.#FREE+((BNK.PTR+BNK.LEN)-(NAH.PTR+NAH.LEN)); /* NUMBER OF EASILY OBTAINED SECTORS LEFT */
+
+      IF TRKSECS IGT FREESECS             /* NOT ENOUGH MEMORY RIGHT NOW */
+      THEN DO;                            /* DO SHUFFLE TO COLLECT MEMORY */
+
+         CALL MAXIMIZE.MEMORY.FOR.RECORD; /* HEAVY DUTY GARBAGE COLLECT */
+
+         FREESECS=NAH.#FREE+((BNK.PTR+BNK.LEN)-(NAH.PTR+NAH.LEN)); /* TOTAL SECTORS AVAILABLE */
+
+         IF TRKSECS IGT FREESECS THEN DO; /* STILL WON'T FIT AFTER SHUFFLE */
+            CALL QUICK.TRACK.ERASE(DESTRK);
+            RETURN FALSE;                 /* BOMB OUT - NOT ENOUGH MEMORY */
+         END;
+      END;
+
+      /* FROM HERE ON, WE ASSUME THAT EVERYTHING */
+      /* IS GOING TO FIT INTO MEMORY.            */
+
+      /* NOW READ IN THE NOTELIST ONE SECTOR AT A TIME */
+
+      WRITE(MAM)=NAH.PTR+THD;          /* LOOK AT DISK TRK FORWARD PTR */
+      NEXT.DISK.NLS=READ(MDI);         /* SAVE PTR TO NEXT NLS ON DISK */
+      WRITE(MD)=0;                     /* RESET THD.REV POINTER TO ZERO */
+      NEXT.NLS=THD;                    /* INIT CUR PTR TO TRK HEAD */
+
+      WRITE(MAL)=THD.TRK;              /* SET TRK NUMBER IN TRK HEAD */
+      WRITE(MD )=DESTRK;               /* TO EVENTUAL DEST TRK #     */
+
+      WRITE(MAL)=THD.ILP;
+      CHECK.ILS.SEC = (READ(MD)<>0);   /* SET FLAGS IF ILP ON TRK */
+      CHECK.ILE.SEC = (READ(MD)<>0);   /* OTHERWISE CLEAR FLAGS   */
+
+      /* $PAGE */
+
+      DO WHILE NEXT.DISK.NLS<>0;       /* LOOP WHILE MORE NLS TO READ IN */
+
+         PRIOR.NLS=NEXT.NLS;           /* SAVE CURRENT PTR   */
+         NEXT.NLS=ALLOCATE.NAH.BLOCK;  /* GET ANOTHER SECTOR */
+
+         IF NEXT.NLS=0 THEN DO;        /* SYSTEM ERROR!!!!   */
+            IF DEBUG THEN DO; END;
+         END;
+
+         WRITE(MAM)=NAH.PTR+PRIOR.NLS; /* FIX FORWARD PTR  */
+         WRITE(MD )=NEXT.NLS;          /* IN OUR PRIOR NLS */
+
+         TRKOFFS=NAHOFFS+NEXT.DISK.NLS; /* OFFSET FROM START OF DISK FILE */
+
+         MSB=DISKADDR(0);              /* COMPUTE ABS DISK ADDR OF NEXT NLS */
+         LSB=DISKADDR(1)+TRKOFFS;
+         IF LSB ILT TRKOFFS THEN MSB=MSB+1;
+
+         CALL EXT.READDATA(MSB,LSB,NAH.PTR+NEXT.NLS,0,1,0); /* READ NLS DATA */
+
+         IF CHECK.ILS.SEC <>0 THEN DO;
+            WRITE(MAM)=NAH.PTR+THD;
+            WRITE(MAL)=THD.ILS.SEC;
+            IF READ(MD)=NEXT.DISK.NLS THEN DO;
+               WRITE(MD)=NEXT.NLS;
+               CHECK.ILS.SEC=0;
+            END;
+         END;
+
+         IF CHECK.ILE.SEC <>0 THEN DO;
+            WRITE(MAM)=NAH.PTR+THD;
+            WRITE(MAL)=THD.ILE.SEC;
+            IF READ(MD)=NEXT.DISK.NLS THEN DO;
+               WRITE(MD)=NEXT.NLS;
+               CHECK.ILE.SEC=0;
+            END;
+         END;
+
+         WRITE(MAM)=NAH.PTR+NEXT.NLS;  /* POINT TO NEWLY READ NLS      */
+         NEXT.DISK.NLS=READ(MD);       /* SAVE ITS ORIGINAL FOR PTR    */
+         WRITE(MDI)=0;                 /* SET FOR PTR TO NULL FOR NOW  */
+         WRITE(MDI)=PRIOR.NLS;         /* FIX BACK PTR TO PRIOR NLS    */
+         WRITE(MD )=DESTRK;            /* AND SET TRK NUMBER CORRECTLY */
+
+      END;
+
+   END;    /* OF TRK TO RECALL HAS A TRK HEAD */
+
+   RETURN TRUE;  /* WE DID IT!!! */
+
+END RECALL.TRACK.FROM.DISK;
+
+/* $SUBTITLE  ROUTINE TO SET UP SEQUENCE AFTER PASTE OPERATION */
+
+CLEAN.UP.AFTER.PASTE:  PROC SWAPABLE;
+   DCL I FIXED;
+
+   /* After pasting in sequence information,  treat as if an entire */
+   /* new sequence was called up:                                   */
+
+   NEW.SEQ.INFO=NEW.SEQ.INFO \ 1;
+
+   CALL DEALLOC.ALL;                   /* FREE UP ANY MEMORIES, SOUND FILES, ETC. */
+
+   TIM.LEN=0; TIM.FREE=0; TIM.#FREE=0;
+
+   WRITE(MAM)=TIM.HEAD;                /* KEYBOARD TIM.HEAD IS ABSOLUTE */
+   WRITE(MAL)=1;                       /* SO START WITH 1     */
+   DO I=1 TO MAX.TIMBRES-1;
+      WRITE(MDI)=0;
+   END;
+
+   CALL COMPUTE.TRK.HEADS;
+   CALL CLEAN.TRACK.HEADS(NUM.KBD.TRACKS);
+   CALL COMPACT.TIMBRES(PAR.PTR,PAR.NUMT);  /* SET UP TIMBRE POINTERS, PAR.NUMT */
+   CALL COMPUTE.ACTIVE.TRKS;
+   CALL SETUP.SQ;                           /* SET UP GLOBAL INFO      */
+   CALL CHECK.MEMORY.FOR.RECORD;
+
+   NPTR=NOTELIST;               /* GO THROUGH NOTELIST AND    */
+   DO WHILE NPTR<>0;            /* SET NACT/NDEC SO NOT       */
+      IF TRACK>=NUM.KBD.TRACKS THEN DO;
+         STEALOK=(-2);
+      END;
+      RECS=0; RECW=0;
+      NPTR=NFPTR;
+   END;
+
+END CLEAN.UP.AFTER.PASTE;
+
+ZERO.TRK.HEAD.TIMBRES: PROC (TRK) SWAPABLE; /* SETS ALL TIMBRE NUMBERS TO ZERO IN SPECIFIED TRK */
+   DCL TRK FIXED;
+
+   /* NOW STUFF THEN TRK HEAD WITH SOME NULL INFO */
+   /* SINCE WE ARE NOT READING IN THE TIMBRE FOR  */
+   /* THIS TRACK RIGHT NOW                        */
+
+   WRITE(MAM)=NAH.PTR;
+   WRITE(MAL)=TRK;
+   IF READ(MD)<>0 THEN DO;
+      WRITE(MAM)=NAH.PTR+READ(MD);           /* POINT AT TRK HEAD */
+      WRITE(MAL)=THD.STIMB;     WRITE(MD)=0; /* CLEAR OUT EXISTING TRK INFO */
+      WRITE(MAL)=THD.CTIMB;     WRITE(MD)=0;
+      WRITE(MAL)=THD.LP.CTIMB;  WRITE(MD)=0;
+      WRITE(MAL)=THD.ILS.CTIMB; WRITE(MD)=0;
+      WRITE(MAL)=THD.ILE.CTIMB; WRITE(MD)=0;
+
+      WRITE(MAL)=THD.USAGE;
+      DO TRK=0 TO THD.USAGE.LEN-1; WRITE(MDI)=0; END; /* CLEAR OUT USAGE TABLE TOO */
+   END;
+
+END ZERO.TRK.HEAD.TIMBRES;
+
+GET.NEXT.CUT.TRK: proc (cut.trks) swapable;
+   dcl cut.trks  array;
+   dcl temp.indx fixed;
+   dcl temp.bit  fixed;
+   dcl trk       fixed;
+
+   temp.indx = t#indx;        /* save current bit & index */
+   temp.bit  = t#bit;
+
+   t#indx    = cut.indx;      /* set globals to cut values */
+   t#bit     = cut.bit;
+
+   trk = Get.Next.Bit(cut.trks); /* get next source trk    */
+   
+   /* this is for the case when you are pasting to more    */
+   /* tracks than were cut from, just loop through cut     */
+   /* tracks until you have filled up all the paste tracks */
+   if (trk = -1) then do;        /* wrap around            */
+      call Set.Start.Bit(num.kbd.tracks);
+      trk = Get.Next.Bit(cut.trks);
+   end;
+
+   cut.indx  = t#indx;        /* update cut values         */
+   cut.bit   = t#bit;
+
+   t#indx    = temp.indx;     /* restore bit & index       */
+   t#bit     = temp.bit;
+
+   return trk;
+end GET.NEXT.CUT.TRK;
+
+PASTE.SILENCE: proc(Trks,Time,Length) fixed public swapable;
+   dcl Trks        array; /* 16 words of bits representing which trks to edit */
+   dcl Time        array; /* 32-bit msec time at which to PASTE */
+   dcl Length      array; /* 32-bit msec amount of time to insert on tracks */
+   dcl (msb,lsb)   fixed;
+   dcl trk         fixed;
+
+   call PUSH.TBUT.SOLOS;   /* save current trk solo state */
+
+   msb=time(0);                            /* compute distance from Script 0.000 */
+   lsb=time(1)-zero.time;                  /* to our paste point */
+   if time(1) ilt zero.time then msb=msb-1;
+
+   call Set.Start.Bit(num.kbd.tracks);
+   trk=Get.Next.Bit (trks);
+
+   do while (trk <> (-1))      /* loop through tracks to paste */
+   and      (Edit.Error=0);    /* unless we run out of memory */
+
+      write(mam)=Nah.Ptr;
+      write(mal)=trk;
+      if read(md)<>0 then do;                    /* dest trk has a trk head */
+
+         write(mam)=Nah.Ptr+read(md);            /* point at its trk head */
+         write(mal)=Thd.NN.Msb;                  /* look at note count vars */
+
+         if (read(mdi)\read(mdi))<>0 then do;    /* have some notes on the dest trk */
+
+            if Insert.Time.On.Trk(trk,time(0),time(1),length(0),length(1))=0
+            then Edit.Error=E#NoRoom;
+         end;                          
+      end;                             
+
+      trk=Get.Next.Bit(trks);  /* step to next track */
+   end;
+
+   call Clean.Up.After.Paste; /* basically set up sequence as if we just recalled it */
+
+   call POP.TBUT.SOLOS;       /* restore trk solos to original state */
+
+   return (Edit.Error);       /* return error status */
+end PASTE.SILENCE;
+
+/* $SUBTITLE  Routine to Perform PASTE/MERGE/FILL Edit Operations */
+
+/* PASTE/MERGE/FILL Operation Literals:
+   dcl EDIT#Paste lit '0'; dcl EDIT#Merge lit '1'; dcl EDIT#Fill lit '2'; dcl EDIT#Insert lit '3';
+*/
+
+PASTE.MERGE.FILL: proc(Operation,Trks,Time,Source,Repetitions) fixed public swapable;
+   dcl Operation   fixed; /* Which type of PASTE: 0=Paste, 1=Merge, 2=Fill  */
+   dcl Trks        array; /* 16 words of bits representing which trks to edit */
+   dcl Time        array; /* 32-bit msec time at which to PASTE */
+   dcl Source      array; /* treename of file holding notes to PASTE */
+   dcl Repetitions fixed; /* how many times to paste same info */
+   dcl i           fixed;
+
+
+   dcl ClipBoard.Name    (32) fixed; /* temp to hold source ClipBoard treename */
+   dcl (BasPtr,NahPtr,TimMap) fixed; /* relative ptrs to 3 temp sectors */
+   dcl Region.Len         (1) fixed; /* length of time to paste/merge/fill */
+   dcl Region.Start       (1) fixed; /* start time of paste/merge/fill data */
+   dcl DiskBase           (1) fixed; /* msb & lsb of disk addr of ClipBoard */
+   dcl (trk,seqlen)           fixed;
+   dcl parlen                 fixed;
+   dcl freesecs               fixed;
+   dcl count                  fixed;
+   dcl (msb,lsb,m,l)          fixed;
+   dcl cut.trks          (15) fixed;
+   DCL CUT.TRK                FIXED; 
+
+   /*
+   BASPTR   - REL PTR TO XMEM SECTOR - HOLDS SEQ HEADER SECTOR
+   NAHPTR   - REL PTR TO XMEM SECTOR - HOLDS 1ST SECTOR OF NAH AREA
+   TIMBMAP  - REL PTR TO XMEM SECTOR - HOLDS MAP OF TIMBRES READ FROM DISK
+   */
+
+   call Stop.Recd.Move.Play.XPos.Cont.Eras;
+   call Abort.Bounce.SMT.SKT;
+   call Store.Sequence.Info;        /* for eventual call to SETUP.SQ */
+
+   if (time(0)=0) and (time(1) ilt zero.time) then do;
+      /* can't paste before zero.time */
+  	  CALL COMPUTE.ACTIVE.TRKS;	    /* RECOMPUTE THD.ACTIVE */
+      return false;
+   end;
+
+   Edit.Error=0;                    /* init flag to no errors */
+
+   do count=0 to shr(source(0)+1,1); ClipBoard.Name(count)=source(count); end; /* copy source treename to temp */
+
+   if not Find.ClipBoard(ClipBoard.Name) then do;
+      /* nothing to paste if no ClipBoard file found */
+      Edit.Error=E#NoFindClip;
+  	  CALL COMPUTE.ACTIVE.TRKS;	    /* RECOMPUTE THD.ACTIVE */
+      return Edit.Error;
+   end;
+
+   call PUSH.TBUT.SOLOS;   /* save current trk solo state */
+
+
+   DiskBase(0)=F#MS_Sector; DiskBase(1)=F#LS_Sector; /* save ptr to file */
+
+   BasPtr=Allocate.Nah.Block;    /* get temp sector for Disk seq header */
+   NahPtr=Allocate.Nah.Block;    /* get temp sector for Disk Nah header */
+   TimMap=Allocate.Nah.Block;
+
+   if (BasPtr=0) or (NahPtr=0) or (TimMap=0) 
+   then do;                      /* not enough memory for edit */
+      call Display.Err(14);      /* 'Not Enough Room in Memory' */
+      Edit.Error=E#NoRoom;
+      GOTO Abort.Paste;          /* clean up */
+   end;
+
+   write(mam)=Nah.Ptr+TimMap;    /* zero out timbre remap table */
+   do trk=0 to 255; write(mdi)=0; end;
+
+   /* $PAGE */
+
+   call Ext.Readdata(DiskBase(0),DiskBase(1),Nah.Ptr+BasPtr,0,1,0); /* read header of ClipBoard from disk */
+
+   write(mam)=Nah.Ptr+BasPtr;
+   write(mal)=Magic.Number;
+   if  ((read(md)<>MAGIC#5)       /* not a 256-track model seq */
+   &&   (read(md)<>MAGIC#6)       /* not a 256-track model seq */
+   &&   (read(md)<>MAGIC#7))      /* not a 256-track model seq */
+   then do;
+      call Display.Err(51);      /* 'Cannot Recall Trk from Old Seq' */
+      Edit.Error=E#OldSeq;
+      GOTO Abort.Paste;          /* clean up */
+   end;
+
+   write(mam)=Nah.Ptr+BasPtr;    /* look up length of pattern stored in file */
+   write(mal)=Seq.Loop;
+   if read(md)=0 then do;        /* no overall loop - can't do paste */
+      Edit.Error=E#LengthErr;    /* can't do this yet -- disallow */
+      GOTO Abort.Paste;          /* clean up */
+   end;
+
+   write(mal)=Seq.G.P.T;              /* look up loop end time */
+   Region.Len(1)=read(mdi); Region.Len(0)=read(md);
+   write(mal)=Seq.S.P.T;              /* look up loop start time */
+   Region.Start(1)=read(mdi); Region.Start(0)=read(md);
+
+   /* subtract start from end to get paste length */
+
+   Region.Len(0)=Region.Len(0)-Region.Start(0);
+   if Region.Len(1) ilt Region.Start(1) then do;
+      if Region.Len(0)<>0
+      then Region.Len(0)=Region.Len(0)-1;
+   end;
+   Region.Len(1)=Region.Len(1)-Region.Start(1);
+
+   /* subtract zero.time from start to get loop countin length */
+
+   if Region.Start(1) ilt ZERO.TIME then do;
+      if Region.Start(0)<>0
+      then Region.Start(0)=Region.Start(0)-1;
+   end;
+   Region.Start(1)=Region.Start(1)-ZERO.TIME;
+
+   if (Region.Len(0)\Region.Len(1))=0 /* zero length pattern */
+   then do;                           /* implies we need to compute length */
+      Edit.Error=E#ZeroLength;        /* nothing to paste - bomb out */
+      GOTO Abort.Paste;               /* clean up */
+   end;
+
+   write(mam)=Nah.Ptr;                  /* make sure temp trk is empty */
+   write(mal)=temp.trk;
+   if read(md)<>0 then do;              /* it's not - so erase it */
+      call Erase.Track(temp.trk);
+   end;
+
+   /* Make a crude test for whether or not    */
+   /* we have enough free memory for the edit */
+
+   write(mam)=Nah.Ptr+BasPtr;
+   write(mal)=Seq.Nah+1;               /* look up length of NAH area */
+   load read(md); mul repetitions;     /* account for repetitions    */
+
+   if ures<>0 then do;                 /* overflow */
+      Edit.Error=E#TooLong;
+      GOTO Abort.Paste;
+   end;
+
+   seqlen=res;                         /* save in temp */
+   write(mal)=Seq.Par+1;               /* look up length of PAR area */
+   parlen=read(md);
+   seqlen=seqlen+parlen+10;            /* add PAR len + a little extra to total */
+
+   if seqlen ilt (read(md)+10) then do; /* overflow */
+      Edit.Error=E#TooLong;
+      GOTO Abort.Paste;
+   end;
+
+   /* $PAGE */
+
+   freesecs=nah.#free+((bnk.ptr+bnk.len)-(nah.ptr+nah.len)); /* number of easily obtained sectors */
+
+   if seqlen igt freesecs then do;     /* if not enough memory, do a shuffle */
+
+      call Maximize.Memory.for.Record; /* heavy duty garbage collect routine */
+
+      freesecs=nah.#free+((bnk.ptr+bnk.len)-(nah.ptr+nah.len)); /* number of easily obtained sectors */
+
+      if seqlen igt freesecs then do;  /* still not enough room */
+         /* not enough memory for edit operation */
+         Edit.Error=E#NoRoom;
+         GOTO Abort.Paste;             /* clean up */
+      end;
+   end;
+
+   /* at this point we assume there   */
+   /* is enough memory to do the edit */
+
+   write(mam)=Nah.Ptr+BasPtr;
+   write(mal)=Seq.Nah;
+   Msb=DiskBase(0);                    /* compute abs disk addr of */
+   Lsb=DiskBase(1)+read(md);           /* Note area header sector  */
+   if Lsb ilt read(md) then Msb=Msb+1;
+
+   call Ext.Readdata(Msb,Lsb,Nah.Ptr+NahPtr,0,1,0); /* read in Nah header from disk */
+   
+   /* $SUBTITLE  Loop through sequencer tracks and perform Edit Operation */
+
+   msb=time(0);                            /* compute distance from Script 0.000 */
+   lsb=time(1)-zero.time;                  /* to our paste point */
+   if time(1) ilt zero.time then msb=msb-1;
+
+   /* need to load cut bits from base area into cut.trks array */
+   write(mam)=Nah.Ptr+BasPtr;
+   write(mal) = seq.cbits.valid;
+   if (read(mdi)) then do;
+      do i = 0 to 15;              /* get SEQ.CUT.BITS */
+         cut.trks(i) = read(mdi);
+      end;
+   end;
+   else do;            /* set all bits */
+      do i = 0 to 15;
+         cut.trks(i) = "177777";
+      end;
+   end;
+
+   call Set.Start.Bit(num.kbd.tracks);
+   trk=Get.Next.Bit (trks);
+
+   cut.indx=shr(num.kbd.tracks,4); cut.bit=num.kbd.tracks&15;
+   CUT.TRK = GET.NEXT.CUT.TRK(cut.trks);  /* FIND NEXT SOURCE TRACK */
+
+   do while (trk <> (-1))      /* loop through tracks to paste */
+   and      (Edit.Error=0);    /* unless we run out of memory */
+
+      write(mam)=Nah.Ptr;
+      write(mal)=trk;
+      if read(md)<>0 then do;                    /* dest trk has a trk head */
+
+         write(mam)=Nah.Ptr+read(md);            /* point at its trk head */
+         write(mal)=Thd.NN.Msb;                  /* look at note count vars */
+
+         if (read(mdi)\read(mdi))<>0 then do;    /* have some notes on the dest trk */
+
+            if Operation<>EDIT#Merge then do;    /* do edit to destination track */
+
+               m=0; l=0;
+               do count=1 to repetitions; /* compute total length to delete */
+                  m=m+region.len(0);
+                  l=l+region.len(1);
+                  if l ilt region.len(1) then m=m+1;
+               end;
+
+               if Operation=EDIT#Fill then do;   /* delete notes we will be replacing */
+                  if Punch.Notes.From.Trk(trk,time(0),time(1),m,l,false,false)=0
+                  then Edit.Error=E#NoRoom;
+               end;
+               else if Operation=EDIT#Paste then do; /* insert rest at Paste point */
+                  if Insert.Time.On.Trk(trk,time(0),time(1),m,l)=0
+                  then Edit.Error=E#NoRoom;
+               end;
+            end;                           /* of doing either a PASTE or a FILL */
+         end;                              /* of dest trk has some notes */
+      end;                                 /* of dest trk has a trk head */
+
+      write(mam)=Nah.Ptr;                  /* make sure temp track is empty to start */
+      write(mal)=Temp.Trk;
+      if read(md)<>0 then call Erase.Track(Temp.Trk);
+
+      write(mam)=Nah.Ptr+NahPtr;           /* now look at Note Area Header for ClipBoard file */
+      write(mal)=CUT.TRK;
+
+      if read(md)<>0 then do;              /* disk file has non-empty trk */
+
+         /* RECALL.TRACK.FROM.DISK does not recall the timbre */
+         /* Do this when we can handle program changes        */
+
+         if not Recall.Track.From.Disk(DiskBase,CUT.TRK,Temp.Trk,BasPtr,NahPtr) 
+         then Edit.Error=E#NoRoom;
+
+         call Quick.Play.Init(Get.Thd.Ptr(temp.trk)); /* make sure trk head is valid */
+
+         /* $PAGE */
+
+         if Edit.Error=0 then do;
+
+            /* if real dest trk has no timbre on it then get one */
+            /* from the disk so we get some reasonable sound     */
+
+            write(mam)=Nah.Ptr;             /* look at ptr to trk head */
+            write(mal)=trk;                 /* for this track          */
+
+            if read(md)<>0 then do;         /* current seq has a trk head for this trk */
+               write(mam)=Nah.Ptr+read(md); /* point at trk head */
+               write(mal)=Thd.Stimb;        /* look at starting timbre */
+
+               if read(md)<num.kbd.tracks   /* no timbre on this trk   */
+               then GOTO Get.Timbre;        /* get one from the disk   */
+
+               /* TIMBRE CONFLICT KLUDGE *************/
+
+               /* for now, we don't do Program Changes, so need to do a kludge */
+               /* which ensures that Edit operations don't die because of      */
+               /* timbre conflicts.                                            */
+
+               call Zero.Trk.Head.Timbres(temp.trk); /* set timbres to zero before call to COPY.TIMBRE */
+
+               if Copy.Timbre(trk,temp.trk)=0  /* put dest trk timbre onto temp trk */
+               then Edit.Error=E#NoRoom;
+
+               /************* TIMBRE CONFLICT KLUDGE */
+            end;
+
+            /* $PAGE */
+
+            else do;                           /* dest trk has no timbre */
+
+               GET.TIMBRE:
+
+               write(mam)=Nah.Ptr;
+               write(mal)=Temp.Trk;
+
+               if read(md)<>0 then do;         /* trk from disk has a trk head */
+                  write(mam)=Nah.Ptr+read(md); /* point at its trk head */
+                  write(mal)=Thd.Stimb;        /* and look up the starting timbre */
+
+                  if read(md)>=num.kbd.tracks then do; /* try to recall this timbre */
+
+                     count=read(md)-num.kbd.tracks;    /* save disk timbre number */
+
+                     call Zero.Trk.Head.Timbres(temp.trk); /* reset timbre numbers to zero for following call */
+
+                     if not Recall.Timbre.From.Disk(DiskBase,count,Temp.Trk,BasPtr,TimMap)
+                     then Edit.Error=E#NoRoom;
+
+                     /* fix up TIMMAP table since we will   */
+                     /* eventually bounce timbre to new trk */
+
+                     write(mam)=Nah.Ptr+TimMap;
+                     write(mal)=count;
+                     write(md )=trk;  /* after bounce, timbre will actually be on this trk */
+
+                  end;
+                  else do;
+                     call Zero.Trk.Head.Timbres(temp.trk); /* reset timbre numbers to zero for following call */
+                  end;
+               end;
+            end;
+
+         end;
+
+         /* $PAGE */
+
+         write(mam)=Trk.Head;         /* look at temp trk */
+         write(mal)=temp.trk;
+
+         if  (read(md)<>0)            /* only bother with the     */
+         and (Edit.Error=0)           /* following if a real trk  */
+         then do;                     /* exists and no errors yet */
+
+            /* delete from ZERO.TIME to REGION.START() */
+
+            if Punch.Notes.From.Trk(temp.trk,0,zero.time,region.start(0),region.start(1),true,true)=0
+            then Edit.Error=E#NoRoom;
+            
+            write(mam)=Trk.Head;         /* look at temp trk */
+            write(mal)=temp.trk;
+
+            if  (read(md)<>0)            /* only bother with the     */
+            and (Edit.Error=0)           /* following if a real trk  */
+            then do;                     /* still exists and no errors yet */
+
+               if Insert.Time.On.Trk(temp.trk,0,zero.time,msb,lsb)=0
+               then Edit.Error=E#NoRoom;
+
+               count=1;
+               do while (count ILT repetitions) & (Edit.Error=0);
+                  if Bounce.Down(temp.trk,trk,1,1)=0 /* do quick bounce, with replicate */
+                  then Edit.Error=E#NoRoom;
+
+                  if count ilt repetitions then do;
+                     if Insert.Time.On.Trk(temp.trk,0,zero.time,region.len(0),region.len(1))=0
+                     then Edit.Error=E#NoRoom;
+                  end;
+
+                  count=count+1;
+               end;
+
+               if Edit.Error=0 then do;
+                  if Bounce.Down(temp.trk,trk,1,0)=0 /* do quick bounce, no replicate (erase TEMP.TRK after bounce) */
+                  then Edit.Error=E#NoRoom;
+               end;
+            end;
+         end;
+      end;
+      else do;
+          /* no trk on disk */
+      end;
+
+      trk=Get.Next.Bit(trks);  /* step to next track */
+      CUT.TRK = GET.NEXT.CUT.TRK(cut.trks);
+   end;
+
+   ABORT.PASTE:
+
+   write(mam)=Nah.Ptr;        /* make sure we get rid of temp */
+   write(mal)=temp.trk;       /* track before returning       */
+   if read(md)<>0 then call Erase.Track(temp.trk);
+
+   if BasPtr<>0 then call Deallocate.Nah.Block(BasPtr);
+   if NahPtr<>0 then call Deallocate.Nah.Block(NahPtr);
+   if TimMap<>0 then call Deallocate.Nah.Block(TimMap);
+
+   call Clean.Up.After.Paste; /* basically set up sequence as if we just recalled it */
+
+   call POP.TBUT.SOLOS;       /* restore trk solos to original state */
+
+   return (Edit.Error);       /* return error status */
+
+end PASTE.MERGE.FILL;

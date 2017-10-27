@@ -1,0 +1,790 @@
+/* 302-SUB2   $TITLE  REAL TIME EFFECTS ROUTINES
+
+   Modified:
+   03/12/91 - cj  - REALLY !! fixed bug to not trigger cues during rewind
+   10/02/90 - CJ  - Changed to not trigger cues during ff/rewind
+   07/10/90 - PF  - Replace calls to DISPLAY.BEAT.NUMBER with NEW.BEAT.NUMBER flag
+   10/10/89 - cj  - do not send overall loop or ff/rewind events
+                    to MAC
+   09/06/89 - MWH - Unsplit 06-MAIN now that the compiler can cope
+   06/09/89 - CJ - LIMIT FF/REWIND DISTANCE BASED ON MAIN LOOP TIME
+   04/13/88 - PF - PUT IN CALL TO CHECK.ALL.MIDI.TRACKS
+   01/12/88 - TS - SPLIT UP 06-MAIN MODULE INTO TWO PIECES
+   12/30/86 - CJ - DEACTIVATED SAM.DELAY CODE
+   09/23/86 - TS - MODIFIED REW/FF LOGIC IN HANDLE.SEQUENCER.MOVE
+   08/21/86 - TS - CHANGED NEW.SEQ.NOTES=1 TO CHECK.TRACK.DISPLAY=1
+   08/13/86 - TS - FIXED BUG IN MOVE.LOOP.PTRS IF PLAY PTRS UNDEFINED (I.E. SEC=WRD=0)
+   06/12/86 - TSS - Removed call to COPY.UP in MOVE.LOOP.PTRS
+   05/15/86 - "official" creation of release-M modules
+*/
+
+
+/* MAIN.LOOP VARIABLES I AND J ARE AFFECTED BY THESE ROUTINES              */
+/*                                                                         */
+/* SCALE.DIV - SCALE INTERPOLATOR DIVISOR NUMBER TO PRODUCE FASTER ATTACKS */
+/*           - USES I = INTERP DIVISOR, J = INTERP ADDER                   */
+/* SCALE.ADD - SCALES INTERPOLATOR ADDER NUMBER (J)                        */
+/*             FOR CHANGES IN PEAK/SUSTAIN LEVEL (I.E. MUST USE DIFFERENT  */
+/*             ATTACK/DECAY TIMES FOR DIFFERENT PEAK/SUSTAIN               */
+/*             LEVELS                                                      */
+/* SCALE.TMC - SCALES INDEX (**ONLY**) TIME CONSTANT AS REQUIRED           */
+/*                                                                         */
+/* COMPUTE.ENV   - COMPUTES ATTACK & INITIAL DECAY INFO FOR VOL ENV        */
+/* COMPUTE.INX   - COMPUTES ATTACK & INITIAL DECAY INFO FOR INX ENV        */
+/* COMPUTE.FIN   - COMPUTES FINAL DECAY INFO FOR INX & ENV                 */
+/* COMPUTE.DELAY - COMPUTES INFO FOR ENV DELAYS                            */
+
+/* CALLED WITH:   MAM = POINTER TO TIMBRE HEAD */
+/*                MAL = POINTER TO RTE ENTRY   */
+
+NEW.SCALE.DIV: PROC;            /* FOR NEW PANEL - SCALE DIVISOR FOR FASTER DECAYS */
+   DCL (I,J) FIXED  EXTERNAL;
+
+   I=256-I;                      /* COMPUTE LOGICAL DIVISOR FOR HARDWARE NUMBER (1-256) */
+   I=SCALE(I);                   /* SCALE FOR RTES   */
+   IF I=0 THEN I=1;              /* MIN DIVISOR OF 1 */
+   DO WHILE I>256;               /* MIGHT BE LONGER NOW */
+      J=SHR(J+1,1);              /* GET ADDER, REDUCE IT */
+      IF J<>0 THEN J=J-1;        /* RESTORE FOR HARDWARE */
+      I=SHR(I,1);                /* AND SMALLER DIVISOR */
+      IF I=0 THEN I=1;           /* BUT LIMIT DIVISOR TO 1  */
+   END;
+   I=256-I;                      /* RE COMPUTE INTERPOLATOR DIVISOR */
+END NEW.SCALE.DIV;
+
+/* CALLED WITH:   MAM = POINTER TO TIMBRE HEAD */
+/*                MAL = POINTER TO RTE ENTRY   */
+
+NEW.SCALE.TMC: PROC(TMC);         /* SCALE TIME CONSTANT FOR INITIAL/FINAL DECAY EFFECTS */
+   DCL (TMC)  FIXED;
+
+   TMC=-SCALE(-TMC);             /* GET POS CODE, SCALE IT, GET - AGAIN */
+   IF TMC=0 THEN TMC=(-1);       /* BUT LIMIT TO ALL ONES   */
+   RETURN TMC;                   /* DONE */
+END NEW.SCALE.TMC;
+
+/* CALLED WITH:   MAM = POINTER TO TIMBRE HEAD */
+/*                MAL = POINTER TO RTE ENTRY   */
+
+NEW.SCALE.ADD: PROC;              /* FOR NEW PANEL RTE'S */
+   DCL (I,J)  FIXED EXTERNAL;
+
+   J=SCALE(J+1);                 /* SCALE ADDER AS WELL     */
+   DO WHILE J>256;               /* MIGHT BE LONGER NOW     */
+      J=SHR(J,1);                /* REDUCE ADDER            */
+      I=SHR(256-I,1);            /* COMPUTE LOGICAL DIVISOR, REDUCE IT */
+      IF I=0 THEN I=1;           /* BUT LIMIT DIVISOR TO 1  */
+      I=256-I;                   /* COMPUTE HARDWARE NUMBER */
+   END;
+   IF J<>0 THEN J=J-1;           /* COMPUTE HARDWARE NUMBER FR ADDER */
+
+END NEW.SCALE.ADD;
+
+/* $PAGE - COMPUTE.ENV */
+
+/* COMPUTE ENVELOPE INFO   */
+/* APPLY REAL TIME EFFECTS */
+/* STORE INFO IN PBLK      */
+
+/* RETURNS MAM POINTER TO TBP */
+
+COMPUTE.ENV: PROC;                /* PROCEDURE TO EXTRACT & SET UP ENVELOPE INFO */
+   DCL (TB,TBP,PTL)    FIXED   EXTERNAL; 
+   DCL (I,J,K,L,M,N,P) FIXED   EXTERNAL;
+
+   WRITE(MAM)=TBP;
+   WRITE(MAL)=(TIM.EATLIM+EATLIM.LOC)+PTL*TIM.EATLIM.STR;    
+
+   L=READ(MDI);                  /* LIMIT   */
+   I=READ(MD)&255;               /* DIVIDER */   
+   J=SHR(READ(MDI),8);           /* ADDER   */
+
+   WRITE(MAL)=TIM.VE.ATK.LOOK;
+   IF READ(MD)<>0 THEN DO;
+      CALL NEW.SCALE.DIV;
+   END;
+
+   DISABLE;                        /* FOR SAFETY - COULD GET INTERRUPTED HERE IF THIS IS RTE CHANGE ON NOTE WITH DELAY */
+   EATINT = I\SHL(J,8);            /* STORE ENV ATTACK INTERP INFO */
+   EATLIM = L;                     /* AND ATTACK LIMIT */
+   ENABLE;
+   
+   WRITE(MAL)=(TIM.EATLIM+EIDLIM.LOC)+PTL*TIM.EATLIM.STR;    
+
+   L=READ(MDI);                  /* LIMIT   */
+   I=READ(MD)&255;               /* DIVIDER */   
+   J=SHR(READ(MDI),8);           /* ADDER   */
+   K=READ(MDI);                  /* TMC     */
+
+   IF DADJ<>0 THEN DO;          /* PERFORM DECAY ADJUST */
+     LOAD J; MUL 1000; J=RES; DIV DADJ; J=RES;
+     LOAD (-K); MUL 1000; K=RES; DIV DADJ;
+     K=(-RES); IF RES=0 THEN K=(-1);
+   END;
+
+   WRITE(MAL)=TIM.VE.IDEC.LOOK;      /* REAL TIME EFFECTS */
+   IF READ(MD)<>0 THEN DO;
+      CALL NEW.SCALE.DIV;
+      K=NEW.SCALE.TMC(K);
+   END;
+
+   DISABLE;
+   EIDINT = I\SHL(J,8);               /* STORE FOR USE DURING INTERRUPT ROUTINE */
+   ETMC   = K;
+   EIDLIM = L;
+   ENABLE;
+
+END COMPUTE.ENV;
+
+/* $PAGE - COMPUTE.INX */
+
+/* COMPUTE INDEX ENVELOPE INFO   */
+/* APPLY REAL TIME EFFECTS       */
+/* STORE INFO IN PBLK            */
+
+/* RETURNS MAM POINTING TO TBP   */
+
+COMPUTE.INX: PROC;                            /* SET UP SPECIAL INDEX ATTACK TIMES */
+   DCL (TB,TBP,PTL)    FIXED   EXTERNAL; 
+   DCL (I,J,K,L,M,N,P) FIXED   EXTERNAL;
+
+   WRITE(MAM)=TBP;
+   WRITE(MAL)=(TIM.IATLIM+IATLIM.LOC)+PTL*TIM.IATLIM.STR;    
+
+   L=READ(MDI);                  /* LIMIT   */
+   I=READ(MD)&255;               /* DIVIDER */   
+   J=SHR(READ(MDI),8);           /* ADDER   */
+
+   WRITE(MAL)=TIM.HE.ATK.LOOK;
+   IF READ(MD)<>0 THEN DO;
+      CALL NEW.SCALE.DIV;
+   END;
+
+   WRITE(MAL)=TIM.HE.PK.LOOK;
+   IF READ(MD)<>0 THEN DO;
+      L=SCALE(L);                         /* SCALE LIMIT */
+      IF L>255 THEN L=255;                /* LIMIT TO HARDWARE MAX */
+   END;
+
+   IF HADJ<>0 THEN DO;                        /* SCALE FOR HARMONIC ADJUST */
+     LOAD L; MUL HADJ; L=RES; DIV 1000; L=RES;/* SCALE BY HARM ADJ FACTOR 1/8 TO 8 */
+     IF L>255 THEN L=255;                     /* LIMIT TO MAX */
+     LOAD J; MUL HADJ; J=RES; DIV 1000; J=RES;/* SCALE INDEX ADDER AS WELL - BY SAME FACTOR AS PEAK CHANGED - THIS CHANGES ATTACK/DECAY RATE */
+     DO WHILE (J>255);                        /* SCALE DOWN IF OUT OF BITS */
+       I=256-SHR(256-I,1);                    /* SCALE DIVISOR TO KEEP RATE THE SAME WITH DIFFERENT J */
+       IF I=256 THEN I=255;                   /* LIMIT TO DIVISOR OF 1 - MUST BE AT FAST RATE ALREADY */
+       J=SHR(J+1,1);
+       IF J<>0 THEN J=J-1;
+     END;
+   END;
+
+   DISABLE;
+   IATINT = I\SHL(J,8);                 /* STORE IN PBLOCK FOR USE BY INTERRUPT ROUTINE */
+   IATLIM = SHL(L,8)\L;                 /* SAVE NEW LIMIT FOR WRITING OUT. ALSO STORE IN UPPER HALF */
+   ENABLE;
+
+   /* $PAGE - CHECK INITIAL DECAY REAL TIME EFFECTS */
+
+   WRITE(MAL)=(TIM.IATLIM+IIDLIM.LOC)+PTL*TIM.IATLIM.STR;    
+
+   K=READ(MDI);                  /* LIMIT   */
+   I=READ(MD)&255;               /* DIVIDER */   
+   J=SHR(READ(MDI),8);           /* ADDER   */
+   L=READ(MDI);                  /* TMC     */
+
+   IF DADJ<>0 THEN DO;                           /* ADJUST FOR DECAY ADJUST */
+     LOAD J; MUL 1000; J=RES; DIV DADJ; J=RES;   /* SCALE ADDER FOR DECAY ADJUST */
+     LOAD (-L); MUL 1000; L=RES; DIV DADJ; 
+     L=(-RES); IF RES=0 THEN L=(-1);
+   END;
+
+   WRITE(MAL)=TIM.HE.IDEC.LOOK;
+   IF READ(MD)<>0 THEN DO;
+      CALL NEW.SCALE.DIV;              /* SCALE DIVISOR FOR FASTIER DECAY */
+      L=NEW.SCALE.TMC(L);              /* ALSO TIME CONST */
+   END;
+   WRITE(MAL)=TIM.HE.SUS.LOOK;
+   IF READ(MD)<>0 THEN DO;
+      K=SCALE(K);                      /* SCALE LIMIT */
+      IF K>255 THEN K=255;             /* LIMIT TO HARDWARE MAX */
+   END;
+
+   IF (HADJ<>0) THEN DO;               /* SCALE FOR HARMONIC ADJUST */
+     LOAD K; MUL HADJ; K=RES; DIV 1000; K=RES; /* SCALE PEAK BY HARM ADJ FACTOR 1/8 TO 8 */
+     IF K>255 THEN K=255;              /* LIMIT TO HARDWARE MAX */
+     LOAD J; MUL HADJ; J=RES; DIV 1000; J=RES; /* SCALE INDEX ADDER AS WELL - BY SAME FACTOR AS PEAK CHANGED - THIS CHANGES ATTACK/DECAY RATE */
+     DO WHILE (J>255);           /* SCALE DOWN UNTIL OUT OF BITS */
+       I=256-SHR(256-I,1); 
+       IF I=256 THEN I=255;    
+       J=SHR(J+1,1); 
+       IF J<>0 THEN J=J-1;
+     END;
+   END;                          /* SCALE FOR HARMONIC ADJUST */
+
+   DISABLE;
+   IIDINT=I\SHL(J,8);            /* SAVE FOR USE BY INTERRUPT ROUTINE */
+   IIDLIM=K;                     /* SAVE LIMIT */
+   ITMC  =L;                     /* STORE TIME CONSTANT FOR EXPONENTIATION   */
+   ENABLE;
+
+END COMPUTE.INX;
+
+/* $PAGE - COMPUTE.FIN - FINAL DECAY COMPUTATION */
+
+COMPUTE.FIN: PROC(JUSTFM);
+   DCL (TB,TBP,PTL)    FIXED   EXTERNAL; 
+   DCL (I,J,K,L,M,N,P) FIXED   EXTERNAL;
+   DCL JUSTFM          FIXED;
+
+   IF JUSTFM=0 THEN DO;               /* COMPUTE BOTH IF DESIRED (FOR SPEED) */
+   
+      I=EFDINT; J=SHR(I,8); I=I&255; K=ETMC;  /* LOOK UP INFO FOR SPEED */
+
+      IF DADJ<>0 THEN DO;             /* CHECK FOR DECAY ADJUST */
+        LOAD J; MUL 1000; J=RES; DIV DADJ; J=RES;
+        LOAD (-K); MUL 1000; K=RES; DIV DADJ;
+        K=(-RES); IF RES=0 THEN K=(-1);     /* KEEP AT MAX */
+      END;
+
+      WRITE(MAM)=TBP;
+      WRITE(MAL)=TIM.VE.FDEC.LOOK;
+      IF READ(MD)<>0 THEN DO;
+         CALL NEW.SCALE.DIV;
+         K=NEW.SCALE.TMC(K);
+      END;
+
+      EFDINT=I\SHL(J,8);                    /* STORE FOR FINAL DECAY */
+      SFDINT=EFDINT;                        /* USE SAME FOR SPLICE CHANNEL IN CASE OF MESSY STOLEN CHANNEL SITUATION */
+      ETMC=K;                               /* SAVE TIME CONSTANT FOR EXPONENTIATION */
+   END;                                     /* OF COMPUTE ENV INFO AS WELL AS FM */
+
+   /* $PAGE - COMPUTE INDEX ENVELOPE FINAL DECAY */
+
+   IF DO.FM<>0 THEN DO;                  /* PREPARE FOR FM DECAY */
+
+      I=IFDINT; J=SHR(I,8); I=I&255; K=ITMC;  /* LOOK UP INFO FOR SPEED */
+
+      IF DADJ<>0 THEN DO;                   /* CORRECT FOR DECAY ADJUST */
+         LOAD J; MUL 1000; J=RES; DIV DADJ; J=RES;
+         LOAD (-K); MUL 1000; K=RES; DIV DADJ;
+         K=(-RES); IF K=0 THEN K=(-1);
+      END;
+
+      WRITE(MAM)=TBP;
+      WRITE(MAL)=TIM.HE.FDEC.LOOK;
+      IF READ(MD)<>0 THEN DO;
+         CALL NEW.SCALE.DIV;
+         K=NEW.SCALE.TMC(K);
+      END;
+
+      IF HADJ<>0 THEN DO;        /* ADJUST FINAL DECAY RATE FOR HARMONIC ADJUST */
+        LOAD J; MUL HADJ; J=RES; DIV 1000; J=RES; /* SCALE INDEX ADDER AS WELL - BY SAME FACTOR AS PEAK CHANGED - THIS CHANGES ATTACK/DECAY RATE */
+        DO WHILE (J>255);        /* SCALE DOWN UNTIL OUT OF BITS */
+          I=256-SHR(256-I,1); 
+          IF I=256 THEN I=255;    
+          J=SHR(J+1,1); 
+          IF J<>0 THEN J=J-1;
+        END;
+        IF J>255 THEN J=255;     /* LIMIT TO 255 */
+      END;
+
+      IFDINT=I\SHL(J,8);         /* STORE FOR USE BY INTERRUPT ROUTINE */
+      ITMC  =K;
+   END;                          /* OF ANY FM */
+END COMPUTE.FIN;
+
+/* $PAGE - COMPUTE INFO FOR DELAYS */
+
+/* PASSED - TIMBRE PARAMETER POINTER IN 'PTPTR' */
+/*          NOTE BLOCK       POINTER IN 'NPTR ' */
+/*          PARTIAL BLOCK    POINTER IN 'PPTR ' */
+
+/* RETURNS MAM POINTING TO TBP                  */
+
+/* NOTE: COMPUTE.DELAY MUST SET BOTH ETIMER     */
+/* AND ITIMER.  DO.FM HAS NOT BEEN SET UP YET   */
+
+COMPUTE.DELAY: PROC;
+   DCL (TB,TBP,PTL,TRK,THP)    FIXED   EXTERNAL; 
+   DCL (I,J,K,L,M,N,P) FIXED   EXTERNAL;
+
+   I=PTPTR+P.EDELAY;                /* CHECK FOR ENV DELAY */
+   WRITE(MAM)=PAR.PTR+SHR(I,8); WRITE(MAL)=I;
+   I=READ(MD);                      /* GET EDELAY (MS.)  */
+
+   J=PTPTR+P.IDELAY;                /* CHECK FOR INX DELAY */
+   WRITE(MAM)=PAR.PTR+SHR(J,8); WRITE(MAL)=J;
+   J=READ(MD);                      /* GET IDELAY (MS.) */
+
+   WRITE(MAM)=TBP;
+   WRITE(MAL)=TIM.VE.DEL.LOOK;
+   IF READ(MD)<>0 THEN DO;
+      I=SCALE(I);                   /* LET'S NOT WORRY ABOUT OVERFLOW HERE - WHO USES 30 SECOND DELAYS? */
+   END;
+
+   WRITE(MAL)=TIM.HE.DEL.LOOK;
+   IF READ(MD)<>0 THEN DO;
+      J=SCALE(J);
+   END;
+   
+   ETIMER=I;                        /* COMPUTE ABSOLUTE START TIMES */
+   ITIMER=J;
+
+END COMPUTE.DELAY;
+
+
+/* $PAGE - MOVE.LOOP.PTRS */
+
+
+/* CALLED DURING OVERALL LOOP PROCESSING.            */
+/* SHOULD RESET CURRENT PLAY POINTERS  TO LOOP START */
+
+MOVE.LOOP.PTRS:PROC PUBLIC SWAPABLE;
+   DCL (I,J) FIXED;
+
+   NEXT.EVENT.QUEUE=0;              /* START WITH EMPTY LIST */
+
+   DO I=NUM.KBD.TRACKS TO (MAX.TRACKS-1); /* LOOP EACH SEQUENCER TRACK */
+
+      WRITE(MAM)=TRK.HEAD;          /* GET PTR TO TRACK HEADER FOR THIS TRACK */
+      WRITE(MAL)=I;
+
+      IF READ(MD)<>0                /* TRACK EXISTS       */
+      THEN DO;                      /* LOOP ITS PLAY INFO */
+         J=READ(MD);                /* SAVE ABS PTR TO TRK HEAD */
+
+         WRITE(MAM)=J;
+         WRITE(MAL)=THD.WRD;
+
+         IF  (READ(MDI)<>0)         /* NEITHER THD.WRD */
+         AND (READ(MDI)<>0)         /* NOR     THD.SEC */
+         THEN DO;                   /* ARE UNDEFINED   */
+
+            CALL HANDLE.LOOP.JUMP(J,THD.LP.NMSB);
+
+            WRITE(MAM)=J;           /* RESTORE PTR TO TRK HEAD */
+            WRITE(MAL)=THD.ANY.FOR;
+           
+            IF READ(MD)<>0 THEN DO; /* CHECK FURTHER UNLESS NO NLS   */
+               CALL FORWARD.MERGE.INTO.EVENT.QUEUE(J);
+            END;
+
+         END;
+      END;
+
+   END;                             /* OF LOOP OVER SEQUENCER TRACKS */
+
+   IF (UPDATE.MIDI<>0) THEN DO;
+      CALL CHECK.ALL.MIDI.TRACKS;
+      UPDATE.MIDI=0;
+   END;
+
+	/* IF USING TRACK FOR CLICK, GET NEW BEAT # HERE */
+   IF CLICK.TRACK.MODE ige 4 THEN BEAT.NUMBER = LOOP.BEAT.NUMBER;
+
+   /* Create a system event when an overall loop is performed so that */
+   /* screen code can be updated:                                     */
+
+   NEW.ABLE.SEQ.INFO = NEW.ABLE.SEQ.INFO \ 4;
+
+   IF ABORT.SEQ.NOTES=0             /* IF NOT AN ENTRY FROM START.PRESET (OR OTHER ABORT SITUATION) */
+   THEN ABORT.SEQ.NOTES=2;          /* FORCE END TO CURRENT SEQUENCER NOTES NOW */
+
+   DO WHILE TIELIST<>0;             /* CLEAN OUT LIST HERE			*/
+      NPTR =TIELIST; TIELIST=NFPTR; /* SINCE WE WON'T IN 330-FINL	*/
+      NFPTR=NFREEP ; NFREEP =NPTR ; /* WORKS BETTER IF FIRST		*/
+   END;                             /* NOTE OF LOOP IS A TIED		*/
+   TIELAST=0;                       /* NOTE								*/
+
+	if (NEXT.EVENT.QUEUE<>0)
+	{
+		if tempo.map.ptr <> 0
+		{
+			dcl (msb, lsb) fixed;
+			call Map.Sequence.Time.To.Real.Time(loc(addr(NEXT.EVENT.MSB)), loc(addr(msb)));
+			next.seq.event = lsb - prescan;
+		}
+		
+		else
+			next.seq.event = NEXT.EVENT.LSB - prescan;
+	}
+	
+	else
+		next.seq.event = play.time.lsb + 5000;
+
+END MOVE.LOOP.PTRS;
+
+/* $SUBTITLE  ROUTINE TO DO FAST FORWARD AND REWIND IN NON-REAL TIME */
+
+HANDLE.SEQUENCER.MOVE: PROC SWAPABLE; /* DOES FAST FORWARD/REWIND */
+   DCL (W1,W2,W3,W4) FIXED;
+   DCL PTR           FIXED;
+   DCL NEWPTR        FIXED;
+   DCL (MSB,LSB)     FIXED;
+   DCL (TIME)   (1)  FIXED;
+   DCL (LAST.MSG)    FIXED STATIC;
+
+   /* NOTE: DON'T CALL THIS ROUTINE IF  */
+   /* TIME.BASE.MODE IS NON-ZERO. IT IS */
+   /* GUARANTEED TO COMPLETELY BLOW UP  */
+   /* IF YOU DO!!!!!                    */
+
+
+   /* FIRST SEE IF WE NEED TO SPEED UP */
+   /* OUR CURRENT MOVE SPEED BECAUSE   */
+   /* USER IS HOLDING REWIND OR FAST   */
+   /* FORWARD BUTTONS                  */
+
+   IF  ((HELD.REWIND.BUTTON\HELD.FF.BUTTON)<>0)
+   THEN DO;   /* INCREASE MOVE.SPEED IN CURRENT DIRECTION */
+      DO WHILE (SAMPLED.KBD.MILLISECONDS-LAST.FF.REWIND.PRESS)>=500;
+
+         LSB=LAST.FF.REWIND.PRESS&1; /* SAVE LSB */
+         LAST.FF.REWIND.PRESS=((LAST.FF.REWIND.PRESS+500)&(NOT 1))\LSB; /* PRESERVE STATE OF LSB */
+
+         IF  (LSB<>0)               /* HOLDING THE REWIND BUTTON */
+         AND (MOVE.SPEED>=0)        /* BUT STILL MOVING FORWARD  */
+         THEN DO;                   /* SLOW DOWN SOME MORE       */
+            IF MOVE.SPEED=0 THEN DO;
+               CALL START.MOVING.BACKWARDS;
+               CALL DISPLAY.SEQUENCER.STATUS;
+            END;
+            ELSE DO;
+               IF      MOVE.SPEED=+32000 THEN MOVE.SPEED=+8000;
+               ELSE IF MOVE.SPEED=+08000 THEN MOVE.SPEED=+2000;
+               ELSE IF MOVE.SPEED=+02000 THEN MOVE.SPEED=    0;
+            END;
+         END;
+
+         ELSE IF (LSB=0)            /* HOLDING THE FF BUTTON */
+         AND     (MOVE.SPEED<=0)    /* BUT STILL MOVING BACKWARD */
+         THEN DO;                   /* SLOW DOWN SOME MORE       */
+            IF MOVE.SPEED=0 THEN DO;
+               CALL START.MOVING.FORWARD;
+               CALL DISPLAY.SEQUENCER.STATUS;
+            END;
+            ELSE DO;
+               IF      MOVE.SPEED=-32000 THEN MOVE.SPEED=-8000;
+               ELSE IF MOVE.SPEED=-08000 THEN MOVE.SPEED=-2000;
+               ELSE IF MOVE.SPEED=-02000 THEN MOVE.SPEED=    0;
+            END;
+         END;
+
+         ELSE DO;                   /* WANT TO SPEED UP IN SAME DIRECTION */
+            IF ABS(MOVE.SPEED)=2000 
+            THEN MOVE.SPEED=SHL(MOVE.SPEED,2); /* 4*CURRENT MOVE.SPEED */
+            ELSE IF ABS(MOVE.SPEED)=8000
+            THEN MOVE.SPEED=SHL(MOVE.SPEED,2); /* 4*CURRENT MOVE.SPEED */
+         END;
+
+         CALL COMPUTE.VOLUME.LEVELS; /* MUTE VOLUME MORE AS SPEED INCREASES */
+
+      END;
+   END;
+
+   IF MOVE.SPEED=0 THEN RETURN;      /* DON'T MOVE ANYWHERE */
+
+   /* COMPUTE DISTANCE TO MOVE IN THIS TIME THROUGH */
+   /* USE PREVIOUS MAIN LOOP TIME AS A SCALE FACTOR */
+   /* SO WE CAN ACHIEVE A STEADY RATE OF FF/REWIND  */
+   /* FURTHER SCALE MOVE DISTANCE BY OUR CURRENT    */
+   /* SPEED FOR NICER OPERATION WHEN SPEED>1.000    */
+
+   LOAD SAMPLED.KBD.MILLISECONDS-PRIOR.KBD.MILLISECONDS; /* PRIOR MAIN LOOP TIME */
+   IF RES IGT 50 THEN LOAD 50;     /* LIMIT  TO 50 MILLISECONDS      */
+   MUL ABS(MOVE.SPEED); MWAIT;     /* COMPUTE ADVANCE AMOUNT IN MSEC */
+   DIV 1000;
+   IF SAMP.SPEED IGT 1000          /* SPEED GREATER THAN 1.000 */
+   THEN DO;                        /* MOVE EVEN FASTER         */
+      LOAD RES; MUL SAMP.SPEED;    /* SCALE BY SPEED FACTOR    */
+      MWAIT;    DIV 1000;
+   END;
+
+
+   /* NOW ADVANCE SEQUENCER TIME BASE */
+   /* IN FAST FORWARD OR REWIND MODE  */
+
+   IF MOVE.SPEED>0                 /* FAST FORWARDING - ADVANCE TARGET PLAY TIME */
+   THEN DO;
+
+      /* ADVANCE THE SEQUENCER TARGET TIME BASE */
+
+      LSB=PLAY.TIME.LSB+RES;         /* ADVANCE AHEAD OF  */
+      MSB=PLAY.TIME.MSB;
+      IF LSB ILT RES THEN MSB=MSB+1; /* CURRENT PLAY TIME */
+
+
+      /* CHECK NEW TARGET TIME WITH TIME */
+      /* OF ANY OVERALL LOOP             */
+
+      IF (OVERALL.LOOP<>0) THEN DO;             /* LOOP EXISTS    */
+
+         IF  (((MSB IGT GOBACK.PLAY.TIME.MSB))  /* AND WE ARE ABOUT */
+         OR   ((MSB  =  GOBACK.PLAY.TIME.MSB)   /* TO GO PAST END   */
+         AND   (LSB IGE GOBACK.PLAY.TIME.LSB))) /* OF IT            */
+         THEN DO;                               /* LOOP OUR PLAY VARS */
+            
+            PLAY.TIME.LSB=GOBACK.PLAY.TIME.LSB; /* FIRST SET PLAY TIME */
+            PLAY.TIME.MSB=GOBACK.PLAY.TIME.MSB; /* TO ASSUMED TARGET TIME */
+
+
+            CALL LOOP.TIME.BASE;                /* RESET TIME BASE INFO */
+
+
+            MSB=PLAY.TIME.MSB;
+            LSB=PLAY.TIME.LSB;
+
+				BROADCAST.MTC();							/* BROADCAST CUR POSITION OVER MIDI */
+			
+            RETURN;                             /* DONE FOR THIS TIME */
+
+         END;                                   /* OF ACTUAL LOOP  */
+      END;                                      /* OF LOOP EXISTS  */
+
+
+      /* NOW LOOK FOR A NOTE WHICH           */
+      /* CAN BE STARTED IN THE NEXT ADVANCE  */
+      /* PERIOD.  START IT IF POSSIBLE, THEN */
+      /* ADVANCE THE SEQUENCER TO OUR NEW    */
+      /* TARGET TIME.                        */
+
+      IF PTRS.LOOPED=LOOP.RESTART      /* PLAY TIME AND PTRS ARE CONSISTENT */
+      THEN DO;
+
+         PTR=NEXT.EVENT.QUEUE;         /* INIT TO HEAD OF NEXT EVENT LIST */
+
+         /* Get sequence time that corresponds to where we will be        */
+         /* advancing the sequence to:                                    */
+
+         call Map.Real.Time.To.Sequence.Time(loc(addr(msb)), time);
+
+         DO WHILE PTR<>0;              /* LOOK FOR A NOTE TO SOUND */
+
+            PTR=NAH.PTR+PTR;           /* CONVERT TO ABS PTR */
+            WRITE(MAM)=PTR;            /* POINT TO TRK HEAD  */
+            WRITE(MAL)=THD.NEVF;       /* GET PTR TO NEXT EVENT IN LIST */
+            NEWPTR=READ(MD);           /* SAVE IT FOR NEXT TIME THROUGH */
+
+            WRITE(MAL)=THD.ACTIVE;     /* MAKE SURE TRACK IS ACTIVE */
+            IF READ(MD)<>0 THEN DO;    /* TRACK IS ACTIVE           */
+
+               WRITE(MAL)=THD.CUE.TRACK;  /* DO NOT TRIGGER CUES    */
+               IF (READ(MD) = 0)          /* DURING FF/REWIND       */
+               THEN DO;
+
+                  WRITE(MAL)=THD.NMSB;    /* SEE WHEN EVENT SHOULD OCCUR */
+
+                  IF ((READ(MD) ILT TIME(0))) /* COMPARE TIME OF THIS */
+                  OR ((READ(MDI) =  TIME(0))  /* NOTE WITH OUR TARGET */
+                  AND (READ(MD) ILT TIME(1))) /* TIME                 */
+                  THEN DO;                /* THIS EVENT WILL OCCUR IN NEXT ADVANCE */
+
+
+                     WRITE(MAL)=THD.WRD;          /* LOOK UP THE NOTE RECORD ITSELF */
+                     WRITE("313")=READ(MDI);      /* READ THD.WRD POINTER           */
+                     WRITE(MAM)=NAH.PTR+READ(MD); /* READ THD.SEC POINTER AND SET UP MAM */
+                     WRITE(MAL)=READ("313");      /* SET UP MAL */
+
+                     W1=READ(MDI);        /* READ THE NOTE RECORD   */
+                     W2=READ(MDI);        /* INTO TEMPS (LESS WORK) */
+                     IF W1 THEN DO;       /* FOUR WORD RECORD       */
+                        W3=READ(MDI);
+                        W4=READ(MDI);
+                     END;
+                     ELSE DO;             /* TWO WORD RECORD        */
+                        W3=0;             /* MAKE OTHER TWO WORDS   */
+                        W4=VEL.NOTE;      /* MEANINGFUL             */
+                     END;
+
+                     IF  (W1>=0)                /* NOT AN ALTERNATE FORMAT RECORD */
+                     AND ((W3&SHL(B.UPD,8))=0)  /* NOT AN UPDATE RECORD           */
+                     AND ((W2&"77")<>REST.NOTE) /* NOT A REST RECORD              */
+                     THEN DO;                   /* TRY TO PLAY THE NOTE           */
+
+                        CALL PLAY.SEQ.NOTE(PTR,W1,W2,W3,W4); /* PLAY THE NOTE */
+                        NEWPTR=0;         /* WILL CAUSE EXIT FROM LOOP  */
+
+                     END;
+                  END;                 /* OF NOTE WILL OCCUR DURING THIS ADVANCE */
+                  ELSE DO;             /* REST OF NOTES IN LIST OCCUR BEYOND */
+                     NEWPTR=0;         /* WHERE WE WILL ADVANCE TO           */
+                  END;                 /* QUIT SEARCH FOR NOTE TO PLAY       */
+               END;                    /* END OF NOT A CUE TRACK    */
+            END;                       /* OF TRACK IS ACTIVE CHECK  */
+
+            PTR=NEWPTR;
+
+         END;                          /* OF LOOP TO FIND NOTE TO SOUND */
+      END;                             /* OF PTRS.LOOPED=LOOP.RESTART   */
+
+
+      /* NOW ADVANCE TIME BASE AND SCAN THROUGH SEQUENCE */
+
+      CALL ADVANCE.SEQUENCER(MSB,LSB);
+
+		IF ((REAL.MILLISECONDS - LAST.MSG)  IGE 100) 
+		{
+			BROADCAST.MTC();					/* BROADCAST CUR POSITION OVER MIDI */
+			LAST.MSG = REAL.MILLISECONDS;
+		}
+   END;
+
+   ELSE DO;                        /* REWINDING - BACK UP TARGET PLAY TIME */
+
+      /* BACK UP THE TARGET TIME BASE */
+
+      IF  (PLAY.TIME.MSB=0)        /* DON'T ALLOW REWIND  */
+      AND (RES IGT PLAY.TIME.LSB)  /* TO BEFORE TIME ZERO */
+      THEN LOAD PLAY.TIME.LSB;
+
+      IF ((PLAY.TIME.MSB ILT MOVE.LIMIT.MSB)) /* ALSO LIMIT    */
+      OR ((PLAY.TIME.MSB  =  MOVE.LIMIT.MSB)  /* TARGET TIME   */
+      AND (PLAY.TIME.LSB ILT MOVE.LIMIT.LSB)) /* TO MOVE.LIMIT */
+      THEN DO;
+         MSB=MOVE.LIMIT.MSB;
+         LSB=MOVE.LIMIT.LSB;
+      END;
+      ELSE DO;                             /* NORMAL BACK UP */
+         MSB=PLAY.TIME.MSB;
+         IF PLAY.TIME.LSB ILT RES THEN MSB=MSB-1;
+         LSB=PLAY.TIME.LSB-RES;
+      END;
+
+
+      /* LOOK FOR A NOTE WHICH               */
+      /* CAN BE STARTED IN THE NEXT ADVANCE  */
+      /* PERIOD.  START IT IF POSSIBLE, THEN */
+      /* ADVANCE THE SEQUENCER TO OUR NEW    */
+      /* TARGET TIME.                        */
+
+      PTR=NEXT.EVENT.QUEUE;         /* INIT TO HEAD OF NEXT EVENT LIST */
+
+      /* Get sequence time that corresponds to where we will be        */
+      /* advancing the sequence to:                                    */
+
+      call Map.Real.Time.To.Sequence.Time(loc(addr(msb)), time);
+
+      DO WHILE PTR<>0;              /* LOOK FOR A NOTE TO SOUND */
+
+         PTR=NAH.PTR+PTR;           /* CONVERT TO ABS PTR */
+         WRITE(MAM)=PTR;            /* POINT TO TRK HEAD  */
+         WRITE(MAL)=THD.NEVF;       /* GET PTR TO NEXT EVENT IN LIST */
+         NEWPTR=READ(MD);           /* SAVE IT FOR NEXT TIME THROUGH */
+
+         WRITE(MAL)=THD.ACTIVE;     /* MAKE SURE TRACK IS ACTIVE */
+
+         IF READ(MD)<>0 THEN DO;    /* TRACK IS ACTIVE           */
+
+            WRITE(MAL)=THD.CUE.TRACK;  /* DO NOT TRIGGER CUES    */
+            IF (READ(MD) = 0)          /* DURING FF/REWIND       */
+            THEN DO;
+
+            WRITE(MAL)=THD.LMSB;    /* SEE WHEN EVENT SHOULD OCCUR */
+
+            IF ((READ(MD) IGT TIME(0))) /* COMPARE TIME OF THIS */
+            OR ((READ(MDI) =  TIME(0))  /* NOTE WITH OUR TARGET */
+            AND (READ(MD) IGT TIME(1))) /* TIME                 */
+            THEN DO;                /* THIS EVENT WILL OCCUR IN NEXT ADVANCE */
+
+               WRITE(MAL)=THD.WRD;  /* GET AT PLAY PTRS          */
+
+               W2=READ(MDI);        /* SAVE THD.WRD AND THD.SEC  */
+               W1=READ(MD);         /* FOR THIS TRK              */
+
+               WRITE(MAM)=W1+NAH.PTR; /* POINT TO NLS            */
+               WRITE(MAL)=NLS.FP;   /* LOOK UP PTR TO FIRST NOTE */
+               W3=READ(MD);
+
+               DO WHILE W2=W3;      /* AT START OF NLS, GO BACK  */
+
+                  WRITE(MAL)=NLS.REV; /* AND SEE IF PRIOR NLS EXISTS */
+
+                  W1=READ(MD);           /* GET PTR TO PRIOR NLS      */
+                  WRITE(MAM)=NAH.PTR+W1; /* LOOK UP PTR TO FIRST NOTE */
+                  WRITE(MAL)=NLS.FP;     /* LOOK UP NEW PTR TO FIRST NOTE */
+                  W3=READ(MDI);          /* READ IT THEN STEP TO NLS.LP VAR */
+                  W2=READ(MD );          /* LSB=NLS.LP (PTR TO LAST NOTE IN NLS) */
+
+               END;
+
+               WRITE(MAL)=W2-1;     /* READ LAST WORD OF PRIOR NOTE */
+
+               IF (READ(MD)&"77")=VEL.NOTE /* HAVE A 4-WORD RECORD */
+               THEN WRITE(MAL)=W2-4;
+               ELSE WRITE(MAL)=W2-2;
+
+               W1=READ(MDI);        /* READ THE NOTE RECORD   */
+               W2=READ(MDI);        /* INTO TEMPS (LESS WORK) */
+               IF W1 THEN DO;       /* FOUR WORD RECORD       */
+                  W3=READ(MDI);
+                  W4=READ(MD );
+               END;
+               ELSE DO;             /* TWO WORD RECORD        */
+                  W3=0;             /* MAKE OTHER TWO WORDS   */
+                  W4=VEL.NOTE;      /* MEANINGFUL             */
+               END;
+
+               IF  (W1>=0)                /* NOT AN ALTERNATE FORMAT RECORD */
+               AND ((W3&SHL(B.UPD,8))=0)  /* NOT AN UPDATE RECORD           */
+               AND ((W2&"77")<>REST.NOTE) /* NOT A REST RECORD              */
+               THEN DO;                   /* TRY TO PLAY THE NOTE           */
+
+                  CALL PLAY.SEQ.NOTE(PTR,W1,W2,W3,W4); /* PLAY THE NOTE */
+                  NEWPTR=0;         /* WILL CAUSE EXIT FROM LOOP  */
+
+               END;
+            END;                    /* OF NOTE WILL OCCUR DURING THIS ADVANCE */
+            ELSE DO;                /* REST OF NOTES IN LIST OCCUR BEYOND */
+               NEWPTR=0;            /* WHERE WE WILL ADVANCE TO           */
+            END;                    /* QUIT SEARCH FOR NOTE TO PLAY       */
+
+         END;                       /* OF NOT A CUE TRACK        */
+         END;                       /* OF TRACK IS ACTIVE CHECK  */
+
+         PTR=NEWPTR;
+
+      END;                          /* OF LOOP TO FIND NOTE TO SOUND */
+
+
+      /* NOW SCAN THE SEQUENCE BACKWARDS */
+
+      CALL BACKUP.SEQUENCER(MSB,LSB);
+
+		IF ((REAL.MILLISECONDS - LAST.MSG)  IGE 100) 
+		{
+			BROADCAST.MTC();					/* BROADCAST CUR POSITION OVER MIDI */
+			LAST.MSG = REAL.MILLISECONDS;
+		}
+
+      DISABLE;
+      CALL MOVE.LOOP.QUES;         /* QUE UP NOTES WAITING FOR NEVER TO BE REACHED PLAY.TIME.LSB */
+      ENABLE;
+
+      /* SEE IF THE PREVIOUS BACKUP CAUSED US TO HIT 0.000 */
+      /* IF SO THEN WE SHOULD STOP REWINDING AND PREPARE   */
+      /* TO START PLAYING IN FORWARD DIRECTION AGAIN       */
+
+      IF  (MSB=MOVE.LIMIT.MSB)            /* WE BACKED UP TO OUR       */
+      AND (LSB=MOVE.LIMIT.LSB)            /* TARGET TIME FOR THE       */
+      THEN DO;                            /* REWIND OPERATION          */
+         CALL STOP.MOVE;                  /* DONE WITH REWIND          */
+         CALL DISPLAY.SEQUENCER.STATUS;   /* SHOW CURRENT SEQ STATE    */
+         NEW.BEAT.NUMBER = 1;             /* NOW AT BEAT ZERO          */
+
+         /* Create a system event when we stop fast forward/rewind     */
+         /* so that various screens accurately position themselves     */
+         /* when we stop.   This is needed because the Screen Boundary */
+         /* checks are only made when PLAY <> 0                        */
+
+         NEW.ABLE.SEQ.INFO = NEW.ABLE.SEQ.INFO \ 4; /* PERFORM UPDATE OF RECORDER SCREEN */
+
+         /* Force a complete update when re-winding to 0 to make       */
+         /* sure the screens re-show the sequence from the very top:   */
+
+         IF  (MOVE.LIMIT.MSB=0)
+         AND (MOVE.LIMIT.LSB=0)
+         THEN NEW.ABLE.SEQ.INFO = NEW.ABLE.SEQ.INFO \ 1; /* RESAMPLE TIME BASE ON REWIND TO 0 */
+      END;
+   END;
+
+END HANDLE.SEQUENCER.MOVE;

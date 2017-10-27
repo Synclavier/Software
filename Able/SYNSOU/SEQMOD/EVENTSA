@@ -1,0 +1,968 @@
+/* EVENTSA - routines for SEQMOD to process events
+
+   Modified:
+   06/05/92 - PF  - Optimize inserting notes
+   02/17/92 - pf  - Split eventsou into eventsa and eventsb
+   02/15/92 - pf  - Speed up block sequence downloading over protocol
+   09/26/91 - cj  - Send env info to DSP during event audition
+   08/24/91 - PF  - Added TIMED.INFO.NOTES in Trigger.Event.For.Audition
+   06/25/91 - PF  - support for editing RAM events like cues
+   05/29/91 - cj  - added arg to trigger.dtd.cue.by.id
+   02/12/91 - TSS - fixed bug in Expand.Sequencer.Event.Information
+   01/30/91 - MWH - Report which tracks have had new notes/timbres
+   12/13/90 - tss - got rid of auto output setup feature of 10/15/90
+   11/06/90 - pf - Speed up Place.Event.In.Sequence by using
+                   Append.Note.During.Play when possible
+   10/06/90 - pf - fixed Place.Event to work with sequencer notes/rtes
+   09/5/90 - tss - added feature for automatically setting up output
+                   on sequence tracks during place of cues/events
+   07/19/89 - cj - fixed track checking to allow placing of events on
+                   cue audition track.
+   06/22/89 - cj - speeded up get.next.sequencer.event routines to
+                   handle larger sequences better.
+   06/14/89 - cj - made Expand.Sequencer.Event.Information public for
+                   use by seq panel
+   05/03/89 - cj - convert from samples to msecs in expand.sequencer.
+                   event.information.  Also look up correct IN time
+                   for cues.  Used smaller array in 'Remove...'
+   04/28/89 - cj - added event audition routines
+*/
+
+/* Get Default Event fills the passed ARRAY with a default event of      */
+/* the type that is specified by FIXED.   This is used when creating     */
+/* a new event in the sequence (as opposed to editing an existing event).*/
+/* By starting with an ARRAY that is filled with a default event,  the   */
+/* volume will start out at 100.0,  the IN time will default to the      */
+/* start of the cue,  etc., etc., etc.                                   */
+
+Get.Default.Event: proc (event, type) public swapable;
+   dcl event    array;     /* array to fill with default settings */
+   dcl type     fixed;     /* event.type code for desired type    */
+
+   write("300") = addr(event(0));  /* begin by zeroing out        */
+   rpc event.record.size;          /* entire event array.         */
+   write("360") = 0;
+
+   event(event.track#)       = num.kbd.tracks;
+
+   event(event.type)         = type;
+
+   event(event.w3)           = rte.max;
+   event(event.w4)           = vel.note;
+
+   event(event.volume  )     = 1000;
+   event(event.svol    )     = 1000;
+   event(event.evol    )     = 1000;
+
+   if (type = event.type.note)
+   or (type = event.type.poly)
+   then do;
+      event(event.key#) = 12;   /* default to C1 as encoded above */
+   end;
+
+   else if type = event.type.rte then do;
+      event(event.w1) = 1;
+      event(event.w2) = shl(2,8);     /* default to ModW, value=0 */
+      event(event.w3) = rte.max\shl(b.upd,8);
+      event(event.w4) = vel.note;
+   end;
+
+   else if type = event.type.cue then do;
+      /* nothing else to add.  user must set name, times, etc.    */
+      event(event.fade.in ) = 1;
+      event(event.fade.out) = 1;
+   end;
+
+   else if type = event.type.ilp then do;
+      event(event.w1) = "104001"; /* ILS RECORD WITH 0 DELTA */
+      event(event.w2) = 0; 
+      event(event.w3) = 0; 
+      event(event.w4) = vel.note;
+      event(event.duration.lsb) = 1000;
+   end;
+
+   else if type = event.type.event then do;
+      event(event.fade.in ) = 1;
+      event(event.fade.out) = 1;
+   end;
+
+end Get.Default.Event;
+
+/* $page - routines for Get.Sequencer.Event.Information                  */
+
+/* Locate Sequencer Event is passed a Sequencer Pointer.   It tries to   */
+/* find that note (or the next one) in the sequence.   The global        */
+/* sequence variables are set up if the note (or the next one) is found. */
+
+/* NOTE: then passed Sequence Pointer is modified to point to the next   */
+/* note if it did not point to a note on entry.                          */
+
+/* Locate Sequencer Event is passed a code that allows it to find the    */
+/* exact note in question,  the note before the passed note,  or the     */
+/* note after the passed note.                                           */
+
+dcl Saved.#LMSB    fixed;    /* saved copy of sequencer variables to     */
+dcl Saved.#LLSB    fixed;    /* provide faster sequencer snapshot        */
+dcl Saved.#WRD     fixed;
+dcl Saved.#SEC     fixed;
+dcl Saved.#ANYF    fixed;
+dcl Saved.#ANYR    fixed;
+
+Locate.Sequencer.Event: proc (spointer, code) PUBLIC swapable;
+   dcl spointer array;  /* pass sequence pointer here                    */
+   dcl code     fixed;  /*  0 = find exact or next                       */
+                        /*  1 = find next note                           */
+                        /*  2 = find next from saved # variables         */
+                        /* -1 = find prior note                          */
+                        /* -2 = find prior from saved # variables        */
+   dcl msb      fixed;    
+   dcl lsb      fixed;
+   dcl cnt      fixed;
+   dcl count    fixed;
+
+   /* first do some error checking */
+
+   #trk = spointer(spointer.track#);     /* get track #             */
+
+   if  ((#trk ILT Num.Kbd.Tracks   )     /* allow access to 200     */
+   or   (#trk IGE First.Lod.Track  ))    /* syncl tracks plus cue   */
+   and ( #trk INE Cue.Audition.Track)    /* audition track and      */
+   and ( #trk INE Temp.Trk)              /* temp track used for optimized note inserts */
+   then return Bad.Event.Track#;
+
+   msb = spointer(spointer.time.msb  );  /* get time info handy     */
+   lsb = spointer(spointer.time.lsb  );
+   cnt = spointer(spointer.time.count);
+
+   /* look up global information for the track (if available)       */
+
+   if (code = (+2))                /* if using 'QUICK' routines,    */
+   or (code = (-2))                /* pick up pointers from         */
+   then do;                        /* where we left off             */
+      write(mam) = TRK.HEAD;
+      write(mal) = #trk;
+      #PTR       = read(md);       /* get pointer to track head     */
+      #NMSB      = msb;            /* this was time of note         */
+      #NLSB      = lsb;
+      #LMSB      = Saved.#LMSB;    /* time of prior ntoe            */
+      #LLSB      = Saved.#LLSB;
+      #WRD       = Saved.#WRD;     /* pointer to it                 */
+      #SEC       = Saved.#SEC;     
+      #ANYF      = Saved.#ANYF;
+      #ANYR      = Saved.#ANYR;
+   end;
+
+   else do;                        /* else start with current ptrs  */
+      if LOAD.SEQ.GLOBALS(#trk)=0  /* if no track head then must be */
+      then return Get.Info.Empty;  /* end of track no matter which  */
+   end;                            /* direction we are searching    */
+
+   if #wrd = 0                     /* if no notes on track then     */
+   then return Get.Info.Empty;     /* also must be end of track     */
+
+   /* Prepare here for search of prior note or next note.           */
+
+   if code < 0 then do;            /* if looking for prior note     */
+      if (msb = 0)                 /* then back up note pointer     */
+      &  (lsb = 0)                 /* by exactly one possible note. */
+      &  (cnt = 0)                 /* But cannot look before 0:0:0  */
+      then return Get.Info.EOT;
+      if cnt = 0 then do;          /* compute pointer to prior      */
+         if lsb = 0 then do;       /* note (either earlier count    */
+            msb = msb - 1;         /* at same time,  or max count   */
+         end;                      /* at earlier time).             */
+         lsb = lsb - 1;
+      end;
+      cnt = cnt - 1;
+   end;
+
+   else if code > 0 then do;       /* if looking for next note      */
+      if (msb = (-1))              /* then advance note pointer     */
+      &  (lsb = (-1))              /* to next possible note.        */
+      &  (cnt = (-1))
+      then return Get.Info.EOT;    /* end of track reached.         */
+      cnt = cnt + 1;
+      if cnt = 0 then do;
+         lsb = lsb + 1;
+         if lsb = 0 then do;
+            msb = msb + 1;
+         end;
+      end;
+   end;
+
+   /* find first note before desired time so we can count notes     */
+   /* in chord to find desired one.                                 */
+
+   do while  (  #anyr <>  0   )    /* while any notes are behind us */
+   and       (((#nmsb igt msb))    /* and we are at or after        */
+   or         ((#nmsb  =  msb)     /* desired point ...             */
+   and         (#nlsb ige lsb)));
+      call BACKUP.TO.PRIOR.NOTE;
+   end;
+   
+   /* now find first note that occurs at desired time               */
+
+   do while (  #anyf <>  0)        /* while we are pointing at a    */
+   and      (((#nmsb ilt msb))     /* note that is before our       */
+   or        ((#nmsb  =  msb)      /* desired time,  skip it        */
+   and        (#nlsb ilt lsb)));  
+      call advance.to.next.note;  
+   end;                           
+                                  
+   /* Now skip rest notes until we find the first actual note       */
+   /* at this time.  Then skip notes until we find the Nth note     */
+   /* requested.                                                    */
+
+   count = 0;                      /* initialize count to skip      */
+                                   /* over chords.                  */
+   next:;
+
+   if #anyf = 0                    /* if at end of track, check     */
+   then do;                        /* further.                      */
+      if code < 0                  /* if looking for prior note,    */
+      then goto locate.prior;      /* then back up a little.        */
+      else return Get.Info.EOT;    /* else reached end of track.    */
+   end;
+
+   call look.up.note.info;         /* get #W1 - #w4                 */
+
+   if ISA.REST.NOTE                /* if it is a rest note,  then   */
+   then do;                        /* skip it,  but do not count it */
+      call advance.to.next.note;   /* as an event.                  */
+      goto next;
+   end;
+
+   if  (#nmsb  =  msb)             /* if note is at desired time    */
+   and (#nlsb  =  lsb)             /* then see if we should skip it */
+   then do;
+      if (count ILT cnt)           /* if we want the Nth note, then */ 
+      then do;                     /* keep looking for it.          */
+         count = count + 1;
+         call advance.to.next.note;
+         goto next;
+      end;
+   end;
+
+   else count = 0;                 /* else if this note is at later */
+                                   /* time,  then it must be the    */
+                                   /* first note within it's chord. */
+
+   /* now return the correct status code.                           */
+
+   spointer(spointer.time.msb  ) = #nmsb;   /* tell user the time   */
+   spointer(spointer.time.lsb  ) = #nlsb;   /* of the note we found */
+   spointer(spointer.time.count) = count;   /* and its count        */
+
+   if  (#nmsb  =  msb)             /* if note is at desired time    */
+   and (#nlsb  =  lsb)             /* then tell user it is the one  */
+   then return Good.Event.Status;  /* we wanted.                    */
+
+   if  (code > 0)                  /* if we were looking for next   */
+   then return Good.Event.Status;  /* one anyways,  we got it.      */
+
+   /* else none existed at the passed time, so tell him we got      */
+   /* the next note,  unless we wanted the prior note.              */
+
+   if (code = 0)                   /* if looking for any note at or */
+   then return Get.Info.Next;      /* after this one,  we got it.   */
+
+   locate.prior:;
+
+   /* we get here only if we are looking for a prior note and so    */
+   /* far we have note found it.                                    */
+
+   /* we should back up by 1 note,  then continue backing up over   */
+   /* any notes that start at that exact time,  then position the   */
+   /* pointers back at the last real event at that time.            */
+
+   if #anyr = 0                    /* if looking for prior note     */
+   then return Get.Info.EOT;       /* and there is none behind us,  */
+                                   /* then we have reached e o t    */
+   call BACKUP.TO.PRIOR.NOTE;      /* back up one note.             */
+
+   call look.up.note.info;         /* get #W1 - #w4                 */
+
+   if ISA.REST.NOTE                /* if it is a rest note,  then   */
+   then goto locate.prior;         /* keep looking.                 */
+
+   /* now back up over all notes at this time,  so we can count     */
+   /* what note of the chord the last one at this time is.          */
+
+   msb   = #nmsb;                  /* this is time of last event    */
+   lsb   = #nlsb;                  /* before the passed time.       */
+   cnt   = 0;                      /* count events goint backwards  */
+   count = 0;                      /* count each note as well.      */
+
+   do while  (#anyr <> 0  )        /* while any notes are behind us */
+   and       (#lmsb =  msb)        /* at this same time,  back up   */
+   and       (#llsb =  lsb);       /* over them.                    */
+      call BACKUP.TO.PRIOR.NOTE;
+      call look.up.note.info;      /* get #W1 - #w4                 */
+      if not(ISA.REST.NOTE)        /* count actual events           */
+      then cnt = cnt + 1;
+      count = count + 1;           /* count total note records      */
+   end;
+
+   /* now position pointers at desired note:                        */
+
+   do while count <> 0;
+      call advance.to.next.note;
+      count = count - 1;
+   end;
+
+   call look.up.note.info;         /* get #W1 - #w4                 */
+
+   spointer(spointer.time.msb  ) = #nmsb;   /* tell user the time   */
+   spointer(spointer.time.lsb  ) = #nlsb;   /* of the note we found */
+   spointer(spointer.time.count) = cnt;     /* and its count        */
+
+   return Good.Event.Status;     /* we found the prior note.        */
+
+end Locate.Sequencer.Event;
+
+/* Expand.Sequencer.Event.Information is used to expand information */
+/* in the global # variables,  into an Event Record.                */
+
+dcl expand.color.information fixed public;
+
+Expand.Sequencer.Event.Information: proc (event, code) PUBLIC swapable;
+   dcl event  array;   /* pass pointer into sequence in an event record. */
+   dcl code   fixed;   /* 0 = skip caption.   1 = get caption.           */
+   dcl sr     fixed;
+
+   dcl rlen        fixed;
+   dcl nlen        fixed;
+   dcl clen        fixed;
+   dcl rate        fixed;
+
+	dcl Zero.Zero	data external;	//	from :SYNMODS:SMGRDCL
+
+   count.4.tracks: proc(bits);
+		dcl bits fixed;
+		dcl i    fixed;
+		
+		i = 0;
+		
+		if (bits & 1) != 0 i=i+1;
+		if (bits & 2) != 0 i=i+1;
+		if (bits & 4) != 0 i=i+1;
+		if (bits & 8) != 0 i=i+1;
+		
+		return (i);
+		
+   end count.4.tracks;
+	
+	compute.color.info: proc(event, stuff);
+		dcl (event) array;
+		dcl (stuff) array;
+
+		dcl tbits       fixed;
+		dcl num_tracks  fixed;
+		dcl drive_bits  fixed;
+		dcl which 		 fixed;
+
+		// Set which tracks in upper 8 bits of output field
+		
+		tbits      = stuff(CUE.TRKS);
+		num_tracks = 0;
+		drive_bits = 0;
+		which      = 1;
+
+		// Count # of tracks to identify poly vs mono cues
+		if ((tbits & 0x000F) != 0) num_tracks = num_tracks + count.4.tracks(    tbits    );
+		if ((tbits & 0x00F0) != 0) num_tracks = num_tracks + count.4.tracks(shr(tbits, 4));
+		if ((tbits & 0x0F00) != 0) num_tracks = num_tracks + count.4.tracks(shr(tbits, 8));
+		if ((tbits & 0xF000) != 0) num_tracks = num_tracks + count.4.tracks(shr(tbits,12));
+		
+		// Compute what drives the event is on
+		if (dtd.tks.per.drive == 1)
+			event(Event.Output) = event(Event.Output) | shl(tbits, 8);
+
+		else if (dtd.tks.per.drive == 2)
+		{
+			while (tbits != 0)
+			{
+				if ((tbits & 3) != 0) drive_bits = drive_bits | which;
+			
+				which = shl(which, 1);
+				tbits = shr(tbits, 2);
+			}
+		}
+		
+		else
+		{
+			while (tbits != 0)
+			{
+				if ((tbits & 0xF) != 0) drive_bits = drive_bits | which;
+			
+				which = shl(which, 1);
+				tbits = shr(tbits, 4);
+			}
+		}
+		
+		if (num_tracks > 1)
+			event(Event.Output) = event(Event.Output) | 128;
+		
+		event(Event.Output) = event(Event.Output) | shl(drive_bits, 8);
+
+	end compute.color.info;
+
+   
+	/* now look up all the useful information about this note.			*/
+   /* get basic note information that is available quickly:				*/
+
+   call Expand.Event.Note(event, code);
+  
+   /* look up duration if cue is available (for simple cue triggers */
+   /* only.  Complete events already have durations with them).     */
+
+   if event(event.type) = event.type.cue   /* if was a cue, then look */
+   then do;                                /* up generic info here    */
+
+      sr = run.syn; run.syn = 0;  /* clear run.syn to keep # variables */
+                                  /* and sequence intact.              */
+
+      /* use Fetch.Entire.DTD.Cue to get info in samples:              */
+
+      if FETCH.ENTIRE.DTD.CUE (event(event.cue.id), Scsi.ptr) <> 0
+      then do;
+
+         write(mam) = scsi.ptr;
+         call COPY.IN(addr(misc.buf(0)), 256);
+         call SUB32 (loc(addr(misc.buf(CUE.S.MSB))),      /* get equivalent */
+                     loc(addr(misc.buf(EVENT.IN.S#.MSB))),/* event in time  */
+                     loc(addr(event(event.in.msb))));
+         call SUB32 (loc(addr(misc.buf(CUE.E.MSB))),      /* and out time   */
+                     loc(addr(misc.buf(EVENT.IN.S#.MSB))),
+                     loc(addr(event(event.out.msb))));
+         call SUB32 (loc(addr(misc.buf(CUE.OFF.MSB))),
+                     loc(addr(misc.buf(EVENT.IN.S#.MSB))),
+                     loc(addr(event(event.mark.msb))));
+         call SUB32 (loc(addr(misc.buf(CUE.E.MSB))),
+                     loc(addr(misc.buf(CUE.S.MSB))),
+                     loc(addr(event(event.duration.msb))));
+         call DTD.Sample.#.To.Msecs(loc(addr(event(event.duration.msb))), 
+                                    CF#Dur,
+                                    Samp.Speed,
+                                    misc.buf(CUE.SRATE), Zero.Zero, 
+                                    loc(addr(event(event.duration.msb))));
+         event(event.fade.in ) = misc.buf(CUE.FIN );
+         event(event.fade.out) = misc.buf(CUE.FOUT);
+         event(event.svol    ) = 1000;
+         event(event.evol    ) = 1000;
+		 
+		 	if (expand.color.information != 0)
+			 	compute.color.info(event, misc.buf);
+			
+         if  (code <> 0)      /* if looking for caption too */
+         then do;             /* then must fetch it         */
+            write(mam) = Scsi.Ptr;
+            write(mal) = CUE.RLEN;
+            rlen       = read(md);
+            write(mal) = CUE.NAME;
+            nlen       = shr(read(md)+3,1);   /* # of wrds in cue name */
+            if rlen igt CUE.NAME+nlen
+            then do;
+               write(mal) = CUE.NAME+nlen;
+               clen       = read(md);         /* caption len, bytes    */
+               if clen IGT event.cap.max.bytes
+               then clen = event.cap.max.bytes;
+               write(mal) = CUE.NAME+nlen;
+               call COPY.IN(addr(event(event.caption)),shr(clen+3,1));
+               event(event.caption) = clen;
+            end;
+         end;
+      end;
+
+      run.syn = sr;
+
+   end;
+
+   /* map event duration to sequencer time here                  */
+
+   else if event(event.type) = event.type.event
+   then do;
+
+      call DTD.Sample.#.To.Msecs (loc(addr(event(event.duration.msb))), 
+                                  CF#Dur,
+                                  Samp.Speed,
+                                  AEE.Current.Project.Rate, Zero.Zero, loc(addr(event(event.duration.msb))));
+											 
+		if (expand.color.information != 0)
+		{
+			sr = run.syn; run.syn = 0;  /* clear run.syn to keep # variables */
+												 /* and sequence intact.              */
+	
+			/* use Fetch.Entire.DTD.Cue to get info in samples:              */
+	
+			if FETCH.ENTIRE.DTD.CUE (event(event.cue.id), Scsi.ptr) <> 0
+			then do;
+	
+				write(mam) = scsi.ptr;
+
+				call COPY.IN(addr(misc.buf(0)), CUE.TRKS+1);
+				
+		 		compute.color.info(event, misc.buf);	
+			end;
+	
+			run.syn = sr;
+		}
+   end;
+
+   /* Else if a music track,  look up sound file info if needed: */
+
+   else if (event(event.type) = event.type.note)
+   or      (event(event.type) = event.type.poly)
+   then do;
+
+      call Get.SF.Name(#trk, event(event.key#), 
+                       loc(addr(event(event.cue.name))));
+
+      if (event(event.type) = event.type.note)
+      then do;
+         call COPY32(loc(addr(event(event.duration.msb))),
+                     loc(addr(event(event.out.msb))));
+      end;
+
+      call COMPUTE.SOUND.FILE.OFFSET.TIME(#trk,
+                                          event(event.key#),
+                                          loc(addr(event(event.mark.msb))), 0);
+
+      if (code <> 0) then do;             /* get caption, too */
+         call LOOK.UP.SOUND.FILE.CAPTION(#trk,
+                                         event(event.key#), 
+                                         loc(addr(event(event.caption))), 0);
+      end;
+   end;
+
+   return Good.Event.Status;
+
+end Expand.Sequencer.Event.Information;
+
+/* $page - Get Sequencer Event Information */
+
+/* Get Sequencer Event Information is the main routine for looking up    */
+/* event information from the sequence.   It is passed a pointer into    */
+/* the sequence,  and returns all the information about that particular  */
+/* event.   If the Sequencer Pointer does not point to an existing event */
+/* then information about the NEXT event in the sequence is returned,    */
+/* along with a status code that indicates that.                         */
+
+/* Thus Get Sequencer Event Information can be used to get information   */
+/* about a particular event,  or it can be used to scan (forward)        */
+/* through the sequence.  See SEQLITS for a listing of the status codes  */
+/* returned by Get Sequencer Event Information.                          */
+
+Get.Sequencer.Event.Information: proc (event) public swapable;
+   dcl event  array;   /* pass pointer into sequence in an event record. */
+   dcl status fixed;
+   dcl i      fixed;
+
+   /* find passed note,  or a later one.   save which.                   */
+
+   status = Locate.Sequencer.Event(event,0);
+
+   if  (status <> Good.Event.Status)   /* if we did not find this note   */
+   and (status <> Get.Info.Next    )   /* or the next one,  then quit    */
+   then return status;                 /* while we are ahead             */
+
+   i = Expand.Sequencer.Event.Information(event,1);
+
+   if i <> Good.Event.Status           /* if some system error           */
+   then return i;                      /* then tell user about it        */
+
+   Saved.#LMSB = #LMSB;                /* save info for quick            */
+   Saved.#LLSB = #LLSB;                /* lookup of prior or             */
+   Saved.#WRD  = #WRD;                 /* next note.                     */
+   Saved.#SEC  = #SEC;     
+   Saved.#ANYF = #ANYF;
+   Saved.#ANYR = #ANYR;
+
+   return status;                      /* else got this or next note     */
+
+end Get.Sequencer.Event.Information;
+
+Get.Other.Sequencer.Event.Information: proc (event, code) swapable;
+   dcl event  array;   /* pass pointer into sequence in an event record. */
+   dcl code   fixed;   /* -2, -1, 0, 1, 2 for Locate.Sequencer.Event     */
+   dcl status fixed;
+   dcl i      fixed;
+
+   status = Locate.Sequencer.Event(event,code);  /* find the next note   */
+
+   if  (status <> Good.Event.Status)   /* if we did not find that note   */
+   then return status;                 /* then quit here                 */
+
+   i = Expand.Sequencer.Event.Information(event,1);
+
+   if i <> Good.Event.Status           /* if some system error           */
+   then return i;                      /* then tell user about it        */
+
+   Saved.#LMSB = #LMSB;                /* save info for quick            */
+   Saved.#LLSB = #LLSB;                /* lookup of prior or             */
+   Saved.#WRD  = #WRD;                 /* next note.                     */
+   Saved.#SEC  = #SEC;     
+   Saved.#ANYF = #ANYF;
+   Saved.#ANYR = #ANYR;
+
+   return status;                      /* else got this or next note     */
+
+end Get.Other.Sequencer.Event.Information;
+
+Get.Next.Sequencer.Event.Information: proc (event) public swapable;
+   dcl event  array;   /* pass pointer into sequence in an event record. */
+
+   return Get.Other.Sequencer.Event.Information(event, 1); /* next       */
+end Get.Next.Sequencer.Event.Information;
+
+Get.Prior.Sequencer.Event.Information: proc (event) public swapable;
+   dcl event  array;   /* pass pointer into sequence in an event record. */
+
+   return Get.Other.Sequencer.Event.Information(event,-1); /* prior      */
+end Get.Prior.Sequencer.Event.Information;
+
+Quickly.Get.Next.Sequencer.Event.Information: proc (event) public swapable;
+   dcl event  array;   /* pass pointer into sequence in an event record. */
+
+   return Get.Other.Sequencer.Event.Information(event, 2); /* next       */
+end Quickly.Get.Next.Sequencer.Event.Information;
+
+Quickly.Get.Prior.Sequencer.Event.Information: proc (event) public swapable;
+   dcl event  array;   /* pass pointer into sequence in an event record. */
+
+   return Get.Other.Sequencer.Event.Information(event,-2); /* prior      */
+end Quickly.Get.Prior.Sequencer.Event.Information;
+
+/*************************************************************************/
+
+/* used to remove an event (of any type) from the sequence.              */
+
+Remove.Sequencer.Event: proc (spointer) public swapable;
+   dcl spointer  array;   /* poss pointer into sequence                  */
+   dcl event(event.caption-1) fixed;
+   dcl status fixed;
+
+   call blockmove(spointer, event, spointer.record.size); /* copy to temp */
+
+   status = Locate.Sequencer.Event(event,0);     /* find the event        */
+
+   if (status = Get.Info.Next )          /* if we found a later event     */
+   or (status = Get.Info.EOT  )          /* or hit the end of track       */
+   or (status = Get.Info.Empty)          /* or track was empty            */
+   then return Event.Missing;            /* then must be missing          */
+
+   if (status <> Good.Event.Status)      /* if other error,  then tell    */
+   then return status;                   /* user about it.                */
+
+   status = Expand.Sequencer.Event.Information(event,0);
+
+   if status <> Good.Event.Status        /* if some system error          */
+   then return status;                   /* then tell user about it       */
+
+   /* delete the event from the sequencer */
+
+   if event(event.type) = event.type.ilp
+   then call REMOVE.ILP.FROM.TRACK(event(event.track#));
+   else call REMOVE.NOTE.RECORD;
+
+   /* note: user must call garbage collect routine */
+
+   return Good.Event.Status;
+end Remove.Sequencer.Event;
+
+/*************************************************************************/
+
+/* Garbage Collect Event List is used to garbage collect an entire       */
+/* sequencer track.   It is a good idea to call this routine after lots  */
+/* of editing has been done on a track.   It goes through the entire     */
+/* track and removes any unnecassary 'rest notes' that may be left       */
+/* over after certain edit operations.                                   */
+
+/* See possible status codes in SEQLITS.                                 */
+
+/* subroutine to clean out event storage area:                           */
+
+Garbage.Collect.Event.Area: proc (track#) public swapable;
+   dcl track#        fixed;
+   dcl (i,j,k,l,m,n) fixed;
+   dcl (ptl)         fixed;
+   dcl (pbase)       fixed;
+   dcl (copybase)    fixed;
+
+   if  ((track# ILT Num.Kbd.Tracks   )     /* allow access to 200     */
+   or   (track# IGE First.Lod.Track  ))    /* syncl tracks plus cue   */
+   and ( track# INE Cue.Audition.Track)    /* audition track          */
+   then return Bad.Event.Track#;
+
+   /* use xmem buffer to store pointer to temporarily map key # to    */
+   /* pointer to frame in question.                                   */
+
+   write(mam) = extbuf.ptr;          /* zero out extbuf.  we use      */
+   do i = 0 to 3;                    /* extbug to hold a backpointer  */
+      rpc 256;                       /* to go from a key # to a       */
+      write(mdi) = 0;                /* cue or event frame.           */
+   end;
+
+   WRITE(MAM)=TRK.HEAD;                    /* SEE IF TRACK HEAD    */
+   WRITE(MAL)=TRACK#;                      /* EXISTS               */
+
+   /* return immediately if track has no timbre:                   */
+
+   IF READ(MD)=0 THEN RETURN Good.Event.Status; 
+
+   IF TRK.HEAD.LOOKUP(TRACK#,THD.CUE.TRACK) = 0 /* if not a cue    */
+   THEN RETURN Good.Event.Status;               /* track, then ok  */
+
+   I = TRK.HEAD.LOOKUP(TRACK#,THD.CTIMB);  /* GET CUR TIMB #       */
+   
+   IF I = 0 THEN RETURN Good.Event.Status; /* easy if no timbre!   */
+
+   IF I = TRK.HEAD.LOOKUP(0,THD.CTIMB)     /* if keyboard is triggering */
+   THEN RETURN Good.Event.Status;          /* events,  keep them!       */
+
+   /* go through the timbre.   Mark all event storage as being     */
+   /* unused.  Construct a back pointer to go from a key # back    */
+   /* to the timbre frame and store that in extbuf.                */
+
+   DO PTL = 0 TO NUM.PARTIALS-1;
+
+      J=TIM.HEAD.LOOKUP(I,TIM.PARTIAL.POINTERS+PTL); /* GET POINTER TO PARTIAL */
+
+      IF  (P.LOOKUP(J)<>SUP)           /* IF NON EMPTY,  CHECK FRAMES     */
+      THEN DO;
+
+         J=J+NUM.PARAMS;               /* GET POINTER TO POSSIBLE FRAME 1 */
+
+         DO WHILE (P.LOOKUP(J) = MOR); /* SEARCH MORE FRAMES         */
+
+            WRITE("313")=READ(MDI);    /* SKIP MOR                   */
+            L=READ(MDI);               /* GET RECORD TYPE            */
+            M=READ(MDI);               /* GET AND SAVE CLEN          */
+            N=READ(MD ) & 255;         /* GET KEY # (NO INCREMENT)   */
+
+            IF (L = CU.TYPE)           /* SET THE UNUSED BIT IN      */
+            OR (L = EV.TYPE)           /* FRAME.                     */
+            THEN WRITE(MD) = N \ "100000";
+
+            WRITE(MAM) = EXTBUF.PTR + PTL;
+            WRITE(MAL) = N;            /* SAVE POINTER TO FRAME IN   */
+            WRITE(MD ) = J;            /* EXTBUF.                    */
+
+            J=J+M;                  /* ADVANCE POINTER TO NEXT FRAME */
+
+         END;
+      END;
+   END;
+
+   /* now go through any notelists that use this timbre to see which */
+   /* cues and events are still triggered.   Mark such cues and      */
+   /* events as being used.                                          */
+
+   DO J = NUM.KBD.TRACKS TO MAX.TRACKS - 1;   /* LOOK AT ALL TRACKS  */
+
+      write(mam) = TRK.HEAD;       /* get abs ptrs to desired track  */
+      write(mal) = J;
+
+      if read(md) <> 0 then do;    /* if track head exists.          */
+
+         #trk = j;
+         #ptr = read(md);          /* point to track header for this track */
+
+         /* look through this track if it uses the timbre that      */
+         /* we are garbage collecting.                              */
+
+         IF I = TRK.HEAD.LOOKUP(J,THD.CTIMB)  /* SEE IF IT TRIGGERS */
+         THEN DO;                             /* EVENTS FROM LIST   */
+
+            #NMSB = 0;         /* init variables for scan. But      */
+            #NLSB = 0;         /* note time may be wrong!           */
+            #LMSB = 0;
+            #LLSB = 0;
+
+            write(mam) = #ptr; /* point to track head               */
+            #SEC = read(md);   /* point to first nls (if any)       */
+
+            if #SEC <> 0 then do;    /* only look further if nls is there */
+
+               write(mam)=NAH.PTR+#SEC;
+               write(mal)=NLS.FP;
+               #WRD = read(md);      /* point to actual first note  */
+               #ANYF = 1;            /* assume note will be there   */
+               #ANYR = 0;            /* but none behind us now.     */
+
+               write(mal) = #wrd;    /* see if it as eos            */
+               if read(md) = NLS.EOS /* if so, get next real thing  */
+               then call ADVANCE.TO.NEXT.NOTE;
+
+               /* else pointers are all set up,  but note #NMSB,    */
+               /* #NLSB are wrong because we don't have the first   */
+               /* delta time in #NLSB                               */
+
+               do while #ANYF <> 0;  /* check for note.             */
+                  call look.up.note.info;  /* get #w1 - #w4         */
+
+                  if (isa.rest.note) /* skip over rest notes,       */
+                  or (isa.rte.note ) /* rtes                        */
+                  or (isa.ilp.note ) /* and ilps                    */
+                  then do; end;
+
+                  /* else for notes that really trigger a cue or    */
+                  /* an event,  mark that cue name/event frame      */
+                  /* as being used.                                 */
+
+                  else do;
+                     k = (#w2&"77") \ shr(#w1&"074000",6); /* get key */
+                     write(mam) = extbuf.ptr + shr(k,8);
+                     write(mal) = k & 255;
+                     if read(md) <> 0 then do;
+                        call p.store(read(md) + cu.key, k & 255);
+                     end;
+                  end;
+
+                  call advance.to.next.note;
+               end;
+            end;
+         end;
+      end;
+   end;
+
+   /* Now go through the timbre and preserve only those event frames */
+   /* that are actually referenced by the track(s).                  */
+
+   /* Algorithm is modled exactly after 'compact.timbres'            */
+
+   copybase = tim.head.lookup(i, tim.partial.pointers+0); /* get dest ptr */
+
+   DO PTL = 0 TO NUM.PARTIALS-1;      /* compact all 4 partials */
+
+      J=TIM.HEAD.LOOKUP(I,TIM.PARTIAL.POINTERS+PTL); /* GET POINTER TO PARTIAL */
+      K=TIM.HEAD.LOOKUP(I,TIM.KBDTAB.PTR      +PTL); /* GET POINTER TO KBDTAB  */
+
+      /* go through kbdtab for this partial.   Preserve cue id's that */
+      /* may be stored in there.  But zero out any pointers           */
+      /* so we can reconstruct them below.   Will minimize the        */
+      /* chance of bad pointers lying around.                         */
+
+      IF K <> 0 THEN DO;               /* clean up possible old pointers */
+         WRITE(MAM) = TIM.PTR + K - 1; /* but leave possible cue id's    */
+         do l = 0 to 255;              /* untouched.                     */
+            write(mal) = l;
+            if read(md) < 0 then write(md) = 0; /* zap old frame ptrs    */
+         end;
+      end;
+
+      /* now look through the entire partial.   Copy over any frames  */
+      /* that are still needed,  plus the pinfo areas,  plus the      */
+      /* tinfo and misc.params area when doing the last partial.      */
+
+      IF  (P.LOOKUP(J) = SUP)          /* if this is a suppressed ptl */
+      then do;                         /* then copy down with ease.   */
+         call p.store(copybase, sup);  /* copy single SUP word        */
+         copybase = copybase + 1;      /* one word for this partial   */
+         j        = j        + 1;      /* update j for tinfo/misc     */
+      end;
+
+      else do;
+
+         PBASE = copybase;   /* save where partial will end up so we  */
+                             /* can save the kbdtab pointer           */
+
+         call copy.ext.mem(par.ptr,j,par.ptr,copybase,num.params);
+         copybase = copybase + num.params;   /* copy down basic ptl   */
+         J        = J        + NUM.PARAMS;   /* parameters.           */
+
+         DO WHILE (P.LOOKUP(J) = MOR); /* check each frame in partial */
+
+            WRITE("313")=READ(MDI);    /* SKIP MOR                   */
+            L=READ(MDI);               /* GET RECORD TYPE            */
+            M=READ(MDI);               /* GET AND SAVE CLEN          */
+            N=READ(MD ) & 255;         /* GET KEY # (NO INCREMENT)   */
+
+            if  ((l = cu.type)         /* if this is a cue or an     */
+            or   (l = ev.type))        /* event frame that is not    */
+            and (read(md) < 0)         /* used by sequence,  then    */
+            then do;                   /* create blank space         */
+
+               call p.store(copybase, MOR);  /* create an empty      */
+               write(mdi) = cu.type;         /* cue frame that holds */
+               write(mdi) = cu.name + 1;     /* the key number so    */
+               write(mdi) = n;               /* that we have a list  */
+               write(mdi) = 0;               /* of which key numbers */
+                                             /* are unused.          */
+               copybase = copybase + cu.name + 1;
+               j        = j        + m;      /* skip over frame      */
+            end;
+
+            else do;                   /* else save it.              */
+               call copy.ext.mem(par.ptr,j,par.ptr,copybase,m);
+               if  (l=ev.type)         /* if this is an event        */
+               and (k<>0     )         /* and we have a kbdtab       */
+               then do;                /* update pointer             */
+                  WRITE(MAM) = TIM.PTR + K - 1;
+                  write(mal) = n;
+                  write(md ) = - (copybase - pbase);
+               end;
+               copybase = copybase + m;
+               j        = j        + m;
+            end;
+         end;
+
+         /* copy down pinfo/tinfo area if one exists */
+
+         if p.lookup(j) = pinfo then do;
+            call copy.ext.mem(par.ptr,j,par.ptr,copybase,pinfo.len);
+            copybase = copybase + pinfo.len;
+            j        = j        + pinfo.len;
+         end;
+      end;
+
+      if ptl = (num.partials-1)    /* check for tinfo/misc area at end */
+      then do;                     /* of last partial.                 */
+         if p.lookup(j) = tinfo then do;
+            call copy.ext.mem(par.ptr,j,par.ptr,copybase,tinfo.len);
+            copybase = copybase + tinfo.len;
+            j        = j        + tinfo.len;
+         end;
+
+         /* copy misc area down */
+
+         call copy.ext.mem(par.ptr,j,par.ptr,copybase,num.misc.params);
+         copybase = copybase + num.misc.params;
+         j        = j        + num.misc.params;
+      end;
+   end;
+
+   /* now copy rest of timbres back down */
+
+   CALL COPY.EXT.MEM(PAR.PTR, J,
+                     PAR.PTR, COPYBASE,
+                     PAR.TOP - J); 
+
+
+   CALL COMPACT.TIMBRES(PAR.PTR,PAR.NUMT); /* SET UP NEW POINTERS */
+
+   CALL TIM.HEAD.LOOKUP(I,TIM.CSEM);
+   INITIALCSEM=INITIALCSEM+1;
+   WRITE(MD)=INITIALCSEM;
+
+   /* Create a system event that will possibly update the timbre names  */
+   /* on a track:                                                       */
+
+	interp_seq_dirtyness(1);
+ 
+   NEW.SEQ.INFO = NEW.SEQ.INFO \ 2;
+   write(MAM) = D115D.Note.Change.Tracks;
+   write(MAL) = Track#;             /* Remember track # on new.seq.info */
+   write(MD) = "177777";            /*   "new notes" OR "new timbre"    */
+
+   CALL COMPUTE.USAGE.KEY#(I);   /* GET NEW USAGE KEY #                 */
+   CALL COMPUTE.ENV.PARAMS(I);   /* COMPUTE ENVELOPE PARAMETERS         */
+   CALL COMPUTE.LOGS      (I);   /* COMPUTE LOGS OF RATIO, CHORUS, ETC. */
+   CALL COMPUTE.RBITS     (I);   /* RECOMPUTE REAL TIME EFFECTS BITS - ALWAYS CALL AFTER COMPUTE.ENV.PARAMS SO TOPTIONS IS SET UP */
+   CALL COMPUTE.MISC.INFO;       /* COMPUTE RIBBON & PRESSURE FILTERS   */
+   CALL CHECK.MEMORY.FOR.RECORD; /* MAKE SURE WE STILL HAVE ENOUGH ROOM */
+
+   return Good.Event.Status;
+
+end Garbage.Collect.Event.Area;
+

@@ -1,0 +1,722 @@
+/* 570-DIR  $TITLE  Routines to Run Timbre Directory Screen */
+
+/*
+   12/12/88 - cj - added features for poly memory (96 voice ram control)
+   3/30/87 - TSS - FIXED BUG CALLING UP TIMBRES FROM THE FLOPPY
+   3/23/87 - tss - added error message for no timbre bank in current device
+   1/19/87 - ts - added ability to refresh just one bank of timbre directory
+   5/22/86 - MPB - Input Command Structure Added
+   5/19/86 - eg - made procedures and some variables public.
+   5/15/86 - "official" creation of release-M modules
+*/
+
+dcl (     bank.pos,     entry.pos) fixed ; /* bank and entry for TIMBRE DIRECTORY */
+dcl (last.bank.pos,last.entry.pos) fixed ; /* last bank and entry for TIMBRE DIRECTORY */
+dcl tname.len                      fixed ; /* number of chars in last name printed - not counting trailing spaces */
+dcl TIMBRE.BANK.IN.DIR.DEVICE      boolean;      /* true if found, else false */
+dcl dialog.code                    fixed;
+
+PRINT.TNAME:  proc(item) swapable; /* gets one name from xmem and prints it */
+   dcl (item,wd,i) fixed;
+   tname.len=0;
+   do i=0 to 7; /* loop over the 8 words of tname info/entry */
+      write(mam)=trd.ptr+shr(item,5); /* set xmem ptrs */
+      write(mal)=shl(item,3)+i;
+      wd=read(md); /* get next two chars */
+      if (wd&"377")<>0 then do;
+         tname.len=tname.len+1; call pc(wd&"377");
+      end;
+      else return;
+      if shr(wd,8)<>0 then do;
+         tname.len=tname.len+1; call pc(shr(wd,8));
+      end;
+      else return;
+   end;
+end PRINT.TNAME;
+
+POS.TIMBRE.DIRECTORY.CURSOR:  proc swapable; /* put cursor at correct location */
+   if vt100<>0 then do;
+      /* redraw last pos without reverse video */
+      call cpos(6+(last.bank.pos/4)*10+last.entry.pos,8+(last.bank.pos&3)*18);
+      call PRINT.TNAME(shl(last.bank.pos,3)+last.entry.pos);
+   end;
+
+   /* compute correct positioning coords */
+   call cpos(6+(bank.pos/4)*10+entry.pos,8+(bank.pos&3)*18);
+
+   if (vt100<>0) then do; /* reprint name in REVERSE VIDEO to highlight it */
+      call reverse.video(1); /* turn on reverse video */
+      call PRINT.TNAME(shl(bank.pos,3)+entry.pos); /* draw the name */
+      call reverse.video(0); /* turn off reverse video */
+      call cpos(6+(bank.pos/4)*10+entry.pos,8+tname.len+(bank.pos&3)*18);
+   end;
+end POS.TIMBRE.DIRECTORY.CURSOR;
+
+FIND.TIMBRE.BANK.IN.DIR.DEVICE:  proc swapable;
+	if  (not Locate('.NEWDATA',dir.device))
+   and (not Locate('.BNKDATA',dir.device)) then do;
+      Timbre.Bank.In.Dir.Device=false;
+   end;
+   else Timbre.Bank.In.Dir.Device=true;
+
+   if not TIMBRE.BANK.IN.DIR.DEVICE      /* no timbre bank in current device */
+   then call No.Timbre.Bank.Warning;     /* Put up warning message about no timbre bank on current device */
+
+end FIND.TIMBRE.BANK.IN.DIR.DEVICE;
+
+PRINT.TIMBRE.DIRECTORY.DEVICE.FIELD: proc swapable;
+   dcl w0_name(50)   fixed;
+
+	// See if should use mac path for W0
+	write(mam) = TBANKNAME.PTR;
+   if (read(mdi) != 0 && read(mdi) < 100)
+      import(TBANKNAME.PTR,1,w0_name,51);                            // Grab mac path name
+
+   call cpos(1,13);
+   call erase.to.end.of.line();
+
+   call LIST.AVAILABLE.DEVICES(w0_name);
+
+end PRINT.TIMBRE.DIRECTORY.DEVICE.FIELD;
+
+/* $SUBTITLE  Draw the Timbre Directory Screen Frame */
+
+PRINT.TIMBRE.DIRECTORY:  proc swapable; /* displays timbre directory */
+   dcl (i,j,k)      fixed;
+   dcl bank.string  data (' BANK ');
+   dcl entry.string data (' ENTRY  ');
+
+   call clear.term;
+   call PRINT.SCREEN.FRAME(3,'TIMBRE DIRECTORY');
+
+   // Remove box to provide cyrillic room
+   call cpos(1,0); call erase.to.end.of.line();
+   call cpos(2,0); call erase.to.end.of.line();
+   call cpos(3,0); call erase.to.end.of.line();
+
+   call cpos(4,0); call DRAW.HOR(80);
+
+   call cpos(1,2);
+   call ps('1. Devices:');
+   call cpos(2,2);
+   call ps('2. Select devices with 1,2,3,....   Poly Memory: [Avail]   [Free]    [Bin]');
+   call cpos(3,2);
+   call ps('                                                 [Shuffle] [Collect] [Erase]');
+   
+   dialog.code = 0;    /* start with no dialog line up */
+
+   if d44_present then call plot.mouse.hole(mouse.hole.lowerx,mouse.hole.lowery);
+
+   call COMPUTE.AVAILABLE.DEVICES(t#timbre); /* figure out which devices can be accessed */
+
+	call PRINT.TIMBRE.DIRECTORY.DEVICE.FIELD;
+	
+   call CHANGE.OUR.DEV(1,dir.device); 	 /* change from current cat to new device */
+   call FIND.TIMBRE.BANK.IN.DIR.DEVICE; /* see if we have a timbre bank on current device */
+
+   do i=0 to 1;
+		/* draw bank heading labels */
+      call cpos(5+i*10,6);
+      do j=0 to 3;	/* loop over the 4 banks in each row */
+         call ps('  '); call DRAW.HOR(4);
+         call ps(bank.string); call pc(asc.1+i*4+j); call pc(sp);
+         call DRAW.HOR(4);
+      end;
+		/* draw entry labels */
+      do j=0 to 7;	/* loop over the 8 entries in each bank */
+         call cpos(6+i*10+j,1);
+         call pc(byte(entry.string,j)); call pc(sp); call pc(sp);
+         call pc(asc.1+j);              call pc(dot);
+      end;
+   end;
+   call tty_wait;
+end PRINT.TIMBRE.DIRECTORY;
+
+/* $SUBTITLE  Routine to Recall a Timbre */
+
+RECALL.TIMBRE:  proc(bank,entry) swapable; /* routine to call up a timbre */
+   dcl (bank,entry,i) fixed;               /* BANK and ENTRY of desired timbre */
+
+   our.bank=bank; our.timbre=entry;
+   call DISPLAY.BANK.BUTTONS;          /* set up lights */
+   call DISPLAY.TIMBRE.RECALL.BUTTONS;
+   call PANEL.RESCAN;
+
+   if not TIMBRE.BANK.IN.DIR.DEVICE      /* no timbre bank in current device */
+   then call No.Timbre.Bank.Warning;     /* Put up warning message about no timbre bank on current device */
+
+   i=FIND.NEW.BANK(our.bank);    /* look for a timbre file */
+
+   if i<>0 then do;          /* bank was found */
+      call READ.IN.BANK;     /* load bank from disk */
+
+      if keyboard.timbre.control<>0 then do;             /* if kbd is controling a track */
+         call reset.keyboard.timbre.control(1);         /* copy timbre out and release control */
+      end;
+      call display.smt.skt.buttons;                      /* update button displays */
+
+      if split.keyboard then call ERASE.TIMBRE(1);
+      split.keyboard=0;      /* get rid of any split */
+
+      IF (RECD)&(RECD.TRK<>0) THEN DO;
+         CALL STOP.RECORD; /* STOP RECORDING ON TIMBRE RECALL */
+         CALL DISPLAY.SEQUENCER.STATUS;
+      END;
+
+      CALL SETUP.FLOPPY.CACHE;             /* SET UP TO USE FLOPPY IN CASE WE NEED TO */
+      CALL MOUNT.OPTICAL.VOLUME;           /* ALSO CACHE OPT DISK IF NEEDED */
+
+      IF (BNK.LEN<>0) THEN DO;             /* BANK IN MEMORY (EITHER FROM BEFORE, OR JUST READ IN) - TRY TO MOVE TIMBRE FROM IN-CORE BANK */
+         SUPPRESS.ERR=1;                   /* SUPPRESS ERR11 PRINTOUT */
+         CALL MOVE.TIMBRE.TO(BNK.PTR,FIND.TIMBRE(BNK.PTR,OUR.TIMBRE),0);
+         SUPPRESS.ERR=0;                   /* ALLOW THEM NOW */
+         IF LENGTH.OVERFLOW=0 THEN GOTO DONE; /* OK MOVE IF NO ERROR */
+      END;
+
+      IF PAT.FORMAT=0 THEN DO;             /* CAN'T RECALL .PATDATA TIMBRE HERE */
+         CALL PRIME.IO.BUFFER(INDEX.DEV(OUR.TIMBRE),INDEX.SEC(OUR.TIMBRE),INDEX.PTR(OUR.TIMBRE),
+                           0,OUR.BANK.STR,
+                           EXTBUF.PTR,EXTBUF.LEN,0);
+         /* POINTERS WERE COMPUTED IN ABOVE CALL TO READ.IN.BANK */
+
+         CALL MOVE.TIMBRE.TO(-1,0,0);      /* MOVE FROM DISK TO DESTINATION */
+      END;
+
+      DONE:
+
+      FLOPPY.CACHE.VALID=0;
+      CALL DISABLE_CACHE(FLOPPY.CACHE.NUM);
+      OPTICAL.DISK.READY=0;
+
+   end;
+end RECALL.TIMBRE;
+
+/* $SUBTITLE  Routine to Take Snap Shot of Timbre Directory */
+
+dcl #refresh.all.banks   lit '255';    /* bits passed to TNAME.SNAP.SHOT & FILL.TIMBRE.DIRECTORY */
+
+dcl no.name      data ('(Unnamed Timbre)'); /* timbre has no name */
+dcl empty.timbre data ('(Empty Timbre)');   /* empty timbre entry */
+dcl no.bank      data ('                '); /* bank does not exist */
+
+TNAME.SNAP.SHOT:  proc (snap.shot.bits) swapable; /* take snap shot of current timbre names */
+   dcl snap.shot.bits      fixed; /* set bits 0-7 to take snap shot of those banks */
+   dcl (bnk,ent,ptr,i,j,k) fixed;
+
+   i=FIND.NEW.BANK(0);           /* look for a timbre file */
+
+   if (i<>0) and (pat.format=0) then do; /* was able to find a timbre file */
+      do bnk=0 to 7;             /* loop over 8 banks */
+
+         if (snap.shot.bits&bits(bnk))<>0 then do;
+
+            if bnk ILT bank.max then do; /* bank exists */
+               i = bank.dev;
+               j = bank.sec + bnk*our.bank.str;
+               if j ilt bank.sec then i = i + 1;
+               call PRIME.IO.BUFFER(i,j,0,
+                                    0,our.bank.str,
+                                    nah.ptr+nah.len,bnk.ptr-(nah.ptr+nah.len),0);
+            end;
+
+            do ent=0 to 7; /* and over the 8 timbres in a bank */
+               ptr=64*bnk+8*ent;
+               if bnk ILT bank.max then do; /* bank actually exists */
+
+                  j=0;
+                  do i=0 to (num.partials-1); /* skip over partial */
+                     j=j\skip.disk.par;
+                  end;
+
+                  if g.next=tinfo then do; /* timbre has name */
+                     call skip.wrds(ti.name-1);
+                     do i=0 to 7;
+                         j=g.next;
+                         write(mam)=trd.ptr+shr(ptr+i,8); /* set xmem ptrs */
+                         write(mal)=ptr+i;
+                         write(md) =j;
+                     end;
+                     call skip.wrds(tinfo.len-ti.name-8); /* skip over rest of TINFO block */
+
+                     j=16; i=7;
+                     do while i>=0; /* count number of trailing spaces in name */
+                        write(mam)=trd.ptr+shr(ptr+i,8); /* set xmem ptrs */
+                        write(mal)=ptr+i;
+                        k=read(md);
+
+                        if shr(k,8)=sp then do; /* char is a space */
+                           j=j-1; k=k&"377";    /* replace space with zero */
+                        end;
+                        else i=(-1);
+
+                        if (i>=0) and (k&"377")=sp then do; /* char is a space */
+                           j=j-1; k=k&"177400"; /* replace space with zero */
+                        end;
+                        else i=(-1);
+
+                        write(md)=k; /* rewrite modified chars */
+                        i=i-1;       /* decrement to next lower word */
+                     end;
+                     if j=0 then do; /* timbre has only spaces in name */
+                        write(mam)=trd.ptr+shr(ptr,8); /* set xmem ptrs */
+                        write(mal)=ptr;
+                        do i=1 to 8; write(mdi)=no.name(i); end;
+                     end;
+                  end;
+                  else do; /* no name - copy default message - assumes name is 16 chars */
+                     buf.r.ptr=buf.r.ptr-1; /* restore ptr for next G.NEXT call */
+                     write(mam)=trd.ptr+shr(ptr,8); /* set xmem ptrs */
+                     write(mal)=ptr;
+
+                     if j=0 then do;          /* have a null or non-sounding timbre */
+                        do i=1 to 7; write(mdi)=empty.timbre(i); end;
+                        write(mdi)=0;
+                     end;
+                     else do;                  /* no name on a real timbre */
+                        do i=1 to 8; write(mdi)=no.name(i); end;
+                     end;
+                  end;
+                  call skip.wrds(num.misc.params); /* skip over misc info */
+               end;
+               else do; /* not a valid bank number */
+                  write(mam)=trd.ptr+shr(ptr,8); /* set xmem ptrs */
+                  write(mal)=ptr;
+                  do i=1 to 8; write(mdi)=no.bank(i); end; /* no bank - copy default message - assumed to be 16 chars */
+               end;
+            end; /* of loop over 8 entries in a bank */
+         end;    /* of take new snap shot of this bank */
+      end;       /* of loop over all 8 banks */
+   end;
+   else do; /* no timbre file -- fill whole area with "(No Timbre Bank)" message */
+      write(mam)=trd.ptr; /* init to start of snap shot area */
+      do bnk=0 to 7;
+         do ent=0 to 7;
+            do i=1 to 8; write(mdi)=no.bank(i); end; /* no bank - copy default message - assumed to be 16 chars */
+         end;
+      end;
+   end;
+end TNAME.SNAP.SHOT;
+
+/* $SUBTITLE  Routine to Fill in the Timbre Directory */
+
+FILL.TIMBRE.DIRECTORY:  proc (refresh.bits) swapable;
+   dcl refresh.bits      fixed; /* set bits 0-7 to refresh just those banks */
+   dcl (bnk,ent,i)       fixed;
+
+   call tty_wait;
+
+   call TNAME.SNAP.SHOT(refresh.bits);  /* take snap shot of timbre banks */
+
+   do bnk=0 to 7;     /* loop over 8 banks */
+      if (refresh.bits&bits(bnk))<>0 then do; /* want to refresh this bank */
+         do ent=0 to 7;  /* loop over 8 entries/bank */
+            call cpos(6+(bnk/4)*10+ent,8+(bnk&3)*18); /* compute correct positioning coords */
+            call PRINT.TNAME(shl(bnk,3)+ent);
+            do i=tname.len+1 to 16; call pc(sp); end;
+         end;
+      end;
+   end;
+end FILL.TIMBRE.DIRECTORY;
+
+REFRESH.TIMBRE.DIRECTORY: proc swapable;
+
+	if ((next.event.info & 256) != 0)
+		PRINT.TIMBRE.DIRECTORY.DEVICE.FIELD();
+
+   call FILL.TIMBRE.DIRECTORY(next.event.info); /* refresh those banks   */
+
+   call POS.TIMBRE.DIRECTORY.CURSOR;  /* and reposition cursor */
+
+   if not TIMBRE.BANK.IN.DIR.DEVICE      /* no timbre bank in current device */
+   then call No.Timbre.Bank.Warning;     /* Put up warning message about no timbre bank on current device */
+
+end REFRESH.TIMBRE.DIRECTORY;
+
+/* $SUBTITLE  Routine to Handle Chars on Timbre Directory */
+
+TIMBRE.DIRECTORY.INPUT:  proc(in.cmd,in.arg) swapable; /* process input for the TIMBRE DIRECTORY SCREEN */
+   dcl (in.cmd,in.arg) fixed;
+
+   do case in.cmd;
+
+      do;   /* Character Input */
+         if (in.arg>=lower.a) and (in.arg<=lower.z) then in.arg=in.arg-"40"; /* convert to uppercase */
+
+         if in.arg=asc.p then do;          /* print hardcopy of screen */
+            if D40_PRESENT<>0               /* if device available */
+            then call SCREEN_DUMP;             
+            else call no.printer;
+            call POS.TIMBRE.DIRECTORY.CURSOR;
+            return;
+         end;
+
+         if in.arg<>esc then call remove.err;
+
+         if in.arg=esc         /* <ESC>:  return to startup menu without changes */
+         then do;
+            call CHANGE.OUR.DEV(dir.device,1); /* change from cur device back to current cat */
+            call RETURN.TO.PREV.STATE;
+         end;
+         else if in.arg=cret then do; /* <RETURN>:  call up timbre at current cursor pos */
+            call RECALL.TIMBRE(bank.pos,entry.pos);
+         end;
+         else if in.arg=home then do;      /* go to home position */
+            last.bank.pos =bank.pos;   /* save this last position */
+            last.entry.pos=entry.pos;
+            bank.pos=0; entry.pos=0;
+            call POS.TIMBRE.DIRECTORY.CURSOR; /* position cursor last spot used */
+         end;
+         else if in.arg=l.arr then do;        /* move left */
+            last.bank.pos =bank.pos;      /* save this last position */
+            last.entry.pos=entry.pos;
+            if (bank.pos&3)<>0
+            then bank.pos=bank.pos-1;
+            else do;
+               if entry.pos<>0 then do;
+                  bank.pos=bank.pos+3; entry.pos=entry.pos-1;
+               end;
+               else if bank.pos=4 then do;
+                  entry.pos=7; bank.pos=3;
+               end;
+            end;
+            call POS.TIMBRE.DIRECTORY.CURSOR; /* position cursor last spot used */
+         end;
+         else if in.arg=r.arr then do;        /* move right */
+            last.bank.pos =bank.pos;      /* save this last position */
+            last.entry.pos=entry.pos;
+            if ((bank.pos&3) ILT 3)
+            then bank.pos=bank.pos+1;
+            else do;
+               if entry.pos<>7 then do;
+                  bank.pos=bank.pos-3; entry.pos=entry.pos+1;
+               end;
+               else if bank.pos=3 then do;
+                  entry.pos=0; bank.pos=4;
+               end;
+            end;
+            call POS.TIMBRE.DIRECTORY.CURSOR; /* position cursor last spot used */
+         end;
+
+         else if in.arg=u.arr then do;        /* move up on screen */
+            last.bank.pos =bank.pos;      /* save this last position */
+            last.entry.pos=entry.pos;
+
+            if entry.pos<>0 then entry.pos=entry.pos-1;
+            else if (bank.pos IGT 3) then do;
+               bank.pos=bank.pos-4; entry.pos=7;
+            end;
+
+            call POS.TIMBRE.DIRECTORY.CURSOR; /* position cursor last spot used */
+         end;
+         else if in.arg=d.arr then do;        /* move down on screen */
+            last.bank.pos =bank.pos;      /* save this last position */
+            last.entry.pos=entry.pos;
+
+            if entry.pos<>7 then entry.pos=entry.pos+1;
+            else if (bank.pos ILT 4) then do;
+               bank.pos=bank.pos+4; entry.pos=0;
+            end;
+
+            call POS.TIMBRE.DIRECTORY.CURSOR; /* position cursor last spot used */
+         end;
+         else if (in.arg>=asc.1) and (in.arg<=(asc.0+devices)) then do; /* select new device */
+            call CHANGE.OUR.DEV(dir.device,device.list(in.arg-asc.1));
+            dir.device=device.list(in.arg-asc.1);
+            call Find.Timbre.Bank.In.Dir.Device; /* make sure we have a .NEWDATA on selected device */
+				call PRINT.TIMBRE.DIRECTORY.DEVICE.FIELD;
+            call FILL.TIMBRE.DIRECTORY(#refresh.all.banks); /* refresh those banks   */
+            call POS.TIMBRE.DIRECTORY.CURSOR;  /* and reposition cursor */
+         end;
+         else call POS.TIMBRE.DIRECTORY.CURSOR;
+      end;
+
+      do;        /* absolute select */
+         last.entry.pos = entry.pos;
+         last.bank.pos  = bank.pos;
+         entry.pos = shr(in.arg,8);
+         bank.pos = (in.arg & 255);
+         call POS.TIMBRE.DIRECTORY.CURSOR;
+         call RECALL.TIMBRE(bank.pos,entry.pos);
+      end;
+      ;  /* scroll down */
+      ;  /* scroll up */
+      do;/* return to previous state */
+         call RETURN.TO.PREV.STATE;
+      end;
+   end;
+end TIMBRE.DIRECTORY.INPUT;
+
+/* $Subtitle Timbre Directory Dialog Lines   */
+
+Fill.Avail.Dialog: proc swapable;
+   dcl Str (40)     fixed; /* a string buffer */
+   dcl (i,j,k)      fixed;
+   dcl Tmp ( 1)     fixed;
+
+   /* TOP LINE OF DIALOG: */
+   /* 0         1         2         3         4         5         6         7          */
+   /* 01234567890123456789012345678901234567890123456789012345678901234567890123456789 */
+   /*                           Available Memory (Mb): 32.1, 32.2,  3.1 */
+
+   call Copy.String('Available Memory (Mb):',Str);
+
+   do k = 0 to 2;                     /* append megabytes in each bin */
+
+      call set.cur.bin(k);            /* point data structures at this bin */
+      call COPY32(psfree, tmp);       /* get in handy temp                 */
+      load  tmp(lw#lsb);              /* get sectors of poly mem avail     */
+      uload tmp(lw#msb);
+
+      div 2048;                       /* compute megabytes avail in this   */
+      i=res; j=rem;                   /* bin to .1 megabyte accurately     */
+      load j; mul 10;
+      j=res;
+      div 2048;
+      j=res;                          /* round up by .05 mb                */
+      if rem ige 1024 then j = j + 1;
+
+      i = i*10 + j;                   /* get tenths of Mb                  */
+
+      call CONV.FIXED.TO.STR(i,1,5,cf#unsigned\cf#right\cf#spfill\cf#appendmask,str);
+
+      if k < 2 then call APPEND.TO.STR(str,',');
+   end;
+
+   call cpos(4,26);
+   call ps(str);
+
+end Fill.Avail.Dialog;
+
+Fill.Free.Dialog: proc swapable;
+   dcl Str (40)     fixed; /* a string buffer */
+   dcl (i,j,k)      fixed;
+   dcl Tmp ( 1)     fixed;
+
+   /* TOP LINE OF DIALOG: */
+   /* 0         1         2         3         4         5         6         7          */
+   /* 01234567890123456789012345678901234567890123456789012345678901234567890123456789 */
+   /*                           Free Memory      (Mb): 10.0, 10.0, 10.0 */
+
+   call Copy.String('Free Memory      (Mb):',Str);
+
+   do k = 0 to 2;                     /* append megabytes in each bin */
+
+      call set.cur.bin(k);            /* point data structures at this bin */
+      call SUB32(psmax, pslast, tmp); /* get in handy temp                 */
+      load  tmp(lw#lsb);              /* get sectors of poly mem that are  */
+      uload tmp(lw#msb);              /* unused at this time.              */
+
+      div 2048;                       /* compute megabytes unused in this  */
+      i=res; j=rem;                   /* bin to .1 megabyte accurately     */
+      load j; mul 10;
+      j=res;
+      div 2048;
+      j=res;                          /* round up by .05 mb                */
+      if rem ige 1024 then j = j + 1;
+
+      i = i*10 + j;                   /* get tenths of Mb                  */
+
+      call CONV.FIXED.TO.STR(i,1,5,cf#unsigned\cf#right\cf#spfill\cf#appendmask,str);
+
+      if k < 2 then call APPEND.TO.STR(str,',');
+   end;
+
+   call cpos(4,26);
+   call ps(str);
+
+end Fill.Free.Dialog;
+
+Fill.Bin.Dialog: proc swapable;
+   dcl (i,j,k)      fixed;
+
+   /* TOP LINE OF DIALOG: */
+   /* 0         1         2         3         4         5         6         7          */
+   /* 01234567890123456789012345678901234567890123456789012345678901234567890123456789 */
+   /*                           Preferred Bin:  [Bin 1]  [Bin 2]  [Bin 3]   [Cancel] | */
+
+   call CPOS(4,26);
+
+   if POLYNUMS = 0
+   then call ps('No poly bins available');
+   else if POLYNUMS = 1
+   then call ps('Only Bin 1 is available');
+   else do;
+      call ps('Preferred Bin:');
+      do i = 0 to POLYNUMS-1;
+         call CPOS(4,42+i*9);
+         if TRK.HEAD.LOOKUP(0, THD.POLY) = i
+         then call REVERSE.VIDEO(1);
+         call ps('[Bin ');
+         call pc(asc.1+i);
+         call ps(']');
+         call REVERSE.VIDEO(0);
+      end;
+   end;
+end Fill.Bin.Dialog;
+
+Draw.Dialog.Line: proc (code) swapable;
+   dcl code   fixed;       /* 0 = none    */
+   dcl i      fixed;       /* 1 = avail   */
+                           /* 2 = free    */
+                           /* 3 = bin     */
+                           /* 4 = shuffle */
+                           /* 5 = collect */
+                           /* 6 = erase   */
+
+   Dialog.Code = code;     /* save for input routine */
+
+   if code = 0 then do;    /* for erase              */
+      call PRINT.SCREEN.FRAME(3,'TIMBRE DIRECTORY');
+      return;
+   end;
+
+   call cpos(4,0);                    /* erase bottom line of frame */
+   do i = 0 to 79; call pc(SP); end;
+   call cpos(4,26);
+
+   do case (code-1);         /* and draw the line      */
+
+      do;                    /* sho memory avail       */
+         call Fill.Avail.Dialog;
+      end;
+
+      do;                    /* sho memory free        */
+         call Fill.Free.Dialog;
+      end;
+
+      do;                    /* select bin             */
+         call Fill.Bin.Dialog;
+      end;
+
+      do;                    /* shuffle poly memory    */
+         /* TOP LINE OF DIALOG: */
+         /* 0         1         2         3         4         5         6         7          */
+         /* 01234567890123456789012345678901234567890123456789012345678901234567890123456789 */
+         /*                           Shuffle Poly Memory:          [Shuffle]     [Cancel] | */
+         call ps('Shuffle Poly Memory:          [Shuffle]');
+      end;
+
+      do;                    /* collect poly memory    */
+         call ps('Collect Poly Memory:          [Collect]');
+      end;
+
+      do;                    /* erase poly memory      */
+         call ps('Erase Poly Memory:            [Erase]');
+      end;
+
+   end;
+
+   call cpos(4,70); call ps('[Cancel]');
+
+end Draw.Dialog.Line;
+
+/* $Subtitle Timbre Directory Mouse Mapping  */
+
+TIMBRE.DIRECTORY.MOUSE.POS:  proc(x,y) swapable;   /* Timbre Directory Mouse postioner*/
+   dcl (x,y) fixed;  /* mouse position in row/col coordinates */
+   dcl (i,j) fixed;
+   dcl (bank,entry) fixed;
+
+   if mouse.hole(x,y) then do;
+      call timbre.directory.input(in.rtps,0);
+      return;
+   end;
+
+   y = convert.mouse.y(y);
+   x = convert.mouse.x(x);
+   
+   /* Check for poly memory functions */
+
+   if ((y = 2) or (y = 3)) and (x >= 51) and (x <= 78) then do;
+      if dialog.code <> 0             /* remove original dialog line */
+      then call Draw.Dialog.Line(0);
+      call Draw.Dialog.Line(1 + (y-2)*3 + (x-51)/10);
+      call POS.TIMBRE.DIRECTORY.CURSOR;
+   end;
+
+   else if  (Dialog.Code <> 0)        /* see if click in dialog line */
+   and      (y           =  4)
+   then do;
+      if (x >= 70) then do;           /* 'cancel' button             */
+         call Draw.Dialog.Line(0);
+         call POS.TIMBRE.DIRECTORY.CURSOR;
+      end;
+      else if (Dialog.Code = 3)       /* 'Bin' dialog line           */
+      and     (POLYNUMS    > 1)
+      then do;
+         do i = 0 to POLYNUMS-1;      /* check for bin selection     */
+            if  (x >= (42 + i*9))
+            and (x <= (48 + i*9))
+            then do;
+               call TRK.HEAD.STORE(0, THD.POLY, i);
+               call Draw.Dialog.Line(0);
+               call POS.TIMBRE.DIRECTORY.CURSOR;
+            end;
+         end;
+      end;
+      else if (Dialog.Code >= 4 )
+      and     (Dialog.Code <= 6 )
+      and     (x           >= 56)
+      and     (x           <= 64)
+      then do;
+		   dcl status fixed;
+         do case (dialog.code-4);
+            do;                          /* shuffle poly memory */
+			  		transparent_mode;
+					SHOW.FILE.LOADING.MESSAGE = shl(23,8);
+               status = ps.shuffle(0);                         /* collect poly memory, but don't delete unused files */
+					SHOW.FILE.LOADING.MESSAGE = 0;
+					if (status <> 0) then call Draw.Message('Partial Shuffle Completed');
+					else                  call Draw.Message('Shuffle Completed');
+            end;
+
+            do;                          /* collect poly memory */
+			  		transparent_mode;
+					SHOW.FILE.LOADING.MESSAGE = shl(23,8);
+               status = ps.shuffle(1);                         /* collect used sound files in poly memory */
+					SHOW.FILE.LOADING.MESSAGE = 0;
+					if (status <> 0) then call Draw.Message('Partial Collect Completed');
+               else                  call Draw.Message('Collect Completed');
+            end;
+
+            do;                          /* Erase poly memory */
+               call Draw.Message('Erasing Poly Memory...');
+               call ps.deallocate.all;
+               call Draw.Message('Erase Completed');
+            end;
+         end;
+         call Draw.Dialog.Line(0);
+         call POS.TIMBRE.DIRECTORY.CURSOR;
+      end;
+   end;
+
+   else if (y = 1) & (x >= 13) then do;      /* means device possibly selected */
+      i = 0;
+      j = 13;
+      do while (i < devices) & ((x < j)\(x > (j+device.len(i)-1)));
+         j = j + device.len(i);
+         i = i + 1;
+      end;
+      if i<>devices
+      then call timbre.directory.input(in.chin,asc.1 + i); /* to input routine */
+   end;
+
+   else if (y >= 6)
+   &  ((y <> 14) & (y <> 15))
+   then do;                            /* see if we in range of an entry */
+      y = y - 6;
+      if x >= 8 then do;                     
+         write(5) = x - 8; write(7) = 18;
+         if (read(4) < 16)
+         then do;
+            if y >= 10 then do;
+               y = y - 10;
+               x = read(5) + 4;
+            end;
+            else x = read(5);
+            call timbre.directory.input(in.abss,shl(y,8)\x); /* send entry & bank */
+         end;
+      end;
+   end;
+end TIMBRE.DIRECTORY.MOUSE.POS;
+

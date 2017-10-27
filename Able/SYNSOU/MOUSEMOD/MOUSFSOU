@@ -1,0 +1,613 @@
+/* MOUSFSOU   $TITLE  MOUSE VARIABLES, MOUSE INITIALIZATION, & D44 INTERRUPT SERVICING ROUTINE
+
+   Modified:
+   03/15/89 - TSS - Added code to support dynamic enable/disable of rs-232 protocol output
+   03/03/89 - TSS - Got rid of PROLITS insert
+   01/11/89 - TSS - Added routines to control Termulator protocol stuff
+   05/26/88 - TSS - Reversed SHOW- & HIDE.TERMULATOR.CURSOR escape seqs again. They work backwards from MOUSE.SWITCH.
+   05/25/88 - LSS - Mac changes to MOUSE.INIT, added D44_present check
+   05/23/88 - TS,LS - added REBOOT.TERMINAL for Mac refresh
+   05/17/88 - MWH - Reverse mouse cursor ON/OFF escape sequences; now correct
+   03/31/88 - TSS - Modify routines to support MAC II mouse via Termulator
+   11/25/87 - MWH - Remove unused "mouse_present" and "d40q_in_system"
+   11/12/87 - MWH - Make timer comparisons unsigned to fix "30 sec hang"
+   
+*/
+
+MODULE MOUSFMOD;
+
+DCL ALLOW.TERMULATOR.MOUSE LIT '1'; /* SET TO 1 TO ALLOW MAC MOUSE TO WORK */
+
+insert ':-xpl:intrprtr';
+
+INSERT ':SYNLITS:COMLITS';
+INSERT ':SYNLITS:GLOBLITS';
+INSERT ':SYNLITS:ASCIILIT';
+INSERT ':SYNLITS:SYSLITS';
+
+INSERT ':SYNAUXS:MOUSELIT';
+INSERT ':SYNAUXS:ERRLITS';
+
+INSERT ':SYNMODS:GLOBDCL';   /* FOR REAL.MILLISECONDS, D54 BITS */
+INSERT ':SYNMODS:MOUSRDCL';
+INSERT ':SYNMODS:PLOTDCL';
+INSERT ':SYNMODS:GETVDCL';
+INSERT ':SYNMODS:TTYDCL';
+
+DCL MOUSE.CURSOR.TYPE     FIXED PUBLIC;  /* 0 => CROSSHAIR NOT VISIBLE, 1 => CROSSHAIR VISIBLE */
+DCL MOUSE.REFRESH.RATE    FIXED PUBLIC;  /* # OF MSEC BETWEEN CURSOR UPDATES (THIS IS NOT THE 50 HZ MOUSE POLLING RATE) */
+DCL MOUSE.CURSOR.ON       FIXED PUBLIC;  /* USER DEFINED: 1 => MOUSE CURSOR ENABLED; 0 => DISABLED */
+
+/* INTERNAL TO MOUSE ROUTINES */
+DCL M$CURSOR.SIZE         FIXED PUBLIC;  /* LENGTH OF EACH ARM OF MOUSE CURSOR CROSSHAIR */
+DCL MOUSE.HOLE.LOWERX     FIXED PUBLIC;  /* LOWER LEFT CORNER OF MOUSE HOLE */
+DCL MOUSE.HOLE.LOWERY     FIXED PUBLIC;
+
+// Set fine vs course cross cursor
+SET.TERMULATOR.CURSOR.STYLE: PROC (IS_FINE) PUBLIC SWAPABLE;
+	DCL IS_FINE fixed;
+	
+   DCL SAVED.#MODE FIXED;
+
+   IF MOUSE.PORT.IS.D50 THEN DO;
+      SAVED.#MODE = #MODE; /* SAVE CURRENT TERMINAL MODE */
+      VECTOR_MODE;
+
+      CALL PC(ESC);
+		IF (IS_FINE != 0)
+			CALL PS('!9;1M'); /* SET FINE CURSOR */
+		ELSE
+			CALL PS('!9;0M'); /* SET FINE CURSOR */
+
+      DO CASE (SAVED.#MODE);
+         TRANSPARENT_MODE;
+         ALPHA_MODE;      
+         ;     /* ALREADY IN VECTOR MODE */
+         POINT_MODE;      
+      END;
+   END;
+END SET.TERMULATOR.CURSOR.STYLE;
+
+HIDE.TERMULATOR.CURSOR: PROC PUBLIC SWAPABLE;
+   DCL SAVED.#MODE FIXED;
+
+   IF MOUSE.PORT.IS.D50 THEN DO;
+      SAVED.#MODE = #MODE; /* SAVE CURRENT TERMINAL MODE */
+      VECTOR_MODE;
+
+      CALL PC(ESC); CALL PS('!3;1M'); /* activate cursor shielding */
+
+      DO CASE (SAVED.#MODE);
+         TRANSPARENT_MODE;
+         ALPHA_MODE;      
+         ;     /* ALREADY IN VECTOR MODE */
+         POINT_MODE;      
+      END;
+   END;
+END HIDE.TERMULATOR.CURSOR;
+
+SHOW.TERMULATOR.CURSOR: PROC PUBLIC SWAPABLE;
+   DCL SAVED.#MODE FIXED;
+
+   IF MOUSE.PORT.IS.D50 THEN DO;
+      SAVED.#MODE = #MODE; /* SAVE CURRENT TERMINAL MODE */
+      VECTOR_MODE;
+
+      CALL PC(ESC); CALL PS('!3;0M'); /* deactivate cursor shielding */
+
+      DO CASE (SAVED.#MODE);
+         TRANSPARENT_MODE;
+         ALPHA_MODE;      
+         ;     /* ALREADY IN VECTOR MODE */
+         POINT_MODE;      
+      END;
+   END;
+END SHOW.TERMULATOR.CURSOR;
+
+TERMULATOR.ABSOLUTE.MOUSE.REPORT.FORMAT: PROC PUBLIC SWAPABLE;
+   DCL SAVED.#MODE FIXED;
+
+   IF MOUSE.PORT.IS.D50 THEN DO;
+      SAVED.#MODE = #MODE; /* SAVE CURRENT TERMINAL MODE */
+      VECTOR_MODE;
+
+      CALL PC(ESC); CALL PS('!6M'); /* REQUEST ABSOLUTE FORM RESPONSES FROM MAC */
+
+      DO CASE (SAVED.#MODE);
+         TRANSPARENT_MODE;
+         ALPHA_MODE;      
+         ;     /* ALREADY IN VECTOR MODE */
+         POINT_MODE;      
+      END;
+   END;
+END TERMULATOR.ABSOLUTE.MOUSE.REPORT.FORMAT;
+
+TERMULATOR.RELATIVE.MOUSE.REPORT.FORMAT: PROC PUBLIC SWAPABLE;
+   DCL SAVED.#MODE FIXED;
+
+   IF MOUSE.PORT.IS.D50 THEN DO;
+      SAVED.#MODE = #MODE; /* SAVE CURRENT TERMINAL MODE */
+      VECTOR_MODE;
+
+      CALL PC(ESC); CALL PS('!7M'); /* REQUEST RELATIVE FORM RESPONSES FROM MAC */
+
+      DO CASE (SAVED.#MODE);
+         TRANSPARENT_MODE;
+         ALPHA_MODE;      
+         ;     /* ALREADY IN VECTOR MODE */
+         POINT_MODE;      
+      END;
+   END;
+END TERMULATOR.RELATIVE.MOUSE.REPORT.FORMAT;
+
+ENABLE.TERMULATOR.AUTO.MOUSE.REPORT: PROC (FORMAT) PUBLIC SWAPABLE;
+   DCL FORMAT FIXED; /* 0 = ABSOLUTE COORDINATES, 1 = RELATIVE COORDINATES */
+   DCL SAVED.#MODE FIXED;
+
+   IF MOUSE.PORT.IS.D50 THEN DO;
+      SAVED.#MODE = #MODE; /* SAVE CURRENT TERMINAL MODE */
+      VECTOR_MODE;
+
+      IF FORMAT = 0 THEN DO;
+         CALL PC(ESC); CALL PS('!6M'); /* REQUEST ABSOLUTE FORM RESPONSES FROM MAC */
+      END;
+      ELSE IF FORMAT = 1 THEN DO;
+         CALL PC(ESC); CALL PS('!7M'); /* REQUEST RELATIVE FORM RESPONSES FROM MAC */
+      END;
+      CALL PC(ESC); CALL PS('!4M');    /* ENABLE FOR CONTINUOUS REPORT MODE */
+
+      DO CASE (SAVED.#MODE);
+         TRANSPARENT_MODE;
+         ALPHA_MODE;      
+         ;     /* ALREADY IN VECTOR MODE */
+         POINT_MODE;      
+      END;
+   END;
+
+END ENABLE.TERMULATOR.AUTO.MOUSE.REPORT;
+
+DISABLE.TERMULATOR.AUTO.MOUSE.REPORT: PROC PUBLIC SWAPABLE;
+   DCL SAVED.#MODE FIXED;
+
+   IF MOUSE.PORT.IS.D50 THEN DO;
+      SAVED.#MODE = #MODE; /* SAVE CURRENT TERMINAL MODE */
+      VECTOR_MODE;
+
+      CALL PC(ESC); CALL PS('!5M'); /* TURNS OFF AUTO REPORTING */
+
+      DO CASE (SAVED.#MODE);
+         TRANSPARENT_MODE;
+         ALPHA_MODE;      
+         ;     /* ALREADY IN VECTOR MODE */
+         POINT_MODE;      
+      END;
+   END;
+END DISABLE.TERMULATOR.AUTO.MOUSE.REPORT;
+
+ENABLE.TERMULATOR.PROTOCOL: PROC PUBLIC SWAPABLE;
+   DCL SAVED.#MODE FIXED;
+
+   IF  INC.PRO AND (MOUSE.PORT.IS.D50 <> 0) THEN DO;
+      SAVED.#MODE = #MODE; /* SAVE CURRENT TERMINAL MODE */
+      TRANSPARENT_MODE;
+
+      CALL PC(ESC); CALL PS('!Y'); /* TURNS ON PROTOCOL */
+
+      DO CASE (SAVED.#MODE);
+         ;     /* ALREADY IN TRANSPARENT MODE */
+         ALPHA_MODE;      
+         VECTOR_MODE;
+         POINT_MODE;      
+      END;
+   END;
+END ENABLE.TERMULATOR.PROTOCOL;
+
+DISABLE.TERMULATOR.PROTOCOL: PROC PUBLIC SWAPABLE;
+   DCL SAVED.#MODE FIXED;
+
+   IF  INC.PRO AND (MOUSE.PORT.IS.D50 <> 0) THEN DO;
+      SAVED.#MODE = #MODE; /* SAVE CURRENT TERMINAL MODE */
+      TRANSPARENT_MODE;
+
+      CALL PC(ESC); CALL PS('!X'); /* TURNS OFF PROTOCOL */
+
+      DO CASE (SAVED.#MODE);
+         ;     /* ALREADY IN TRANSPARENT MODE */
+         ALPHA_MODE;      
+         VECTOR_MODE;
+         POINT_MODE;      
+      END;
+   END;
+END DISABLE.TERMULATOR.PROTOCOL;
+
+/* MOUSE INITIALIZATION */
+
+/* SUMMAGRAPHICS OPTICAL MOUSE INITIALIZATION:
+   .
+   . A) RESET THE MOUSE TO ITS DEFAULT CONDITION (SET AT SUMMAGRAPHICS)
+   . B) PUT MOUSE INTO POLLING MODE
+   . C) READ STATUS TO SEE IF THE MOUSE UNDERSTOOD
+   . D) NOTIFY USER TO ORIENT THE MOUSE IF IT NEEDS TO BE
+   .
+   . NOTE: EACH OF THESE STEPS MUST WAIT FOR AT LEAST 5MSEC BEFORE
+   .       CONTINUING TO THE NEXT STEP. */
+
+MOUSE.INIT: PROC PUBLIC SWAPABLE;
+   DCL M$TIMER               FIXED;
+   DCL M$TIMEOUT             FIXED;
+   DCL M$INIT_DONE           FIXED;
+   DCL M$RESET               LIT '0';
+   DCL M$POLLMODE            LIT '"104"';
+   DCL M$OKSTATUS            LIT '"117"';
+   DCL M$STATUSCOM           LIT '"163"';
+   DCL M$WAIT LIT 'M$TIMER = REAL.MILLISECONDS; DO WHILE (M$TIMER - REAL.MILLISECONDS) ILT 10;interp_run_host_non_timer();END';
+   DCL M$FIRSTBOOT           FIXED STATIC;
+
+   /* mouse.timeout.error is not */
+   /* called any more.  It is    */
+   /* left here in case someone  */
+   /* needs it for debugging     */
+
+   MOUSE.TIMEOUT.ERROR: PROC;  /* CALLED WHEN MOUSE DOES NOT RESPOND AT PROGRAM BOOT */
+      CALL CLEAR.TERM;         /* NEVER CALLED AFTER PROGRAM HAS STARTED */
+      CALL CPOS(12,0);
+      CALL PSR('The MOUSE is not responding.  Make sure the mouse cable is attached');
+      CALL  PS('properly.  Press <RETURN> after checking.');
+      CALL TTY_WAIT;
+      CALL GET.NEXT.D50.IN.CHAR;
+   END MOUSE.TIMEOUT.ERROR;               /* TO WHATEVER KEY USER PRESSED */
+
+   MOUSE.READY       = 0;                 /* NO MOUSE YET */
+   MOUSE.PORT.IS.D50 = FALSE;             /* ASSUME IT'S A LOGITECH MOUSE */
+
+   IF ALLOW.TERMULATOR.MOUSE THEN DO;
+      IF TERMINAL.MODEL = T#MACINTOSH     /* IF TERMINAL IS THE MAC II */
+      THEN MOUSE.PORT.IS.D50 = TRUE;      /* THEN WE HAVE A MAC MOUSE */
+   END;
+
+   IF (NOT MOUSE.PORT.IS.D50) AND (D44_PRESENT) THEN DO; /* SEE IF LOGITECH MOUSE IS ON D44 PORT */
+      D54BITS=D54BITS&"177773";              /* DISABLE D44 INTERRUPTS FOR HERE */
+
+      WRITE(D54) = D54BITS;                         /* DISABLE D44INT */
+
+      M$TIMEOUT = REAL.MILLISECONDS;                /* SET TIMEOUT TIME */
+      MOUSE.STATUS = 0;                             /* CLEAR PREV STATUS WORD */
+
+      DO WHILE M$INIT_DONE = 0;
+         IF (REAL.MILLISECONDS - M$TIMEOUT) IGT 500 THEN DO; /* NOTIFY USER TO CHECK */
+            IF (M$FIRSTBOOT = 0) THEN DO;           /* MOUSE IF RUNNING FOR */
+               CALL SET.ERROR(ERR.NOMOU,'');        /* MOUSE IS NOT REALLY IN SYSTEM */
+               RETURN;                              /* FOR NOW - JUST RETURN */
+
+               CALL MOUSE.TIMEOUT.ERROR;            /* EXECUTES ONLY AT BOOT */
+               M$TIMEOUT = REAL.MILLISECONDS;       /* RESET TIMEOUT CLOCK */
+               CALL CLEAR.TERM;                     /* CLEAR SCREEN AND */
+            END;                                    /* TRY AGAIN */
+         END;
+
+         WRITE(D45) = 0;                            /* CLEAR STATUS */
+         WRITE(D44) = M$RESET;                      /* SEND RESET */
+         M$WAIT;                                    /* 5MSEC WAIT */
+         WRITE(D44) = M$POLLMODE;                   /* SEND POLL MODE COMMAND */
+         M$WAIT;                                    /* 5MSEC WAIT */
+         WRITE(D44) = M$STATUSCOM;                  /* SEND STATUS REQUEST */
+         M$WAIT;                                    /* 5MSEC WAIT */
+         WRITE(D45) = 0;                            /* RESET D44 STATUS REG */
+         IF (READ(D45)&2) <> 0                      /* IF A CHARACTER RECEIVED */
+         THEN MOUSE.STATUS = READ(D44);             /* THEN GET STATUS BYTE */
+
+         IF MOUSE.STATUS = M$OKSTATUS               /* IF STATUS BYTE CHECKS OUT SET DONE FLAG */
+         THEN M$INIT_DONE = 1;
+      END;
+
+      D54BITS=D54BITS\4;
+      WRITE(D54) = D54BITS;                         /* DISABLE D44INT */
+
+      MOUSE.XMIT.DONE = 0;                          /* SO NEXT MOUSE.SCAN.AND.POLL DOES */
+      MOUSE.COMMAND = M$POSITION;                   /* NOT GENERATE AN ERROR */
+   END;
+   ELSE MOUSE.COMMAND = M$HALT;                     /* WILL KEEP MOUSE.SCAN.AND.POLL FROM BEING CALLED */
+
+   IF (VT640) OR (DQ640) THEN DO;               /* LIMIT THE RANGE OF */
+      MOUSE.REFRESH.RATE =  60;                 /* 60MSEC REFRESH OF MOUSE CURSOR */
+      M$CURSOR.SIZE      =  15;
+      MOUSE.X            = 408;                 /* POSITION MOUSE FOR */
+      MOUSE.Y            = 170;                 /* WELCOME MENU */
+      MOUSE.HOLE.LOWERX  = 607;                 /* SET LOWER LEFT COORDINATES OF MOUSE HOLE */
+      MOUSE.HOLE.LOWERY  = 444;
+   END;                                         /* IN USE */
+   ELSE IF (MG600) THEN DO;
+      MOUSE.REFRESH.RATE =  20;                 /* 20MSEC REFERSH OF MOUSE CURSOR */
+      M$CURSOR.SIZE      =  20;
+      MOUSE.X            = 748;                 /* POSITION MOUSE FOR */
+      MOUSE.Y            = 400;                 /* WELCOME MENU */
+      MOUSE.HOLE.LOWERX  = 985;
+      MOUSE.HOLE.LOWERY  = 715;
+   END;
+
+   MOUSE.X.MIN = 0;                             /* COORDINATES OF REGION */
+   MOUSE.Y.MIN = 0;                             /* THAT MOUSE CURSOR CAN MOVE */
+   MOUSE.X.MAX = SCREEN.WIDTH-M$CURSOR.SIZE;    /* OVER (ONLY USE WITH LOGITECH */
+   MOUSE.Y.MAX = SCREEN.HEIGHT;                 /* MOUSE AND D44 PORT */
+
+   MOUSE.CURSOR.ON   = 1;                        /* TURN ON THE CURSOR */
+   MOUSE.CURSOR.TYPE = 1;                        /* CROSSHAIR CURSOR */
+   M$FIRSTBOOT       = 1;
+   MOUSE.READY       = 1;                        /* MOUSE IS NOW USABLE - ALLOW POLLING TO BEGIN */
+
+   CALL ENABLE.TERMULATOR.AUTO.MOUSE.REPORT(0); /* ABSOLUTE REPORTING FORMAT */
+   CALL ENABLE.TERMULATOR.PROTOCOL;
+
+END MOUSE.INIT;
+
+/* SUMMAGRAPHICS OPTICAL MOUSE INPUT ROUTINE
+   .
+   . THE SUMMAGRAPHICS MOUSE SENDS THREE REPORTS IN DIFFERENT FORMATS:
+   .     1. POSITION REPORT   (3 BYTES: DIRECTION & BUTTON BITS, X, Y)
+   .     2. STATUS REPORT     (1 BYTE : STATUS BITS)
+   .     3. DIAGNOSTIC REPORT (3 BYTES: BUTTON BITS, RED LED QUALITY, INFRARED LED QUALITY)
+   . THIS INTERRUPT STORES INCOMING CHARACTERS IN ARRAY MOUSE.BUFFER ACCORDING
+   . TO THE VALUE OF INPUT.CTR.  INPUT.CTR IS INCREMENTED AFTER EACH CHARACTER
+   . AND IS RESET TO ZERO BEFORE STORING A STATUS REPORT (1 CHAR), OR THE
+   . THE FIRST CHAR OF A DIAGNOSTIC REPORT, OR THE FIRST CHAR OF A
+   . POSITION REPORT.  GLOBAL VAR MOUSE.COMMAND MUST
+   . REFLECT THE TYPE OF DATA COMING FROM THE MOUSE. */
+
+WHEN D44INT THEN BEGIN;
+   DCL INPUT.CTR          FIXED;     /* TRACKS INPUT AND ADDRESSES IT TO INPUT BUFFER */
+   DCL CH                 FIXED;     /* INPUT CHARACTER */
+
+   IF (READ(D45) & 2) = 0 THEN DO;   /* SEE IF WE HAVE AN OUTPUT INTERRUPT - TRAP IF SO */
+      WRITE(D45) = 0;                /* ACKNOWLEDGE INTERRUPT */
+      RETURN;                        /* DONE; EXIT INTERRUPT */
+   END;
+
+   CH = READ(D44);                   /* GET THE INPUT */
+
+   IF NOT MOUSE.PORT.IS.D50 THEN DO;
+      IF (MOUSE.COMMAND = M$HALT)       /* MOUSE IS NOT ON; MUST BE NOISE */
+      THEN RETURN;
+
+      IF ((MOUSE.COMMAND = M$POSITION)  /* SEE IF INPUT.CTR NEEDS TO BE RESET */
+      &  (CH & 128) <> 0)               /* IF A POSITION REPORT WAS SENT AND BIT 7 OF CH IS SET, */
+      OR (MOUSE.COMMAND = M$STATUS)     /* OR A STATUS REQUEST WAS SENT, */
+      OR (MOUSE.COMMAND = M$DIAGNOSTIC) /* OR A DIAGNOSTIC REQUEST WAS SENT */
+      THEN INPUT.CTR = 0;               /* THEN RESET INPUT.CTR TO 0 */
+
+      IF INPUT.CTR > 2 THEN RETURN;     /* BEYOND BUFFER SIZE; MUST BE ERROR */
+
+      MOUSE.BUFFER(INPUT.CTR) = (CH & 127);  /* PUT CH INTO BUFFER FOR USE LATER */
+
+      INPUT.CTR = INPUT.CTR + 1;        /* ADVANCE BUFFER POINTER */
+
+      IF ((MOUSE.COMMAND = M$POSITION)  /* SEE IF WE HAVE A COMPLETE POSITION */  
+      OR  (MOUSE.COMMAND = M$DIAGNOSTIC))  /* REPORT OR DIAGNOSTIC REPORT */
+      &  (INPUT.CTR = 3)                   /* IF SO SET MOUSE.XMIT.DONE TRUE */
+      THEN DO;                             /* AND RETURN */
+         MOUSE.XMIT.DONE = 1;
+         RETURN;
+      END;
+
+      IF MOUSE.COMMAND = M$STATUS          /* IF WE HAVE A COMPLETE STATUS */
+      THEN MOUSE.XMIT.DONE = 1;            /* REPORT SET MOUSE.XMIT.DONE TRUE */
+   END;
+END; /* D44INT */
+
+MOUSE: PROC (FUNCTION) RETURNS (FIXED) PUBLIC;
+   DCL FUNCTION FIXED;    /* WHAT TO RETURN */
+   DCL CUR.BUTTON         FIXED;  /* BUTTON #, 0-2          */
+   DCL CUR.VAL            FIXED;  /* CURRENT CODE           */
+   DCL CUR.PX  (2)        FIXED;  /* X POS OF PRESS/RELEASE */
+   DCL CUR.PY  (2)        FIXED;  /* Y POS OF PRESS/RELEASE */
+   DCL CUR.PT  (2)        FIXED;  /* TIME OF PRESS/RELEASE  */
+   DCL CUR.RX  (2)        FIXED;  /* X POS OF PRESS/RELEASE */
+   DCL CUR.RY  (2)        FIXED;  /* Y POS OF PRESS/RELEASE */
+   DCL CUR.RT  (2)        FIXED;  /* TIME OF PRESS/RELEASE  */
+   DCL RETVAL             FIXED STATIC; /* HOLDS LAST BUTTON PRESS/RELEASE DATA */
+   DCL I                  FIXED;
+   DCL (CT.MOUSE.X,CT.MOUSE.Y)   FIXED;
+   DCL (CT.MOUSE.DX,CT.MOUSE.DY) FIXED;
+
+   /* THIS FUNCTION INFORMS THE CALLING PROCEDURE ABOUT THE MOUSE.
+      DIFFERENT FUNCTION CODES DETERMINE WHAT THE PROCEDURE RETURNS
+         (0) MOUSE BUTTON INFORMATION
+         (1) CURRENT X COORDINATE
+         (2) CURRENT Y COORDINATE
+         (3) BUTTON PRESS X COORDINATE
+         (4) BUTTON PRESS Y COORDINATE
+         (5) BUTTON RELEASE X COORDINATE
+         (6) BUTTON RELEASE Y COORDINATE
+   */
+
+   DISABLE;                    /* SAMPLE OUTPUT FROM INTERRUPT */
+      CT.MOUSE.X = MOUSE.X;    /* SCAN ROUTINE                 */
+      CT.MOUSE.Y = MOUSE.Y;
+      CT.MOUSE.DX = MOUSE.DX;
+      CT.MOUSE.DY = MOUSE.DY;
+   ENABLE;
+
+   DO CASE FUNCTION;
+
+      DO; /* 0 - BUTTON INFORMATION:
+             THIS INFORMATION IS RELATIVE TO THE LAST TIME MOUSE WAS
+             CALLED.
+
+             RETURNS: 0 - WHEN BUTTON IS NOT DOWN AND HAS NOT BEEN PRESSED
+                     -1 - WHEN BUTTON 1 WAS CLICKED AND IS STILL DOWN
+                     -2 - WHEN BUTTON 2 WAS CLICKED AND IS STILL DOWN
+                     -3 - WHEN BUTTON 3 WAS CLICKED AND IS STILL DOWN
+                      1 - WHEN BUTTON 1 WAS CLICKED BUT IS NOT DOWN CURRENTLY
+                      2 - WHEN BUTTON 2 WAS CLICKED BUT IS NOT DOWN CURRENTLY
+                      3 - WHEN BUTTON 3 WAS CLICKED BUT IS NOT DOWN CURRENTLY
+             * - BUTTON 1: LEFT; BUTTON 2:MIDDLE; BUTTON 3: RIGHT         
+         */
+
+         RETVAL = 0;                               /* ASSUME NO ACTIVITY */
+
+         DISABLE;
+         IF M$PRESSES <> 0 THEN DO;                /* MOUSE PRESS WAITING */
+            CUR.BUTTON = MOUSE.LOOKUP(M$PRESSES);  /* GET WHICH BUTTON    */
+            M$PRESSES = M$PRESSES XOR BITS(CUR.BUTTON);  /* ACKNOWLEGE    */
+            CUR.PX(CUR.BUTTON) = M$PX(CUR.BUTTON);
+            CUR.PY(CUR.BUTTON) = M$PY(CUR.BUTTON);
+            CUR.PT(CUR.BUTTON) = M$PT(CUR.BUTTON);
+            CUR.RX(CUR.BUTTON) = -1;
+            CUR.RY(CUR.BUTTON) = -1;
+            M$BS  = M$BS XOR BITS(CUR.BUTTON);           /* SET OUR STATUS */
+            RETVAL = -1 - CUR.BUTTON;                    /* -1, -2, -3     */
+            CUR.VAL = RETVAL;                            /* SAVE           */
+         END;
+
+         ELSE IF M$RELEASES <> 0 THEN DO;                /* RELEASE        */
+            CUR.BUTTON = MOUSE.LOOKUP(M$RELEASES);       /* GET WHICH BUTTON    */
+            M$RELEASES = M$RELEASES XOR BITS(CUR.BUTTON);/* ACKNOWLEGE    */
+            CUR.RX(CUR.BUTTON) = M$RX(CUR.BUTTON);
+            CUR.RY(CUR.BUTTON) = M$RY(CUR.BUTTON);
+            CUR.RT(CUR.BUTTON) = M$RT(CUR.BUTTON);
+            M$BS   = M$BS XOR BITS(CUR.BUTTON);          /* SET OUR STATUS */
+            RETVAL = +1 + CUR.BUTTON;                    /* +1, +2, +3     */
+            CUR.VAL = RETVAL;                            /* SAVE           */
+         END;
+         ENABLE;
+
+         RETURN RETVAL;                              /* RETURN FUNCTION VALUE */
+      END;  /* 0 */
+
+      DO;   /* 1 - CURRENT X */
+         RETURN CT.MOUSE.X;
+      END;
+
+      DO;   /* 2 - CURENT Y */
+         RETURN CT.MOUSE.Y;
+      END;
+
+      DO;   /* 3 - STARTING X POSITION */
+         RETURN CUR.PX(CUR.BUTTON);
+      END;
+
+      DO;   /* 4 - STARTING Y POSITION */
+         RETURN CUR.PY(CUR.BUTTON);
+      END;
+
+      DO;   /* 5 - ENDING X POSITION */
+         IF (M$BS&BITS(CUR.BUTTON))<>0     /* IF BUTTON IS STILL HELD */
+         THEN DO;                          /* THEN RETURN CURRENT X   */
+            IF (M$RELEASES&BITS(CUR.BUTTON))<>0  /* BUT IF RELEASE PENDING */
+            THEN RETURN M$RX(CUR.BUTTON);        /* THEN GET ACTUAL X      */
+            ELSE RETURN CT.MOUSE.X;              /* ELSE CURRENT X         */
+         END;
+         ELSE RETURN CUR.RX(CUR.BUTTON);   /* ELSE RETURN RELEASE POS */
+      END;
+
+      DO;   /* 6 - ENDING Y POSITION */
+         IF (M$BS&BITS(CUR.BUTTON))<>0     /* IF BUTTON IS STILL HELD */
+         THEN DO;                          /* THEN RETURN CURRENT Y   */
+            IF (M$RELEASES&BITS(CUR.BUTTON))<>0  /* BUT IF RELEASE PENDING */
+            THEN RETURN M$RY(CUR.BUTTON);        /* THEN GET ACTUAL Y      */
+            ELSE RETURN CT.MOUSE.Y;              /* ELSE CURRENT Y         */
+         END;
+         ELSE RETURN CUR.RY(CUR.BUTTON);   /* ELSE RETURN RELEASE POS */
+      END;
+
+      DO;   /* 7 - LAST BUTTON */
+         RETURN CUR.VAL;
+      END;
+
+      DO;   /* 8 - DELTA X */
+         RETURN CT.MOUSE.DX;
+      END;
+
+      DO;   /* 9 - DELTA Y */
+         RETURN CT.MOUSE.DY;
+      END;
+
+      DO;   /* 10 - CURRENT PRESS TIME */
+         RETURN CUR.PT(CUR.BUTTON);        /* RETURN PRESS TIME        */
+      END;
+
+      DO;   /* 11 - CURREN RELEASE TIME */
+         IF (M$BS&BITS(CUR.BUTTON))<>0     /* IF BUTTON IS STILL HELD */
+         THEN DO;                          /* THEN RETURN CURRENT T   */
+            IF (M$RELEASES&BITS(CUR.BUTTON))<>0  /* BUT IF RELEASE PENDING */
+            THEN RETURN M$RT(CUR.BUTTON);        /* THEN GET ACTUAL T      */
+            ELSE RETURN REAL.MILLISECONDS;       /* ELSE CURRENT T         */
+         END;
+         ELSE RETURN CUR.RT(CUR.BUTTON);   /* ELSE RETURN RELEASE TIME     */
+      END;
+
+   END;
+
+END MOUSE;
+
+DCL MOUSE.CURSOR.UPDATE PROC RETURNS(FIXED) EXTERNAL;
+
+MOUSE.SWITCH: PROC(TYPE) PUBLIC SWAPABLE;
+   DCL TYPE FIXED;
+
+   MOUSE.CURSOR.TYPE = TYPE;
+   CALL MOUSE.CURSOR.UPDATE;
+END MOUSE.SWITCH;
+
+DCL SAVED.MOUSE.TYPE FIXED;
+
+PUSH.MOUSE: PROC PUBLIC SWAPABLE;
+   SAVED.MOUSE.TYPE = MOUSE.CURSOR.TYPE;
+END PUSH.MOUSE;
+
+POP.MOUSE: PROC PUBLIC SWAPABLE;
+   CALL MOUSE.SWITCH(SAVED.MOUSE.TYPE);
+END POP.MOUSE;
+
+CONVERT.MOUSE.X: PROC(X) RETURNS(FIXED) PUBLIC SWAPABLE; /* MAPS X PIXEL COORDINATE TO SCREEN COORDINATE */
+   DCL X FIXED;
+
+   RETURN TPOS.X(X);
+END CONVERT.MOUSE.X;
+
+CONVERT.MOUSE.Y: PROC(Y) RETURNS(FIXED) PUBLIC SWAPABLE;
+   DCL Y FIXED;
+   
+   RETURN TPOS.Y(Y);
+END CONVERT.MOUSE.Y;
+
+/* REBOOT.TERMINAL is here for want of a better place.  It is called
+   whenever the Macintosh terminal emulation program is started up.
+   It reinitializes just the terminal and the mouse.
+*/
+
+Reboot.Terminal: proc public swapable;
+   dcl ok.to.xmit.mac.protocol fixed external;
+
+   ok.to.xmit.mac.protocol = 0;         /* reset to turn off rs-232 protocol xmit */
+   new.clavier.info        = 0;         /* stop any pending rs-232 protocol outpput */
+
+   screen.dump       = 0;
+
+   mouse.cursor.on   = 0;               /* basically try to make sure that system  */
+   mouse.ready       = 0;               /* thinks the mouse is not yet initialized */
+   mouse.port.is.d50 = 0;
+   mouse.cursor.type = 0;
+
+   /* from TTYMOD:TTYSOU */
+   call initialize.terminal.type;       /* set up for this terminal type */
+
+   #mode = 0;                           /* was cleared by above call to initialize.terminal.type */
+
+   call initialize.graphics.terminal;   /* from PLOTMOD:PLOTSOU */
+
+   call mouse.init;                     /* from MOUSEMOD:MOUSFSOU */
+
+   call clear.term;                     /* from PLOTMOD:PLOTSOU */
+
+   /* from WELCMOD:WELCSOU */
+   if MG600<>0 then do;                 /* reset charsize */
+      vector_mode;
+      alpha_mode;
+      call pc(27);
+      call ps('8');
+      transparent_mode;
+   end;
+
+end Reboot.Terminal;
+
+END MOUSFMOD;

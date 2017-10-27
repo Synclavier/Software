@@ -1,0 +1,898 @@
+/* $Title STEDSOUB Edit Routines -> Cut, Paste, and Copy */
+/*
+   11/18/91 - PF  - More quick update support
+   05/09/88 - MWH - Remove "16 sample fades"; extract now allows real ones
+   04/14/88 - MWH - Allow different crossfades at start and end
+   04/12/88 - MWH - Preserve mark start, mark end where possible
+   03/01/88 - LSS - fixed word lengths in header setup (off-by-one bugs)
+   02/23/88 - MWH - Improve crossfade handling for cut, copy & paste
+   02/12/88 - MWH - Expand crossfade times to 65.535 seconds; improve
+   12/21/87 - MWH - Merge poly updates with N-Final plus AEE sources
+   08/14/87 - MWH - Update all to support max 4 poly bins, 512mb/bin
+   07/14/87 - MWH - new interface for PS.SETUP
+   07/02/87 - MWH - new interface for PS.DEALLOCATE
+   02/06/87 - This is part of the STM command module, STEDMOD
+*/
+
+   /* $Subtitle Get Paste Name and Multiplier */
+
+   dcl paste.name(4)          fixed; /* paste sound file name */
+   dcl paste.multiplier       fixed; /* how many copies to paste */
+   dcl paste.alt.pre          fixed; /* If using alternate crossfade algorithm, set to 1, else to 0 */
+   dcl paste.alt.post         fixed;
+
+   GET.PASTE.FILENAME.AND.MULTIPLIER:  proc fixed swapable; /* returns 1 if successful in retrieving a valid filename and paste multiplier */
+      /* sets globals paste.name and paste.multiplier */
+      dcl ch   fixed;
+
+      tok.ptr=0;                          /* find the name of the sound file to be pasted */
+      tok.ptr=GET.FILENAME(token,tok.ptr,paste.name);
+      if tok.ptr=0 then return;
+
+      ch=byte(token,tok.ptr);
+      if ((ch=comma) and (tok.ptr<token(0)) and (paste.name(0)<=shl(f#name_len,1))) then do;  /* if user has specified a paste multiplier */
+         tok.ptr=tok.ptr+1;                          /* skip comma */
+         if tok.ptr<token(0) then do;                /* get paste multiplier */
+            ch=byte(token,tok.ptr);
+            paste.multiplier=0;
+            do while tok.ptr<token(0);
+               if ((ch>=asc.0) and (ch<=asc.9)) and (ch<>0) then do;
+                  if paste.multiplier IGT 6553 then do;
+                     call overflow.error;
+                     return 0;
+                  end;
+                  load paste.multiplier; mul 10; paste.multiplier=res+(ch-asc.0);
+                  if paste.multiplier ILT (ch-asc.0) then do;
+                     call overflow.error;
+                     return 0;
+                  end;
+               end;
+               else do;
+                  call format.error;
+                  return 0;
+               end;
+               tok.ptr=tok.ptr+1;
+               ch=byte(token,tok.ptr);
+            end;
+         end;
+         else paste.multiplier=1;
+      end;
+      else if paste.name(0)<=shl(f#name_len,1)
+      then paste.multiplier=1;
+      else do;
+         call format.error;
+         return 0;
+      end;
+
+
+      if paste.multiplier=0 then do;           /* must paste at least one file */
+         call paste.one;
+         return 0;
+      end;
+
+      return 1;
+   end GET.PASTE.FILENAME.AND.MULTIPLIER;
+
+   /* $Subtitle Find Paste crossfade length */
+
+   PASTE.CROSSFADE:  proc(paste.base,mark.time,end.time,paste.time,
+                     mark.start.time,mark.end.sec,mark.end.wrd,
+                     pre.xfade.time,post.xfade.time) fixed swapable;
+      /* Note: returns pre and post crossfade lengths in last two args  */
+      /* which are pointers to arrays supplied by the caller            */
+      /* Also, sets globals paste.alt.pre and paste.alt.post            */
+      dcl paste.base         fixed array; /* base of sound file to be pasted */
+      dcl mark.time          fixed array; /* time associated with cursor */
+      dcl end.time           fixed array; /* time after the mark  */
+      dcl paste.time         fixed array; /* total time of paste sound file */
+      dcl mark.start.time    fixed array; /* mark start time of paste file */
+      dcl mark.end.sec       fixed;       /* mark end in paste file */
+      dcl mark.end.wrd       fixed;      
+      dcl pre.xfade.time     fixed array; /* RETURNED: crossfade before paste */
+      dcl post.xfade.time    fixed array; /* RETURNED: crossfade after paste */
+      dcl post.sec           fixed;       /* piece of .EDITBUF after mark end */
+      dcl post.wrd           fixed;
+      dcl post.time(2)       fixed;
+      dcl half.paste.time(2) fixed;       /* Half of "paste.time" */
+      dcl zero.time(2)       fixed;       /* Left as zeroes */
+      dcl i                  fixed;
+
+      /* limit size of crossfade to available data */
+
+      pre.xfade.time(1) = stm.crossfade;
+      call time_normalize(pre.xfade.time);
+      call copy_time(pre.xfade.time,post.xfade.time);
+
+      /* Calculate the piece of .EDITBUF after mark end */
+      call psmread(paste.base,SF.HDR,sf.valid.data);
+      write("300")=read(psd);
+      post.sec=read(psd);
+      post.wrd=read(psd);
+      call subtract.addresses(post.sec,post.wrd,mark.end.sec,mark.end.wrd);
+      post.sec=a.sec;
+      post.wrd=a.wrd;
+      call INDEX_TO_TIME(0,post.sec,post.wrd,stm.sample.rate,stereo);
+      post.time(0)=time.seconds;
+      post.time(1)=time.milliseconds;
+      post.time(2)=time.microseconds;
+
+      call COPY_TIME(paste.time,half.paste.time);
+      if (half.paste.time(0) & 1) <> 0                      /* If we're about to shift off 1 sec */
+      then half.paste.time(1) = half.paste.time(1) + 1000;  /* Carry down 1000 msec */
+      do i=0 to 2;                                          /* (Don't worry about usec) */
+         half.paste.time(i) = shr(half.paste.time(i),1);    /* Divide by two */
+      end;
+
+      i=0;   /* Haven't changed crossfade time yet */
+
+      if COMPARE_TIMES(mark.start.time,zero.time,3) <> 0
+      then paste.alt.pre = 0;      /* Material exists on clipboard before mark start for crossfade */
+      else paste.alt.pre = 1;      /* Mark start at time zero; use alternate crossfade algorithm */
+      if COMPARE_TIMES(post.time,zero.time,3) <> 0
+      then paste.alt.post = 0;      /* Material exists on clipboard after mark end for crossfade */
+      else paste.alt.post = 1;      /* Mark end at same time as END; use alternate crossfade algorithm */
+
+      /* Material exists on clipboard before mark start for crossfade */
+      if paste.alt.pre = 0 then do;
+         /* Pre crossfade can't be longer than sound file before paste point */
+         if COMPARE_TIMES(pre.xfade.time,mark.time,3) > 0 then do;
+            call copy_time(mark.time,pre.xfade.time);
+            i=1;
+         end;
+
+         /* Pre crossfade can't be longer than paste file before mark start */
+         if COMPARE_TIMES(pre.xfade.time,mark.start.time,3) > 0 then do;
+            call copy_time(mark.start.time,pre.xfade.time);
+            i=1;
+         end;
+      end;
+      /* Mark start at time zero; use alternate crossfade algorithm */
+      else do;
+         /* Pre crossfade can't be longer than sound file after paste point */
+         if COMPARE_TIMES(pre.xfade.time,end.time,3) > 0 then do;
+            call copy_time(end.time,pre.xfade.time);
+            i=1;
+         end;
+
+         /* Pre crossfade can't be longer than half of piece being pasted */
+         if COMPARE_TIMES(pre.xfade.time,half.paste.time,3) > 0 then do;
+            call copy_time(half.paste.time,pre.xfade.time);
+            i=1;
+         end;
+      end;
+
+      /* Material exists on clipboard after mark end for crossfade */
+      if paste.alt.post = 0 then do;
+         /* Post crossfade can't be longer than sound file after paste point */
+         if COMPARE_TIMES(post.xfade.time,end.time,3) > 0 then do;
+            call copy_time(end.time,post.xfade.time);
+            i=1;
+         end;
+
+         /* Post crossfade can't be longer than paste file after mark end */
+         if COMPARE_TIMES(post.xfade.time,post.time,3) > 0 then do;
+            call copy_time(post.time,post.xfade.time);
+            i=1;
+         end;
+      end;
+      /* Mark end at same time as END; use alternate crossfade algorithm */
+      else do;
+         /* Post crossfade can't be longer than sound file before paste point */
+         if COMPARE_TIMES(post.xfade.time,mark.time,3) > 0 then do;
+            call copy_time(mark.time,post.xfade.time);
+            i=1;
+         end;
+
+         /* Post crossfade can't be longer than half of piece being pasted */
+         if COMPARE_TIMES(post.xfade.time,half.paste.time,3) > 0 then do;
+            call copy_time(half.paste.time,post.xfade.time);
+            i=1;
+         end;
+      end;
+
+      /* If pasting multiple copies, pre crossfade can't be longer than paste file (between marks)... */
+      /* ...or half of paste file if alternate "pre" algorithm is used */
+      if paste.multiplier > 1 then do;
+         if paste.alt.pre = 0
+         then call COPY_TIME(paste.time,some.time);
+         else call COPY_TIME(half.paste.time,some.time);
+         if COMPARE_TIMES(pre.xfade.time,some.time,3) > 0 then do;
+            call copy_time(some.time,pre.xfade.time);
+            i=1;
+         end;
+      end;
+
+      /* notify user if we change crossfade length */
+      if i <> 0 then do;
+         /* Display truncation message showing shortest crossfade */
+         if COMPARE_TIMES(pre.xfade.time,post.xfade.time,3) > 0
+         then call COPY_TIME(post.xfade.time,some.time);
+         else call COPY_TIME(pre.xfade.time, some.time);
+         tok.ptr=0;
+         token(0)=tok.ptr;
+         call CONVERT.SAMPLE.TIME.TO.STRING(some.time);  /* converts an unsigned number between 0 and 999 to a string*/
+         call crossfade.override;                /* tell the user */
+      end;
+      return;
+   end PASTE.CROSSFADE;
+
+   /* $Subtitle Insert Paste files into new file */
+
+   PASTE.FILES:  proc(old.base,mark.sec,mark.wrd,end.sec,end.wrd,paste.base,mark.start.sec,mark.start.wrd,
+                      mark.end.sec,mark.end.wrd,paste.tot.sec,paste.tot.wrd,new.base,pre.crossfade,post.crossfade)
+                      swapable;  /* inserts all of the paste files */
+      dcl old.base         fixed array; /* current sound file base */
+      dcl (mark.sec,mark.wrd)    fixed; /* address of cursor location where sound file will be pasted */
+      dcl (end.sec,end.wrd)      fixed; /* length of data after cursor location */
+      dcl paste.base       fixed array; /* base of sound file to be pasted */
+      dcl mark.start.sec         fixed; /* mark start in paste file */
+      dcl mark.start.wrd         fixed;
+      dcl mark.end.sec           fixed; /* mark end in paste file */
+      dcl mark.end.wrd           fixed;
+      dcl paste.tot.sec          fixed;
+      dcl paste.tot.wrd          fixed;
+      dcl new.base         fixed array; /* base of new sound file with pasted sound file */
+      dcl pre.crossfade          fixed;
+      dcl post.crossfade         fixed;
+      dcl (ssec1,swrd1)          fixed; /* source 1 address for crossfade */
+      dcl (ssec2,swrd2)          fixed; /* source 2 address for crossfade */
+      dcl (dsec,dwrd)            fixed; /* destination address for crossfade */
+      dcl (mult.sec,mult.wrd)    fixed;
+      dcl temp.base (1)          fixed;
+      dcl (i, j)                 fixed;
+
+      /* copy up to the cursor location */
+      call COPY.POLY.MEM(old.base,shr(BL.POLY,8),0,new.base,shr(BL.POLY,8),0,mark.sec,mark.wrd);
+
+      /* insert all of the paste files */
+
+      call GET.CROSSFADE.WRD.LEN(pre.crossfade,stm.sample.rate,stereo);
+
+      mult.sec = mark.sec;        /* start pasting at cursor */
+      mult.wrd = mark.wrd;        /* location                */
+
+      do i=0 to paste.multiplier-1;
+         /* Calculate addresses and copy paste file to destination */
+         ssec2=shr(BL.POLY,8)+mark.start.sec;
+         swrd2=mark.start.wrd;
+         dsec =shr(bl.poly,8) + mult.sec;
+         dwrd =mult.wrd;
+
+         call COPY.POLY.MEM(paste.base,ssec2,swrd2,new.base,dsec,dwrd,paste.tot.sec,paste.tot.wrd);
+
+         /* Material exists on clipboard before mark start for crossfade */
+         if paste.alt.pre = 0 then do;
+            if i=0 then do;          /* first time through - cross fade out from original data */
+               call subtract.addresses(mark.sec,mark.wrd,xfade.sec,xfade.wrd);
+               call copy32(old.base,temp.base);
+            end;
+            else do;                 /* other times - cross fade out from end of paste */
+               call subtract.addresses(mark.end.sec,mark.end.wrd,xfade.sec,xfade.wrd);
+               call copy32(paste.base,temp.base);
+            end;
+            ssec1=shr(bl.poly,8) + a.sec;
+            swrd1=a.wrd;
+            call subtract.addresses(mark.start.sec,mark.start.wrd,xfade.sec,xfade.wrd);
+            ssec2=shr(BL.POLY,8)+a.sec;       /* fading in data */
+            swrd2=a.wrd;
+            call subtract.addresses(mult.sec,mult.wrd,xfade.sec,xfade.wrd);
+            dsec =shr(bl.poly,8) + a.sec;
+            dwrd =a.wrd;
+         end;
+         /* Mark start at time zero; use alternate crossfade algorithm */
+         else do;
+            if i=0 then do;          /* first time through - cross fade out from original data */
+               ssec1=shr(bl.poly,8) + mark.sec;
+               swrd1=mark.wrd;
+               call copy32(old.base,temp.base);
+            end;
+            else do;                 /* other times - cross fade out from end of paste */
+               /* Note, there is NO good material to fade out in this one case! */
+               /* It is better to do pastes one at a time IF no data past MARK END */
+               ssec1=shr(bl.poly,8) + mark.start.sec;
+               swrd1=mark.start.wrd;
+               call copy32(paste.base,temp.base);
+            end;
+            ssec2=shr(bl.poly,8) + mark.start.sec;      /* fading in data */
+            swrd2=mark.start.wrd;
+            dsec =shr(bl.poly,8) + mult.sec;
+            dwrd =mult.wrd;
+         end;
+
+         call POLY.CROSS.FADE(temp.base,ssec1,swrd1,paste.base,ssec2,swrd2,new.base,dsec,dwrd,pre.crossfade,stm.sample.rate,stereo);
+
+         mult.sec = mult.sec + paste.tot.sec;
+         mult.wrd = mult.wrd + paste.tot.wrd;
+      end;
+
+      /* copy in trailing section */
+
+      call GET.CROSSFADE.WRD.LEN(post.crossfade,stm.sample.rate,stereo);
+
+      ssec1 = shr(bl.poly,8) + mark.end.sec;
+      swrd1 = mark.end.wrd;
+      ssec2 = shr(BL.POLY,8) + mark.sec;
+      swrd2 = mark.wrd;
+      dsec  = shr(bl.poly,8) + mult.sec;
+      dwrd  = mult.wrd;
+
+      call COPY.POLY.MEM(old.base,ssec2,swrd2,new.base,dsec,dwrd,end.sec,end.wrd);
+
+      /* Mark end at same time as END; use alternate crossfade algorithm */
+      if paste.alt.post <> 0 then do;
+         call subtract.addresses(mark.end.sec,mark.end.wrd,xfade.sec,xfade.wrd);
+         ssec1 = shr(bl.poly,8) + a.sec;
+         swrd1 = a.wrd;
+         call subtract.addresses(mark.sec,mark.wrd,xfade.sec,xfade.wrd);
+         ssec2 = shr(BL.POLY,8) + a.sec;
+         swrd2 = a.wrd;
+         call subtract.addresses(mult.sec,mult.wrd,xfade.sec,xfade.wrd);
+         dsec  = shr(bl.poly,8) + a.sec;
+         dwrd  = a.wrd;
+      end;
+      /* Else, material exists on clipboard after mark end for crossfade */
+      /* so do crossfade in the same place we copied to */
+
+      call POLY.CROSS.FADE(paste.base,ssec1,swrd1,old.base,ssec2,swrd2,new.base,dsec,dwrd,post.crossfade,stm.sample.rate,stereo);
+
+      mult.sec = mult.sec + end.sec;    /* compute new total length */
+      mult.wrd = mult.wrd + end.wrd;    /* of sound file            */
+      mult.sec = mult.sec + shr(mult.wrd,8);
+      mult.wrd = mult.wrd & 255;
+
+      /* Set MARK.END to last valid sample in file */
+      i = mult.sec; /* sector length */
+      j = mult.wrd - (1+stereo); /* subtract one sample from length */
+      if j < 0 then do; /* need to borrow from sectors */
+         j = j&255; i = i - 1; 
+      end;
+
+      call INDEX_TO_TIME(0,i,j,stm.sample.rate,stereo);
+      call psmwrite(new.base,SF.HDR,sf.mark.end);
+      write(psd)=time.seconds;
+      write(psd)=time.milliseconds;
+      write(psd)=time.microseconds;
+      call SET.SYMBOL.TIME(new.base,mend,time.seconds,time.milliseconds,time.microseconds);
+
+      /* Set DATA.END the same as MARK.END */
+      call psmwrite(new.base,SF.HDR,sf.data.end);
+      write(psd)=time.seconds;
+      write(psd)=time.milliseconds;
+      write(psd)=time.microseconds;
+      call SET.SYMBOL.TIME(new.base,ENDNAME,time.seconds,time.milliseconds,time.microseconds);
+
+      /* Set VALID.DATA to be length of valid data in file */
+      call psmwrite(new.base,SF.HDR,sf.valid.data);
+      write(psd)=0;
+      write(psd)=mult.sec;
+      write(psd)=mult.wrd;
+   end PASTE.FILES;
+
+   /* $Subtitle Paste Symbols */
+
+   PASTE.SYMBOLS:  proc(base,mark.time,paste.base,mark.start.time,mark.end.time,paste.time,new.base) swapable;
+      dcl base                   fixed array; /* file base of original sound file */
+      dcl mark.time              fixed array; /* time associated with cursor */
+      dcl paste.base             fixed array;
+      dcl mark.start.time        fixed array; /* time of mark start of file to be pasted */
+      dcl mark.end.time          fixed array; /* mark end time of paste file */
+      dcl paste.time             fixed array;
+      dcl new.base               fixed array;
+      dcl old.base (1)           fixed;
+      dcl old_number_of_symbols  fixed;
+      dcl new_number_of_symbols  fixed;
+      dcl edit.offset.time(2)    fixed; /* how far to slide symbols in .EDITBUF */
+      dcl (i,j)                  fixed;
+
+      /* insert the symbols into the new sound file */
+
+      /* calculate amount to slide symbols over by */
+      do i=0 to 2;
+         edit.offset.time(i) = mark.time(i) - mark.start.time(i);
+      end;
+      call time_normalize(edit.offset.time);
+
+      call psmread(new.base,SF.HDR,sf.number.of.symbols);      /* get number of symbols from new sound file */
+      new_number_of_symbols=read(psd);
+      call psmread(paste.base,SF.HDR,sf.number.of.symbols);    /* get number of symbols from EDITBUF */
+      old_number_of_symbols=read(psd);
+
+      if old_number_of_symbols>new_number_of_symbols then do;  /* if there are some symbols to paste */
+
+         i=FIND_TIME(paste.base,mark.start.time);
+         j=FIND_TIME(paste.base,mark.end.time);
+         do while (i<j) and (new_number_of_symbols<max.symbols);
+            new_number_of_symbols=MOVE.SYMBOL(paste.base,new.base,i,edit.offset.time,1,0);   /* insert all of the symbols into the new sound file */
+            i=i+1;
+         end;
+      end;
+
+      call SELECT.PARTIAL(0);
+      call LOOK.UP.SF.INFO;
+      call copy32(SFILE.BASE,old.base);
+
+      call psmread(old.base,SF.HDR,sf.number.of.symbols);      /* get number of symbols from old sound file */
+
+      /* include all of the symbols up to the paste time */
+      do i=0 to 2;  /* no mapping needs to be done */
+         some.time(i)=0;
+      end;
+      i=0;                        /* copy from the beginning to the marked place */
+      j=FIND_TIME(old.base,mark.time);
+      do while (i<j) and (new_number_of_symbols<max.symbols);
+         new_number_of_symbols=MOVE.SYMBOL(old.base,new.base,i,some.time,0,1);   /* insert all of the symbols into the new sound file */
+         i=i+1;
+      end;
+
+      /* include all of the symbols after the paste time */
+      do i=0 to 2;
+         edit.offset.time(i) = 0;   /* Initialize the time to zero */
+      end;
+      /* offset by a paste.time for each copy pasted */
+      do j=1 to paste.multiplier;
+         do i=0 to 2;
+            edit.offset.time(i) = edit.offset.time(i) + paste.time(i);
+         end;
+      end;
+      i=FIND_TIME(old.base,mark.time);
+      j=FIND_TIME(old.base,tot.time);
+      do while (i<j) and (new_number_of_symbols<max.symbols);
+         new_number_of_symbols=MOVE.SYMBOL(old.base,new.base,i,edit.offset.time,1,1);   /* insert all of the symbols into the new sound file */
+         i=i+1;
+      end;
+   end PASTE.SYMBOLS;
+
+   /* $Subtitle Paste Samples */
+
+   PASTE.SAMPLES:  proc (base) public swapable;     /* pastes the specified sound file into the current sound file*/
+      dcl base             fixed array; /* current sound file base */
+      dcl sbase (1)              fixed;       /* 32 bit poly base */
+      dcl i                      fixed;
+      dcl paste.time(2)          fixed; /* total time of paste sound file */
+      dcl paste.base (1)         fixed; /* base of sound file to be pasted */
+      dcl new.base (1)           fixed; /* base of new sound file with pasted sound file */
+      dcl old.base (1)           fixed; /* base of original sound file */
+      dcl current.name(4)        fixed; /* current sound file name */
+      dcl rate                   fixed; /* current sound file sample rate */
+      dcl type                   fixed; /* if current sound file is stereo */
+      dcl prev.part              fixed static;/* previous sound file partial */
+      dcl paste.tot.sec          fixed; /* sector address to total number of sectors in sound file to be pasted */
+      dcl paste.tot.wrd          fixed; /* word address to total number of remaining words in pasted sound file*/
+      dcl (mark.sec,mark.wrd)    fixed; /* address of cursor location where sound file will be pasted */
+      dcl mark.time(2)           fixed; /* time up to the mark  */
+      dcl (tot.sec,tot.wrd)      fixed; /* length of the current file */
+      dcl origin.time(2)         fixed; /* time of left edge of original sound file display */
+      dcl end.time(2)            fixed; /* time after the mark  */
+      dcl mark.start.time(2)     fixed; /* mark start time of paste file */
+      dcl mark.end.time(2)       fixed; /* mark end time of paste file */
+      dcl mark.start.sec         fixed; /* mark start in paste file */
+      dcl mark.start.wrd         fixed;
+      dcl mark.end.sec           fixed; /* mark end in paste file */
+      dcl mark.end.wrd           fixed;
+      dcl (end.sec,end.wrd)      fixed; /* number of samples in current sound file */
+      dcl #secs                  fixed; /* new sound file length */
+      dcl pre.xfade.time (2)     fixed; /* crossfade before paste */
+      dcl post.xfade.time (2)    fixed; /* crossfade after paste */
+      dcl pre.crossfade          fixed; /* before paste, in milliseconds */
+      dcl post.crossfade         fixed; /* after paste, in milliseconds */
+      dcl rec(POLY.HIST.REC.LEN-1) fixed;
+
+      RECOVER.KEY.TIMBRE: proc fixed;     /* recovers current keyboard timbre and erases it from old location */
+         call COPY.KBD.TIMBRES(1,0);    
+         call ERASE.TIMBRE(1);
+         call SELECT.PARTIAL(prev.part);  /* select the original partial    */
+      end RECOVER.KEY.TIMBRE;
+
+      if inc.stmm=0 then return;          /* PASTE is a STM release M feature */
+
+      current.name(0)=8;                  /* find the current sound file name */
+      do i=1 to 4;
+         current.name(i)=FNBUF(i);
+      end;
+      rate=stm.sample.rate;
+      type=stereo;
+
+      /* remember the cursor time before it gets clobbered by selecting the paste partial */
+      call copy_time(cursor.time,mark.time);
+
+      /* save this for later use because LOOK.UP.SF.INFO gloms original file start.time */
+      call copy_time(start.time,origin.time);
+
+      if GET.PASTE.FILENAME.AND.MULTIPLIER=0   /* get paste filename and the number of times to be pasted */
+      then return;
+
+      split.keyboard=0;
+      prev.part=FIND.PARTIAL;         /* remember the previously selected partial in case of error */
+      call COPY.KBD.TIMBRES(0,1);     /* copy current keyboard timbre */
+
+      /* set up sound files on first and second partials of keyboard timbre */
+
+      call ERASE.KEYBOARD.TIMBRE;     /* get rid of timbre #0        */
+      call SELECT.PARTIAL(0);         /* select the first partial    */
+      call CREATE.PATCH.PARTIAL(0,current.name);       /* turn this partial into a patch partial*/
+      call SELECT.PARTIAL(1);         /* select the second partial   */
+      call CREATE.PATCH.PARTIAL(1,paste.name);         /* turn this partial into a patch partial*/
+      if ertyp<>0 then do;
+         call RECOVER.KEY.TIMBRE;     /* recover keyboard timbre */
+         return;
+      end;
+
+      call SELECT.PARTIAL(0);                    /* select the current sound file */
+      call LOOK.UP.SF.INFO;                      /* check if it is okay */
+      if sf.type<>1 then do;                     /* if not a sound file */
+         call RECOVER.KEY.TIMBRE;                /* recover keyboard timbre */
+         return;
+      end;
+
+      /* find the sector and word length of the original sound file */
+      call TIME_TO_INDEX(tot.time(0),tot.time(1),tot.time(2),stm.sample.rate,stereo);
+      tot.sec=sector.numb;
+      tot.wrd=sector.offset;
+
+      do i=0 to 2;  /* find the time of the sound file after the paste */
+         end.time(i)=tot.time(i)-mark.time(i);
+      end;
+      call TIME_NORMALIZE(end.time);
+      call TIME_TO_INDEX(end.time(0),end.time(1),end.time(2),stm.sample.rate,stereo);
+      end.sec=sector.numb;
+      end.wrd=sector.offset;
+
+      call TIME_TO_INDEX(mark.time(0),mark.time(1),mark.time(2),stm.sample.rate,stereo);
+      mark.sec=sector.numb;
+      mark.wrd=sector.offset;
+
+      /* $page */
+
+      call SELECT.PARTIAL(1);                /* select second paste sound file */
+      call LOOK.UP.SF.INFO;
+      call copy32(SFILE.BASE,paste.base);
+      if sf.type<>1 then do;                 /* if not a sound file     */
+         call COPY_TIME(origin.time,start.time);
+         call RECOVER.KEY.TIMBRE;            /* recover keyboard timbre */
+         return;
+      end;
+      if stereo<>type then do;               /* check sound file types */
+         call COPY_TIME(origin.time,start.time);
+         call RECOVER.KEY.TIMBRE;            /* recover keyboard timbre */
+         call incompat.sf.types;             /* must both be mono or both stereo */
+         return;
+      end;
+      if stm.sample.rate<>rate then do;      /* check sampling rates */
+         call COPY_TIME(origin.time,start.time);
+         call RECOVER.KEY.TIMBRE;            /* recover keyboard timbre */
+         call incompat.sf.rates;
+         return;
+      end;
+
+      call psmread(paste.base,SF.HDR,sf.mark.start);
+      do i=0 to 2;
+         mark.start.time(i)=read(psd);
+      end;
+      call psmread(paste.base,SF.HDR,sf.mark.end);    /* look up mark end time */
+      do i=0 to 2;
+         mark.end.time(i)=read(psd);
+      end;
+
+      call TIME_TO_INDEX(mark.start.time(0),mark.start.time(1),mark.start.time(2),stm.sample.rate,stereo);
+      mark.start.sec=sector.numb;   /* get address of mark start in paste file*/
+      mark.start.wrd=sector.offset;
+      call TIME_TO_INDEX(mark.end.time(0),mark.end.time(1),mark.end.time(2),stm.sample.rate,stereo);
+      mark.end.sec=sector.numb;     /* get address of mark end in paste file */
+      mark.end.wrd=sector.offset;
+
+      do i=0 to 2;                           /* save the total time of the paste sound file */
+         paste.time(i)=mark.end.time(i)-mark.start.time(i);
+      end;
+      call TIME_NORMALIZE(paste.time);
+      call TIME_TO_INDEX(paste.time(0),paste.time(1),paste.time(2),stm.sample.rate,stereo);
+      paste.tot.sec=sector.numb;
+      paste.tot.wrd=sector.offset;
+
+      /* make sure we have enough material to do the crossfade */
+      call PASTE.CROSSFADE(paste.base,mark.time,end.time,paste.time,mark.start.time,mark.end.sec,mark.end.wrd,pre.xfade.time,post.xfade.time);
+      pre.crossfade  =  (pre.xfade.time(0) * 1000) +  pre.xfade.time(1);
+      post.crossfade = (post.xfade.time(0) * 1000) + post.xfade.time(1);
+
+      /* find the total number of sectors to create the new sound file */
+      bitmsb = 0; bitlsb = (paste.tot.sec+shr(paste.tot.wrd,8)+((paste.tot.wrd&255)<>0));
+      call multiply(paste.multiplier,0,0,0);
+
+      bitlsb = bitlsb + tot.sec;
+      if bitlsb ilt tot.sec then bitmsb=bitmsb+1;
+
+      bitlsb = bitlsb + shr(tot.wrd,8) + ((tot.wrd&255)<>0);
+      if bitlsb ilt (shr(tot.wrd,8) + ((tot.wrd&255)<>0)) then bitmsb=bitmsb+1;
+
+      #secs = bitlsb;
+
+      if  (bitmsb<>0)               /* overflow */
+      or  (#secs igt 30000)         /* too long */
+      then do;                      /* not enough memory for sound file creation */
+         call COPY_TIME(origin.time,start.time);
+         call nomem.error;
+         call RECOVER.KEY.TIMBRE;
+         return;
+      end;
+
+      if CREATE.SOUND.FILE(#secs+shr(BL.POLY,8),stm.sample.rate,0,stereo)<>0 then do;  /* if we can create a sound file large enough */
+         call copy32(SFILE.BASE,new.base);
+         call SELECT.PARTIAL(0);
+         call LOOK.UP.SF.INFO;
+         if sf.type<>1 then do;
+            call COPY_TIME(origin.time,start.time);
+            call RECOVER.KEY.TIMBRE;
+            return;
+         end;
+         call copy32(SFILE.BASE,old.base);
+         call DRAW.MESSAGE('Pasting Sound File...');
+
+         /* $page */
+
+         call PS.LOCK;                         /* lock out a reboot */
+
+         /* paste the insert file(s) and the remaining part of the original sound file */
+         call PASTE.FILES(old.base,mark.sec,mark.wrd,end.sec,end.wrd,
+            paste.base,mark.start.sec,mark.start.wrd,mark.end.sec,mark.end.wrd,
+            paste.tot.sec,paste.tot.wrd,new.base,pre.crossfade,post.crossfade);  /* inserts all of the paste files */
+
+         call PASTE.SYMBOLS(old.base,mark.time,paste.base,mark.start.time,mark.end.time,paste.time,new.base);
+
+         call PS.SETUP(new.base);          /* set up new file */
+         call PS.UNLOCK;
+         call ERASE.KEYBOARD.TIMBRE;       /* erase the split keyboard timbre */
+         call COPY.KBD.TIMBRES(0,1);
+         call SELECT.PARTIAL(0);           /* select the first partial */
+         call CREATE.PATCH.PARTIAL(0,NEWFNAME);     /* create a patch timbre */
+         call CLEAR.PARAMETERS;            /* clear all previous active parameters */
+         call clear.display;               /* clear the Synclavier window */
+         call COPY_TIME(origin.time,start.time);
+         new.poly.contents = new.poly.contents \ 1;
+         call ERASE.MESSAGE;
+
+         call BUILD.POLY.HIST.REC(new.base,0,rec);
+         call ADD.POLY.TO.HIST(rec);
+
+      end;
+      else do;
+         call COPY_TIME(origin.time,start.time);
+         call RECOVER.KEY.TIMBRE;
+      end;
+   end PASTE.SAMPLES;
+
+   /* $Subtitle Copy Samples */
+
+   COPY.SAMPLES:  proc (base,cross.start,cross.2) public swapable; /* copies the specified section of the current sound file and puts contents in a new sound file */
+      dcl base             fixed array; /* original file base */
+      dcl cross.start            fixed; /* start of crossfade in token array */
+      dcl cross.2                fixed; /* zero or start of second crossfade */
+      dcl current.name(4)        fixed; /* current sound file name */
+      dcl (begin.sec,begin.wrd)  fixed; /* address of beginning location */
+      dcl (end.sec,end.wrd)      fixed; /* address of ending location */
+      dcl (copy.sec,copy.wrd)    fixed; /* length of piece being copied */
+      dcl (aft.sec,aft.wrd)      fixed; /* length of sound file section after copy */
+      dcl aft.time(2)            fixed;
+      dcl #secs                  fixed; /* length of .EDITBUF to create */
+      dcl new.base (1)           fixed; /* file base of .EDITBUF */
+      dcl pre.crossfade          fixed; /* crossfade before actual copy */
+      dcl pre.xfade.time(2)      fixed;
+      dcl post.crossfade         fixed; /* crossfade after actual copy */
+      dcl post.xfade.time(2)     fixed;
+      dcl old_number_of_symbols  fixed; /* number of symbols in old sound file */
+      dcl new_number_of_symbols  fixed; /* number of symbols in new sound file */
+      dcl edit.offset.time(2)    fixed; /* how far to slide symbols in .EDITBUF */
+      dcl (i,j)                  fixed;
+      dcl (tbuf) (4)             fixed;
+
+
+      if inc.stmm=0 then return 0;          /* COPY is a STM release M feature */
+
+      if GET.STM.EDIT.TIMES(base)=0         /* if we cannot get decent edit times */
+      then return 0;                        /* we will leave */
+
+      current.name(0)=8;                    /* find the current sound file name */
+      do i=1 to 4;
+         current.name(i)=FNBUF(i);
+      end;
+      if eqstr(current.name,EDITBUFF)=0 then do; /* if the current sound file is the edit buffer */
+         call no.edit.buf;                                  /* no can do */
+         return 0;
+      end;
+
+      /* find addresses of begin and end time */
+
+      call TIME_TO_INDEX(stm.begin.time(0),stm.begin.time(1),stm.begin.time(2),stm.sample.rate,stereo); /* find the address of the beginning time */
+      begin.sec=sector.numb;
+      begin.wrd=sector.offset;
+      call TIME_TO_INDEX(stm.end.time(0),stm.end.time(1),stm.end.time(2),stm.sample.rate,stereo); /* find the address of the ending time */
+      end.sec=sector.numb;
+      end.wrd=sector.offset;
+
+      call subtract.addresses(end.sec,end.wrd,begin.sec,begin.wrd);
+      copy.sec=a.sec;
+      copy.wrd=a.wrd;
+
+      /* find the sector length of the sound file piece after the copy */
+      call psmread(base,SF.HDR,sf.valid.data);
+      write("300")=read(psd);
+      aft.sec=read(psd);
+      aft.wrd=read(psd);
+      call subtract.addresses(aft.sec,aft.wrd,end.sec,end.wrd);
+      aft.sec=a.sec;
+      aft.wrd=a.wrd;
+
+      call INDEX_TO_TIME(0,aft.sec,aft.wrd,stm.sample.rate,stereo);
+      aft.time(0)=time.seconds;
+      aft.time(1)=time.milliseconds;
+      aft.time(2)=time.microseconds;
+
+      if GET.CROSSFADE.TIME(cross.start)<>0
+      then do;
+         call copy_time(some.time,pre.xfade.time);
+         call copy_time(some.time,post.xfade.time);
+      end;
+      else return 0;
+
+      if cross.2 <> 0 then do;  /* If user specified a different ending crossfade */
+         if GET.CROSSFADE.TIME(cross.2) <> 0
+         then call copy_time(some.time,post.xfade.time);
+      end;
+
+      /* limit size of crossfade to available data */
+
+      i=0;   /* Haven't changed crossfade time yet */
+      j=0;
+
+      /* Pre crossfade can't be longer than sound file before copy */
+      if COMPARE_TIMES(pre.xfade.time,stm.begin.time,3) > 0 then do;
+         call copy_time(stm.begin.time,pre.xfade.time);
+         i=1;
+      end;
+
+      /* Post crossfade can't be longer than sound file after copy */
+      if COMPARE_TIMES(post.xfade.time,aft.time,3) > 0 then do;
+         call copy_time(aft.time,post.xfade.time);
+         j=1;
+      end;
+
+      /* notify user if we change crossfade length */
+      if i <> 0 OR j <> 0 then do;
+         /* Display truncation message showing changed crossfade */
+         if      i <> 0 then call COPY_TIME(pre.xfade.time, some.time);
+         else if j <> 0 then call COPY_TIME(post.xfade.time,some.time);
+         tok.ptr=0;
+         token(0)=tok.ptr;
+         call CONVERT.SAMPLE.TIME.TO.STRING(some.time);  /* converts an unsigned number between 0 and 999 to a string*/
+         call crossfade.override;                /* tell the user */
+      end;
+
+      pre.crossfade  =  (pre.xfade.time(0) * 1000) +  pre.xfade.time(1);
+      post.crossfade = (post.xfade.time(0) * 1000) + post.xfade.time(1);
+
+      /* Get length of total copy including pre and post crossfades */
+      call GET.CROSSFADE.WRD.LEN(pre.crossfade+post.crossfade,stm.sample.rate,stereo);
+      copy.wrd=copy.wrd+xfade.wrd;
+      copy.sec=copy.sec+xfade.sec+shr(copy.wrd,8);
+      copy.wrd=copy.wrd&255;
+      #secs=copy.sec+(copy.wrd<>0);
+
+      if CREATE.SOUND.FILE(#secs+shr(BL.POLY,8),stm.sample.rate,0,stereo)<>0 then do;  /* create the copy buffer */
+         call copy32(SFILE.BASE,new.base);  /* things may have changed */
+         call DRAW.MESSAGE('Copying Samples from Sound File...');
+         call copy.string(editbuff,fnbuf);
+         LNBUF(0)=0;
+         if ps.search<>0 then do;           /* if .EDITBUF already exists */
+            call ps.users(SFILE.BASE,(-1)); /* subtact one from the number of users */
+            call ps.deallocate(SFILE.BASE); /* delete it */
+         end;   
+         call LOOK.UP.SF.INFO;              /* so find current file name again */
+         if sf.type=1 then do;              /* if not a sound file */
+            call copy32(SFILE.BASE,base);
+            call PS.LOCK;                   /* lock out a reboot */
+
+            /* copy into a new file */
+            call GET.CROSSFADE.WRD.LEN(pre.crossfade,stm.sample.rate,stereo);/* calculate the crossfade word length */
+            call subtract.addresses(shr(BL.POLY,8)+begin.sec,begin.wrd,xfade.sec,xfade.wrd);
+            call COPY.POLY.MEM(base,a.sec,a.wrd,new.base,shr(BL.POLY,8),0,copy.sec,copy.wrd);
+
+            /* calculate amount to slide symbols over by */
+            do i=0 to 2;
+               edit.offset.time(i) = stm.begin.time(i) - pre.xfade.time(i);
+            end;
+            call time_normalize(edit.offset.time);
+
+            /* get number of symbols from old sound file */
+            call psmread(base,SF.HDR,sf.number.of.symbols);
+            old_number_of_symbols=read(psd);
+            call psmread(new.base,SF.HDR,sf.number.of.symbols);
+            new_number_of_symbols=read(psd);
+
+            if old_number_of_symbols>new_number_of_symbols then do;     /* if there are some symbols included in the copy */
+               i=FIND_TIME(base,stm.begin.time);                            /* include the symbols from the beginning copy time */
+               j=FIND_TIME(base,stm.end.time);                              /* to the end of the copy time */
+               do while (i<j) and (new_number_of_symbols<max.symbols);  /* do while less than copy time and number of symbols in new sound file is less than max */
+                  new_number_of_symbols=MOVE.SYMBOL(base,new.base,i,edit.offset.time,0,0);
+                  i=i+1;
+               end;                                               /* of if not a duplicate name */
+            end;
+
+            call ps.users(new.base,1);                        /* set the number of users */
+            call psmwrite(new.base,0,bl.fname);
+            call copy.string(editbuff,tbuf);
+            call poly.out(addr(tbuf(1)),4);
+            call psmwrite(new.base,0,bl.lname);
+            call poly.out(addr(tbuf(0)),5);
+            do i=4 to sf.file.handle.wl-1;
+               write(psd)=0;
+            end;
+
+            /* Set MARK.START after the leading crossfade data */
+            call INDEX_TO_TIME(0,xfade.sec,xfade.wrd,stm.sample.rate,stereo);
+            call psmwrite(new.base,SF.HDR,sf.mark.start);
+            write(psd)=time.seconds;
+            write(psd)=time.milliseconds;
+            write(psd)=time.microseconds;
+            call SET.SYMBOL.TIME(new.base,mstart,time.seconds,time.milliseconds,time.microseconds);
+
+            /* Set MARK.END before the ending crossfade data */
+            call GET.CROSSFADE.WRD.LEN(post.crossfade,stm.sample.rate,stereo);/* calculate the crossfade word length */
+            call subtract.addresses(copy.sec,copy.wrd,xfade.sec,xfade.wrd);
+            i = a.sec; /* sector length */
+            j = a.wrd - (1+stereo); /* subtract one sample from length */
+            if j < 0 then do; /* need to borrow from sectors */
+               j = j&255; i = i - 1; 
+            end;
+            call INDEX_TO_TIME(0,i,j,stm.sample.rate,stereo);
+            call psmwrite(new.base,SF.HDR,sf.mark.end);
+            write(psd)=time.seconds;
+            write(psd)=time.milliseconds;
+            write(psd)=time.microseconds;
+            call SET.SYMBOL.TIME(new.base,mend,time.seconds,time.milliseconds,time.microseconds);
+
+            /* Set VALID.DATA to length of data in file */
+            call psmwrite(new.base,SF.HDR,sf.valid.data);
+            write(psd)=0;
+            write(psd)=copy.sec; /* include both crossfades in valid data */
+            write(psd)=copy.wrd;
+
+            /* Set DATA.END to last valid sample in file */
+            i = copy.sec; /* sector length */
+            j = copy.wrd - (1+stereo); /* subtract one sample from length */
+            if j < 0 then do; /* need to borrow from sectors */
+               j = j&255; i = i - 1; 
+            end;
+
+            call INDEX_TO_TIME(0,i,j,stm.sample.rate,stereo);
+            call psmwrite(new.base,SF.HDR,sf.data.end);
+            write(psd)=time.seconds;
+            write(psd)=time.milliseconds;
+            write(psd)=time.microseconds;
+            call SET.SYMBOL.TIME(new.base,ENDNAME,time.seconds,time.milliseconds,time.microseconds);
+
+            call ps.setup(new.base);            /* set up Synclavier info */
+            call PS.UNLOCK;
+         end;                            /* of valid sound file */
+      end;                               /* of sound file is created */
+
+      call ERASE.MESSAGE;
+      return 1;
+   end COPY.SAMPLES;
+
+   /* $Subtitle Cut Samples */
+   /* 02/18/88 - MWH - Simply make this a COPY and DELETE */
+
+   CUT.SAMPLES:  proc (base,cross.start,cross.2) public swapable; /* cuts the specified section of the current sound file and puts contents in a new sound file */
+      dcl base             fixed array; /* original file base */
+      dcl cross.start            fixed; /* start of crossfade in token array */
+      dcl cross.2                fixed; /* zero or start of second crossfade */
+      dcl (tbuf) (64)            fixed;
+
+      if inc.stmm=0 then return;            /* CUT is a STM release M feature */
+
+      call copy.string(token,tbuf);         /* Save token in case COPY.SAMPLES changes it */
+      if COPY.SAMPLES(base,cross.start,cross.2) <> 0 then do;
+         call copy.string(tbuf,token);      /* Restore token so cross.start is valid */
+         call DELETE.SAMPLES(base,cross.start);
+      end;
+
+   end CUT.SAMPLES;
+

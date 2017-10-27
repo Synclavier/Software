@@ -1,0 +1,1227 @@
+/* PROSOU  $TITLE  Routines to process protocol packets
+
+   Modified:
+	2007/02/02 - CJ  - Change NUM.MIDI.TRACKS to MAX.INPUTS = 202
+   12/07/91 - PF  - Added ability to receive block transfers
+   11/15/91 - PF  - Begin Standard Data Transfer Protocol
+   11/01/90 - cj  - Fixed check.for.protocol.stop.button to not
+                    throw away current message.
+   10/30/90 - MWH - Handle special message from D115D: Channel now inactive
+   10/29/90 - cj  - Processed redundant 'Here Is' messages in interrupt
+                    routine so buffer doesn't fill with here is messages
+                    during protocol audition.  All so we can actually stop
+                    an audition!!
+   10/12/90 - cj  - added ability to stop protocol audition
+   08/27/90 - PF  - Support all MIDI controllers
+   05/31/90 - cj  - added snapshot tag variable
+   05/09/90 - PF  - zero poly pressure on new MIDI note
+   03/09/89 - PF  - Increase MAX.INPUTS to 128
+   02/01/90 - MWH - Reset timeout timer on ANY incoming message
+   01/04/90 - MWH - Be sure HERE_IS is processed when device mapping changes
+   10/30/89 - MWH - Add MIDI channel limit checking (per Paul)
+   09/20/89 - PF  - Added check for track head in NOTE.OFF, NOTE.ON and PROGRAM.CHANGE
+   09/15/89 - PF  - Added MIDINET.TIMEOUT
+   09/01/89 - MWH - Rework the protocol for release 2.2
+   08/24/89 - PF  - Removed TRACK and TIMBRE params from MIDI messages
+   06/27/89 - cj  - split up RUN.PROTOCOL to provide separate control over
+                    input, D50 termulator, and RS422 protocol devices.
+                    Added Flush.VK.Display.To.Termulators, Send.Events.To.D50.Termulator
+                    Added use.protocol.for.d50.
+   06/26/89 - CJ  - Clean up interrupt handling in D115INT
+   06/26/89 - PF  - MIDI interrupt rewrite in WHEN D115
+   06/08/89 - TSS - Made changes to improve Clavier button sluggishness
+   06/07/89 - MWH - Process start/stop record packets faster
+   06/01/89 - MWH - Ignore incoming messages from unknown devices
+   05/04/89 - MWH - Support for multiple D115 boards & channels; timeouts
+   03/22/89 - MWH - Reload D115 when it requests it; check limits
+   03/15/89 - TSS - Fixed bug where Flush protocol was not happening for Mac
+   03/03/89 - TSS - Added OK.TO.XMIT.MAC.PROTOCOL
+   01/26/89 - MWH - Remove ECHO packet; add remote loading via D115D
+    1/23/89 - PF  - Added high priority message handling to protocol
+   01/17/89 - MWH - Send periodic time message in interrupt, not here
+    1/13/89 - PF  - Monster MIDI code
+   12/07/88 - TSS - bug fix, keybaord delays because output being flushed
+   12/06/88 - MWH - Better response for protocol emulator
+   11/14/88 - MWH - Don't log output of frequent SYNC messages
+   11/09/88 - MWH - Clean up messages and update lengths
+   10/27/88 - MWH - New loop to process many incoming D115 messages
+   10/24/88 - TSS - Disable run.syn during protocol output flush & check for INITIALIZE.COMPLETED
+   10/19/88 - TSS - changed inc.protocol to use.D50.protocol
+   10/14/88 - TSS - Moved a bunch of protocol driver code into this module
+   10/11/88 - MWH - Add RS422 driver
+   10/03/88 - TSS - Cleared PROTOCOL.PACKET.THERE to fix bug
+   09/24/88 - TSS - Started using INC.PROTOCOL literal
+   09/21/88 - TSS - Moved Clavier Emulation code into TRAPMOD
+   09/21/88 - TSS - Changed references to TBUT.PTR to BSTAT.PTR
+   09/15/88 - TSS - Created this source file
+
+*/
+
+Module PROMOD;
+
+insert ':-xpl:filerout';     /* Buffered file i/o */
+insert ':-xpl:catrout';      /* Catalog routines  */
+insert ':-xpl:strings';      /* String routines   */
+insert ':-xpl:intrprtr';
+
+insert ':synlits:comlits';   /* compilation literals */
+insert ':synlits:globlits';  /* global literals      */
+insert ':synlits:asciilit';  /* ascii code literals  */
+insert ':synlits:lpnlits';   /* logical button number lits */
+insert ':synlits:synclits';  /* general synclavier literals */
+insert ':synlits:cplits';    /* D115 comm proc lits  */
+insert ':synlits:timlits';   /* some real time lits  */
+insert ':synlits:thdlits';   /* track head lits      */
+insert ':synauxs:prolits';   /* protocol literals    */
+insert ':synauxs:traplits';  /* protocol literals    */
+
+insert ':synmods:globdcl';
+insert ':synmods:ttydcl';
+insert ':synmods:plotdcl';
+insert ':synmods:xmemdcl';
+insert ':synmods:getdcl';
+insert ':synmods:getvdcl';
+insert ':synmods:trapdcl';   /* for emulation routine */
+insert ':synmods:mousrdcl';
+insert ':synmods:mathdcl';
+
+insert ':synrdcls:03-pdcls';
+insert ':synrdcls:05-bdcls';
+insert ':synrdcls:08-idcls';
+insert ':synrdcls:10-intdc';
+
+dcl Protocol.Packet.There   fixed public;    /* Packet.Ptr (xmem) contains valid data when true */
+dcl num.d115d.bds           fixed public;    /* How many D115D boards in the system */
+dcl ok.to.xmit.mac.protocol fixed public;    /* Set if Mac II wants protocol info */
+dcl escape.evnt.loop        fixed public;    /* Escape D115 event loop if positive; ignore run syn if negative */
+dcl disable.protocol.output fixed public;    /* set to non-zero to stop output processing */
+dcl use.protocol.for.d50    fixed public;    /* use protocol for d50 output */
+dcl d115d.ints.enabled		fixed public;    /* true if d115d rx interrupts are enabled */
+
+/* These arrays are used to indicate the status of each D115 channel.
+   Each board has two channels, and up to 4 boards (8 channels) may exist
+   in an Able.  The 8-word arrays are organized like this:
+   +--------+--------+--------+--------+--------+--------+--------+--------+
+   |     Board 0     |     Board-1     |     Board-2     |     Board-3     |
+   | Chan-0 | Chan-1 | Chan-0 | Chan-1 | Chan-0 | Chan-1 | Chan-0 | Chan-1 |
+   +--------+--------+--------+--------+--------+--------+--------+--------+
+
+   d115d.chans are zero for inactive channels, -1 when a channel is becoming
+   active, and the lower byte is a "node-id" (telling you what kind of
+   remote device is attached) when the channel is active.
+
+   d115d.timers contain the value of real.milliseconds when either the last
+   "here-is" message came in on that channel, or when it started to become
+   active.  The interrupt code uses this to decide when a channel will time out.
+*/
+
+dcl d115d.chans ((2 * MAX.D115D.BDS) - 1) fixed public;
+dcl d115d.timers((2 * MAX.D115D.BDS) - 1) fixed public;
+dcl d115d.format((2 * MAX.D115D.BDS) - 1) fixed public;
+dcl d115d.timeout                         fixed public;
+dcl midinet.timeout                       fixed public;
+
+dcl most.recent.snapshot.tag              fixed public;
+dcl allow.scrubbing.snapshot              fixed public;
+dcl most.recent.scrub.pos   (1)           fixed public;
+
+insert ':synsou:promod:pro-io';       /* Send/receive packet routines */
+insert ':synsou:promod:pro-load';     /* Download remote device routines */
+
+
+// PROCESS.MIDI.BULK.PACKET
+// Low level routine for processing MIDI bulk packets either
+// from MIDINet or from the OMS Midi Interface
+
+PROCESS.MIDI.BULK.PACKET:proc (where, wlen, mapping) PUBLIC;			// Pass xmem sector of packet
+	dcl where 	   fixed;		// External memory sector
+	dcl wlen  	   fixed;		// Pass word length
+	dcl mapping	   fixed;		// Pointer to midi.mapping if we should map channel numbers (e.g. for midinet)
+
+	dcl channel    fixed;
+	dcl key#       fixed;
+	dcl velocity   fixed;
+	dcl value      fixed;
+	dcl controller fixed;
+	dcl sav.mal    fixed;
+	dcl key_stamp  fixed;
+	
+	dcl j		   fixed;
+	
+	do while read(MAL) < wlen;                    /* while mal is not pointing past end of packet */
+	   do case shr(read(mdi),8);                  /* branch on individual message types */
+		  ;    /*  0:  undefined */
+		  do;  /*  1:  Note Off  */             
+			 channel  = read(mdi);                /* read in the data */
+			 key#     = read(mdi);
+			 velocity = read(mdi);
+			 
+			 key_stamp = key# & 0xFF00;			// extract possible key stamp from OMS midi (in upper half)
+			 key#      = key# & 255;				// extract key number
+
+          key# = key# + (SYNC.MIDDLE.C-MIDI.MIDDLE.C) + KBD_TRANSPOSE; /* CORRECT FOR OFFSET BETWEEN SYNC KEY#S AND MIDI KEY#S */
+
+          if (mapping != 0)					  /* map midi channel to track if in use */
+			 	channel = core(mapping + channel);
+	
+          if (channel IGE MAX.INPUTS)		  /* route bogus inputs to nowhere */
+			 	channel = 1;
+				
+			 /* *** interrupts are off here *** */
+			 if new.note.stak(0)<NEW.NOTE.LIST.SIZE
+			 then do;                             /* add to list if room in list */
+				sav.mal    = read(mal);
+				write(mam) = trk.head;
+				write(mal) = channel;
+				if read(md)<>0 then do;           /* this track has a track header */
+				   new.note.stak(0)=new.note.stak(0)+1;
+				   new.note.stak(new.note.stak(0)) = (2\"10") \ shl(channel,8);  /* code for released note - or in channel */
+
+				   new.note.key#(new.note.stak(0)) = key#;
+				  	new.note.time(new.note.stak(0)) = key_stamp;
+               // Inform interpreter we have a new key to process
+				   if (newkey == 0) interp_newkey_pending(true);
+				   newkey=1;
+				end;
+	
+				write(mam) = where;
+				write(mal) = sav.mal;
+			 end;
+			 else midi.overrun = 1;               /* about to lose vital information - bail out */
+		  end;
+	
+		  do;  /*  2:  Note On   */
+			 channel   = read(mdi);
+			 key#      = read(mdi);
+			 velocity  = read(mdi);
+			 
+          key# = key# + (SYNC.MIDDLE.C-MIDI.MIDDLE.C) + KBD_TRANSPOSE; /* CORRECT FOR OFFSET BETWEEN SYNC KEY#S AND MIDI KEY#S */
+
+			 key_stamp = shr(key#, 8);				// extract possible key stamp from OMS midi
+			 key#      = key# & 255;				// extract key number
+
+			 if (mapping != 0)					  /* map midi channel to track if in use. Will be zero for OMS midi input */
+			 	channel = core(mapping + channel);
+	
+          if (channel IGE MAX.INPUTS)		  /* route bogus inputs to nowhere */
+			 	channel = 1;
+				
+			 /* *** interrupts are off here *** */
+			 if new.note.stak(0)<NEW.NOTE.LIST.SIZE
+			 then do;                             /* add to list if room in list */
+				sav.mal    = read(mal);           /* sav MAL for restore below */
+				write(mam) = trk.head;
+				write(mal) = channel;
+				if read(md) <> 0 then do;         /* this track has a header */
+				   new.note.stak(0)=new.note.stak(0)+1;
+				   new.note.key#(new.note.stak(0))=key#;              /* key number */
+				   new.note.stak(new.note.stak(0))=(1\"10") \ shl(channel,8);          /* code for new note - or in channel number */
+	
+					if (key_stamp != 0)					 // if time stamp provided, back up by x milliseconds
+						new.note.time(new.note.stak(0)) = kbd.milliseconds - interp_compute_time_stamp(key_stamp);
+					else
+				   	new.note.time(new.note.stak(0)) = kbd.milliseconds;  /* use no sync delay for midi input */
+					
+               // Apply velocity sensitivity and mapping to velocity.
+               // Perhaps this was done in midinet.
+               IF V.S.MIN<>100 THEN DO;      /*	ONLY IF OTHER THAN FULL SENSITIVITY	*/
+                  LOAD V.S.MUL; MUL 127-velocity; velocity=URES;
+                  IF RES<0 THEN velocity=velocity+1;
+               
+                  WRITE(MAM)=VMAP.PTR;       /* LOOK UP VOLUME FROM TABLE */
+                  WRITE(MAL)=127-velocity;
+                  velocity  =READ(MD);       /* SAVE REMAPPED VALUE */
+               END;
+               ELSE DO;
+                  WRITE(MAM)=VMAP.PTR;       /* LOOK UP VOLUME FROM TABLE */
+                  WRITE(MAL)=velocity;
+                  velocity  =READ(MD);       /* SAVE REMAPPED VALUE */
+               END;
+
+				   new.note.vel(new.note.stak(0))=velocity;          /* store new note volume */
+               // Inform interpreter we have a new key to process
+				   if (newkey == 0) interp_newkey_pending(true);
+				   newkey=1;                                          /* only set flag for new notes - not for releases */
+               if (key# >= 0 && key# < NUM.KEYS) {
+                  load channel; uload key#; mul num.keys;
+                  write(mam)=midi.key.press+shr(res,8);
+                  write(mal)=res;  			  /* point to pressure table for this note */
+                  write(md )=0;              /* init to zero to prevent stuck pressure */
+               }
+				end;
+	
+				write(MAM) = where;     		  /* restore MAM */
+				write(MAL) = sav.mal;             /* restore MAL */
+			 end;
+			 else midi.overrun=1;                 /* about to lose vital information */
+		  end;
+	
+		  do;  /*  3:  Polyphonic Key Pressure */
+			 channel  = read(mdi);
+			 key#     = read(mdi);
+			 value    = read(mdi);
+	
+          key# = key# + (SYNC.MIDDLE.C-MIDI.MIDDLE.C) + KBD_TRANSPOSE; /* CORRECT FOR OFFSET BETWEEN SYNC KEY#S AND MIDI KEY#S */
+
+			 if (mapping != 0)					  /* map midi channel to track if in use */
+			 	channel = core(mapping + channel);
+	
+		    if (channel IGE MAX.INPUTS)		  /* route bogus inputs to nowhere */
+			 	channel = 1;
+				
+			 sav.mal = read(MAL);                 /* sav MAL for restore below */
+	
+			 write(mam)=trk.head;                 /* now see if pressure is */
+			 write(mal)=channel;    			  /* set pointer to proper track */
+			 if read(md)<>0 then do;           	  /* this track has a track header */
+				 write(mam)=read(md);             /* active on kbd timbre */
+				 write(mal)=thd.active.midi.rtes;
+				 if ((read(md)&b.pressure)<>0 && key# >= 0 && key# < NUM.KEYS) {
+					load channel; uload key#; mul num.keys;
+					write(mam)=midi.key.press+shr(res,8);
+					write(mal)=res;     		  /* point to pressure table */
+					write(md) =value;             /* store new indiv pressure value */
+             }
+			 end;
+	
+			 write(MAM) = where;        			/* restore MAM */
+			 write(MAL) = sav.mal;                  /* restore MAL */
+		  end;
+	
+		  do;  /*  4:  Continuous Control Change */
+			 channel    = read(mdi);
+			 controller = read(mdi);
+			 value      = read(mdi);
+	
+			 if (mapping != 0)					  /* map midi channel to track if in use */
+			 	channel = core(mapping + channel);
+	
+		     if (channel IGE MAX.INPUTS)		  /* route bogus inputs to nowhere */
+			 	channel = 1;
+				
+			 sav.mal = read(MAL);                 /* sav MAL for restore below */
+
+			 write(mam)=trk.head;                 /* now see if pressure is */
+			 write(mal)=channel;          		  /* set pointer to proper track */
+			 if read(md)<>0 then do;           	  /* this track has a track header */
+				 write(mam)=read(md);             /* active on kbd timbre */
+				 write(mal)=thd.active.midi.rtes;
+				 if (read(md)&bits(controller))<>0          /* this rte controller is enabled */
+				 then do;
+					write(mam)=midi.analog.in+shr(shl(channel,3)+controller,8);
+					write(mal)=shl(channel,3)+controller;
+					write(md) =value;     /* update midi value */
+					j = shr(channel,4);
+					midi.analog.changes    (channel) = midi.analog.changes    (channel) \ bits(controller  ); /* * set bit to denote change here */
+					MIDI.ANALOG.CHANGETABLE(j      ) = MIDI.ANALOG.CHANGETABLE(j      ) \ bits(channel&"17"); /* set bit to denote active channel */
+					MIDI.ANALOG.CHANGEBITS           = MIDI.ANALOG.CHANGEBITS           \ bits(j);
+				 end;
+			 end;
+			 
+			 write(MAM) = where;              			/* restore MAM */
+			 write(MAL) = sav.mal;                      /* restore MAL */
+		  end;
+	
+		  do;  /*  5:  Switch Control Change */
+			 channel    = read(mdi);
+			 controller = read(mdi);
+			 value      = read(mdi);
+	
+			 if (mapping != 0)					  /* map midi channel to track if in use */
+			 	channel = core(mapping + channel);
+	
+		     if (channel IGE MAX.INPUTS)		  /* route bogus inputs to nowhere */
+			 	channel = 1;
+				
+			 sav.mal = read(MAL);                 /* sav MAL for restore below */
+	
+			 write(mam)=trk.head;                 /* now see if pressure is */
+			 write(mal)=channel;          		  /* set pointer to proper track */
+			 if read(md)<>0 then do;           	  /* this track has a track header */
+				 write(mam)=midi.switchdata+shr(shl(channel,3)+controller,8);
+				 write(mal)=shl(channel,3)+controller;
+				 write(md) =value;
+				
+				 j = shr(channel,4);
+				 midi.switch.changes    (channel) = midi.switch.changes    (channel) \ bits(controller  ); /* * set bit to denote change here */
+				 MIDI.SWITCH.CHANGETABLE(j      ) = MIDI.SWITCH.CHANGETABLE(j      ) \ bits(channel&"17"); /* set bit to denote active channel */
+				 MIDI.SWITCH.CHANGEBITS           = MIDI.SWITCH.CHANGEBITS           \ bits(j);
+			 end;
+			 
+			 write(MAM) = where;                 		   /* restore MAM */
+			 write(MAL) = sav.mal;                         /* restore MAL */
+		  end;
+	
+		  do;  /*  6:  Program Change */
+			 channel  = read(mdi);
+			 value    = read(mdi);
+	
+			 if (mapping != 0)					  /* map midi channel to track if in use */
+			 	channel = core(mapping + channel);
+	
+		     if (channel IGE MAX.INPUTS)		  /* route bogus inputs to nowhere */
+			 	channel = 1;
+				
+			 sav.mal    = read(mal);
+			 write(mam) = trk.head;
+			 write(mal) = channel;
+			 if read(md) <> 0 then do;            /* this track has a header */
+	
+				/* *** interrupts are off here *** */
+				if new.program.stak(0)<PGM.CHG.LIST.SIZE
+				then do;                                   /* add to list if room in list */
+				   new.program.stak(0)=new.program.stak(0)+1;
+				   new.program.stak(new.program.stak(0))=value\(shl(channel,8));  /* save timbre number with possible origin code */
+				end;
+			 end;
+	
+			 write(MAM) = where;                 		   /* restore MAM */
+			 write(MAL) = sav.mal;                         /* restore MAL */
+		  end;
+	
+		  do;  /*  7:  Channel Pressure */
+			 channel  = read(mdi);
+			 value    = read(mdi);
+	
+			 if (mapping != 0)					  /* map midi channel to track if in use */
+			 	channel = core(mapping + channel);
+	
+		     if (channel IGE MAX.INPUTS)		  /* route bogus inputs to nowhere */
+			 	channel = 1;
+				
+			 sav.mal = read(MAL);                 /* sav MAL for restore below */
+	
+			 write(mam)=trk.head;                 /* now see if pressure is */
+			 write(mal)=channel;          		  /* set pointer to proper track */
+			 if read(md) <> 0 then do;            /* this track has a header */
+				 write(mam)=read(md);             /* active on kbd timbre */
+				 write(mal)=thd.active.midi.rtes;
+				 if (read(md)&b.pressure)<>0 then do;
+					midi.pressure(channel)=value;           /* store as overall pressure (standard mode) */
+				 end;
+			 end;
+			 
+			 write(MAM) = where;              		    /* restore MAM */
+			 write(MAL) = sav.mal;                      /* restore MAL */
+		  end;
+	
+		  do;  /* 	8:	Pitch Bend Change */
+			 /* This is currently being handled by continuous control changes */
+		  end;
+	
+		  do;  /*  9:  MIDI Song Position Pointer */
+			 value = read(mdi);
+	
+			 if (ext.clock.mode = 5) then do;
+				midi.song.ptr.info=value;
+				sequencer.control.reg=shl(sequencer.control.reg,4)\5;
+			 end;
+		  end;
+	
+		  do;  /* 10:  MIDI Timing Clock */
+			 if  (ext.clock.mode = 5)
+			 and (timing.clock.enable<>0) then do;
+				if (time.base.mode=6) then do;
+				   clock.received=1;                    /* clock pulse received    */
+				   clock.delay.time=kbd.milliseconds;   /* no delay    */
+				end;
+				else missed.midi.clocks=missed.midi.clocks+1;  /* count these */
+			 end;
+	
+		  end;
+	
+		  do;  /* 11:  MIDI Start */
+			 if (ext.clock.mode = 5) then do;
+				if play=0 then do;
+				   sequencer.control.reg=shl(sequencer.control.reg,4)\1;  /* set flag to start sequencer asap */
+				   missed.midi.clocks=0;                /* rezero */
+				end;                                       
+				timing.clock.enable=1;                  /* enable.accumulation of midi clocks */
+			 end;
+	
+		  end;
+	
+		  do;  /* 12:  MIDI Continue */
+			 if (ext.clock.mode = 5) then do;
+				if play=0 then do;
+				   sequencer.control.reg=SHL(sequencer.control.reg,4)\2;  /* set flag to continue asap */
+				   missed.midi.clocks=0;                /* rezero */
+				end;
+				timing.clock.enable=1;                  /* enable accumulation of midi clocks */
+			 end;
+	
+		  end;
+	
+		  do;  /* 13:  MIDI Stop */
+			 if (ext.clock.mode = 5) then do;
+				if play<>0
+				then sequencer.control.reg=shl(sequencer.control.reg,4)\3;  /* set flag to stop sequencer asap */
+				timing.clock.enable=0;                  /* disable accumulation of midi clocks */
+			 end;
+	
+		  end;
+	
+		  do;  /* 14:  System Exclusive Packet */
+		  end;
+	
+		  do;  /* 15:  MIDI Control Change */
+			 channel    = read(mdi);
+			 controller = read(mdi);
+			 value      = read(mdi);
+			 
+			 key_stamp = shr(value, 8);				// extract possible key stamp from OMS midi
+			 
+			 if (mapping != 0)					  /* map midi channel to track if in use */
+			 	channel = core(mapping + channel);
+	
+		     if (channel IGE MAX.INPUTS)		  /* route bogus inputs to nowhere */
+			 	channel = 1;
+				
+			 sav.mal    = read(mal);
+
+			 write(mam)=trk.head;                 /* now see if pressure is */
+			 write(mal)=channel;          		  /* set pointer to proper track */
+			 if read(md) <> 0 then do;            /* this track has a header */
+				 if MIDI.RTE.STAK(0)<RTE.LIST.SIZE
+				 then do;                                   /* add to list if room in list */
+					MIDI.RTE.STAK(0)=MIDI.RTE.STAK(0)+1;
+					MIDI.RTE.STAK(MIDI.RTE.STAK(0))=controller\shl(channel,8);
+					MIDI.RTE.VALUE(MIDI.RTE.STAK(0))=value&0xFF;
+					if (key_stamp != 0)					 // if time stamp provided, back up by x milliseconds
+					{
+						key_stamp = interp_compute_time_stamp(key_stamp);
+
+						if (PLAY.TIME.LSB ILT key_stamp)
+							MIDI.RTE.MSB(MIDI.RTE.STAK(0))=PLAY.TIME.MSB-1;
+						else
+							MIDI.RTE.MSB(MIDI.RTE.STAK(0))=PLAY.TIME.MSB;
+						
+						MIDI.RTE.LSB(MIDI.RTE.STAK(0))=PLAY.TIME.LSB - key_stamp;
+					}
+					else
+					{
+						MIDI.RTE.MSB(MIDI.RTE.STAK(0))=PLAY.TIME.MSB;
+						MIDI.RTE.LSB(MIDI.RTE.STAK(0))=PLAY.TIME.LSB;
+					}
+               // Inform interpreter we have a new key to process
+				   if (newkey == 0) interp_newkey_pending(true);
+				   newkey=1;
+				 end;
+				 else MIDI.OVERRUN=1;
+			 end;
+			 write(mam) = where;
+			 write(mal) = sav.mal;
+		  end;
+	
+	   end;	/* branch on midi type   */
+	end;	/* while mal < wlen      */
+end PROCESS.MIDI.BULK.PACKET;
+
+/* $SUBTITLE  Interrupt handler for D115D board */
+
+dcl PRINT_PACKETS lit '0';
+
+WHEN D115INT then begin;
+   dcl (save.mam,save.mal,save.r13) fixed;     /* local copies of registers */
+   dcl board                        fixed;
+   dcl len                          fixed;     /* byte length of packet */
+   dcl wlen                         fixed;     /* equivelent word length */
+   dcl supertype                    fixed;     /* super type of message */
+   dcl subtype                      fixed;     /* sub type of message */
+   dcl type                         fixed;     /* both super & sub types */
+   dcl packet.processed             fixed;     /* indicates if message got processed here or not */
+   dcl chan                         fixed;     /* channel number */
+   dcl ptr                          fixed;     /* pointer into d115 channel arrays */
+   dcl new_device                   fixed;     /* true when new "here_is" shows up */
+   dcl tempbuf(40)                  fixed;     /* for quick copy of block data */
+   dcl copylen                      fixed;     /* len of block datat to copy */
+
+   /* When we get a receive interrupt, Type-A should have been set to
+      get us here when a packet comes in.  We must immediately shut
+      off the d115d interrupts so that we don't get reinterrupted
+      when we ENABLE interrupts below.  We then proceed to read
+      packets into our rotary buffer (PACKET.BAS.PTR) processing
+      high priority messages as we go until the buffer fills up or
+      there are no more packets to read.  We must then enable all
+      d115d interrupts at the bottom of this routine but only if the
+      rotary buffer is not full.  Whenever anyone reads a packet from
+      the buffer they also must explicitly enable all d115d interrupts
+      so that we will come back here asap.
+   */
+
+   /* Now disable all d115d interrupts to prevent re-entrance */
+   do board=0 to (num.d115d.bds - 1);         /* Loop over boards */
+      write(cpsel) = cp#sel_group_20 | board; /* First group of boards */
+      write(cpcmd) = cp#disable_rx;           /* Disable all receive interrupts */
+   end;
+
+   d115d.ints.enabled = false;
+   
+   /* in the unlikely event that we get here and the rotary buffer is full */
+   /* (d115d interrupts should be kept disabled while the buffer is full)  */
+   /* we must bail out.  Simply leave the interrupts disabled and return   */
+
+   if  (Packet.Free.Ptr = Packet.Ptr)       /* the buffer is either full or empty */
+   AND (Protocol.Packet.There <> 0)         /* the buffer is not empty */
+   then return;                             /* bail out */
+
+   ENABLE;                                  /* So the rest of the world can carry on */
+
+   /* The coast is clear - let's get some packets.  But first... */
+   /* save these registers so we don't have to worry about them. */
+   save.mam=read(mam  );
+   save.mal=read(mal  );
+   save.r13=read("313");
+   new_device = FALSE;                           /* Assume this is not a new "here_is" */
+
+   do board=0 to (num.d115d.bds - 1);            /* Loop over all boards */
+
+      DISABLE;                                   /* protect us here      */
+
+      write(cpsel) = cp#sel_group_20 | board;    /* First group of boards */
+      do while (read(cpstat) & cp#packet_present) <> 0; /* Message pending on this board */
+         len = read(cpdata);                     /* Full packet length in bytes... */
+         wlen = shr(len+1,1);                    /* ...and words */
+         if wlen > 256                           /* If length beyond a sector somehow */
+         OR wlen < 2                             /* OR too small (MUST RPC at least 1) */
+         then do;                                /* Then we're in BIG trouble! */
+            /* flush d115 to get back in sync */
+            /* probably set a flag here and let main loop do the job */
+            Packet.Processed = 1;                /* so pointers don't move */
+         end;
+         else do;                                /* we have a valid packet */
+            write(MAM) = Packet.Free.Ptr;        /* Start filling xmem buffer */
+            write(MDI) = len;                    /* Byte length is first */
+            RPC (wlen - 1);                      /* Rest of words to read */
+            write(MDI) = read(cpdata);           /* Put them into xmem */
+            write(cpcmd) = cp#decrement;         /* Decrement read frame counter */
+
+            ENABLE;                              /* through with hardware now */
+
+            /* now branch on the super and sub type of this message */
+            /* if this is an interrupt priority message, process it */
+            /* now, else leave it in rotary buffer for run.protocol */
+            /* and update the rotary buffer pointers.               */
+               
+            write(mal) = P#Type;              /* packet type word        */
+            type       = read(md);            /* both super & sub types  */
+            supertype  = shr(type,8);         /* super-type in high byte */
+            subtype    = type & "377";        /* sub-type in lower byte  */
+
+            Packet.Processed = 0;             /* assume packet will not be processed here */
+
+            write(mal) = P#SOURCE;            /* Point at source word */
+            chan = read(md);                  /* Get channel number   */
+            ptr = shl(board,1) + chan;        /* Point into d115 channel arrays */
+
+	        if (PRINT_PACKETS)
+	        {
+	        	if (type != T#Net_Here_Is)
+	        		send 'Packet: len ', len, ' typ', supertype, ' sub', subtype, ' cha', chan;
+         	}
+         	
+            if chan = 0 OR chan = 1 then do;  /* A legal channel number? */
+               d115d.timers(ptr) = real.milliseconds;  /* Update timeout timer for ALL incoming messages */
+               if type = T#D115_Chan_Active   /* Special message from D115 to Able: a channel is becoming active */
+               then do;
+                  d115d.chans(ptr) = -1;      /* Mark port active with as yet unknown device! */
+                  Packet.Processed = 1;
+               end;
+               else if type = T#D115_Chan_Inactive then do;
+                  if d115d.chans(ptr) = nn#midi then midinet.timeout = 1;
+                  d115d.timeout = d115d.chans(ptr) | shl(ptr,8);
+                  d115d.chans(ptr) = 0;       /* Timeout: mark channel inactive */
+                  Packet.Processed = 1;
+               end;
+               else do;                       /* Map active channel to node_id record */
+                  if type = T#Net_Here_Is     /* But don't map a "here-is" */
+                  OR type = T#Net_Crash_Part1 /* (this is also treated as a "here-is") */
+                  then do;                    /* "Here is" needs to know board & channel number */
+
+                     write(md) = shl(board,8) | (read(md) & "377");  /* Put board # in (unused) upper byte */
+                     write(mal) = P#DATA;     /* Point at the packet data */
+
+                     if d115d.chans(ptr) <> shr(read(md),8)
+                     then new_device = TRUE;  /* Different device on this channel */
+                     else do;                 /* process here is messages here if we can */
+                        if type = T#Net_Here_Is
+                        then Packet.Processed = 1;
+                     end;
+                  end;
+                  else do;                       /* Not a "here-is", so map it */
+                     write(md) = d115d.chans(ptr);  /* Look up node_id for this channel */
+                  end;
+               end;
+            end;                        /* Of legal channel number */
+            else Packet.Processed = 1;  /* We don't know what this is! */
+
+            write(mal) = P#DATA;              /* point at the data for below! */
+
+            if (supertype - P#BASE_TYPE) ilt P#NUM_PACKET_TYPES  /* message in defined range */
+            AND Packet.Processed = 0                             /* and we may process it */
+            then do;
+
+               DISABLE;  /* to change midi variables */
+
+               do case (supertype - P#BASE_TYPE);         /* branch on packet type */
+                  do;                              		  /* P#Network_Level          */
+                     if  (subtype >= 48)                  /* Block Transfer */
+                     and (subtype <= 50)
+                     then do;
+                        do case (subtype - 48);       
+                           do;                            /* Block Continuation */
+                              write("313") = read(mdi);   /* skip tag */
+                              write("313") = read(mdi);   /* and rsvd word */
+                              Packet.Processed = 1;       /* just copy the data below and then toss packet */
+                           end;
+                           do;                            /* Block Start */
+                              Block.Tag = read(mdi);      /* reset block globals */
+                              Block.Len = read(mdi);
+                              Block.MAM = XFER.PTR;
+                              Block.MAL = 0;
+                              Packet.Processed = 1;       /* now we'll just copy the data below and then toss packet */
+                           end;
+                           do;                            /* Block End */
+                              write("313") = read(mdi);   /* skip over tag */
+                              write(mdi) = Block.Len;     /* store block len for error check later */
+                                                          /* NOTE: Packet.Processed = 0 here! */
+                                                          /* use this packet to trigger processing of entire block during main loop */
+                           end;
+                        end;
+
+                        if (subtype = 49)                 /* first block */
+                        or (Block.Len ile Max_Block_Length)  /* or ok to copy all data */
+                        then do;                          /* actually copy the data to XFER.PTR */
+                           copylen = wlen - P#Data - 2;   /* compute num words of data to copy */
+
+                           write("313")=addr(tempbuf(0)); /* set up to write to tempbuf */
+                           rpc (copylen);                 /* repeat on word len */
+                           write("373")=read(mdi);        /* copy from packet to tempbuf */
+
+                           write(mam)=Block.MAM;          /* now set up to write data back to XFER.PTR */
+                           write(mal)=Block.MAL;
+                           write("313")=addr(tempbuf(0)); /* from tempbuf */
+                           rpc (copylen);                 /* repeat on word len */
+                           write(mdi)=read("373");        /* write data into XFER.PTR */
+
+                           Block.MAM = read(mam);         /* save ext mem ptrs for next time thru */
+                           Block.MAL = read(mal);
+                        end;
+                     end;
+                  end;
+                  do;                              /* P#Playback               */
+
+                     /* Check for abort of audition: */
+
+                     dcl Poly.Read.Aborted    fixed external;
+                     dcl Doing.Proto.Audition fixed external;
+
+                     if (Doing.Proto.Audition <> 0)
+                     &  (subtype = (T#Stop & 255))
+                     then do;
+                        Packet.Processed  = 1;
+                        Poly.Read.Aborted = 1;
+                     end;
+
+                     /* Perform logic here to abort sequence snapshot for */
+                     /* sequence scrubbing if user changes his mind:      */
+
+                     else if (subtype = (T#Start_Scrubbing & 255))
+                     then allow.scrubbing.snapshot = 1;
+
+                     else if (subtype = (T#Scrub_Seq       & 255))
+                     then do;
+                        most.recent.scrub.pos(0) = read(mdi);
+                        most.recent.scrub.pos(1) = read(md );
+                     end;
+
+                     else if (subtype = (T#Stop_Scrubbing  & 255))
+                     then allow.scrubbing.snapshot = 0;
+                  end;
+                  ;                                /* P#Creation_Recording     */
+                  do;                              /* P#Sequence_Editing       */
+
+                     /* Check for incoming snapshot request.  Save */
+                     /* most recent tag away to abort snapshots    */
+                     /* in progress that are no longer needed      */
+
+                     if subtype = (T#Req_Seq_Snapshot & 255)
+                     then do;
+                        most.recent.snapshot.tag = read(md);
+                     end;
+
+                  end;
+
+                  ;                                /* P#Sound_Editing          */
+                  ;                                /* P#Archival               */
+                  ;                                /* P#Retrieval              */
+                  ;                                /* P#Time_Base              */
+                  ;                                /* P#Track_Setup            */
+                  ;                                /* P#Utility                */
+                  ;                                /* P#Events                 */
+                  begin;                           /* P#MIDI                   */
+					 
+                     if subtype = 16 then do;      /* 16:  T#MIDI_Bulk Packet */
+					 	PROCESS.MIDI.BULK.PACKET(Packet.Free.Ptr, wlen, addr(midi.mapping(0)));
+						Packet.Processed = true;
+                     end;		/* subtype = 16			 */
+                  end;      /* of P#MIDI                 */
+                  ;         /* P#Clavier                 */
+                  ;         /* P#Mixer                   */
+                  ;         /* reserved                  */
+                  ;         /* P#Data_Transfer           */
+               end;         /* of Do Case                */
+
+               ENABLE;      /* after changing variables  */
+
+            end;         /* of should look at message    */
+         end;            /* of a valid message           */
+
+         if (Packet.Processed = 0) then do;
+            Protocol.Packet.There = 1;                /* buffer is non-empty */
+            Packet.Free.Ptr = Packet.Free.Ptr + 1;    /* increment ptr */
+            
+			if (Packet.Free.Ptr = Packet.Bas.Ptr + Sizeof.Packet.Buf)
+            then Packet.Free.Ptr = Packet.Bas.Ptr;    /* wrap ptr if necessary */
+           
+		    if  (Packet.Free.Ptr = Packet.Ptr)        /* buffer is full */
+            OR  (new_device = TRUE)                   /* must fully process here_is from new device before ANY other packets come in */
+            then do;                                  /* leave d115 interrupts disabled */
+               DISABLE;                               /* so its safe to return */
+               write(mam  )=save.mam;                 /* restore the registers saved above */
+               write(mal  )=save.mal;
+               write("313")=save.r13;
+               return;                                /* bail out */
+            end;
+         end;
+
+         DISABLE;
+         write(cpsel) = cp#sel_group_20 | board;      /* First group of boards */
+      end;                                            /* of message pending        */
+
+      ENABLE;
+
+   end;                                               /* of loop over boards       */
+
+   /* restore the registers saved above */
+   write(mam  )=save.mam;
+   write(mal  )=save.mal;
+   write("313")=save.r13;
+
+   DISABLE;                                           /* So we can return from interrupt */
+
+   /* now enable d115 interrupts */
+   /* (must be room in buffer or we wouldn't have gotten this far) */
+   do board=0 to (num.d115d.bds - 1);          /* Loop over boards   */
+      write(cpsel) = cp#sel_group_20 | board;  /* First group of boards */
+      write(cpcmd) = cp#enable_rx_a;           /* Enable Rx interrupt on condition A (packet present) */
+	  d115d.ints.enabled = true;
+   end;
+
+end; /* of D115INT */
+
+/* $SUBTITLE Routine to Look for STOP button over RS-232 Protocol */
+
+CHECK.FOR.PROTOCOL.STOP.BUTTON: proc fixed public swapable;
+   dcl (subtype,i,j,k,l) fixed;
+   dcl (dat1,dat2)       fixed;
+   dcl (node)            fixed;
+   dcl (super)           fixed;
+   dcl ptr               fixed;
+
+   /* Begin by copying any D50 protocol messages into Packet.Ptr  */
+
+   DISABLE;
+   do while  (NUM.OF.NEW.PACKETS <> 0)          /* A D50 packet is available */
+   and       ((Protocol.Packet.There = 0)       /* buffer is empty           */
+   or         (Packet.Free.Ptr <> Packet.Ptr)); /* OR buffer is not full     */
+
+      /* allocate a sector in the rotary buffer while we're still disabled */
+      ptr = Packet.Free.Ptr;                    /* temp copy of free ptr */
+
+      Protocol.Packet.There = 1;                /* buffer about to be non-empty */
+      Packet.Free.Ptr = Packet.Free.Ptr + 1;
+      if Packet.Free.Ptr = Packet.Bas.Ptr + Sizeof.Packet.Buf
+      then Packet.Free.Ptr = Packet.Bas.Ptr;
+
+      if Packet.Free.Ptr = Packet.Ptr       /* buffer just became full */
+      AND num.d115d.bds > 0
+      then do;
+	     do i=0 to (num.d115d.bds - 1);     /* Loop over boards */
+            write(cpsel) = cp#sel_group_20 | i;   /* First group of boards, board "i" */
+            write(cpcmd) = cp#disable_rx;      /* Disable all receive interrupts */
+	 	 end;
+         d115d.ints.enabled = false;
+      end;
+
+      ENABLE;
+      call Get.Next.D50.Protocol.Packet(ptr);   /* Read into xmem buf for processing */
+      DISABLE;
+   end;
+   ENABLE;
+
+   /* Figure out how many protocol packets are in rotary buffer: */
+
+   i = Packet.Free.Ptr - Packet.Ptr;         /* get difference in pointers           */
+   if i < 0 then i = i + Sizeof.Packet.Buf;  /* < 0 means we have wrapped            */
+   if (i = 0) & (Protocol.Packet.There)      /* if pointers same and packet there    */
+   then i = Sizeof.Packet.Buf;               /* actually means buffer is full        */
+
+   /* Now look through all messages for 'stops'                   */
+
+   j = 0;                               /* initialize count       */
+   k = Packet.Ptr;                      /* initialize pointer     */
+
+   do while j <> i;                     /* loop through all       */
+
+      write(mam) = k;                   /* point to the packet    */
+      write(mal) = P#Source;
+      node = read(mdi);                 /* get source node        */
+
+      if node = P#RS232_Node            /* packet is from the D50 */
+      then do;
+         super   = read(mdi);           /* P#Type                 */
+         subtype = read(mdi);           /* actually P#Data        */
+      end;
+      else do;
+         super   = shr(read(md),8);     /* from RS422, super-type in high byte */
+         subtype = read(mdi) & 255;
+      end;
+
+      if node > 0                       /*  must be from known node */
+      then do;                          /* for stop                 */
+
+         if super = P#CLAVIER_EMULATE      /* a clavier emulation packet */
+         then do;
+            if (subtype = 0) or (subtype = 1) /* PRESS & RELEASE or PRESS & HOLD */
+            then do;                          /* see which button */
+               dat1    = read(mdi);           /* read in a few P#DATA words */
+               dat2    = read(mdi);
+               l = shl(dat1,4) + dat2;        /* this is PBN # */
+               if l ILT 160 then do;          /* button in valid range */
+                  l = lpn.lookup(l);          /* this is LPN # */
+
+                  if (l = STOP.L) then return TRUE;
+               end;
+            end;
+         end;
+
+         else if super = P#Playback           /* check for basic STOP */
+         then do;
+            if subtype = (T#Stop & 255)
+            then return TRUE;
+         end;
+
+         else if super = P#Clavier            /* check actual clavier */
+         then do;
+            if (subtype = 0) or (subtype = 1) /* PRESS & RELEASE or PRESS & HOLD */
+            then do;                          /* see which button */
+               dat1    = shr(read(md), 8);       /* get P#DATA bytes */
+               dat2    = read(mdi) & 255;
+               l = shl(dat1,4) + dat2;        /* this is PBN # */
+               if l ILT 160 then do;          /* button in valid range */
+                  l = lpn.lookup(l);          /* this is LPN # */
+
+                  if (l = STOP.L) then return TRUE;
+               end;
+            end;
+         end;
+
+      end;
+
+      j = j + 1;                  /* advance count */
+      k = k + 1;                  /* advance ptr   */
+      if k = Packet.Bas.Ptr + Sizeof.Packet.Buf
+      then k = Packet.Bas.Ptr;
+
+   end;
+
+   return FALSE;
+
+end CHECK.FOR.PROTOCOL.STOP.BUTTON;
+
+/* $SUBTITLE Routines Used to Transmit Protocol Messages Out the D50 */
+
+/* Explanation of RS-232 PACKET OVERHEAD:                   */
+/*    Terminal must be in Transparent mode before sending   */
+/*    packet of info.  Up to 2 bytes to do this.            */
+/*    Packet frame header is 3 bytes long (ESC ! Z).        */
+/*    Checksum is 2 bytes long.                             */
+/*    Have to restore terminal to original mode. Up to 2    */
+/*    bytes to do this. Total worst case overhead = 9 bytes */
+
+dcl saved.screen.dump fixed; /* some globals shared by following routines */
+dcl saved.#mode       fixed;
+dcl checksum          fixed;
+
+BEGIN.D50.PROTOCOL.XMIT: proc swapable;
+   saved.screen.dump = screen.dump;
+   screen.dump = 0;        /* turn off screen dump updates */
+   saved.#mode = #mode;    /* save current terminal mode   */
+   transparent_mode;       /* put terminal into basic mode */
+
+   call pc(ESC);           /* send packet frame header */
+   call pc(asc.exclam);
+   call pc(asc.z);
+
+   checksum = 0;           /* initialize checksum */
+end BEGIN.D50.PROTOCOL.XMIT;
+
+FINISH.D50.PROTOCOL.XMIT: proc swapable;
+
+   call pc(shr(checksum,8)&255);      /* send the 2 checksum bytes */
+   call pc(    checksum   &255);      /* NOTE: checksum is 16-bit value */
+
+   do case (saved.#mode);           /* restore terminal to original mode */
+      ; /* already in transparent mode */
+      alpha_mode;
+      vector_mode;
+      point_mode;
+   end;
+   screen.dump = saved.screen.dump; /* restore screen dump mode */
+
+end FINISH.D50.PROTOCOL.XMIT;
+
+/* $SUBTITLE Routine to Transmit Protocol Messages Out the D50 */
+
+SEND.NEXT.PENDING.D50.PROTOCOL.PACKET: proc swapable;
+   dcl (i,len) fixed;
+
+   /* NOTE:  Routine assumes the data will stored in the lower */
+   /*        byte of each 16-bit word.                         */
+
+   call Begin.D50.Protocol.Xmit; /* put tty into transparent mode, send header */
+
+   write(mam)=protocol.out.ptr+shr(p.out.rptr,8);
+   write(mal)=p.out.rptr;
+   len=(read(md)-1)&255;                        /* bytes to follow length field */
+
+   checksum = len;                              /* initialize checksum */
+   p.out.rptr = (p.out.rptr + 1) & (protocol.out.len-1); /* advance read ptr */
+   call pc(len);                                /* bytes to follow length info */
+
+   checksum = checksum + P#ABLE_NODE;           /* synthesize our source address */
+   p.out.rptr = (p.out.rptr + 1) & (protocol.out.len-1); /* advance read ptr */
+   call pc(P#ABLE_NODE&255);
+
+   do i = 2 to len;
+      write(mam) = protocol.out.ptr + shr(p.out.rptr,8);
+      write(mal) = p.out.rptr;
+
+      checksum = checksum + (read(md)&255);           /* accumulate checksum */
+      p.out.rptr = (p.out.rptr + 1) & (protocol.out.len-1); /* advance read ptr */
+      call pc(read(md)&255);
+   end;
+
+   call Finish.D50.Protocol.Xmit;                  /* send checksum & clean up */
+
+end SEND.NEXT.PENDING.D50.PROTOCOL.PACKET;
+
+/* $SUBTITLE Routine to Transmit Clavier Button Panel Status Info */
+
+SEND.CLAVIER.BUTTON.STATUS.TO.D50: proc (bnk) swapable;
+   dcl bnk       fixed;
+   dcl bstat.ptr fixed external;
+
+   SEND.ROW.STATUS: proc (base.but#,which.bit) fixed;
+      dcl base.but# fixed;
+      dcl which.bit fixed;
+      dcl (s,i)     fixed;
+
+      write(mam) = bstat.ptr;             /* set up ptr to status info */
+      write(mal) = base.but#;             /* for this row of 8 buttons */
+
+      s = 0;
+      do i = 0 to 7;                      /* 8 buttons per row */
+         if (read(mdi)&which.bit)<>0 then s = s | bits(i);
+      end;
+
+      checksum = checksum + s;
+      call pc(s);
+
+   end SEND.ROW.STATUS;
+
+   call Begin.D50.Protocol.Xmit;           /* put tty into transparent mode, send header */
+
+   checksum = 10;                      /* initialize checksum */
+   call pc(10);                        /* 10 bytes to follow */
+
+   checksum = checksum + (P#ABLE_NODE & 255);  /* synthesize our source address */
+   call pc(P#ABLE_NODE&255);
+
+   checksum = checksum + P#CLAVIER_EMULATE;  /* basic packet type code */
+   call pc(P#CLAVIER_EMULATE);
+
+   checksum = checksum + CB#STATUS;    /* subtype code */
+   call pc(CB#STATUS);
+
+   checksum = checksum + bnk;          /* the bank address */
+   call pc(bnk);
+
+   bnk = shl(bnk,4);                           /* convert to base button # */
+
+   call Send.Row.Status(bnk  ,b.lit.button);   /* 16 bits of LIT status */
+   call Send.Row.Status(bnk+8,b.lit.button);
+   call Send.Row.Status(bnk  ,b.blink.button); /* 16 bits of BLINK status */
+   call Send.Row.Status(bnk+8,b.blink.button);
+   call Send.Row.Status(bnk  ,b.held.button);  /* 16 bits of HELD status */
+   call Send.Row.Status(bnk+8,b.held.button);
+
+   call Finish.D50.Protocol.Xmit;          /* send checksum & clean up */
+
+end SEND.CLAVIER.BUTTON.STATUS.TO.D50;
+
+/* $SUBTITLE Routine to Transmit Clavier Window Display Status Info */
+
+SEND.CLAVIER.WINDOW.STATUS.TO.D50: proc (part) swapable;
+   dcl part   fixed; /* 0: 0-7, 1: 8-15, 2: 16-23, 3: 24-31 */
+   dcl (i,ch) fixed;
+   dcl wimage array external;
+
+   call Begin.D50.Protocol.Xmit; /* put tty into transparent mode, send header */
+
+   checksum = 12;                      /* initialize checksum */
+   call pc(12);                        /* 12 bytes to follow */
+
+   checksum = checksum + (P#ABLE_NODE & 255);  /* synthesize our source address */
+   call pc(P#ABLE_NODE&255);
+
+   checksum = checksum + P#CLAVIER_EMULATE;  /* basic packet type code */
+   call pc(P#CLAVIER_EMULATE);
+
+   checksum = checksum + CW#STATUS;    /* subtype code */
+   call pc(CW#STATUS);
+
+   checksum = checksum + part;         /* the section of display to update */
+   call pc(part);
+
+   do i=shl(part,3) to shl(part,3)+7;
+      ch = wimage(i) & 127;            /* get ascii char code */
+      if wimage(i) < 0                 /* if high bit set for decimal */
+      then ch = ch | 128;              /* point, set in status byte */
+
+      checksum = checksum + ch;
+      call pc(ch);
+   end;
+
+   call Finish.D50.Protocol.Xmit;     /* send checksum & clean up */
+end SEND.CLAVIER.WINDOW.STATUS.TO.D50;
+
+/* $SUBTITLE Routine to Transmit Clavier Emulation Status Info */
+
+SEND.CLAVIER.STATUS.PACKET.TO.D50: proc swapable; /* sends the next packet of status info */
+   dcl bit# fixed static;
+
+   do while D50.Termulator.Clavier.Info <> 0; /* loop until we send a packet or nothing to do */
+
+      if (D50.Termulator.Clavier.Info & bits(bit#)) <> 0
+      then do;            /* new button panel or window status */
+         D50.Termulator.Clavier.Info = D50.Termulator.Clavier.Info xor bits(bit#); /* clear status bit */
+
+         if bit#<10 then do;
+            call Send.Clavier.Button.Status.To.D50(bit#);
+         end;
+         else if bit#<14 then do; /* new window status */
+            call Send.Clavier.Window.Status.To.D50(bit#-10);
+         end;
+
+         bit# = (bit# + 1) & 15;  /* step to next bit with wrap */
+         return;                  /* have sent one packet */
+      end;
+
+      bit# = (bit# + 1) & 15;     /* step to next bit with wrap */
+   end;
+
+end SEND.CLAVIER.STATUS.PACKET.TO.D50;
+
+/* $page - Flush.VK.Display.To.Termulators  */
+
+/* This routine is used to send a copy of the VK status (buttons & window) */
+/* out to the D50 termulator,  plus any RS422 protocol devices that are    */
+/* getting clavier information.                                            */
+
+Flush.VK.Display.To.Termulators: proc public swapable;
+   dcl saved.run.syn fixed;
+   dcl i             fixed;
+
+   if inc.pro              = 0 then return;
+   if INITIALIZE.COMPLETED = 0 then return; /* things are not up & running yet */
+
+   /* Send clavier information out to any & all RS422 devices that */
+   /* are showing a VK emulation.                                  */
+
+   do i = 0 to (shl(num.d115d.bds,1) - 1);      /* check each channel */
+      if d115d.chans(i) > 0 then do;            /* if active, do it   */
+
+         write(mam) = D115D.Event.Enable.Ptr;   /* point to bits      */
+         write(mal) = i*num.of.OS.events + get.OS.clavier.info;
+         if read(md) <> 0 then do;
+
+            /* xxx */ /* send out VK Display protocol message */
+                      /* send out VK Button panel message     */
+
+         end;
+      end;
+   end;
+
+   /* Now send the information out to the D50 termulator if needed */
+
+   if USE.D50.PROTOCOL        =  0  then return;  /* not there             */
+   if disable.protocol.output <> 0  then return;  /* oops - called from PC */
+                                                  /* so cannot update.     */
+
+   /* Update D50.Termulator.Clavier.Info here because we most likely    */
+   /* have not called perform since the bits in new.clavier.info        */
+   /* were set:                                                         */
+
+   D50.Termulator.Clavier.Info = D50.Termulator.Clavier.Info
+                               \ new.clavier.info;
+
+   saved.run.syn = run.syn;    /* keep from re-entering PERFORM since   */
+   run.syn = 0;                /* that is where we are called from.     */
+
+   do while (P.OUT.RPTR<>P.OUT.WPTR);              /* have a pending protocol message to send */
+      call SEND.NEXT.PENDING.D50.PROTOCOL.PACKET;  /* write message to d50 */
+   end;
+
+   do while D50.Termulator.Clavier.Info <> 0;
+      call SEND.CLAVIER.STATUS.PACKET.TO.D50; /* send new status packet */
+   end;
+
+   call tty_wait;
+
+   run.syn = saved.run.syn;            /* restore to prior state */
+
+end Flush.VK.Display.To.Termulators;
+
+/* $SUBTITLE - Send.Events.To.D50.Termulator                     */
+
+/* This routine is called periodically from Get.Next.Event.   It */
+/* is NOT called from PERFOM level.   It may send up to 1        */
+/* packet out the D50 protocol to keep the D50 termulator VK     */
+/* display up to date.                                           */
+
+Send.Events.To.D50.Termulator: proc public;
+
+   /* check for assorted debug input items */
+
+   if protocol.trap <> 0 then do;
+      call protocol.emulator;              /* Let the user manually enter a packet */
+   end;
+
+   if d115d.timeout <> 0 then do;          /* Maybe print when device goes off line */
+      call log.d115d.timeout;
+      d115d.timeout = 0;
+   end;
+
+   if USE.D50.PROTOCOL = 0 then return;
+
+   if (P.OUT.RPTR<>P.OUT.WPTR)                        /* have a pending protocol message to send */
+   then call SEND.NEXT.PENDING.D50.PROTOCOL.PACKET;   /* write message to d50 */
+
+   else if D50.Termulator.Clavier.Info<>0             /* have a change in Clavier status */
+   then call SEND.CLAVIER.STATUS.PACKET.TO.D50;       /* send new status packet */
+
+end Send.Events.To.D50.Termulator;
+
+end PROMOD;

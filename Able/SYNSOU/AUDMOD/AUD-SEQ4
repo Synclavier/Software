@@ -1,0 +1,764 @@
+/* AUD-SEQ4   $TITLE  routines for dragging, moving, copying notes
+
+   Modified:
+   11/01/90 - CJ  - Further enhancements to move/copy
+   09/27/90 - cj  - allowed move/copy to occur across multiple tracks
+   02/02/90 - MWH - Stop placing events at less than zero.time when dragging
+   01/18/90 - MWH - Stop playback properly when mouse button is released
+   05/08/89 - cj - fixed "Argyle Sweater" bug
+   04/24/89 - cj - allow dragging of events on seq panel
+   10/03/88 - cj - checked for live click track after dragging note
+*/
+
+/* find row and track for mouse position: */
+
+COMPUTE.SEQ.ROW.AND.TRACK: proc (x,y,trdata) swapable;
+   dcl (x,y)   fixed;
+   dcl spacing fixed;
+   dcl trdata  array;  /* 0 - ROW  1 - TRACK */
+
+   load 64; div Seq.Tracks; spacing=res;
+
+   trdata(0) = tpos.y(y)-Seq.Event.Display.Row; /* logical row point maps to */
+   load        tpos.x(x)-Seq.Event.Display.Left.X;
+   div spacing;
+   trdata(1) = res;                             /* logical col point maps to */
+end COMPUTE.SEQ.ROW.AND.TRACK;
+
+
+FETCH.LAST.TIME.DISPLAYED: proc (base,tracks,rows,time) returns (fixed) swapable;
+   dcl base     fixed;
+   dcl tracks   fixed;
+   dcl rows     fixed;
+   dcl time     array;
+   dcl (r,t)    fixed;
+   dcl last.row fixed;
+   dcl last.trk fixed;
+
+   last.row = -1;
+   
+   do t = 0 to tracks-1;
+      r = rows-1;
+      do while r >= 0;
+         write(mam) = base + t;
+         write(mal) = INDEX.START+r;
+         if read(md) <> 0 then do;
+            if r > last.row then do;
+               last.row = r;    /* save row */
+               last.trk = t;    /* save track */
+               r = 0;           /* kill loop */
+            end;
+         end;
+         r = r - 1;
+      end;
+   end;
+
+   if last.row >= 0 then do;  /* something found */
+      if Get.Snapshot.Info(base,last.trk,TRKINDEX,last.row) then do;
+         time(0) = #NMSB;
+         time(1) = #NLSB;
+      end;
+      else do;
+         time(0) = 0;
+         time(1) = 0;
+      end;
+      return last.row;
+   end;
+   else do;
+      time(0) = 0;
+      time(1) = 0;
+      return 0;
+   end;
+end FETCH.LAST.TIME.DISPLAYED;
+
+COMPUTE.TIME.PAST.END.OF.SEQUENCE: proc(base,x,y,time) swapable;
+   dcl base         fixed; /* ptr to a snapshot area in xmem */
+   dcl (x,y)        fixed; /* mouse coordinates */
+   dcl time         array;
+   dcl last.time(1) fixed;
+   dcl row          fixed;
+   dcl last.center  fixed;
+   dcl past.pixels  fixed;
+
+   row = Fetch.Last.Time.Displayed(base,Seq.Tracks,Seq.Event.Display.Size,last.time);
+
+   last.center = gpos.y((Seq.Event.Display.Row+row)*100+43);     /* center of last note */
+   past.pixels = last.center-gpos.y((Seq.Event.Display.Row+Seq.Event.Display.Size-1)*100-4); /* pix between last note and end of sequence */
+
+   call STR32(0, 30000, loc(addr(bitmsb)));        /* get 30 seconds        */
+   if y > last.center then y = last.center;        /* avoid y > last.center */
+
+   call ratio_multiply(last.center-y,past.pixels); /* time * (y pix/total pix) */
+
+   call ADD32(last.time,loc(addr(bitmsb)),time);   /* add result to last time */
+end COMPUTE.TIME.PAST.END.OF.SEQUENCE;
+
+PLOT.SEQ.DRAG.CURSOR: proc (x,y) swapable;
+   dcl (x,y)  fixed;
+
+   call alias.lines.off();
+   call connect(gpos.x(-6),y,gpos.x(8006),y);   /* line with a diamond */
+   call gdiam(x,y);
+   call alias.lines.on();
+end PLOT.SEQ.DRAG.CURSOR;
+
+UPDATE.SEQ.DRAG.TIME: proc (x,y,mode) swapable;
+   dcl (x,y)           fixed;
+   dcl mode            fixed;
+   dcl time.above(1)   fixed;
+   dcl time.below(1)   fixed;
+   dcl mouse.time(1)   fixed;
+   dcl temp.time (1)   fixed;
+   dcl mouse.row       fixed;  /* absolute */
+   dcl local.row       fixed;  /* row within sequence editor 0=top row of notes */
+   dcl track           fixed;
+   dcl center          fixed;
+   dcl deadband        lit '1';
+
+   /* Procedure: Computes the time of the mouse's time position in sequence based on absolute y graphics position */
+
+   mouse.row = tpos.y(y);
+   local.row = mouse.row-Seq.Event.Display.Row;
+
+   track = Find.Row.Time(local.row, Mouse.Time);
+   
+   if track < 0 then do;  /* no note on the row; means end of seq  */
+      /* find out time of last note in sequence; we are at end of it */
+      /* set time.above and time.beow */
+      call Compute.Time.Past.End.of.Sequence(AEE.Cur.Seq.Snap,x,y,mouse.time);
+      if (com16(Zero.Time,Mouse.Time) = lw#igt)
+      then call str32(0,Zero.Time,Mouse.Time);
+      Disable.Deposits = true;
+         call Deposit.32Bit.MSEC(Seq.Drag.Time,mouse.time,Zero.Zero);
+      Disable.Deposits = false;
+      return;
+   end;
+
+   /* we know that there is a note on local.row */
+
+   center = gpos.y(mouse.row*100)+gpix.y(57);   /* bottom of row + 1/2++ char height (++ compensates for uncentered nature of transparent mode chars) */
+
+   if mode = 1 then do;      /* replace mode */
+      if (com16(Zero.Time,Mouse.Time) = lw#igt)
+      then call str32(0,Zero.Time,Mouse.Time);
+      Disable.Deposits = true;
+         call Deposit.32Bit.MSEC(Seq.Drag.Time,Mouse.Time,Zero.Zero);
+      Disable.Deposits = false;
+      return;
+   end;
+
+   if (center-deadband) > y then do;  /* mouse graphics position is below center of mouse.row */
+      if ((local.row+1) < Seq.Event.Display.Size) then do;  /* next row down is not past bottom of seq editor*/
+         track = Find.Row.Time(local.row+1, Time.Below); 
+         if track < 0 then do; /* at end of sequence for tracks displayed */
+            call Compute.Time.Past.End.of.Sequence(AEE.Cur.Seq.Snap,x,y,mouse.time);
+            if (com16(Zero.Time,Mouse.Time) = lw#igt)
+            then call str32(0,Zero.Time,Mouse.Time);
+            Disable.Deposits = true;
+               call Deposit.32Bit.MSEC(Seq.Drag.Time,mouse.time,Zero.Zero);
+            Disable.Deposits = false;
+            return;
+         end;
+      end;
+      else do; /* at bottom seq edit display */
+         time.below(0) = mouse.time(0);
+         time.below(1) = mouse.time(1);
+      end;
+   end;
+
+   else if (center+deadband) < y then do;  /* mouse position is above center of mouse.row, mouse row is time.below */
+      if (local.row-1 >= 0) then do; /* above row is still on sequence editor */
+         track = Find.Row.Time(local.row-1, Time.Above);
+      end;
+      else do;                       /* just above first line of sequencer */
+         time.above(0) = #NMSB;  
+         time.above(1) = #NLSB;
+      end;
+   end;
+
+   else do; /* mouse is centered; just deposit time of mouse.row */
+      Disable.Deposits = true;
+         if (com16(Zero.Time,loc(addr(#NMSB))) = lw#igt)
+         then do;
+            call str32(0,Zero.Time,Temp.Time);
+            call Deposit.32Bit.MSEC(Seq.Drag.Time,Temp.Time, Zero.Zero);
+         end;
+         else call Deposit.32Bit.MSEC(Seq.Drag.Time,loc(addr(#NMSB)),Zero.Zero);
+      Disable.Deposits = false;
+      return;
+   end;
+
+   /* if we get here we need to compute the mouse time between time.above and time.below */
+
+   if (time.above(0)<>0) or (time.above(1)<>0) then do;  /* compute time between mouse.time and time.above */
+      call SUB32(mouse.time,time.above,loc(addr(bitmsb)));
+      call ratio_multiply(y-center,gpix.y(100)-shl(deadband,1));  /* distance_from_center div distance_between_rows */
+      call SUB32(mouse.time,loc(addr(bitmsb)),mouse.time);
+   end;
+   else if (time.below(0)<>0) or (time.below(1)<>0) then do; /* compute time between mouse.time and time.below */
+      call SUB32(time.below,mouse.time,loc(addr(bitmsb)));
+      call ratio_multiply(center-y,gpix.y(100)-shl(deadband,1));
+      call ADD32(mouse.time,loc(addr(bitmsb)),mouse.time);
+   end;
+
+   if (com16(Zero.Time,Mouse.Time) = lw#igt)
+   then call str32(0,Zero.Time,Mouse.Time);
+   Disable.Deposits = true;
+      call Deposit.32Bit.MSEC(Seq.Drag.Time,mouse.time,Zero.Zero);
+   Disable.Deposits = false;
+end UPDATE.SEQ.DRAG.TIME;
+
+UPDATE.SEQ.POSITION.DISPLAY: proc (time) swapable;
+   dcl time         array;
+   dcl save.changed fixed;
+
+   save.changed = Screen.Changed;
+   Disable.Deposits = true;
+      call Deposit.32Bit.MSEC(Seq.Drag.Time, time, Zero.Zero);
+   Disable.Deposits = false;
+   Screen.Changed = save.changed;
+
+end UPDATE.SEQ.POSITION.DISPLAY;
+
+DRAG.CUE.OR.NOTE: proc (button,drop.data,mode) returns (fixed) public swapable;
+   dcl button        fixed;
+   dcl drop.data     array;  /* 0-Disp Row  1-Disp Track  2-Row Time MSB  3-Row Time LSB */
+   dcl mode          fixed;  /* 0-Insert  1-Replace  */
+   dcl seq.xmin      fixed;
+   dcl seq.xmax      fixed;
+   dcl seq.ymin      fixed;
+   dcl seq.ymax      fixed;
+   dcl prev.type     fixed;
+   dcl dragging      fixed;  /* if proc is made re-entrant this var must be declared static */
+   dcl In.Seq.Editor lit '((mx > seq.xmin) & (mx < seq.xmax) & (my > seq.ymin) & (my < seq.ymax))';
+   dcl i             fixed;
+   dcl (mx,my)       fixed;
+   dcl event         fixed;
+   dcl (stk) (num.of.get.events) fixed;
+
+   popit:proc (stk);                  /* routine to restore get enable */
+      dcl stk array;                  /* stack upon exit               */
+      dcl i   fixed;
+      do i=1 to num.of.get.events;
+         get.item.enabled(i)=stk(i);
+      end;
+   end popit;
+
+   /* If this procedure is called when the mouse is outside of sequence
+      editor then it puts up a drag cursor, when it passes into sequence
+      editor area then it changes to a note placement cursor */
+
+   /* Assumes mouse is located over something that can be dragged */
+
+   do i=1 to num.of.get.events;      /* save system get-enable states */
+      stk(i) = get.item.enabled(i);  /* so we can look at only        */
+      get.item.enabled(i)=0;         /* mouse activity                */
+   end;
+
+   if Seq.Group=0 then do; /* sequencer panel is not open - abort drag */
+      do while 1;
+         call Get_Enable(Get.Mouse.Button);
+         event = Get.Next.Event;
+         call Get_Disable(Get.Mouse.Button);
+
+         if (event = Get.Mouse.Button) then do;
+            if  ((Mouse(Release.Time)-Mouse(Press.Time)) IGE 200)
+            AND ((DTD.Play.State=5) OR (DTD.Play.State=2))
+            then call Stop.DTD.Playback; /* turn off currently playing cue */
+            call popit(stk);
+            return 0;
+         end;
+      end;
+   end;
+
+   else do; /* If sequencer is around set up limits; else leave initialized to zero */
+      seq.xmin = gpos.x(1550);
+      seq.xmax = gpos.x(8000);
+      seq.ymax = gpos.y((Seq.Event.Display.Row-1)*100+4);  /* +4 is one pixel on Pericom */
+      seq.ymin = gpos.y((Seq.Event.Display.Row+Seq.Event.Display.Size-1)*100-4);
+   end;
+
+   call mouse.switch(0);
+
+   vector_mode;
+   call data_level(2);  /* complement */
+
+   if not dragging then do;   /* put up initial cursor */
+      disable;
+         mx = mouse(press.x);
+         my = mouse(press.y);
+      enable;
+
+      if In.Seq.Editor then do;
+         call Plot.Seq.Drag.Cursor(mx,my);
+         prev.type = 1;
+         transparent_mode;
+         call Update.Seq.Drag.Time(mx,my,mode);
+      end;
+      else do;
+         call gdiam(mx,my);
+         prev.type = 2;
+      end;
+      dragging = true;
+      transparent_mode;
+   end;
+
+   do while 1;
+
+      call Get_Enable(Get.Mouse.Button);
+      call Get_Enable(Get.Mouse.Movement);
+      event = Get.Next.Event;
+      call Get_Disable(Get.Mouse.Button);
+      call Get_Disable(Get.Mouse.Movement);
+
+      if (event = Get.Mouse.Button) then do;
+
+         if (Last.Event.Info = button) then do;
+            vector_mode;
+            do case prev.type;
+               ;
+               call Plot.Seq.Drag.Cursor(mx,my);
+               call gdiam(mx,my);   /* erase the drag box */
+            end;
+            mx = mouse(release.x);
+            my = mouse(release.y);
+            call data_level(0);
+            call line_type(0);
+            call mouse.switch(1);
+            transparent_mode;
+
+            if  ((Mouse(Release.Time)-Mouse(Press.Time)) IGE 200)
+            AND ((DTD.Play.State=5) OR (DTD.Play.State=2))
+            then call Stop.DTD.Playback; /* turn off currently playing cue */
+
+            call Update.Seq.Drag.Time(mx,my,mode);
+
+            dragging = false;    /* Turn off state flag */
+
+            call popit(stk);
+
+            if In.Seq.Editor then do;
+               /* 0-Disp Row  1-Disp Track  2-Row Time MSB  3-Row Time LSB */
+               /* find out where the mouse button was released */ 
+               call Compute.Seq.Row.and.Track(mx,my,drop.data);
+               call Fetch.32Bit.MSEC(Seq.Drag.Time,loc(addr(drop.data(2))));
+               return true;  /* note does not exist where mouse */
+            end;
+            else do;
+               call Update.Seq.Position.Display(Seq.Refresh.Time);
+               return false;   /* Not dropped in sequence editor */
+            end;
+         end;
+      end;
+
+      else if event = Get.Mouse.Movement then do;
+         vector_mode;
+         do case prev.type;   /* erase previous cursor */
+            ;
+            call Plot.Seq.Drag.Cursor(mx,my);
+            call gdiam(mx,my); 
+         end;
+
+         mx = mouse(current.x);
+         my = mouse(current.y);
+
+         if In.Seq.Editor then do;
+            call Plot.Seq.Drag.Cursor(mx,my);
+            transparent_mode;
+            prev.type = 1;
+            call Update.Seq.Drag.Time(mx,my,mode);
+         end;
+         else do;
+            call gdiam(mx,my);
+            prev.type = 2;
+         end;
+         transparent_mode;
+      end;
+   end;
+end DRAG.CUE.OR.NOTE;
+
+/* $page - perform note move function */
+
+MOVE.SELECTED.NOTES: proc (drag.delta, track.delta, code) swapable;
+   dcl drag.delta      array;  /* pass time  delta */
+   dcl track.delta     fixed;  /* pass track delta */
+   dcl code            fixed;
+
+   dcl cue.id          fixed;
+   dcl drop.track      fixed;
+   dcl time1   (1)     fixed;
+   dcl time2   (1)     fixed;
+   dcl loopmoved       fixed;
+   dcl bitlist         fixed;
+   dcl edited          fixed;
+
+   dcl event(event.record.size-1) fixed;
+
+   dcl (first.row,first.col)       fixed;
+   dcl (num.notes,num.cols)        fixed;
+   dcl type            fixed;
+
+   dcl a      (1 )     fixed;
+   dcl NewTime(1 )     fixed;
+
+   dcl (i,j,k)         fixed;
+
+   /* Handy routine to compute new absolute track # after drag.  */
+   /* On entry, drop.track is a logical track # of the AEE       */
+   /* display.  It may be off the screen to the left or right    */
+   /* as needed.  Compute the absolute track # that this should  */
+   /* map to, extending the display as needed.                   */
+
+   compute.drop.track: proc(drop.track);
+      dcl drop.track fixed;
+
+      /* see if drop track is off the left of the AEE display:             */
+
+      if drop.track < 0 then do;         /* give error if nothing is shown */
+         if trkindex(0) < NUM.KBD.TRACKS /* in left column; else extend    */
+         then drop.track = 0;            /* display to right.  Must limit  */
+         else do;                        /* to first track, however.       */
+            drop.track = trkindex(0) + drop.track;
+            if drop.track < NUM.KBD.TRACKS
+            then drop.track = 0;
+         end;
+      end;
+      
+      /* else see if drop track is off the right side:                     */
+
+      else if drop.track >= Seq.Tracks
+      then do;
+         if trkindex(Seq.Tracks-1) < NUM.KBD.TRACKS  /* nothing shown in */
+         then drop.track = 0;                        /* right col: error */
+         else do;
+            drop.track = trkindex(Seq.Tracks-1) + drop.track - (Seq.Tracks-1);
+            if drop.track >= FIRST.LOD.TRACK
+            then drop.track = 0;
+         end;
+      end;
+
+      else drop.track = trkindex(drop.track);       /* else look up abs */
+                                                    /* track #          */
+      return drop.track;
+
+   end compute.drop.track;
+         
+   /* If someone else has modified the sequence since we took our */
+   /* snapshot,  then we cannot do the move because our note      */
+   /* information is invalid:                                     */
+
+   if ((New.Seq.Info      & (1\4)) <> 0)
+   or ((New.ABLE.Seq.Info & (1\4)) <> 0)
+   or ((Seq.Refresh       & (4  )) <> 0)
+   then do;                             
+      call Clear.All.Highlights;
+      call Close.Seq.Dialog;
+      call Display.Notice(NT#SystemError,ATTR#Reverse, NulStr,0,0,0);
+      return;
+   end;
+
+   /* Set up for processing of all selected notes */
+
+   first.row = 0;
+   num.notes = Seq.Event.Display.Size;
+   first.col = 0;
+   num.cols  = Seq.Tracks;
+
+   /* Perform a pass through the screen to make sure a legit track */
+   /* is available for every move.  I.E. : perform error checks!   */
+
+   edited = 0;                         /* detect same track apearing twice */
+
+   do i = first.col to first.col + num.cols - 1; /* loop through tracks    */
+
+      j = 0;                           /* look for same track edited       */
+      do k = first.col to i - 1;       /* already.                         */
+         if  (TrkIndex(i) = Trkindex(k))
+         and ((edited & bits(k)) <> 0)
+         then j = 1;
+      end;
+
+      if j = 0                         /* loop over rows if track is ok    */
+      then do j = first.row to first.row + num.notes - 1;
+
+         if  ((Highlighted(j) & bits(i)) <> 0)
+         and (Get.Snapshot.Info(AEE.Cur.Seq.Snap,i,TRKINDEX,j) <> 0)
+         and (isa.rest.note                                    =  0)
+         then do;
+
+            if isa.ilp.note then do;         /* see if moving loop note */
+               if (#w1&"174001")="104001"    /* ILP START */
+               then type = 1;
+               else type = 2;                /* ilp end   */
+            end;
+
+            else if isa.rte.note then do;
+               type = 3;
+            end;
+
+            else if Trk.Head.Lookup(TRKINDEX(i),THD.CUE.TRACK) <> 0 then do;  /* cue track note change */
+               type = 4;
+            end;
+
+            else do;          /* music note */
+               type = 5;
+            end;
+
+            /* compute new track # for this note: */
+
+            drop.track = compute.drop.track(i+track.delta);
+
+            /* give error if cannot move note to track: */
+
+            if (drop.track ILT NUM.KBD.TRACKS)
+            or ((type = 4) & (TRACK.AVAILABLE.FOR.CUES(drop.track) = FALSE))
+            or ((type = 5) & (Trk.Head.Lookup(drop.track, THD.CUE.TRACK) <>  0))
+            then do;
+               call Clear.All.Highlights;
+               call Close.Seq.Dialog;
+               call Display.Notice(NT#BadPlaceTrack, ATTR#Reverse,NulStr,0,0,0);
+               return;
+            end;
+
+            edited = edited \ bits(i);
+
+         end;
+      end;
+   end;
+
+   /* now loop through notes and delete the selected notes */
+
+   if Move.Or.Copy = 0        /* that was easy now, wasn't it? */
+   then do;
+      bitlist = DELETE.SEQ.NOTES.SUBROUTINE;
+   end;
+
+   /* now loop through the notes and insert them on the track */
+
+   edited = 0;                         /* detect same track apearing twice */
+
+   do i = first.col to first.col + num.cols - 1; /* loop through tracks    */
+
+      loopmoved = 0;                   /* loop not moved yet for this trk  */
+
+      j = 0;                           /* look for same track edited        */
+      do k = first.col to i - 1;       /* already.                        */
+         if  (TrkIndex(i) = Trkindex(k))
+         and ((edited & bits(k)) <> 0)
+         then j = 1;
+      end;
+
+      if j = 0                         /* loop over rows if track is ok    */
+      then do j = first.row to first.row + num.notes - 1;
+
+         if  ((Highlighted(j) & bits(i)) <> 0)
+         and (Get.Snapshot.Info(AEE.Cur.Seq.Snap,i,TRKINDEX,j) <> 0)
+         and (isa.rest.note                                    =  0)
+         then do;
+
+            if isa.ilp.note then do;         /* see if moving loop note */
+               if (#w1&"174001")="104001"    /* ILP START */
+               then type = 1;
+               else type = 2;                /* ilp end   */
+
+               call TRK.HEAD.LOOKUP(trkindex(i), THD.COUNTIN.MSB);
+               call COPY.IN(addr(time1(0)), 2);    /* THD.COUNTIN.MSB */
+               call COPY.IN(addr(time2(0)), 2);    /* THD.LOOPLEN.MSB */
+            end;
+
+            else if isa.rte.note then do;
+               type = 3;
+            end;
+
+            else if Trk.Head.Lookup(TRKINDEX(i),THD.CUE.TRACK) <> 0 then do;  /* cue track note change */
+               type = 4;
+            end;
+
+            else do;          /* music note */
+               type = 5;
+            end;
+
+            /* compute new time for this note: */
+
+            call ADD32(loc(addr(#NMSB)), drag.delta, NewTime);
+            if NewTime(0) < 0 then call STR32(0, 0, NewTime);
+
+            /* compute new track # for this note: */
+
+            drop.track = compute.drop.track(i+track.delta);
+
+            /* continue with move if destination track is ok: */
+
+            if drop.track IGE NUM.KBD.TRACKS
+            then do;
+
+               if (type = 1)  /* ils or ile */
+               or (type = 2)
+               then do;
+         
+                  /* if dragging ils,  then drag loop end as well: */
+
+                  if type = 1    /* handle move of ILS.  Set flag so we don't */
+                  then do;       /* also move the ILE                         */
+                     call COPY32(NewTime, Time1);
+                     loopmoved = 1;
+                  end;
+
+                  /* else if dragging loop end,  then  change loop length */
+
+                  else if loopmoved = 0 then do;
+
+                     /* reverse ils/ile if dragging ile to before ils: */
+
+                     call ADD32(time1, time2,      a);   /* compute loop end time */
+                     call ADD32(a,     drag.delta, a);   /* get new loop end time */
+
+                     if a(0) < 0 then call STR32(0, 0, a);
+
+                     if COM32(a, time1) = lw#ilt
+                     then do;
+                        call SUB32 (time1, a, time2); /* compute new length    */
+                        call COPY32(a,        time1);
+                     end;
+                     else do;
+                        call SUB32(a, time1, time2);
+                     end;
+                  end;
+
+                  call ADD32(time1, time2, a);                /* compute end time                               */
+                  call Add.Seq.Ilp(drop.track, time1, 2, a);  /* reconstruct loop on drop track          */
+               end;
+
+               /* handle cue/event move */
+
+               else if type = 4 then do;
+
+                  /* Expand cue info from drag track: */
+
+                  call Expand.Event.Note(event, 1);
+
+                  /* now set up for drop track: */
+
+                  event(event.track#    ) = drop.track; /* set up info for */
+                  event(event.time.msb  ) = Newtime(0); /* place of cue or */
+                  event(event.time.lsb  ) = Newtime(1); /* event.          */
+                  event(event.time.count) = -1;         /* put at end of chord */
+
+                  call Place.Event.In.Sequence(event);  /* hope for the best */
+
+               end;
+
+            
+               /* else handle music or rte note */
+
+               else if (type = 3)
+               or      (type = 5)
+               then do;
+
+                  /* if not a cue track then can move both rte's and notes. */
+                  /* Else if dest is a cue track,  can only move rtes.      */
+
+                  if (Trk.Head.Lookup(drop.track, THD.CUE.TRACK) =  0)
+                  or (type                                       =  3)
+                  then do;
+
+                     write(mam)=trk.head;
+                     write(mal)=drop.track;
+                     if (read(md)=0) then do;                   /* if there are no notes on this track yet */
+                        if ALLOCATE.TRK.HEADER(drop.track)=0 then do; /* create track header */
+                           call NOMEM.ERROR;
+                           return;
+                        end;
+                        call COPY.TIMBRE(trkindex(i), drop.track);
+                     end;
+
+                     call LOAD.SEQ.GLOBALS(drop.track);
+                     #w1 = #w1 & "174001";
+                     call INSERT.NOTE.RECORD(NewTime(0), NewTime(1));
+                     call Check.For.Live.Click;
+                  end;
+               end;
+
+               edited = edited \ bits(i);
+
+            end;
+         end;
+      end;
+   end;
+
+   /* Garbage collect event information now that we have copied it */
+   /* to the new track:                                            */
+
+   if Move.Or.Copy = 0
+   then call GARBAGE.COLLECT.AFTER.DELETE(bitlist);
+
+   call Take.New.AEE.Snapshot;
+   if code = 0 then call Clear.All.Highlights;
+   call Close.Seq.Dialog;
+
+end MOVE.SELECTED.NOTES;
+
+/* $page - higher level move notes function */
+
+DRAG.SEQ.NOTE.AND.MOVE: proc (row,track) swapable;
+   dcl (row,track)     fixed;  /* leave in order */
+
+   dcl drag.time (1)   fixed;
+   dcl drop.time (1)   fixed;
+   dcl drag.delta(1)   fixed;
+   dcl track.delta     fixed;
+   dcl drag.data (3)   fixed;
+
+   /* Make sure the user clicked on a real note:      */
+
+   if  Get.Snapshot.Info(AEE.Cur.Seq.Snap,track,TRKINDEX,row) = 0
+   then do;
+      call Close.Seq.Dialog;       /* oops - the guy missed the */
+      return;                      /* note                      */
+   end;
+
+   drag.time(0) = #NMSB;           /* save time for start of drag */
+   drag.time(1) = #NLSB;
+
+   /* see if user clicked on a hilighted area */
+
+   if (Highlighted(row) & bits(track)) = 0   /* if not on a higlighted note, */
+   then do;
+      call Clear.All.Highlights;
+      call Set.Highlight(row, track);  /* set highlight for delete function */
+   end;
+
+   /* now perform the drag:                                        */
+
+   if Drag.Cue.or.Note(2,drag.data,0) = 0 then do;
+      call Close.Seq.Dialog;       /* the guy dragged off the page */
+      return;
+   end;
+
+   /* See if it was dropped on a track with no track index: */
+
+   if trkindex(drag.data(1)) < Num.Kbd.Tracks
+   then do;
+      call Clear.All.Highlights;
+      call Close.Seq.Dialog;
+      call No.Edit.Allowed;
+      return;
+   end;
+
+   drop.time(0)=drag.data(2); /* get time note was dropped at */
+   drop.time(1)=drag.data(3);
+
+   call SUB32(Drop.Time, Drag.Time, Drag.Delta); /* get time delta from drag */
+   track.delta = drag.data(1) - track;           /* and track delta          */
+
+   if ((drop.time(0) = drag.time(0))  /* Drop time did not changed */
+   and (drop.time(1) = drag.time(1))
+   and (track        = drag.data(1)))
+   then do;
+      call Close.Seq.Dialog;
+      return;
+   end;
+
+   call MOVE.SELECTED.NOTES (drag.delta, track.delta, 0);
+
+end DRAG.SEQ.NOTE.AND.MOVE;

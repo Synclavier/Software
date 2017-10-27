@@ -1,0 +1,603 @@
+/* 04-IOMOD  $TITLE  Handlers for Terminal and File I/O */
+
+DCL OUTDEV  FIXED; OUTDEV = 0; /* 0=TERMINAL, 1=PRINTER, 2=TO FILE */
+DCL BYTEP   FIXED; /* BYTE POINTER FOR FILLING FILE */
+DCL #DIGITS FIXED; /* NUMBER OF CHARS OUTPUT BY NUMBER ROUTINES */
+
+BRKC:PROC; /* QUERY AND CLEAR BREAK SEMAPHORE */
+   IF BREAK.RECEIVED THEN DO; /* BREAK WAS SET */
+      BREAK.RECEIVED=0;
+      RETURN 1;
+   END;
+   RETURN 0; /* BREAK WAS CLEAR */
+END BRKC;
+
+SIGNAL.BREAK:PROC; /* SIGNAL BREAK AND WAIT 300 MS FOR BREAK TO GO AWAY */
+   DCL I FIXED;
+   BREAK.RECEIVED=1; /* SIGNAL BREAK */
+   WRITE("3")=0; WRITE("3")=0; /* SYNCHRONIZE WITH D03 */
+   DO I=1 TO 30*D03_SPEED; /* WAIT 300 MS */
+      WRITE("3")=0;
+   END;
+END SIGNAL.BREAK;
+
+PCHAR:PROC(CH); /* PRINT CHAR TO CURRENT OUTPUT DEV */
+   DCL (DEST,I) FIXED;
+   DCL CH       FIXED;
+   DCL BREAK    FIXED;
+
+   IF OUTDEV=2 THEN DO; /* TO FILE */
+      CALL PBYTE(LOCATION(FBUFPTR-1),BYTEP,CH); /* STORE CHAR */
+      BYTEP=BYTEP+1;
+      IF BYTEP THEN DO; /* ADVANCE BY WORD */
+         FILNG=FILNG+1; FILNS=SHR(FILNG+255,8);
+         BLEN=BLEN+1;
+      END;
+   END; /* TO FILE */
+   ELSE DO; /* TO REGULAR DEVICE */
+      IF OUTDEV=1 THEN DEST=PRI; ELSE DEST=TTY; /* SELECT DESTINATION */
+
+      IF (READ(DEST+1) and "2")<>0 THEN DO; /* CHECK FOR INPUT CHAR ON DEVICE */
+         I=READ(DEST) and "177"; /* GET CHAR */
+         BREAK=0; /* ASSUME WE HAVEN'T RECEIVED A BREAK */
+         IF I=0 THEN BREAK=1; /* BREAK */
+         ELSE IF I=c.S THEN DO WHILE I<>c.Q; /* CONTROL S/CONTROL Q */
+            I=READ(DEST) and "177";
+            IF I=0 THEN BREAK=1; /* BREAK */
+         END;
+         IF BREAK THEN CALL SIGNAL.BREAK; /* IF WE RECEIVED A BREAK, SIGNAL IT AND WAIT FOR IT TO DISAPPEAR */
+      END;
+      IF      OUTDEV=0 THEN WRITE(TTY)=CH; /* TERMINAL */
+      ELSE IF OUTDEV=1 THEN WRITE(PRI)=CH; /* PRINTER  */
+   END; /* OF TO DEVICE */
+END PCHAR;
+
+/* $SUBTITLE Numeric Output */
+
+pdec: proc(ms,ls,field); /* output a 32-bit number in decimal (0 to 4,294,967,295) */
+   dcl (ms,ls,i,r) fixed; /* ms, ls:  value to print */
+   dcl (field,go)  fixed; /* field:  field size */
+   dcl #ms_divisors data (15258, 1525,  152,   15,    1,    0,   0,  0, 0,0); /* powers of ten */
+   dcl #ls_divisors data (51712,57600,38528,16960,34464,10000,1000,100,10,1);
+
+   #digits=0;
+   do i=1 to field-10; /* print out any necessary leading spaces */
+      call pchar(a.SP);
+      #digits=#digits+1;
+   end;
+
+   go=false; /* suppress leading zeroes */
+   do i=0 to 9; /* loop over 10 digits */
+      r=0; /* assume digit is zero */
+      do while ((ms IGT #ms_divisors(i)) /* must simulate unsigned 32-bit divide */
+         or ((ms=#ms_divisors (i)) and (ls IGE #ls_divisors (i))));
+         ms=ms-#ms_divisors(i);
+         if ls ilt #ls_divisors(i) then ms=ms-1;
+         ls=ls-#ls_divisors(i);
+         r=r+1;
+      end;
+      if r<>0 then go=true; /* turn on printing */
+      #digits=#digits+1;
+      if (go) or (i=9)        then call pchar(a.0+r); /* print digit */
+      else if field-(9-i) > 0 then call pchar(a.SP); /* or print space */
+      else #digits=#digits-1;
+   end; /* of digits loop */
+end pdec;
+
+pmeg: proc(ms,ls,field);        /* output sectors in megabyte format */
+   dcl (ms, ls, field, i) fixed;
+   dcl (tenths)           fixed;
+
+   if (ms<>0 or ls<>0) then do; 	/* if file length is nonzero         */
+      if (ms = 0 and ls ILT 205)  	/* but less than .1 meg, then show   */
+      then ls = 205;            	/* .1 meg as file length to          */
+   end;                         	/* easily distinguish zero length    */
+
+   if (field > 2)
+      then field = field - 2;
+
+   tenths = (ls & "h7ff") / 205; /* extract tenths of megabyte         */
+
+   do i=0 to 10;
+      ls = shr(ls,1) or shl(ms,15);
+      ms = shr(ms,1);
+   end;
+
+   call pdec(ms, ls, field);
+   call pchar(a.period);
+   call pchar(a.0 + tenths);
+end pmeg;
+
+poct: proc(ms,ls,field); /* output a 32-bit number in octal */
+   dcl (ms,ls,i,j) fixed; /* ms, ls:  value to print */
+   dcl (field,go)  fixed; /* field:  field size */
+
+   #digits=0;
+   do i = 1 to field - 11; /* output as many leading spaces as necessary */
+      call pchar(a.SP);
+      #digits=#digits+1;
+   end;
+
+   j = rot(ms, 2);
+   ms = ((rot(ms, 2) and (not "3")) or (rot(ls, 2) and "3"));
+   ls = ((rot(ls, 2) and (not "3")) or (j and "3"));
+   if (((ls and "3") <> 0) or (field-11 >= 0)) then do; /* need leading digit */
+      call pchar(a.0 + (ls and "3")); /* first digit */
+      go=true; /* we've started */
+   end;
+   else go=false; /* suppress leading zeroes */
+   do i = 0 to 9; /* loop over 10 digits */
+      j = rot(ms, 3);
+      ms = ((rot(ms, 3) and (not "7")) or (rot(ls, 3) and "7"));
+      ls = ((rot(ls, 3) and (not "7")) or (j and "7"));
+      if (ls and "7") <> 0 then go = true; /* turn on printing */
+      #digits=#digits+1;
+      if (go or (i = 9)) then call pchar(a.0 + (ls and "7")); /* if okay to start printing or at end */
+      else if field - (9 - i) > 0 then call pchar(a.0); /* or print space */
+      else #digits=#digits-1;
+   end;
+end poct;
+
+PSTR:PROC(STR); /* PRINT A STRING TO CURRENT DEVICE */
+   DCL STR ARRAY;
+   DCL I   FIXED;
+
+   DO I=0 TO STR(0)-1;  CALL PCHAR(BYTE(STR,I));  END;
+END PSTR;
+
+PCN:PROC; /* PRINT COMMAND NUMBER */
+   IF CNUM<=2 THEN RETURN;
+   CALL PDEC(0,CNUM,0); /* PRINT COMMAND NUMBER ON TTY, IGNORE BREAKS HERE */
+   CALL PSTR(') ');
+END PCN;
+
+NEWLINE:PROC FIXED; 									/* SEND OUT A CRLF, AND A FEW NULLS */
+   DCL NULLS FIXED;
+
+   IF OUTDEV=2 THEN DO; 							/* TO FILE */
+      CALL PCHAR(A.NUL); IF BYTEP THEN CALL PCHAR(A.NUL); /* END LINE */
+      CALL PCHAR(A.NUL); CALL PCHAR(A.NUL); 	/* START NEW LINE WITH LN 0 */
+   END;
+   ELSE DO; 											/* NOT TO FILE */
+      CALL PCHAR(A.CR); CALL PCHAR(A.LF);
+      NULLS=TERMINAL.NULLS; 						/* ASSUME TTY */
+      IF OUTDEV=1 THEN NULLS=PRINTER.NULLS; 	/* PRINTER */
+      DO NULLS=1 TO NULLS; 						/* LOOP OVER NULLS */
+         CALL PCHAR(A.NUL);
+      END;
+   END; /* NOT TO FILE */
+END NEWLINE;
+
+pstringr: proc(str); /* print a string followed by a newline */
+   dcl str fixed array;
+
+   call pstr (str); /* print the string */
+   call newline; /* and a newline */
+end pstringr;
+
+/* $SUBTITLE Command Line I/O */
+
+GET.CHAR:PROC; /* GET CHARACTER - LOWER OR UPPER CASE */
+   INCH = BYTE(TYB, TYBP);
+   TYBP = TYBP + 1;
+END GET.CHAR;
+
+UPCASE.INCH:PROC;
+  IF (INCH-l.A) ILE (l.Z-l.A) THEN INCH=INCH-"40"; /* UP THE CASE */
+END UPCASE.INCH;
+
+GET.CHAR.UPCASE:PROC; /* GET CHAR AND CONVERT TO UPPER CASE */
+   CALL GET.CHAR; /* SCAN NEXT */
+   CALL UPCASE.INCH;
+END GET.CHAR.UPCASE;
+
+GW:PROC FIXED; /* GET FULL WORD FROM LINK */
+   DCL I FIXED;
+
+   I=READ(LNK); /* READ LINK DEVICE */
+   RETURN I or SHL(READ(LNK),8); /* SHIFT ANOTHER BYTE INTO WORD */
+END GW;
+
+NOT.END:PROC; /* RETURN TRUE IF INCH IS NOT AN END OF COMMAND CHAR */
+   RETURN (INCH<>a.CR) AND (INCH<>a.SEMICOLON);
+END NOT.END;
+
+SKIPSPA:PROC; /* CALLED TO SKIP SPACES IN INPUT COMMAND LINE */
+   DO WHILE INCH=a.SP; CALL GET.CHAR; END;
+END SKIPSPA;
+
+SKIPNONSPA:PROC; /* CALLED TO SKIP NON-SPACE CHARACTERS */
+   DO WHILE (NOT.END) AND (INCH<>a.SP); CALL GET.CHAR; END;
+END SKIPNONSPA;
+
+SKIPEND:PROC; /* CALLED TO SKIP TO END OF COMMAND */
+   DO WHILE (NOT.END); CALL GET.CHAR; END;
+END SKIPEND;
+
+SKIP_LEADING_CHARS:PROC; /* CALLED TO SKIP EXTRA LEADING CHARS */
+   DO WHILE (INCH=a.SP)    OR (INCH=a.SEMICOLON)
+   OR       (INCH=a.SLASH) OR (INCH=a.COMMA);
+      CALL GET.CHAR.UPCASE;
+   END;
+END SKIP_LEADING_CHARS;
+
+SKIPEOL:PROC; /* CALLED TO SKIP TO END OF LINE */
+   DO WHILE INCH<>a.CR; CALL GET.CHAR; END;
+END SKIPEOL;
+
+SCANSTR:PROC(ARR,LEN,UPFLAG); /* SCAN STRING INTO ARRAY FOR CHANGE/LOCATE */
+   DCL ARR    ARRAY;
+   DCL LEN    FIXED; /* MAX NUMBER OF CHARS */
+   DCL UPFLAG FIXED; /* TRUE IF SHOULD UP THE CASE */
+   DCL I      FIXED;
+
+   DO I=0 TO SHR(LEN+1,1); ARR(I)=0; END; /* NULL OUT STRING */
+   DO WHILE (NOT.END) AND (INCH<>a.COMMA); /* SCAN FOR RETURN OR COMMA */
+      IF INCH=a.SLASH THEN CALL GET.CHAR; /* A SLASH IS BREAK CHARACTER */
+      IF ARR(0)<LEN THEN DO; /* OKAY TO STORE */
+         IF UPFLAG THEN CALL UPCASE.INCH; /* MUST SCAN INTO UPPER CASE */
+         CALL PBYTE(ARR,ARR(0),INCH); /* STORE IT */
+         ARR(0)=ARR(0)+1; /* BUMP LENGTH */
+      END;
+      CALL GET.CHAR;
+   END;
+END SCANSTR;
+
+PUTSTR:PROC; /* PRINT ARGUMENT STRING TO TERMINAL */
+   DO WHILE (NOT.END); /* LOOP UNTIL END OF COMMAND */
+      CALL PCHAR (INCH); /* PRINT CHARS */
+      CALL GET.CHAR;
+   END;
+   CALL NEWLINE;
+END PUTSTR;
+
+SCANARG:PROC; /* CALLED TO SCAN ARGUMENT INTO GLOBAL 'ARG' */
+   dcl (msw,lsw) fixed;
+   dcl i         fixed;
+   dcl fraction  fixed;
+	dcl dot.there fixed;
+   
+   fraction  = 0;
+	dot.there = false;
+   
+   argMSW = 0; argLSW = 0; /* no number yet */
+   
+   if inch = a.E then do; /* detect 'END' */
+      argMSW = -1;
+      argLSW = -1; /* set to largest possible */
+      call get.char.upcase;
+      do while (inch >= a.A) and (inch <= a.Z); /* skip over remaining alpha characters */
+         call get.char.upcase;
+      end;
+   end;
+  
+   else
+	{
+	   do while ((inch >= a.0) and (inch <= a.9)); /* scan in number */
+		  msw = argMSW; lsw = argLSW;
+		 
+		  do i = 1 to 9; /* multiply current 32-bit number by 10 */
+			 argMSW = argMSW + msw;
+			 argLSW = argLSW + lsw;
+			 if argLSW ilt lsw then argMSW = argMSW + 1;
+		  end;
+	
+		  i = inch - a.0; /* convert to digit */
+		  argLSW = argLSW + i; /* add new digit to 32-bit number */
+		  if argLSW ilt i then argMSW = argMSW + 1;
+	
+		  call get.char.upcase; /* get next digit */
+	   end;
+	   
+	   if (inch == a.period)
+	   {
+			dot.there = true;
+			call get.char.upcase; /* get next digit */
+	   	
+			if ((inch >= a.0) and (inch <= a.9))
+				fraction = (inch - a.0) * 205;
+			
+			call get.char.upcase; /* get next digit */
+				
+			do while ((inch >= a.0) and (inch <= a.9)); /* toss lower significant digits */
+				call get.char.upcase;
+			end;
+	   }
+	   
+	   if (inch == a.M)							/* look for MB in create command */
+	   {
+			dot.there = true;
+			
+			call get.char.upcase; /* get next digit */
+			do while (inch >= a.A) and (inch <= a.Z); /* skip over remaining alpha characters */
+				call get.char.upcase;
+			end;
+		}
+		
+		if (dot.there != 0)						/* scale to megabytes */
+		{
+			argMSW = shl(argMSW, 11) | shr(argLSW, 5);
+			argLSW = shl(argLSW, 11) + fraction;
+	   }
+   }
+	
+   if argMSW <> 0 /* larger than 16 bits */
+   then arg = -1; /* flag for large numbers */
+   else arg = argLSW; /* store lower 16 bits */
+END SCANARG;
+
+CLEARSCREEN:PROC; /* CALL TO CLEAR SCREEN */
+   DCL I FIXED;
+
+   I=0;
+   DO CASE TERMINAL.TYPE;
+      ; /* 0=UNCONFIGURED */
+      ; /* 1=HARDCOPY - IGNORE */
+      DO; /* 2=ADM3 */
+         WRITE(TTY)="14"; WRITE(TTY)="232"; WRITE(TTY)="32";
+         I=4;
+      END;
+      DO; /* 3=VT100 */
+         IF TERMINAL.GRAPHICS <> 0 THEN DO; /* GRAPHICS TERMINAL */
+            WRITE(TTY)=A.GS; /* ENTER GRAPHICS MODE */
+            IF TERMINAL.GRAPHICS = G#MACINTOSH THEN DO; /* IF THIS IS A MAC */
+               WRITE(TTY)=A.ESC; WRITE(TTY)=A.EXCLAM; WRITE(TTY)=A.5; WRITE(TTY)=A.M; /* TURN OFF AUTO-MOUSE REPORTING */
+            END;
+            WRITE(TTY)=A.ESC; WRITE(TTY)=A.FF; /* CLEAR GRAPHICS SCREEN */
+            WRITE(TTY)=A.CAN;  /* GET OUT OF GRAPHICS MODE */
+         END;
+         WRITE(TTY)=A.ESC; WRITE(TTY)=A.LBRACKET; WRITE(TTY)=L.R; /* SET SCROLL REGION TO ENTIRE SCREEN */
+         WRITE(TTY)=A.ESC; WRITE(TTY)=A.LBRACKET; WRITE(TTY)=A.0; WRITE(TTY)=L.M; /* SET NO SCREEN ATTRIBUTES */
+         WRITE(TTY)=A.ESC; WRITE(TTY)=A.LPAREN;   WRITE(TTY)=A.B; /* GET OUT OF ALTERNATE CHARACTER MODE */
+         WRITE(TTY)=A.ESC; WRITE(TTY)=A.LBRACKET; WRITE(TTY)=A.H; /* CURSOR HOME */
+         WRITE(TTY)=A.ESC; WRITE(TTY)=A.LBRACKET; WRITE(TTY)=A.J; /* ERASE REST OF SCREEN */
+         I=45;
+      END;
+      DO; /* 4=DATAMEDIA */
+         WRITE(TTY)="14";
+         I=4;
+      END;
+   END; /* CASE */
+   DO I=1 TO I; WRITE(TTY)=0; END; /* DELAY */
+   LINEC=0; /* RESET LINE COUNT */
+END CLEARSCREEN;
+
+/* $SUBTITLE  Line Input Procedure */
+
+LOAD.CMD.BUF:PROC; /* PUT THE COMMAND FILE CONTENTS INTO BUFFER */
+   DCL (MS, LS) FIXED;
+
+   IF (PERFORMING AND PERF_LEVEL) <> 0 THEN DO; /* IN THE MIDDLE OF A PERFORM FILE */
+      MS = PERFDEV; /* COMPUTE STARTING SECTOR */
+      LS = PERFSEC + SHR(PERPTR, 9);
+      IF LS ILT PERFSEC THEN MS = MS + 1; /* CARRY */
+
+      CALL SDREAD (MS, LS, LOC(ADDR(PBUFFER (1))), PBUFSZ); /* READ IN */
+   END;
+END LOAD.CMD.BUF;
+
+RCHAR:PROC; /* READ NEXT CHAR FROM TERMINAL */
+   DCL CH FIXED;
+
+   RETRY:
+   CH = (READ("50") and "177"); /* WAIT FOR CR OR LINE FEED */
+   IF CH = C.S THEN DO; 		/* CTRL-S */
+     DO WHILE (CH <> C.Q); CH = (READ("50") and "177"); END;
+     GOTO RETRY;
+   END;
+   RETURN (CH);
+END RCHAR;
+
+GET.LINE:PROC(MODE); 			/* GET NEXT COMMAND LINE FROM USER OR COMMAND FILE */
+   DCL MODE FIXED;   			/* 0 IF BUILDING, 1 IF GETTING MONITOR COMMAND */
+   DCL LEN       FIXED; 		/* LENGTH OF LINE BUFFER */
+   DCL CHANGED   BOOLEAN; 		/* TRUE IF LINE BUFFER HAS BEEN CHANGED */
+   DCL LAST_SEMI FIXED; 		/* POSITION OF LAST SEMICOLON READ */
+   DCL CH        FIXED;
+   DCL EDIT.LINE PROC EXTERNAL;
+
+   FGC:PROC FIXED; 				/* NEXT CHARACTER FROM FILE */
+      DCL CH FIXED;
+
+      IF SHR(PERPTR, 1) < PERFLEN THEN DO; /* IF NOT BEYOND END OF FILE */
+         CH = BYTE(PBUFFER, (PERPTR AND "777"));
+         PERPTR = PERPTR + 1; /* POINT TO NEXT */
+
+         IF (((PERPTR AND "777") = 0) AND (SHR(PERPTR, 1) < PERFLEN))
+         THEN CALL LOAD.CMD.BUF; /* READ IN NEXT SECTOR */
+
+         RETURN (CH);
+      END; /* OF NOT BEYOND END OF FILE */
+      ELSE RETURN (0); /* BEYOND THE END - END THE LINE */
+   END FGC;
+
+   CHANGED = TRUE; 					/* ASSUME BUFFER HAS BEEN CHANGED */
+   IF CORE(TYB.BASE) <> 0 			/* SOMETHING ALREADY IN BUFFER */
+   THEN IF BYTE(TYB, CORE(TYB.BASE) - 1) = A.CR THEN CHANGED = FALSE; /* BUFFER HAS NOT BEEN CHANGED */
+
+   LEN = 0; 							/* CLEAR LINE */
+   IF (PERFORMING AND PERF_LEVEL) <> 0 THEN DO; /* IF IN COMMAND FILE */
+      CALL FGC; CALL FGC; 			/* SKIP LINE NUMBER */
+
+      LAST_SEMI = 0; 				/* NO SEMICOLON FOUND YET */
+      CH = FGC; 						/* GET FIRST CHAR */
+      DO WHILE (CH <> A.NUL); 	/* LOOP UNTIL END-OF-LINE */
+         IF LEN < TYBMAX - 1 THEN DO; /* DON'T OVERFLOW BUFFER; LEAVE ROOM FOR FINAL CR */
+            CALL PBYTE(TYB, LEN, CH); /* STORE CHAR */
+            LEN = LEN + 1;
+            IF CH = A.SEMICOLON THEN LAST_SEMI = LEN; /* STORE LENGTH AFTER SEMICOLON */
+         END;
+         ELSE IF LAST_SEMI <> 0 THEN LEN = LAST_SEMI - 1; /* END LINE AT LAST COMMAND */
+
+         CH = FGC; /* GET NEXT */
+      END;
+
+      IF PERPTR THEN CALL FGC; /* MOVE TO WORD BOUNDARY */
+      CALL PBYTE(LOCATION(TYB.BASE), LEN, A.CR); /* STORE ENDING CR */
+      LEN = LEN + 1;
+      CORE(TYB.BASE) = LEN; /* STORE LENGTH */
+
+      IF (PERFORMING AND PERF_ECHO) <> 0 THEN DO; /* ECHO COMMANDS */
+         CALL PCN; CALL PSTR (LOC(LOC.PRMT)); /* PRINT THE COMMAND PROMPT */
+         IF RESUME_MULTI THEN CALL NEWLINE; /* NO COMMAND STRING IF RESUMING A MULTICOMMAND LINE */
+         ELSE CALL PSTRINGR (LOC(TYB.BASE)); /* PRINT THE COMMAND STRING */
+      END;
+   END; /* IN COMMAND FILE */
+
+   ELSE IF MODE = 0 THEN DO; 		/* ELSE GET FROM TERMINAL FOR BUILD */
+      CH = A.NUL; 					/* ENTER LOOP */
+      DO WHILE (CH <> A.CR); 		/* LOOP UNTIL CR */
+         CH = RCHAR; 				/* GET CHAR FROM TERM */
+         DO WHILE (CH = A.ESC); 	/* SKIP ESC SEQS */
+            CH = RCHAR; CH = RCHAR; /* 3 CHARS OF SEQ */
+            IF CH = A.E THEN CH = A.CR; /* TURN REFRESH INTO RETURN */
+            ELSE CH = RCHAR; 		/* OTHERWISE, GET NEXT CHAR AFTER ESC SEQ */
+         END;
+
+         IF CH = A.VT THEN CH = A.NUL; /* IGNORE UP */
+         IF CH = C.X THEN DO; 	/* CONTROL-X MEANS DELETE INPUT */
+            LEN = 0; 				/* CLEAR STRING */
+            CALL PSTR (' deleted');
+            CH = A.CR; 				/* AS IF <RETURN> WAS TYPED */
+         END;
+         IF (CH = C.R) AND (NOT CHANGED) THEN DO; /* CONTROL-R MEANS RECALL LAST LINE */
+            CORE(TYB.BASE) = CORE(TYB.BASE) - 1; /* SKIP CARRIAGE RETURN */
+            LEN = CORE(TYB.BASE); /* RECALL LAST LENGTH */
+            CALL PSTR (TYB); 		/* PRINT LAST LINE */
+            CHANGED = TRUE; 		/* LINE HAS BEEN CHANGED NOW */
+         END;
+         ELSE IF (CH = A.BS) OR (CH = A.DEL) OR (CH = C.Z) THEN DO; /* BACKSPACE, DELETE, OR CNTRL-Z */
+            IF LEN > 0 THEN DO; /* CHARS TO DELETE */
+               WRITE("50") = A.BS; WRITE("50") = A.SP; WRITE("50") = A.BS;
+               LEN = LEN - 1;
+            END;
+         END;
+         ELSE IF (CH = A.CR) OR ((CH >= A.SP) AND (LEN < TYBMAX - 1)) /* LEAVE ROOM FOR CR */
+         THEN DO; 				/* VALID CHAR, AND LESS THAN MAX LENGTH */
+            WRITE("50") = CH; /* ECHO CHAR */
+            CALL PBYTE(TYB, LEN, CH); /* STORE CHAR */
+            LEN = LEN + 1; 	/* INCREASE LENGTH */
+            CHANGED = TRUE; 	/* LINE HAS BEEN CHANGED */
+         END;
+      END; /* OF DO WHILE */
+
+      CORE(TYB.BASE) = LEN; /* STORE LENGTH */
+      WRITE("50") = A.LF; /* ECHO LINEFEED AT END */
+   END; /* OF GET FROM TERMINAL FOR BUILD */
+
+   ELSE DO;   /* GET AND EDIT MONITOR COMMAND */
+      CALL EDIT.LINE;
+      LEN = CORE(TYB.BASE);
+   END;
+
+   LINEC = 0; /* INITIALIZE CRT LINE COUNT */
+   TYBP = 0; /* SET POINTER TO START OF BUFFER */
+   CALL GET.CHAR.UPCASE; /* GET FIRST CHAR */
+END GET.LINE;
+
+/* $subtitle Filename Handling and Catalog Error Routines */
+
+move.name:proc(s1,s2); /* move file name from s1 to s2 */
+   dcl (s1,s2) fixed array;
+   dcl i       fixed;
+
+   do i = 0 TO shr(s1(0) + 1,1);
+      s2(i) = s1(i);
+   end;
+end move.name;
+
+store.name:proc(nam); /* store file name in memory */
+   dcl nam fixed array;
+   dcl i   fixed;
+
+   do i = 0 to F#Name_Len;
+      core(loc.cfn + i) = 0;
+   end;
+   do i = 0 TO shr(nam(0) + 1,1);
+      core(loc.cfn + i) = nam(i);
+   end;
+end store.name;
+
+print.device:  proc(dev); /* print the device name */
+   dcl dev fixed;
+
+   dev = shr(dev,8); /* shift into LS byte */
+   call pchar(byte('*FRW',shr(dev,1))); call pchar(a.0 + (dev and "1"));
+end print.device;
+
+cat.error:  proc; /* prints out catalog routine error messages */
+   dcl space_on_disk        data (' Space on Disk');
+   dcl is_not_on_disk       data ('is not on disk');
+   dcl number_out_of_bounds data (' number out of bounds! <<');
+
+   print.name: proc;
+      if f#name (0) <> 0 then do;
+         call pstr (f#name); call pchar (a.sp);
+      end;
+   end print.name;
+
+   call pcn; /* print command number */
+
+   do case (c#status); /* branch on catalog status */
+      call pstringr ('>> No catalog error! <<');     /* E#None */
+      call pstringr ('>> Magic number not set! <<'); /* E#OS */
+      call pstringr ('>> No catalog buffer allocated! <<'); /* E#Buffer */
+      call pstringr ('>> No catalog in memory! <<'); /* E#No_Dir */
+      do;                                            /* E#No_Config */
+         call pstr ('Device ');
+         if f#name (0) = 0
+         then call print.device (c#ms_sector); /* print device name */
+         else call pstr (f#name);
+         call pstringr (' is not in configuration');
+      end;
+      call pstringr ('No floppy disk in drive');     /* E#No_Floppy */
+      do;                                            /* E#FCB */
+         call pstr ('>> FCB'); call pstringr (number_out_of_bounds);
+      end;
+      do;                                            /* E#Level */
+         call pstr ('>> Level'); call pstringr (number_out_of_bounds);
+      end;
+      do;                                            /* E#Storage */
+         call pstr ('No Available'); call pstringr (space_on_disk);
+      end;
+      do;                                            /* E#CStorage */
+         call pstr ('No Contiguous'); call pstringr (space_on_disk);
+      end;
+      call pstringr ('No Room for More Entries in Catalog'); /* E#Dir_Full */
+      do;                                            /* E#Invalid */
+         call pstr ('Validity Error in Catalog ');
+         if not (((c#ms_sector and "HFF") = 0) and (c#ls_sector = 0)) then do; /* not top-level catalog */
+            if (c#ms_sector = UDEV) and (c#ls_sector = UCAT) /* error occurred on current catalog */
+            then do; call pstr (location(loc.ccnm)); call pchar (a.sp); end; /* print current catalog name */
+            else call print.name; /* print given name */
+         end;
+         call pstr ('on device '); call print.device (c#ms_sector);
+         call pstr (' at sector '); call poct (c#ms_sector and "HFF", c#ls_sector, 6);
+         call newline;
+      end;
+      call pstringr (icfms);                         /* E#Name */
+      call pstringr ('>> Duplicate file name! <<');  /* E#Duplicate */
+      do;                                            /* E#No_File */
+         call pstr ('File '); call print.name; call pstringr (is_not_on_disk);
+      end;
+      do;                                            /* E#Not_Cat */
+         call pstr ('File '); call print.name; call pstringr ('is not a subcatalog');
+      end;
+      call pstringr ('Incorrect format for treename'); /* E#Treename */
+      do;                                            /* E#No_Path */
+         call pstr ('Subcatalog '); call print.name; call pstringr (is_not_on_disk);
+      end;
+      call pstringr ('File type must match for Replace'); /* E#Type */
+      call pstringr ('Disk is write-protected'); /* E#Protect */
+      call pstringr ('Subcatalog cannot be larger than 1,048,575 sectors'); /* E#Too_Large */
+   end;
+end cat.error;
+
+TRAP:  PROC(TRAP.MSG); /* FATAL ERROR MESSAGE TRAP */
+   DCL TRAP.MSG FIXED ARRAY;
+
+   OUTDEV = 0;
+   CALL PSTRINGR ('*** Fatal System Error:  Contact TSC Customer Service');
+   CALL PSTR (TRAP.MSG);
+   STOP;
+END TRAP;

@@ -1,0 +1,1347 @@
+/*	:SYNRSOU:03-PRIM:197-PAL - $TITLE  SUBROUTINES FOR POLY SAMPLING MEMORY MANAGEMENT
+
+Modified:
+2002/02/02 - TY  - Added checks for zeroed sf.mark.end, sf.hertz and sf.octave in CONVERT.SOUNDFILE.INFO().
+						 (The bug mentioned in the 2001/01/29 entry in :SYNSOU:AUDMOD:AUD-OPT1 allowed
+						 the Q-page's optical panel to write soundfiles in this condition.)
+1999/10/19 - TY  - Fixed a bug in PS.SETUP() that computed unscrupulous values for PITCH and TOFFS
+						 when the SFM Octave Base was set to 6.0777 or greater
+1996/12/12 - CJ  - Checked stop.held during ps.collect
+1991/11/30 - PF  - Report quick updates in PS.COLLECT
+1991/11/18 - PF  - More quick update support
+1991/11/06 - PF  - Expanded Quick Update to include poly files
+1991/08/13 - PF  - Check POLY.READ.ABORTED in PS.AUDITION
+1991/08/09 - PF  - Keep mouse code running in PS.AUDITION if noio=0
+1990/10/31 - cj  - Tricked & treated check.next.event calls so can audition
+						 sound files via protocol
+1990/02/23 - MWH - Fix infinite loop bug if COLLECT is interrupted by mouse
+1988/12/12 - cj  - showed 'loading' and 'moving' messages for all
+						 sound files (even short ones) per request of Fred Haas
+1988/10/16 - TSS - Call FLUSH.VK.DISPLAY.TO.TERMULATORS to keep displays up to date
+1988/07/21 - LSS - fix for # and $ labels not set to mart.start,mark.end
+1988/05/09 - LSS - check for END label not set exactly at DATA.END
+1988/05/05 - LSS - bug fix in header conversion for mark.start&mark.end
+1988/03/28 - LSS - created 197-PAL2; 197-PAL1 now has PS.LOAD
+1988/02/18 -LS,TS- change for loading entire sound file
+1988/02/16 - LSS - fixed file loading so data word lengths are correct
+1988/02/18 - TSS - moved PS.MAX.TIME to 197-PAL1
+1987/12/18 - MWH - Merge poly updates with N-Final plus AEE sources
+1987/11/17 - CJ  - show loading message on terminal
+1987/07/02 - MWH - kbd lookup table literals; restructured for 32 bit poly
+1987/01/06-CJ,BSW- changed get.poly.cross.fade.length.in.words
+1986/12/16-CJ,BSW- fixed bug with nonzero mark starts and looping sound files
+1986/12/04-CJ,BSW- limit symbold to 8 characters
+1986/11/26 -     - corrected start times for period to khz changes
+1986/11/18 - MPB - POLY.CROSS.FADE made to work for any word length
+1986/10/27 - MPB - fixed a bug in POLY.CROSS.FADE
+1986/10/22 - MPB - added POLY.CROSS.FADE routine
+1986/10/07 - KJO - updated for -7 catalog structure
+1986/08/15 - CJ  - fixed kdbtab bugs
+1986/07/24 -KC,CJ- kbdtab changes
+1986/07/16 -CJ,TS- fixed cache sort/ext mem bug
+1986/06/05 - CJ  - changed PS.SETUP, PS.LOAD for new sample rate format
+1986/05/15 -     - "official" creation of release-M modules
+*/
+
+/*	THESE SUBROUTINES MANAGE BLOCKS OF THE POLYPHONIC SAMPLING	*/
+/*	MEMORY.  THESE BLOCKS ARE USED TO HOLD SOUND FILES, AS		*/
+/*	WELL AS SYNTHESIZED/TIMBRE FRAME TIMBRES FOR THE POLY SYNTH	*/
+
+DCL CACHE.PTR				FIXED PUBLIC;	/*	ptr to next free word in cache	*/
+DCL CACHE.SECS				FIXED PUBLIC;	/*	cache length in sectors	*/
+DCL CACHE.BASE (1)		FIXED PUBLIC;	/*	base sector/bin of cache	*/
+DCL NUM.SNDS.IN.CACHE	FIXED PUBLIC;	/*	number of sound files in cache	*/
+
+DCL LOAD.WHOLE.FILE		LIT '1';	/*	SET TO 1 TO LOAD ENTIRE FILE, 0 LOADS MARK.START TO MARK.END	*/
+DCL FILE.MESSAGE.SIZE	LIT '1';	/*	SIZE OF SOUND FILE THAT YIELDS MESSAGE	*/
+
+dcl POLY.HIST.THERE		fixed public;	/*	TRUE IF .SPLY-7 FILE IS THERE	*/
+dcl POLY.HIST.BUF			fixed public;
+dcl POLY.HIST.SIZE		fixed public;
+dcl (POLYDEV,POLYSEC)	fixed public;	/*	DISK PTRS TO THE FILE			*/
+
+
+/*	$PAGE - GARBAGE COLLECTION - POLY SAMPLING MEMORY	*/
+
+/*	THE POLY MEMORY CONTAINS A SERIES OF VARIABLE LENGTH BLOCKS.
+	EACH BLOCK CONTAINS A SOUND FILE, OR IS AN EMPTY
+	BLOCK LEFT OVER FROM SPLITTING UP A LARGE BLOCK	*/
+
+/*	A BLOCK THAT CONTAINS VALID FILE DATA BUT HAS NO KEYS CURRENTLY
+	USING THAT FILE IS INCLUDED IN THE LENGTH OF FREE STORAGE.
+	THIS REDUCES THE NUMBER OF UNNECESSARY, TIME CONSUMING GARBAGE
+	COLLECTIONS.	*/
+
+/*	PS.UPDATE - USED TO CHANGE FILE POINTERS ON GARBAGE COLLECTION	*/
+
+/*	PS.DEALLOCATE - USED TO FREE UP A SOUND FILE IN POLY MEMORY		*/
+
+/*	PS.COLLECT - CALLED TO CLEAN UP POLY SYNTH MEMORY TO FIND A LARGE
+	FREE BLOCK.  THE DESIRED BLOCK LENGTH IS PASSED.  COLLECTION
+	CONTINUES UNTIL A BLOCK THAT IS LARGE ENOUGH FOR THE FILE
+	IS FOUND. THIS TENDS TO PRESERVE MEMORY AS MUCH AS POSSIBLE	*/
+
+
+PS.UPDATE:PROC(OLD,NEW) PUBLIC SWAPABLE;	/*	UPDATE FILE POINTERS IF DATA IS MOVED	*/
+	DCL OLD	FIXED ARRAY;						/*	PREVIOUS 32 BIT POLY POINTER				*/
+	DCL NEW	FIXED ARRAY;						/*	NEW 32 BIT POLY POINTER						*/
+	DCL STEREO		FIXED;						/*	SAVES STEREO WHILE SWAPPING POINTERS	*/
+	DCL (TBP)		FIXED;						/*	POINTER TO EACH TIMBRE HEAD				*/
+	DCL (TB,PTL,P)	FIXED;
+
+	DO TB=0 TO MAX.TIMBRES-1;				/*	CHECK EACH TIMBRE		*/
+
+		WRITE(MAM)=TIM.HEAD;					/*	POINT TO LOOK UP TBL	*/
+		WRITE(MAL)=TB;							/*	INDEX TO TIMBRE		*/
+
+		IF READ(MD)<>0 THEN DO;				/*	TIMBRE EXISTS			*/
+
+			TBP=READ(MD);						/*	POINT TO TIMBRE HEAD	*/
+
+			DO PTL=0 TO NUM.PARTIALS-1;	/*	CHECK EACH PARTIAL	*/
+
+				WRITE(MAM)=TBP;				/*	POINT TO TIMBRE HEAD	*/
+				WRITE(MAL)=TIM.KBDTAB.PTR+PTL;
+				P			 =READ(MD);			/*	GET PTR TO KBD TABLE	*/
+
+				WRITE(MAL)=TIM.SYNTH.TYP+PTL;			/*	CHECK SYNTH TYPE				*/
+				IF READ(MD)<>TIM#POLY THEN P=0;		/*	MAKE SURE POLY PATCH LIST	*/
+
+				IF P<>0 THEN DO;				/*	MUST CHECK KBD TABLE	*/
+
+					WRITE(MAM)=P+TIM.PTR-1;								/*	POINT TO KBD LOOKUP TABLE	*/
+					DO P=0 TO (NUM.KEYS*KLT.SIZE)-1 BY KLT.SIZE;	/*	CHECK EACH ENTRY	*/
+						IF READ(MDI)<>0 THEN DO;						/*	KLT.PATCH.TIM.PTR EXISTS FOR THIS KEY	*/
+							STEREO=READ(MD)&BASE#STEREO_B;			/*	SAVE STEREO BIT	*/
+							IF OLD(LW#MSB) = (READ(MDI)&BASE#ONLY) THEN DO;	/*	COMPARE KLT.BASE.MSB	*/
+								IF OLD(LW#LSB) = READ(MD) THEN DO;				/*	COMPARE KLT.BASE.LSB	*/
+									WRITE(MAL) = P + KLT.BASE.MSB;				/*	BACKUP TO BASE.MSB FOR THIS KEY	*/
+									WRITE(MDI) = NEW(LW#MSB) \ STEREO;			/*	PUT IN NEW MSB AND PREV STEREO	*/
+									WRITE(MD)  = NEW(LW#LSB);						/*	PUT IN NEW LSB			*/
+								END;
+							END;
+						END;									/*	OF KLT.PATCH.TIM.PTR NONZERO	*/
+						ELSE WRITE("303")=READ(MDI);	/*	SKIP KLT.BASE.MSB	*/
+						WRITE("303")=READ(MDI);			/*	SKIP KLT.BASE.LSB	*/
+					END;										/*	OF LOOP OVER ACTIVE PART OF KBDTAB	*/
+
+					IF TB=0									/*	KEYBOARD TIMBRE	*/
+					THEN NEW.KBD.PRE=1;					/*	THEN KEEP PRE-COMPUTED INFO UP TO DATE	*/
+
+				END;		/*	OF A KBDTAB EXISTS			*/
+			END;			/*	OF LOOP OVER ALL PARTIALS	*/
+		END;				/*	OF TIMBRE EXISTS				*/
+	END;					/*	OF LOOP OVER TIMBRES			*/
+
+END PS.UPDATE;
+
+READ.IN.POLY.HIST: proc public swapable;
+	dcl I		fixed;
+	dcl dev	fixed;
+	dcl sec	fixed;
+
+	if POLY.HIST.THERE = 0
+	then return 0;
+
+	EXT.READDATA(POLYDEV, POLYSEC, POLY.HIST.BUF, 0, POLY.HIST.SIZE, 0);
+
+	return 1;
+end READ.IN.POLY.HIST;
+
+WRITE.OUT.POLY.HIST: proc public swapable;
+	dcl I		fixed;
+	dcl dev	fixed;
+	dcl sec	fixed;
+
+	if POLY.HIST.THERE = 0
+	then return 0;
+
+	EXT.WRITEDATA(POLYDEV, POLYSEC, POLY.HIST.BUF, 0, POLY.HIST.SIZE, 0);
+
+	return 1;
+end WRITE.OUT.POLY.HIST;
+
+BUILD.POLY.HIST.REC: PROC (BASE,CODE,REC) PUBLIC SWAPABLE;
+	DCL BASE	ARRAY;
+	DCL CODE	FIXED;
+	DCL REC	ARRAY;
+	DCL I		FIXED;
+
+	DO I = 0 TO POLY.HIST.REC.LEN - 1;		/*	FIRST ZERO OUT INFO RECORD	*/
+		REC(I) = 0;
+	END;
+
+	CALL PSMREAD(BASE,0,0);						/*	SET UP TO READ POLY INFO	*/
+
+	REC(0) = SHL(11,8);							/*	DIR ID: 'poly_ram' in upper byte of first word	*/
+	REC(1) = 0;
+	REC(2) = READ(PSD);							/*	BLOCK LENGTH IN SECTORS	*/
+
+	I = READ(PSD);									/*	SKIP BL.USERS	*/
+
+	DO I = 0 TO F#NAME_LEN - 1;				/*	GET SF NAME	*/
+		REC(5+I) = READ(PSD);
+	END;
+
+	REC(3) = READ(PSD);							/*	BL.DEV	*/
+	REC(4) = READ(PSD);							/*	BL.SEC	*/
+
+	REC(9) = CODE;									/*	HIST CODE <0:INSERT, 1:REMOVE>	*/
+
+END BUILD.POLY.HIST.REC;
+
+BUILD.POLY.HIST.RESET.REC: PROC (REC) PUBLIC SWAPABLE;
+	DCL REC	ARRAY;
+	DCL I		FIXED;
+
+	DO I = 0 TO POLY.HIST.REC.LEN - 1;		/*	FIRST ZERO OUT INFO RECORD	*/
+		REC(I) = 0;
+	END;
+
+	/*	SPECIAL RESET RECORD ONLY NEEDS DIR ID AND RESET CODE=2	*/
+
+	REC(0) = SHL(11,8);							/*	DIR ID: 'poly_ram' in upper byte of first word	*/
+	REC(9) = 2;										/*	HIST CODE <0:INSERT, 1:REMOVE, 2:RESET>	*/
+
+END BUILD.POLY.HIST.RESET.REC;
+
+ADD.POLY.TO.HIST: proc (rec) public swapable;
+	dcl rec				array;
+	dcl cur.stamp(1)	fixed;
+	dcl wrd.ptr			fixed;
+
+	if READ.IN.POLY.HIST = 0
+	then return 0;
+
+	write(MAM) = POLY.HIST.BUF;
+	cur.stamp(0) = read(mdi);
+	cur.stamp(1) = read(md );
+
+	call ADD16(1,cur.stamp);
+
+	wrd.ptr = ((cur.stamp(1) mod POLY.HIST.NUM.RECS) * POLY.HIST.REC.LEN) + POLY.HIST.HDR.LEN;
+
+	write(MAM) = POLY.HIST.BUF + shr(wrd.ptr,8);
+	write(MAL) = wrd.ptr;
+
+	write("313") = addr(rec(0));
+	rpc POLY.HIST.REC.LEN;
+	write(mdi) = read("373");
+
+	write(MAM) = POLY.HIST.BUF;
+	write(mdi) = cur.stamp(0);
+	write(md ) = cur.stamp(1);
+
+	call WRITE.OUT.POLY.HIST;
+
+	return(1);
+
+end ADD.POLY.TO.HIST;
+
+/*	$PAGE - DEALLOCATE A SOUND FILE FROM POLY MEMORY	*/
+
+/*	PS.DEALLOCATE - THIS ROUTINE LOOKS THROUGH ALL THE KEYBOARD LOOKUP
+	TABLES TO SEE WHO IS USING A FILE.  ALL USERS OF THAT FILE ARE
+	DEALOCATED.  ADDITIONALLY, THE FILE IS ERASED FROM POLY
+	MEMORY	*/
+
+DCL POLY.HIST.DISABLED	FIXED;
+
+PS.DEALLOCATE:PROC(BASE) PUBLIC SWAPABLE;
+	DCL BASE	FIXED ARRAY;
+	DCL (TB,PTL,P)	FIXED;
+	DCL (TBP)		FIXED;
+	DCL REC(POLY.HIST.REC.LEN - 1)	FIXED;
+
+	DO TB=0 TO MAX.TIMBRES-1;				/*	CHECK EACH TIMBRE		*/
+
+		WRITE(MAM)=TIM.HEAD;					/*	POINT TO LOOK UP TBL	*/
+		WRITE(MAL)=TB;							/*	INDEX TO TIMBRE		*/
+
+		IF READ(MD)<>0 THEN DO;				/*	TIMBRE EXISTS			*/
+
+			TBP=READ(MD);						/*	POINT TO TIMBRE HEAD	*/
+
+			DO PTL=0 TO NUM.PARTIALS-1;	/*	CHECK EACH PARTIAL	*/
+
+				WRITE(MAM)=TBP;				/*	POINT TO TIMBRE HEAD	*/
+				WRITE(MAL)=TIM.KBDTAB.PTR+PTL;
+				P			 =READ(MD);			/*	GET PTR TO KBD TABLE	*/
+
+				WRITE(MAL)=TIM.SYNTH.TYP+PTL;		/*	ONLY REQD IF MONO		*/
+				IF READ(MD)<>TIM#POLY THEN P=0;	/*	NOT FOR POLY			*/
+
+				IF P<>0 THEN DO;				/*	MUST CHECK KBD TABLE	*/
+					WRITE(MAM)=P+TIM.PTR-1;	/*	POINT TO KBD LOOKUP TABLE - IN EXTERNAL MEMORY, NOT POLY SYN MEMORY	*/
+					DO P=0 TO (NUM.KEYS*KLT.SIZE)-1 BY KLT.SIZE;	/*	CHECK EACH ENTRY	*/
+						WRITE(MAL)=P+KLT.PATCH.TIM.PTR;
+						IF READ(MDI)<>0 THEN DO;		/*	IF A FILE POINTER FOR THIS KEY, THEN DO	*/
+							IF BASE(LW#MSB) = (READ(MDI) & BASE#ONLY) THEN DO;	/*	COMPARE KLT.BASE.MSB	*/
+								IF BASE(LW#LSB) = READ(MD) THEN DO;	/*	AND LSB;  IF THIS IS OUR FILE		*/
+									WRITE(MAL)=P+KLT.PATCH.TIM.PTR;	/*	BACK TO START OF RECORD	*/
+									WRITE(MDI)=0;							/*	ZERO OUT ENTRY				*/
+									WRITE(MDI)=0;							/*	ZERO OUT ENTRY				*/
+									WRITE(MD )=0;							/*	ZERO OUT ENTRY				*/
+									IF TB=0									/*	KEYBOARD TIMBRE			*/
+									THEN NEW.KBD.PRE=1;					/*	THEN KEEP PRE-COMPUTED INFO UP TO DATE	*/
+								END;
+							END;
+						END;	/*	OF KBDTAB ENTRY NONZERO		*/
+					END;		/*	OF LOOP OVER ACTIVE PART OF KBDTAB	*/
+				END;			/*	OF KBD TAB EXISTS				*/
+
+			END;				/*	OF LOOP OVER PARTIALS		*/
+		END;					/*	OF TIMBRE EXISTS				*/
+	END;						/*	OF LOOP OVER ALL TIMBRES	*/
+
+	/*	NO MARK THIS SOUND FILE AS FREE IN POLY MEMORY	*/
+	/*	SPECIAL CASE HERE:  IF THE BASE POINTER			*/
+	/*	POINTS TO THE END OF MEMORY, THEN IT				*/
+	/*	REALLY DOES NOT POINT TO A FILE AT ALL				*/
+	/*	HAPPENS DURING LOAD OF SOUND FILE WHEN				*/
+	/*	RELOAD IS FORCED (FROM FLOPPY FOR EXAMPLE)		*/
+	/*	IN THIS CASE, THE SF WAS NOT IN MEMORY				*/
+	/*	ANYWAYS														*/
+
+	IF ((BASE(LW#MSB)&(BASE#PAGE_B)) <> (BASE#PAGE_B))
+	OR ((BASE(LW#LSB)					 ) <> (-1			))
+	THEN DO;
+
+		IF (POLY.HIST.DISABLED = 0) THEN DO;			/*	QUICK UPDATE CAN BE DISABLED BY PS.DEALLOCATE.ALL	*/
+			CALL BUILD.POLY.HIST.REC(BASE,1,REC);		/*	BUILD HISTORY RECORD BEFORE INFO IS GLOMMED	*/
+			CALL ADD.POLY.TO.HIST(REC);
+		END;
+
+		CALL PSMREAD(BASE,0,0);	/*	LOOK UP INFO	*/
+		P=READ(PSD);				/*	GET LENGTH		*/
+		IF READ(PSD)<>0 THEN DO;
+			CALL SET.BIN.FROM.BASE(BASE);
+			CALL ADD16(P,PSFREE);	/*	COUNT IN FREE STORAGE NOW IF WAS USED	*/
+			NEW.POLY.CONTENTS = NEW.POLY.CONTENTS \ 2;
+		END;
+		CALL PSMWRITE(BASE,0,BL.USERS);
+		WRITE(PSD)=0;			/*	ZERO OUT USERS	FIELD	*/
+		WRITE(PSD)=0;			/*	ZERO OUT NAME	FIELD	*/
+	END;
+
+END PS.DEALLOCATE;
+
+/*	$PAGE - DEALLOCATE ALL SOUND FILES FROM ALL BINS OF POLY MEMORY	*/
+
+PS.DEALLOCATE.ALL: PROC PUBLIC SWAPABLE;	/*	FREE UP ALL SOUNDS IN POLYMEM	*/
+	DCL (J,K,N,BIN)	FIXED;
+	DCL (I,BASE)  (1)	FIXED;		/*	32 BIT POLY POINTERS	*/
+	DCL CACHE.LOC (1)	FIXED;		/*	WHERE WE FOUND THE SOUND FILE CACHE	*/
+	DCL CACHE.SIZE		FIXED;		/*	HOW BIG THE CACHE WAS	*/
+	DCL REC(POLY.HIST.REC.LEN-1)	FIXED;
+
+	POLY.HIST.DISABLED = 1;			/*	DISABLE INDIVIDUAL REPORTING OF CUES DELETED	*/
+
+	CALL PS.LOCK;						/*	PREVENT RELOAD - POLY CONTENTS IN TRANSITION	*/
+	CALL STR32(0,0,CACHE.BASE);	/*	CLEAR OUT GLOBALS - WE WILL FILL THEM LATER, IF THERE	*/
+	CACHE.SECS=0;
+	DO BIN=0 TO POLYNUMS-1;			/*	LOOP OVER POLY BINS	*/
+		CALL SET.CUR.BIN(BIN);		/*	POINT OFFSETS TO CURRENT BIN	*/
+		CACHE.SIZE=0;					/*	IN CASE WE DON'T FIND THE SOUND FILE CACHE	*/
+		CALL COPY32(PSFIRST,I);		/*	START HERE	*/
+		DO WHILE COM32(I,PSLAST) <> LW#IEQ;	/*	SEARCH EVERY BLOCK	*/
+			CALL COPY32(I,BASE);		/*	GET BASE POINTER IN THIS BIN	*/
+			BASE(LW#MSB) = BASE(LW#MSB) \ SHL(BIN,BASE#BIN_P);	/*	ADD BIN BITS	*/
+			CALL PSMREAD(BASE,0,0);	/*	SET UP FOR DATA READ	*/
+			J=READ(PSD);				/*	GET BLOCK LENGTH IN SECTORS	*/
+			K=READ(PSD);				/*	AND USERS	*/
+			N=READ(PSD);				/*	AND FIRST WORD OF FILENAME	*/
+
+			IF (K<>0)					/*	SOUND IS BEING USED	*/
+			OR (N<>0)					/*	OR JUST HAVE A SOUND	*/
+			THEN DO;
+				IF N<>1 THEN DO;		/*	IF THIS IS NOT THE SOUND FILE CACHE	*/
+					CALL PS.DEALLOCATE(BASE);		/*	FREE IT UP	*/
+				END;
+				ELSE DO;					/*	SET CACHE BASE AND LENGTH GLOBALS	*/
+					CALL COPY32(BASE,CACHE.LOC);	/*	REMEMBER WHERE WE FOUND IT	*/
+					CACHE.SIZE=J;
+				END;
+			END;
+
+			CALL ADD16(J,I);
+		END;	/*	OF LOOP OVER BLOCKS	*/
+
+		IF CACHE.SIZE<>0
+		THEN DO;	/*	SLIDE THE CACHE DOWN TO LOWEST AVAILABLE SPOT IN POLY MEMORY	*/
+			CALL COPY32(PSFIRST,BASE);		/*	ADD BIN BITS TO PSFIRST	*/
+			BASE(LW#MSB) = BASE(LW#MSB) \ SHL(BIN,BASE#BIN_P);
+			CALL COPY.POLY.MEM.SEC(CACHE.LOC,0,BASE,0,CACHE.SIZE);
+			CALL COPY32(BASE,CACHE.BASE);	/*	REPORT NEW LOCATION	*/
+			CACHE.SECS = CACHE.SIZE;		/*	REPORT SIZE	*/
+		END;
+
+		CALL COPY32(PSFIRST,PSLAST);		/*	NOW MEMORY IS EMPTY	*/
+		CALL ADD16(CACHE.SIZE,PSLAST);	/*	ONLY THING MIGHT BE CACHE	*/
+		CALL COPY32(PSLAST,PSHERE);		/*	LOAD NEXT FILE HERE	*/
+	END;		/*	OF LOOP OVER POLY BINS	*/
+
+	CALL PS.UNLOCK;					/*	POLY MEMORY CONTENTS ARE VALID AGAIN	*/
+
+	CALL BUILD.POLY.HIST.RESET.REC(REC);
+	CALL ADD.POLY.TO.HIST(REC);
+
+	POLY.HIST.DISABLED = 0;			/*	RE-ENABLE INDIVIDUAL REPORTING OF CUES FOR QUICK UPDATES	*/
+
+END PS.DEALLOCATE.ALL;
+
+/*	$PAGE - ROUTINES TO DISPLAY LOADING AND MOVING MESSAGES IN WINDOW AND ON SCREEN	*/
+
+DCL MSGNAME (5)		FIXED PUBLIC;		/*	BUT NEEDS NOT TO BE!!					*/
+DCL SAMPLE.TO.MEMORY	FIXED PUBLIC;		/*	NONZERO MEANS SAMPLING INTO MEMORY	*/
+
+DCL SHOW.FILE.LOADING.MESSAGE	FIXED PUBLIC;		/*	SET TO POSITION TO SHOW MESSAGE AT	*/
+
+GET.MSG.NAME: PROC SWAPABLE;
+   DCL M			FIXED;
+	DCL FNAME	FIXED;
+
+	DO M=1 TO 4;											/*	COPY IN FILE NAME FOR MESSAGE	*/
+		MSGNAME(M)=READ(PSD);
+	END;
+
+	FNAME=MSGNAME(1);										/*	SAVE FIRST WORD OF FILE NAME FOR VALID CHECK BELOW	*/
+
+	MSGNAME(0)=8;											/*	ASSUME 8 CHARACTER FILE NAME	*/
+
+	DO WHILE (MSGNAME(0)<>0)&(BYTE(MSGNAME,MSGNAME(0)-1)=0);
+		MSGNAME(0)=MSGNAME(0)-1;
+	END;
+
+	CALL PBYTE(MSGNAME,MSGNAME(0),34);				/*	TRAILING "	*/
+	MSGNAME(0)=MSGNAME(0)+1;							/*	INCLUDE " IN CHARACTER STRING	*/
+
+   RETURN (FNAME);
+END GET.MSG.NAME;
+
+SHOW.MOVE.MSG: PROC SWAPABLE;							/*	SHOW MOVING MESSAGE	*/
+	IF  (NEW.PAN<>0)										/*	NEW PANEL CODE ONLY	*/
+	THEN DO;													/*	PRESENT MESSAGE ON LONG SHUFFLES	*/
+		CALL CLEAR.DISPLAY;
+		CALL EMIT.STRING(0, 'Moving  Sound   File "');
+		CALL EMIT.STRING(22,MSGNAME);
+		UPPER.DISP=LOADM.DISP;
+		BOTH.DISPLAY=1;
+
+		/*	Force an immediate update to the VK display on remote devices	*/
+		/*	to provide an immediate update of the VK window display while	*/
+		/*	we are moving sound files:													*/
+
+		call Flush.VK.Display.To.Termulators;
+	END;
+
+	IF (SHOW.FILE.LOADING.MESSAGE <> 0)	/*	SHOW MESSAGE ON TERMINAL	*/
+	THEN DO;
+		CALL CPOS(SHR(SHOW.FILE.LOADING.MESSAGE,8), SHOW.FILE.LOADING.MESSAGE&255);
+		call erase.to.end.of.line;
+		CALL PS('Moving Sound File "');
+      call PS(MSGNAME);
+	END;
+END SHOW.MOVE.MSG;
+
+REMOVE.MOVE.MSG :PROC SWAPABLE;
+	IF UPPER.DISP=LOADM.DISP
+	THEN CALL CLEAR.DISPLAY;
+
+	IF (SHOW.FILE.LOADING.MESSAGE <> 0)	/*	SHOW MESSAGE ON TERMINAL	*/
+	THEN DO;
+		CALL CPOS(SHR(SHOW.FILE.LOADING.MESSAGE,8), SHOW.FILE.LOADING.MESSAGE&255);
+		call erase.to.end.of.line;
+		CALL CHECK.NEXT.EVENT;				/*	KEEP MOUSE GOING - CHECK FOR MOVEMENTS AND BUTTON RELEASES	*/
+	END;
+END REMOVE.MOVE.MSG;
+
+/*	$PAGE - POLY SAMP GARBAGE COLLECT ROUTINE	*/
+
+
+PS.COLLECT:PROC(MAX,BIN,AUDITION) PUBLIC SWAPABLE;	/*	GARBAGE COLLECT POLY SYNTH MEMORY	*/
+	DCL (MAX)		FIXED;	/*	UNTIL BLOCK OF THIS SIZE IS CREATED	*/
+	DCL (BIN)		FIXED;	/*	IN THIS POLY BIN							*/
+	DCL (AUDITION)	FIXED;	/*	TRUE IF AUDITION CHECK DESIRED		*/
+
+	DCL (K,L)		FIXED;
+	DCL (I)	(1)	FIXED;	/*	32 BIT POLY READ POINTER	*/
+	DCL (J)	(1)	FIXED;	/*	32 BIT POLY WRITE POINTER	*/
+	DCL (T)	(1)	FIXED;	/*	READ BASE (INCLUDING BIN)	*/
+	DCL (U)	(1)	FIXED;	/*	WRITE BASE (INCLUDING BIN)	*/
+	DCL (SAVED)		FIXED;
+	DCL FNAME		FIXED;
+	DCL STATUS		FIXED;
+	DCL REC(POLY.HIST.REC.LEN - 1)	FIXED;
+
+	IF SAMPLE.TO.MEMORY<>0			/*	CAN NOT COLLECT WHILE S - T - M	*/
+	THEN RETURN(0);					/*	BOMB OUT	*/
+
+	STATUS			 = 0;				/*	NO STOP BUTTON PRESSED YET			*/
+	ALLOW.POLY.STOP = 1;				/*	CHECK FOR STOP DURING COPY			*/
+
+	CALL PS.LOCK;						/*	LOCK OUT IN CASE OF CRASH/RELOAD	*/
+	CALL SET.CUR.BIN(BIN);			/*	POINT OFFSETS TO THE BIN			*/
+	CALL COPY32(PSHERE,I);			/*	START HERE FOR COLLECTION			*/
+	CALL COPY32(PSHERE,J);
+	CALL SUB32(I,J,T);				/*	TEMPORARILY GET I-J IN T			*/
+	SAVED = RUN.SYN; RUN.SYN = 0;	/*	SKIP PROTOCOL MESSAGES HERE		*/
+
+	DO WHILE COM16(MAX,T) = LW#IGT;	/*	GARBAGE COLLECT WHILE WHAT WE NEED IS MORE THAN WHAT WE HAVE	*/
+
+		/*	DETECT EARLY STOP AS A RESULT OF AUDITION CHANGE OR MOUSE PRESS		*/
+		IF ( (AUDITION <> 0)								/*	IF AUDITION AND				*/
+		AND  ((NEW.MOUSE.BUTTON|NEW.IN.CHAR)<>0))	/*	USER CHANGES HIS MIND		*/
+		OR ( (SHOW.FILE.LOADING.MESSAGE <> 0)		/*	OR WE ARE USER-INTERACTIVE	*/
+		AND  (M$PRESSES <> 0))							/*	AND MOUSE BUTTON PRESSED	*/
+		OR ( STATUS		 <> 0 )							/*	OR STOP DETECTED				*/
+		THEN DO;
+			IF COM32(I,J) <> LW#IEQ THEN DO;	/*	MUST CREATE EMPTY BLOCK					*/
+				CALL COPY32(J,U);					/*	GET J AS BASE WITH BIN ADDED			*/
+				U(LW#MSB) = U(LW#MSB) \ SHL(BIN,BASE#BIN_P);
+				CALL SUB32(I,J,T);				/*	GET I-J IN T (NOTE: T <= 16 BITS)	*/
+				CALL PSMWRITE(U,0,0);			/*	DEFINE AN EMPTY BLOCK AT THE LAST	*/
+				WRITE(PSD)=T(LW#LSB);			/*	LOCATION SHUFFLED SO THAT MEMORY		*/
+				WRITE(PSD)=0;						/*	IS CONSISTENT								*/
+				WRITE(PSD)=0;						/*	AND NO FILE NAME							*/
+				CALL COPY32(U,SFILE.BASE);		/*	SET SFILE.BASE FOR CONSISTENCY		*/
+				CALL COPY32(J,PSHERE);			/*	SAVE LOCATION FOR NEXT TIME START	*/
+			END;
+
+			RUN.SYN			 = SAVED;
+			ALLOW.POLY.STOP = 0;
+
+			RETURN(0);								/*	COLLECT STOPPED EARLY	*/
+		END;
+
+		ELSE DO;										/*	DO THE GARBAGE COLLECT	*/
+
+			IF COM32(I,PSLAST) = LW#IEQ THEN DO;	/*	MUST RESET POINTERS IF END IS REACHED	*/
+				CALL COPY32(J,PSLAST);	/*	NEW LAST POINTER IS HERE		*/
+				CALL COPY32(PSFIRST,I);	/*	RESET TO START OF MEMORY		*/
+				CALL COPY32(PSFIRST,J);
+			END;
+
+			CALL COPY32(I,T);				/*	ADD BIN BITS TO I FOR PSMREAD	*/
+			T(LW#MSB) = T(LW#MSB) \ SHL(BIN,BASE#BIN_P);
+
+			CALL PSMREAD(T,0,0);			/*	SET UP FOR READ	*/
+
+			K=READ(PSD);					/*	GET BLOCK LENGTH	*/
+			L=READ(PSD);					/*	GET USERS			*/
+			FNAME = GET.MSG.NAME;		/*	EXTRACT NAME		*/
+
+			IF L<>0 THEN DO;							/*	SOME USERS - MUST SAVE FILE	*/
+				IF COM32(I,J) <> LW#IEQ THEN DO;	/*	DIFFERENT LOCATIONS - MOVE DATA, UPDATE POINTERS	*/
+
+					CALL SHOW.MOVE.MSG;				/*	SHOW MOVING MESSAGE											*/
+
+					CALL COPY32(J,U);					/*	ADD BIN BITS TO J -> U	*/
+					U(LW#MSB) = U(LW#MSB) \ SHL(BIN,BASE#BIN_P);
+
+					STATUS = STATUS | COPY.POLY.MEM.SEC(T,0,U,0,K);
+
+					CALL PS.UPDATE(T,U);				/*	UPDATE POINTERS FOR FILE MOVEMENT		*/
+
+					CALL REMOVE.MOVE.MSG;
+				END;					/*	OF ACTUALLY A DIFFERENT LOCATION	*/
+				CALL ADD16(K,J);	/*	ADVANCE WRITE POINTER IF BLOCK SAVED	*/
+			END;						/*	OF SOME USERS, MUST SAVE	*/
+			ELSE IF (FNAME <> 0)								/*	WE ARE ABOUT TO DELETE VALID FILE	*/
+			THEN DO;
+				CALL BUILD.POLY.HIST.REC(T,1,REC);		/*	BUILD HISTORY RECORD BEFORE INFO IS GLOMMED	*/
+				CALL ADD.POLY.TO.HIST(REC);
+			END;
+			CALL ADD16(K,I);		/*	ADVANCE READ POINTER			*/
+			IF COM32(I,PSLAST) = LW#IEQ THEN DO;		/*	IF WE HAVE REACHED THE END	*/
+				CALL COPY32(PSMAX,I);						/*	THEN UP TO MAX WILL FIT		*/
+				CALL COPY32(PSMAX,PSLAST);					/*	MOVE LAST UP HERE TOO		*/
+			END;
+			CALL SUB32(I,J,T);	/*	TEMPORARILY GET I-J IN T	*/
+		END;	/*	OF DO THE GARBAGE COLLECT	*/
+	END;		/*	OF LOOP - GARBAGE COLLECT UNTIL ENOUGH	*/
+
+	CALL COPY32(J,T);						/*	GET J+MAX IN T			*/
+	CALL ADD16(MAX,T);
+	IF COM32(I,T) = LW#IGT THEN DO;	/*	BLOCK IS TOO LARGE	*/
+		IF COM32(PSLAST,I) = LW#IEQ
+		THEN DO;
+			CALL COPY32(J,PSLAST);		/*	TRIM LAST TO HERE		*/
+			CALL ADD16(MAX,PSLAST);
+		END;
+		ELSE DO;								/*	ELSE MARK BLOCK		*/
+			CALL COPY32(J,U);				/*	ADD BIN BITS TO J IN U	*/
+			U(LW#MSB) = U(LW#MSB) \ SHL(BIN,BASE#BIN_P);
+			CALL PSMWRITE(U,MAX,0);		/*	POINT TO NEXT BLOCK	*/
+			CALL SUB32(I,T,T);			/*	T WAS J+MAX, IS NOW "I-(J+MAX)"	*/
+			WRITE(PSD)=T(LW#LSB);		/*	LEAVE HOLE OF THIS SIZE (NOTE 32MB LIMIT FOR A SOUND FILE)	*/
+			WRITE(PSD)=0;					/*	WITH NO USERS			*/
+			WRITE(PSD)=0;					/*	AND NO FILE NAME		*/
+		END;
+	END;
+
+	CALL COPY32(J,U);						/*	ADD BIN BITS TO J IN U	*/
+	U(LW#MSB) = U(LW#MSB) \ SHL(BIN,BASE#BIN_P);
+	CALL COPY32(U,SFILE.BASE);			/*	START NEW BLOCK HERE (AT END OF USED MEMORY)	*/
+	CALL COPY32(J,PSHERE);				/*	START HERE NEXT TIME IF ABORTED					*/
+
+	RUN.SYN			 = SAVED;
+	ALLOW.POLY.STOP = 0;
+
+	RETURN(1);								/*	DONE WITH COLLECT: SUCCESS	*/
+
+END PS.COLLECT;
+
+/*	$PAGE - PS.SHUFFLE ROUTINE	*/
+
+/*	PS.SHUFFLE IS USED TO GARBAGE COLLECT ALL OF POLY MEMORY	*/
+
+/*	PASS A 1 TO DELETE ALL UNUSED FILES FROM POLY MEMORY		*/
+/*	PASS A 0 TO ONLY COLLECT FOR EXISTING FREE SPACE			*/
+/*	RETURNS 0 IF COMPLETED; 1 IF INTERRUPTED BY USER			*/
+
+PS.SHUFFLE: PROC (DELETE.ALL) PUBLIC SWAPABLE;
+	DCL DELETE.ALL	FIXED;	/*	0=SAVING OR 1=UNSAVING POLY FILES THAT ARE NOT USED	*/
+	DCL BIN			FIXED;	/*	WHICH POLY BIN					*/
+	DCL K				FIXED;
+	DCL I	(1)		FIXED;	/*	32 BIT POLY READ POINTER	*/
+	DCL J	(1)		FIXED;	/*	32 BIT POLY WRITE POINTER	*/
+	DCL T	(1)		FIXED;	/*	READ BASE (INCLUDING BIN)	*/
+	DCL U	(1)		FIXED;	/*	WRITE BASE (INCLUDING BIN)	*/
+	DCL USERS		FIXED;
+	DCL FNAME		FIXED;
+	DCL REC(POLY.HIST.REC.LEN - 1)	FIXED;
+	DCL SAVED		FIXED;
+	DCL STATUS		FIXED;
+
+	SAVED   = RUN.SYN;	/*	PUSH & CLEAR RUN.SYN IN CASE WE WANT TO	*/
+	RUN.SYN = 0;			/*	PRINT OUT SOME DAY...							*/
+
+	IF SAMPLE.TO.MEMORY<>0		/*	CAN NOT SHUFFLE WHILE S - T - M		*/
+	THEN DO;
+		RUN.SYN = SAVED;
+		RETURN (1);
+	END;
+
+	STATUS			 = 0;
+	ALLOW.POLY.STOP = 1;
+
+	CALL PS.LOCK;										/*	LOCK OUT IN CASE OF CRASH/RELOAD	*/
+	DO BIN=0 TO POLYNUMS-1;							/*	LOOP OVER POLY BINS					*/
+		CALL SET.CUR.BIN(BIN);						/*	POINT DATA STRUCTURES AT THIS BIN	*/
+		CALL COPY32(PSFIRST,I);						/*	START HERE FOR COLLECTION			*/
+		CALL COPY32(PSFIRST,J);
+		DO WHILE COM32(I,PSLAST) <> LW#IEQ;		/*	SHUFFLE ALL OF THIS BIN				*/
+
+			CALL COPY32(I,T);							/*	ADD BIN BITS TO I FOR PSMREAD		*/
+
+			T(LW#MSB) = T(LW#MSB) \ SHL(BIN,BASE#BIN_P);
+
+			CALL PSMREAD(T,0,BL.LEN);				/*	SET UP FOR READ						*/
+
+			K		= READ(PSD);						/*	BL.LEN	- GET BLOCK LENGTH		*/
+			USERS	= READ(PSD);						/*	MAKE LOCAL COPIES OF BL.USERS		*/
+			FNAME	= GET.MSG.NAME;					/*	AND BL.FNAME							*/
+
+			IF (USERS<>0)								/*	BL.USERS - IF USERS FIELD IS NONZERO, MUST SAVE FILE	*/
+			OR ((FNAME<>0)&(DELETE.ALL=0))		/*	BL.FNAME - OR ACTUAL SOUND FILE & NOT DELETE ALL	*/
+			THEN DO;										/*	MUST SAVE FILE							*/
+				IF COM32(I,J) <> LW#IEQ THEN DO;	/*	DIFFERENT LOCATIONS - MOVE DATA, UPDATE POINTERS	*/
+
+					CALL COPY32(J,U);					/*	ADD BIN BITS TO J -> U				*/
+					U(LW#MSB) = U(LW#MSB) \ SHL(BIN,BASE#BIN_P);
+
+					CALL SHOW.MOVE.MSG;				/*	SHOW MOVING MESSAGE					*/
+
+					STATUS = STATUS | COPY.POLY.MEM.SEC(T,0,U,0,K);
+
+					CALL PS.UPDATE(T,U);				/*	UPDATE POINTERS FOR FILE MOVEMENT	*/
+				
+					CALL REMOVE.MOVE.MSG;
+				END;					/*	OF ACTUALLY A DIFFERENT LOCATION			*/
+				CALL ADD16(K,J);	/*	ADVANCE WRITE POINTER IF BLOCK SAVED	*/
+			END;						/*	OF SOME USERS, MUST SAVE	*/
+			ELSE IF (FNAME<>0) THEN DO;				/*	ACTUAL FILE BEING DELETED	*/
+				CALL BUILD.POLY.HIST.REC(T,1,REC);	/*	BUILD HISTORY RECORD BEFORE INFO IS GLOMMED	*/
+				CALL ADD.POLY.TO.HIST(REC);
+			END;
+			CALL ADD16(K,I);		/*	ADVANCE READ POINTER										*/
+
+			IF (STATUS <> 0)		/*	IF USER ABORT REQUEST RECEIVED, THEN CLEAN UP	*/
+			THEN DO;
+
+				CALL COPY32(J, PSHERE);					/*	SAVE LOCATION FOR NEXT TIME START	*/
+
+				DO WHILE COM32(I,J) <> LW#IEQ;		/*	CLOSE UP GAP BEFORE RETURN				*/
+					K = 30000;								/*	FILL GAPS WITH 30000 SECTOR BLKS		*/
+
+					CALL COPY32(J,T);						/*	GET SOURCE POINTER COPIED				*/
+					CALL ADD16(K,T);						/*	COMPUTE WHERE WE ARE						*/
+
+					IF (COM32(T,I) = LW#IGT)
+						THEN K = I(LW#LSB) - J(LW#LSB);
+
+					CALL COPY32(J,T);						/*	ADD BIN BITS TO J FOR PSMREAD			*/
+
+					T(LW#MSB) = T(LW#MSB) \ SHL(BIN,BASE#BIN_P);
+
+					CALL PSMWRITE(T, 0, 0);
+
+					WRITE(PSD)=K;				/*	SET LENGTH WORD	*/
+					WRITE(PSD)=0;				/*	IS CONSISTENT		*/
+					WRITE(PSD)=0;				/*	AND NO FILE NAME	*/
+
+					CALL ADD16(K,J);			/*	ADVANCE POINTER	*/
+				END;
+
+				RUN.SYN			 = SAVED;
+				ALLOW.POLY.STOP = 0;
+				CALL PS.UNLOCK;
+
+				RETURN (1);						/*	ABORTED			*/
+			END;
+		END;							/*	OF SHUFFLE LOOP			*/
+
+		CALL COPY32(J,PSLAST);
+		CALL COPY32(J,PSHERE);	/*	START RECORDING HERE		*/
+	END;								/*	OF LOOP OVER ALL BINS	*/
+	CALL PS.UNLOCK;
+
+	RUN.SYN			 = SAVED;
+	ALLOW.POLY.STOP = 0;
+
+	RETURN (0);						/*	NORMAL COMPLETION			*/
+
+END PS.SHUFFLE;
+
+/*	$PAGE - PS.ALLOCATE - ALLOCATE AN AREA OF POLY MEMORY	*/
+
+/*	ALLOCATE A SECTION FROM POLY SYNTH MEMORY:
+		1. USE FREE MEMORY AT END OF USED SECTION IF POSSIBLE.
+		2. RETURN ERROR IF NOT ENOUGH MEMORY EVEN IF ALL GARBAGE
+			COLLECTION DONE.
+		3. SEARCH THROUGH LIST OF BLOCKS TO FIND A PERFECT FIT
+			OR A LARGER BLOCK THAT IS FREE.  RE-USE THAT BLOCK
+			IF SO TO SAVE GARBAGE COLLECTION.
+		4. IF NO LUCK SO FAR, GARBAGE COLLECT MEMORY UNTIL A LARGE
+			ENOUGH HOLE IS CREATED.	*/
+
+/*	NOTE - THE BLOCK **MUST** BE FILLED IN BY THE CALLING ROUTINE	*/
+/*	(LENGTH, USERS, FILENAME OR 0)											*/
+/*	ALSO, CALL PS.UNLOCK WHEN BLOCK IS ALL SET UP						*/
+
+PS.ALLOCATE:PROC(I,BIN,AUDITION) PUBLIC SWAPABLE;	/*	ALLOCATE A BLOCK I SECTORS LONG IN BIN	*/
+	DCL I				FIXED;
+	DCL BIN			FIXED;
+	DCL AUDITION	FIXED;
+	DCL T	(1)		FIXED;	/*	TEMP STORAGE FOR 32 BIT POLY POINTER	*/
+
+	CALL SET.CUR.BIN(BIN);						/*	POINT DATA STRUCTURES AT THIS POLY BIN				*/
+	IF COM16(I,PSFREE) = LW#IGT THEN DO;	/*	NOT ENOUGH ROOM EVEN AFTER GARBAGE COLLECTION	*/
+		RETURN 0;									/*	NOT ENOUGH ROOM FOR FILE								*/
+	END;												/*	ELSE WE KNOW IT WILL FIT, SOMEHOW					*/
+
+	CALL SUB32(PSMAX,PSLAST,T);				/*	GET PSMAX-PSLAST IN T								*/
+	IF  COM32(PSHERE,PSLAST) = LW#IEQ		/*	IF CURRENT LOAD POINTER IS AT END OF MEMORY	*/
+	AND (COM16(I,T) <> LW#IGT)					/*	AND ROOM ENOUGH THERE (PSMAX-PSLAST IGE I)	*/
+	THEN DO;											/*	WILL FIT AT END OF MEMORY - USE IT				*/
+		CALL COPY32(PSLAST,SFILE.BASE);		/*	START HERE												*/
+		SFILE.BASE(LW#MSB) = SFILE.BASE(LW#MSB) \ SHL(BIN,BASE#BIN_P);
+		CALL ADD16(I,PSLAST);					/*	NOW USED UP TO HERE									*/
+	END;
+	ELSE DO;
+		IF SAMPLE.TO.MEMORY<>0					/*	CAN NOT LOAD ANY SOUND FILES...					*/
+		THEN RETURN 0;								/*	...WHILE RECORDING S - T - M						*/
+		IF PS.COLLECT(I,BIN,AUDITION) = 0	/*	COLLECT FOR BLOCK THIS BIG. RETURN POINTER IN GLOBAL SFILE.BASE	*/
+		THEN RETURN 0;
+	END;
+
+	RETURN 1;										/*	SUCCESS IN GETTING I SECTORS	*/
+END PS.ALLOCATE;
+
+/*	$PAGE - PS.AUDITION - AUDITION SOUND FILE IN POLY MEMORY	*/
+
+
+/*	NOTE: PS.AUDITION CAN ONLY BE CALLED FROM THE TERMINAL CODE (FOR NOW)	*/
+/*	SINCE IT KEEPS THE MOUSE GOING														*/
+
+PS.AUDITION:PROC (BASE, NOIO) PUBLIC SWAPABLE;
+	DCL BASE		ARRAY;
+	DCL NOIO		FIXED;
+	DCL I			FIXED;
+	DCL J			FIXED;
+	DCL K			FIXED;
+	DCL SAVED	FIXED;
+
+	SAVED = RUN.SYN; RUN.SYN = 0;
+	POLY.READ.ABORTED = 0;
+
+	IF POLY.PLAY.SFILE(BASE)<>0 THEN DO;	/*	SEE IF CHANNELS STARTED AND NOTE GOING	*/
+		I = 1;
+		DO WHILE I <> 0;							/*	WAIT FOR VOLUME TO BE ZERO	*/
+
+			DISABLE;
+			WRITE(PSC) = PB.LEFT;
+			WRITE(PSF) = PSRON;
+			I = READ(PSD);
+			ENABLE;
+
+         IF I <> 0 THEN DO;
+				CHILL.OUT.AND.RUN.SYN();				// run main loop and mac for a bit
+ 
+            if (noio=0)                 			// and check for event if allowed
+            then CHECK.NEXT.EVENT();
+
+				if (interp_poll_for_stop(0) != 0)	// interp request to stop audition
+					POLY.READ.ABORTED = 1;
+				
+				IF (new.mouse.button	 <>0)	/*	BOMB OUT IF ANY MOUSE PRESS		*/
+				or (new.in.char		 <>0)	/*	or character typed					*/
+				or (newkey				 <>0)	/*	or clavier key							*/
+				or (poly.read.aborted <>0)	/*	protocol stop audition received	*/
+				THEN I=0;
+			END;
+		END;
+		CALL POLY.FREE.CHANS;
+	END;
+
+	RUN.SYN = SAVED;
+
+END PS.AUDITION;
+
+
+/*	$PAGE - SET UP SYNCLAVIER INFO FOR MODIFIED SOUND FILE	*/
+
+//	This routine is called to 'precompute' some information that will then
+//	be used to play the sound file.  Upon entry, the sound file header
+//	has been read into SF.HDR section of memory, and the contents of
+//	the SF.HDR sector have been massaged by CONVERT.SOUNDFILE.INFO.
+
+//	This routine is also called whenever any symbols, or the mark start &
+//	mark end pointers are changed.
+
+//	Our goal is to look at the information in the (converted) sound file
+//	header, compute some values, and then write those values to
+//	the first sector of allocated memory (e.g. bl.keytc, etc. etc. etc).
+
+//	Note that at this point, we are just computing information that would
+//	be used by all patches that use this file.  That is, we have no
+//	patch-specific information available to us at this time.  Patch-specific
+//	information is available to SETUP.POLY.INFO, which is called later on
+//	when a patch is being prepared for playback
+
+PS.SETUP:PROC(BASE) PUBLIC SWAPABLE;			//	SET UP SYNCLAVIER INFO FROM SOUND FILE IN POLY MEMORY
+
+	DCL (BASE)	FIXED ARRAY;
+	DCL (SRATE,PITCH,SSS,SSW,SES,SEW,KEYTC,VR,VD,VA)	FIXED;	//	HOLDS INFO FROM FILE
+	DCL (SYNCSRATE)	FIXED;
+	DCL (TOFFS)			FIXED;
+	DCL (I,J,K)			FIXED;
+	DCL (CHECKSUM)		FIXED;
+	DCL (TLMSB,TLLSB)	FIXED;
+	DCL (LLMSB,LLLSB)	FIXED;
+	DCL (STEREO)		FIXED;
+
+	call psmread(base,sf.hdr,0);
+	call poly.in(addr(misc.buf(0)),256);		//	read massaged sound file header into misc.buf
+
+	checksum=0;											//	compute checksum for first
+	do i=0 to 255;										//	sector to detect different
+		checksum=checksum+misc.buf(i);			//	file
+	end;
+
+	keytc=misc.buf(sf.keyboard.decay.number);
+	vr   =misc.buf(sf.vibrato.rate);				//	vib rate
+	vd   =misc.buf(sf.vibrato.depth);			//	vib dep
+	va   =misc.buf(sf.vibrato.attack);			//	vib atk
+
+	pitch=misc.buf(sf.hertz);						//	look up hertz*10
+
+	srate=misc.buf(sf.sample.rate);
+
+	tlmsb=misc.buf(sf.total.length+1); tllsb=misc.buf(sf.total.length+2);	/*	get loop info from soundfile	*/
+	llmsb=misc.buf(sf.loop.length +1); lllsb=misc.buf(sf.loop.length +2);	/*	24-bit format	*/
+
+	stereo=misc.buf(sf.stereo);
+
+	call time_to_index(misc.buf(sf.mark.start),misc.buf(sf.mark.start+1),misc.buf(sf.mark.start+2),srate,stereo);
+	sss=sector.numb;									//	starting sector
+	ssw=sector.offset;								//	word of that sector
+
+	call time_to_index(misc.buf(sf.mark.end),misc.buf(sf.mark.end+1),misc.buf(sf.mark.end+2),srate,stereo);
+	ses=sector.numb;									//	starting sector
+	sew=sector.offset;								//	last word to play
+
+	if ((ses ilt sss))								//	see if mark.start before mark.end
+	or ((ses  =  sss)
+	and (sew ilt ssw))
+	then do;												//	switch mark.start and mark.end positions
+		i=ses; ses=sss; sss=i;
+		i=sew; sew=ssw; ssw=i;
+	end;
+
+	if (tlmsb\tllsb)<>0 then do;					//	check loop info
+		if ((sss igt tlmsb))							//	disallow sound file loops
+		or ((sss  =  tlmsb)							//	if mark start is beyond
+		and (ssw igt tllsb))							//	total length
+		then do;
+			tlmsb=0; tllsb=0;
+		end;
+		else do;											//	subtract out mark start
+			tlmsb=tlmsb-sss;							//	to get total length
+			tllsb=tllsb-ssw;							//	relative to mark start
+			if tllsb<0 then do;
+				tlmsb=tlmsb-1;
+				tllsb=tllsb+256;
+			end;
+			if ((tlmsb ilt llmsb))					//	see if new total length is
+			or ((tlmsb  =  llmsb)					//	less than loop length
+			and (tllsb ilt lllsb))					//	then serious error
+			then do;
+				tlmsb=0; tllsb=0;
+			end;
+		end;
+	end;
+
+	/*	$page	*/
+
+	syncsrate=log1000(500)-log1000(srate);		//	compute offset from 50 khz - syncl II format
+
+	//	Note: If the SFM Octave Base is set to 6.0777 or greater, the value of "pitch" will exceed 32767 and
+	//	log4400() will interpret it as a negative number.
+	if (pitch < 0)	{
+		//	Divide unsigned pitch by 2 but round towards even result to minimize
+		//	rounding further away in the upcoming call to log4400()
+		write("313") = shr(pitch,1);
+		pitch = 1024+log4400(read("313")+((pitch&1)&read("313")));	//	pitch correction, from a-440
+	}
+	else pitch = log4400(pitch);												//	pitch correction, from a-440
+
+	i=pitch+43; j=i&1023; i=i&"176000";			//	round up, compute octave & fractional octave
+	load j; mul   12; mwait; div 1024; j=res;	//	compute key #, 0-11
+	load j; mul 1024; mwait; div	 12; j=res;	//	compute 0,85,170,256...
+	if read(4) ige 6 then j=j+1;					//	perform rounding to match syncl II
+	toffs=(i+j)-pitch;								//	get correction factor for transpositions
+
+	tllsb=tllsb+shl(tlmsb,8);						//	convert to 32-bit format
+	tlmsb=shr(tlmsb,8);
+	lllsb=lllsb+shl(llmsb,8);
+	llmsb=shr(llmsb,8);
+
+	call psmread(base,shr(bl.poly,8),0);
+	call poly.in(addr(misc.buf(0)),256);		//	get first data sector of sound file
+
+	do i=0 to 255;										//	sound file to also
+		checksum=checksum+misc.buf(i);			//	include in check sum
+	end;													//	(hopefully not off end of disk)
+
+	CALL PS.LOCK;										//	LOCK UP IN CASE SYSTEM BOMB
+
+	CALL PSMWRITE(base, 0, BL.KEYTC);
+
+	WRITE(PSD)=KEYTC;									//	BL.KEYTC	- KEYBOARD DECAY INFO FROM FILE
+	WRITE(PSD)=VR;										//	BL.VRATE	- VIBRATO		  INFO FROM FILE
+	WRITE(PSD)=VD;										//	BL.VDEPTH- VIBRATO		  INFO FROM FILE
+	WRITE(PSD)=VA;										//	BL.VAT	- VIBRATO		  INFO FROM FILE
+
+	WRITE(PSD)=SYNCSRATE;							//	BL.SRATE	- SAMPLE RATE	  INFO FROM FILE
+	WRITE(PSD)=PITCH;									//	BL.PITCH	- PITCH			  INFO FROM FILE
+	WRITE(PSD)=TOFFS;									//	BL.TOFFS	- TRANSPOSITION  INFO FROM FILE
+
+	J=SES-SSS+1; K=0;									//	CONSTRUCT 24 BIT SOUND FILE LENGTH
+	K=K-SSW;												//	REDUCE LENGTH BY FIRST WORD OFFSET
+	IF K<0 THEN DO; K=K+256; J=J-1; END;
+	K=K-(255-SEW);										//	REDUCE BY LENGTH OF LAST SECTOR UNUSED
+	IF K<0 THEN DO; K=K+256; J=J-1; END;
+
+	WRITE(PSD)=J;										//	BL.WTABL	- SAVE **POSITIVE TABLE LENGTH** FOR NOW
+	WRITE(PSD)=K;										//				- SET TO MINUS LENGTH IN SETUP.POLY.INFO
+	WRITE(PSD)=SSS+BL.POLY/256;					//	BL.SOFS	- SECTOR	OFFSET (BASE ADDRESS); THIS IS LATER COPIED INTO PT.SOFS
+	WRITE(PSD)=SSW;									//	BL.WOFS	- WORD	OFFSET (BASE ADDRESS); THIS IS LATER COPIED INTO PT.WOFS
+	WRITE(PSD)=J;										//	BL.LOOPL	- SAVE **POSITIVE TABLE LENGTH** FOR NOW
+	WRITE(PSD)=K;										//				- SET TO MINUS LENGTH IN SETUP.POLY.INFO
+	WRITE(PSD)=1;										//	BL.ONLOOP
+	WRITE(PSD)=J;										//	BL.MAX
+	WRITE(PSD)=K;
+	WRITE(PSD)=CHECKSUM;								//	BL.CHECK
+	WRITE(PSD)=TLMSB;									//	BL.SFTL
+	WRITE(PSD)=TLLSB;
+	WRITE(PSD)=LLMSB;									//	BL.SFLL
+	WRITE(PSD)=LLLSB;
+	WRITE(PSD)=STEREO;								//	BL.STEREO
+	WRITE(PSD)=SRATE;									//	BL.KHZ
+
+	WRITE(PSD)=0;										//	BL.SAVED
+
+	CALL PS.UNLOCK;									//	STORE INFO FOR LATER LOAD
+
+END PS.SETUP;
+
+/*	$PAGE - CONVERT SOUND FILE HEADER AFTER LOADING INTO POLY	*/
+
+/*	This procedure changes the sound file header information in poly
+	so that it represents the data read from the disk.  Data lengths
+	of the file and time values of the labels are converted so they
+	are correct for the case of loading data between points other than
+	the ORIGIN and the END of the file.
+*/
+
+//	This routine is called after the header has been read into memory at SF.HDR
+//	offset from the start of allocated memory.  Upon entry, the data in poly
+//	memory is exactly the data read from disk.
+
+//	We perform many error checks; move symbols around, and update the information
+//	in the sound file header.  We then write this information back out to
+//	the SF.HDR sectors.
+
+//	This routine is only called once, right after the sound file is read into memory.
+CONVERT.SOUNDFILE.INFO: PROC (BASE,COMPAT,SRATE,STEREO,SSS,SSW,SES,SEW,ORIG.SRATE,ORIG.PER) SWAPABLE;
+	DCL BASE			FIXED ARRAY;				//	sound file base in poly memory
+	DCL COMPAT		FIXED;						//	compatibility
+	DCL SRATE		FIXED;						//	sample rate
+	DCL STEREO		FIXED;						//	0 - mono, 1 - stereo
+
+	//	DO NOT change variable order of next two declarations
+	DCL (SSS,SSW)	FIXED;						//	sector/word of starting sample in original file
+	DCL (SES,SEW)	FIXED;						//	sector/word of ending sample in original file
+	DCL ORIG.SRATE	FIXED;
+	DCL ORIG.PER	FIXED;
+
+	//	DO NOT change variable order in these declarations
+	dcl (end.sec,end.wrd)	fixed;			//	sector/word of final sample after data shift (will be converted to sector/word length of valid data)
+	dcl (sec, wrd)				fixed;			//	temporaries
+
+	dcl samp.len		fixed;					//	word length of one sample (1 for mono, 2 for stereo)
+	dcl temp	(1)		fixed;					//	temporary array for sec/word location
+	dcl (L)	(1)		fixed;					//	32 BIT POLY POINTER
+	dcl (j,k,m,n,p,q)	fixed;
+
+	sub_addresses: proc (num, num2, dest);	//	subtracts two sector addresses
+		dcl num	fixed array;					//	sector/word of first address - must be larger than NUM2
+		dcl num2	fixed array;					//	sector/word to subtract from NUM
+		dcl dest	fixed array;					//	sector/word result
+
+		dest(0) = num(0) - num2(0);			//	subtract the sectors
+		dest(1) = num(1) - num2(1);			//	subtract the words
+
+		if num(1) ilt num2(1) then do;		//	need to borrow from sectors
+			dest(0) = dest(0) - 1;				//	get one from sectors
+			dest(1) = dest(1) + 256;			//	get words back to 8 bits
+		end;
+		return (addr(dest(0)));					//	return the result in this array
+	end sub_addresses;
+
+	/*	Set up the header information for file being read into poly	*/
+
+   // Read the sound file header into misc.buf
+	CALL PSMREAD(BASE, SF.HDR, 0);
+	CALL POLY.IN(ADDR(MISC.BUF(0)),256);
+
+	IF COMPAT<1 THEN MISC.BUF(SF.PERIOD.INDEX)=600;
+	IF ((COMPAT < 2) || (MISC.BUF(SF.HERTZ) == 0)) THEN DO;
+		MISC.BUF(SF.HERTZ   )=4400;
+		MISC.BUF(SF.OCTAVE  )="061341";		/*	FLOATING POINT 3.09	*/
+		MISC.BUF(SF.OCTAVE+1)="043702";
+	END;
+	IF COMPAT<3 THEN DO;
+		MISC.BUF(SF.KEYBOARD.DECAY.NUMBER)=MISC.BUF(SF.KEYBOARD.DECAY.NUMBER)*5;
+	END;
+	IF COMPAT<4 THEN DO;							/*	OLD SYMBOL TABLE FORMAT	*/
+		CALL PSMREAD(BASE,SF.SYM,0);
+		J=READ(PSD);								/*	GET OLD # OF SYMBOLS	*/
+		IF J IGT MAX.SYMBOLS THEN J=MAX.SYMBOLS;
+		MISC.BUF(SF.NUMBER.OF.SYMBOLS)=J;
+	END;
+
+	IF MISC.BUF(SF.SAMPLE.RATE)=0
+	THEN MISC.BUF(SF.SAMPLE.RATE)=SRATE;	/*	STORE RESULT COMPUTED ABOVE	*/
+
+	MISC.BUF(SF.COMPATIBILITY)=4;				/*	RESULT IS NOW UP TO DATE	*/
+
+	/*	$page - Set up the sound file header information in poly	*/
+
+	/*	Calculate the ending address of the file in poly so that header
+		conversion is done correctly.  Do this even when loading the
+		whole sound file, to correct any messed up file headers.  Leave
+		SSS,SSW,SES,SEW as they are for proper label conversions below.	*/
+
+	//	compute the sector/word of the final sample after data shift
+	call sub_addresses (loc(addr(SES)),loc(addr(SSS)),loc(addr(end.sec)));
+
+	/*	set up file start and end positions in the header	*/
+
+	CALL INDEX_TO_TIME(0,END.SEC,END.WRD,SRATE,STEREO);	/*	time of DATA.END sample				*/
+	MISC.BUF(SF.DATA.END  )=TIME.SECONDS;						/*	time of last valid data sample	*/
+	MISC.BUF(SF.DATA.END+1)=TIME.MILLISECONDS;
+	MISC.BUF(SF.DATA.END+2)=TIME.MICROSECONDS;
+
+	if not LOAD.WHOLE.FILE then do;	/*	if loading from MARK.START to MARK.END		*/
+		MISC.BUF(SF.MARK.END  )=TIME.SECONDS;	/*	MARK.END is the same as DATA.END	*/
+		MISC.BUF(SF.MARK.END+1)=TIME.MILLISECONDS;
+		MISC.BUF(SF.MARK.END+2)=TIME.MICROSECONDS;
+
+		MISC.BUF(SF.MARK.START	)=0;				/*	set MARK.START to zero				*/
+		MISC.BUF(SF.MARK.START+1)=0;
+		MISC.BUF(SF.MARK.START+2)=0;
+	end;
+	else do;	/*	loading the entire sound file	*/
+		//	In the case of loading the whole file, the MARK.START should be correct and left alone.
+		//	But make sure that MARK.END is not greater than DATA.END, which it could be by now.
+		//	Also check for erroneously zeroed sf.mark.end
+
+		if ((misc.buf(sf.mark.end)|misc.buf(sf.mark.end+1)|misc.buf(sf.mark.end+2)) == 0)
+		{	//	set MARK.END to DATA.END
+			MISC.BUF(SF.MARK.END  )=MISC.BUF(SF.DATA.END  );
+			MISC.BUF(SF.MARK.END+1)=MISC.BUF(SF.DATA.END+1);
+			MISC.BUF(SF.MARK.END+2)=MISC.BUF(SF.DATA.END+2);
+		}
+		else
+		{
+			if orig.srate=0 then do;		/*	handle old sfm files	*/
+				call period_time_to_index(misc.buf(sf.mark.end),misc.buf(sf.mark.end+1),misc.buf(sf.mark.end+2),orig.per);
+			end;
+			else do;	/*	handle khz * 10 files	*/
+				call time_to_index(misc.buf(sf.mark.end),misc.buf(sf.mark.end+1),misc.buf(sf.mark.end+2),srate,stereo);
+			end;
+
+			if ((sector.numb igt end.sec)	/*	if MARK.END is out past the end of file data	*/
+			or ((sector.numb = end.sec) and (sector.offset igt end.wrd)))
+			then do;
+				MISC.BUF(SF.MARK.END  )=MISC.BUF(SF.DATA.END);	/*	truncate MARK.END to DATA.END	*/
+				MISC.BUF(SF.MARK.END+1)=MISC.BUF(SF.DATA.END+1);
+				MISC.BUF(SF.MARK.END+2)=MISC.BUF(SF.DATA.END+2);
+			end;
+		}
+	end;
+
+	//	convert sector/word of final sample after data shift to sector/word length of valid data
+
+	if stereo then	samp.len = 2;		/*	samples are 2 data words in stereo files	*/
+	else				samp.len = 1;		/*	and one word in mono files	*/
+
+	end.wrd = end.wrd + samp.len;		/*	add one sample so numbers represent length	*/
+	if ((end.wrd&255) ilt samp.len) then do;	/*	if there is a carry	*/
+		end.sec = end.sec + 1;			/*	add one to sector length	*/
+		end.wrd = end.wrd & 255;		/*	reset words to 8 bits only	*/
+	end;
+
+	MISC.BUF(SF.VALID.DATA	)=0;		/*	set up VALID.DATA	*/
+	MISC.BUF(SF.VALID.DATA+1)=end.sec;
+	MISC.BUF(SF.VALID.DATA+2)=end.wrd;
+
+	MISC.BUF(SF.TOTAL.DATA	)=0;		/*	TOTAL.DATA is even sector len of file	*/
+	MISC.BUF(SF.TOTAL.DATA+1)=end.sec + (end.wrd <> 0);	/*	round up if there are any words	*/
+	MISC.BUF(SF.TOTAL.DATA+2)=0;
+
+	MISC.BUF(SF.CURSOR.TIME  )=0;		/*	set cursor time to start of file	*/
+	MISC.BUF(SF.CURSOR.TIME+1)=0;
+	MISC.BUF(SF.CURSOR.TIME+2)=0;
+
+	/*	$page - Reset TOTAL.LENGTH (looping length of file)	*/
+
+	sec = misc.buf(sf.total.length+1);			/*	get location of TOTAL.LENGTH	*/
+	wrd = misc.buf(sf.total.length+2);
+
+	if ((sec igt SSS)			/*	if loop point is past where MARK.START was		*/
+	or  ((sec = SSS) and (wrd igt SSW)))
+	then do;
+		call sub_addresses (loc(addr(sec)),loc(addr(SSS)),loc(addr(temp(0))));
+		misc.buf(sf.total.length  ) = 0;
+		misc.buf(sf.total.length+1) = temp(0);	/*	store result back in header	*/
+		misc.buf(sf.total.length+2) = temp(1);
+	end;
+	else do;						/*	loop point was before the original MARK.START	*/
+		misc.buf(sf.total.length  ) = 0;			/*	set TOTAL.LENGTH to zero		*/
+		misc.buf(sf.total.length+1) = 0;
+		misc.buf(sf.total.length+2) = 0;
+	end;
+
+	/*	Reset MARK.OFFSET (SMPTE offset)	*/
+
+	if orig.srate=0 then do;			/*	handle old sfm files		*/
+		call period_time_to_index(misc.buf(sf.mark.offset),misc.buf(sf.mark.offset+1),misc.buf(sf.mark.offset+2),orig.per);
+	end;
+	else do;									/*	handle khz * 10 files	*/
+		call time_to_index(misc.buf(sf.mark.offset),misc.buf(sf.mark.offset+1),misc.buf(sf.mark.offset+2),srate,stereo);
+	end;
+
+	if ((sector.numb ilt SSS)			/*	if MARK.OFFSET was before the MARK.START point	*/
+	or  ((sector.numb = SSS) and (sector.offset ilt SSW)))
+	then do;
+		sector.numb = SSS; sector.offset = SSW;	/*	set it at MARK.START			*/
+	end;
+	else if ((sector.numb igt SES)	/*	if MARK.OFFSET was after the MARK.END	*/
+	or			((sector.numb = SES) and (sector.offset igt SEW)))
+	then do;
+		sector.numb = SES; sector.offset = SEW;
+	end;
+
+	sec = sector.numb; wrd = sector.offset;		/*	set these up as an array	*/
+	call sub_addresses (loc(addr(sec)),loc(addr(SSS)),loc(addr(temp(0))));	/*	convert for created sound file	*/
+
+	call index_to_time(0,temp(0),temp(1),srate,stereo);	/*	convert it to time			*/
+	misc.buf(sf.mark.offset  ) = time.seconds;				/*	store it back into header	*/
+	misc.buf(sf.mark.offset+1) = time.milliseconds;
+	misc.buf(sf.mark.offset+2) = time.microseconds;
+
+	/*	TRUNCATE POSSIBLE ERRONEOUS CAPTION LENGTHS TO MAX OF 256	*/
+	/*	BUT BE SURE TO PRESERVE POSSIBLE CATEGORIES	*/
+
+	if misc.buf(sf.id.field.bytes) igt 256
+	then misc.buf(sf.id.field.bytes) = 0;
+
+	DO N=0 TO MISC.BUF(SF.ID.FIELD.BYTES)-1;	/*	REMOVE ANY CONTROL CHARACTERS FROM CAPTION	*/
+		P=BYTE(LOC(ADDR(MISC.BUF(SF.ID.FIELD))),N);
+		IF (P < SP)
+		OR (P > 127) THEN P=SP;
+		CALL PBYTE(LOC(ADDR(MISC.BUF(SF.ID.FIELD))),N,P);
+	END;
+
+   // Set up file handle if this has never been done
+   // Remember the data at sf.file.handle is a c string - zero terminated, no length byte
+   // but will fit into 128 characters
+   // The data in the partial and in the management area at bl.lname is an able-string
+   if (misc.buf(sf.file.handle) == 0) {
+      // zero out entire handle area just to be sure
+      do j = sf.file.handle to sf.file.handle + sf.file.handle.wl - 1;
+         misc.buf(j) = 0;
+      end;
+      
+      // If a long name is available, use it. This might happen if someone is calling up
+      // an able file stored on a mac disk that has a long name, but the long name was never
+      // written out in the sound file handle
+      if (lnbuf(0) != 0) {
+         j = 0;
+         
+         while (j < lnbuf(0)) {
+            pbyte(loc(addr(misc.buf(sf.file.handle - 1))), j, byte(lnbuf, j));
+            j = j + 1;
+         }
+      }
+      
+      // Else fabricate from fnbuf
+      else {
+         j = 0;                                    // get real length of file name
+         
+         while ((j < 8) && (byte(fnbuf, j) != 0)) {
+            pbyte(loc(addr(misc.buf(sf.file.handle - 1))), j, byte(fnbuf, j));
+            j = j + 1;
+         }
+      }
+   }
+
+   CALL PSMWRITE(BASE,SF.HDR,0);					/*	write the tweaked header out to poly	*/
+	CALL POLY.OUT(ADDR(MISC.BUF(0)),256);
+
+   // Now write out the long name (e.g. handle) (possibly just computed above)
+   // out to the management area. Begin by finding the length of the c-string
+   j = 0;
+
+   while ((j < (sf.file.handle.bl-1)) && (byte(loc(addr(misc.buf(sf.file.handle - 1))), j) != 0))
+      j = j + 1;
+
+   CALL PSMWRITE(BASE,0,BL.LNAME);           // Write the long name
+   WRITE(PSD) = j;                           // Number of bytes
+
+   DO K=0 to SHR(J+1,1)-1;                   // write data bytes; upper half will be zero-filled due to c-string null termination byte
+      write(psd) = misc.buf(sf.file.handle+k);
+   end;
+
+   J=MISC.BUF(SF.NUMBER.OF.SYMBOLS);			/*	total number of symbols in header	*/
+	IF J IGT MAX.SYMBOLS THEN J=MAX.SYMBOLS;	/*	truncate to maximum	*/
+
+	IF COMPAT<4 THEN DO;					/*	COPY SYMBOLS AROUND	*/
+		CALL PSMREAD(SFILE.BASE,SF.SYM,1);
+		CALL POLY.IN(ADDR(MISC.BUF(0)),256);
+		CALL PSMWRITE(SFILE.BASE,SF.SYM,0);
+		CALL POLY.OUT(ADDR(MISC.BUF(0)),256);
+		CALL PSMREAD(SFILE.BASE,SF.SYM+1,1);
+		CALL POLY.IN(ADDR(MISC.BUF(0)),255);
+		CALL PSMWRITE(SFILE.BASE,SF.SYM+1,0);
+		CALL POLY.OUT(ADDR(MISC.BUF(0)),255);
+	END;
+
+	/*	$page - Correct time and names for each symbol (2 sectors)	*/
+
+	DO K=0 TO (J-1);						/*	loop through symbols	*/
+		CALL COPY32(SFILE.BASE,L);		/*	get address of symbols in poly	*/
+		CALL ADD16(SF.SYM,L);
+		M=K*SYMBOL_LENGTH;				/*	offset to next symbol	*/
+		IF M>=256 THEN DO;				/*	move to next sector if necessary	*/
+			CALL ADD16(1,L);				/*	add one to sectors	*/
+			M=M-256;							/*	reset words	*/
+		END;
+
+		CALL PSMREAD(L,0,M);				/*	LOAD SYMBOL INTO MISC.BUF	*/
+		CALL POLY.IN(ADDR(MISC.BUF(0)),SYMBOL_LENGTH);
+
+		IF MISC.BUF(NAME_ENTRY) IGT 8		/*	CORRECT BAD SYMBOL LENGTH	*/
+		THEN MISC.BUF(NAME_ENTRY) = 8;	/*	LIMIT TO 8 CHARACTERS		*/
+
+		DO N=1 TO 4;						/*	REMOVE ANY CONTROL CHARACTERS FROM NAME	*/
+			P=MISC.BUF(NAME_ENTRY+N);	/*	P is a word from the name	*/
+			Q=SHR(P,8);						/*	Q is the upper byte	*/
+			P=P&255;							/*	P is now the lower byte	*/
+			IF (P < SP)						/*	if character is out of bounds	*/
+			OR (P > 127) THEN P=SP;		/*	make it a space	*/
+			IF (Q < SP)
+			OR (Q > 127) THEN Q=SP;
+			MISC.BUF(NAME_ENTRY+N)=P\SHL(Q,8);	/*	write whole word back out	*/
+		END;
+
+		/*	Recalculate the symbol time.  Do this even if loading the
+			whole file because of cases where the labels are messed up.	*/
+
+		/*	Set the special labels "#" for mark.start and "$" for mark.end
+			first.  There are cases because of Sound Editor woes that these
+			are NOT setup correctly.	*/
+
+		if ((misc.buf(name_entry) = 1)		/*	label is one character long	*/
+		and ((misc.buf(name_entry+1)&"377") = "43")) then do;	/*	we have # - set it to mark.start	*/
+			if orig.srate=0	/*	handle old sfm files	*/
+			then call period_time_to_index(misc.buf(sf.mark.start),misc.buf(sf.mark.start+1),misc.buf(sf.mark.start+2),orig.per);
+			else call time_to_index(misc.buf(sf.mark.start),misc.buf(sf.mark.start+1),misc.buf(sf.mark.start+2),srate,stereo);
+		end;
+		else if ((misc.buf(name_entry) = 1)	/*	label is one character long	*/
+		and ((misc.buf(name_entry+1)&"377") = "44")) then do;	/*	we have $ - set it to mark.end	*/
+			if orig.srate=0	/*	handle old sfm files	*/
+			then call period_time_to_index(misc.buf(sf.mark.end),misc.buf(sf.mark.end+1),misc.buf(sf.mark.end+2),orig.per);
+			else call time_to_index(misc.buf(sf.mark.end),misc.buf(sf.mark.end+1),misc.buf(sf.mark.end+2),srate,stereo);
+		end;
+		else do;	/*	just a regular label - use the time stored with it	*/
+			if orig.srate=0	/*	handle old sfm files	*/
+			then call period_time_to_index(misc.buf(0),misc.buf(1),misc.buf(2),orig.per);
+			else call time_to_index(misc.buf(0),misc.buf(1),misc.buf(2),srate,stereo);
+		end;
+
+		if ((sector.numb ilt SSS)			/*	if symbol time was before the MARK.START point	*/
+		or  ((sector.numb = SSS) and (sector.offset ilt SSW)))
+		then do;
+			sector.numb = SSS; sector.offset = SSW;	/*	set it at MARK.START	*/
+		end;
+		else if ((sector.numb igt SES)	/*	if symbol time was after the end of data	*/
+		or			((sector.numb = SES) and (sector.offset igt SEW)))
+		then do;
+			sector.numb = SES; sector.offset = SEW;	/*	set it at DATA.END	*/
+		end;
+
+		/*	Reset the END label in case it is not the same as DATA.END	*/
+		if ((misc.buf(name_entry) = 3)	/*	length of label name is three characters	*/
+		and (misc.buf(name_entry+1) = "47105") and ((misc.buf(name_entry+2)&"377") = "104"))	/*	"END"	*/
+		then do;	/*	this is the label END	*/
+			sector.numb = SES; sector.offset = SEW;	/*	set it at DATA.END	*/
+		end;
+
+		sec = sector.numb; wrd = sector.offset;		/*	set these up as an array	*/
+		call sub_addresses (loc(addr(sec)),loc(addr(SSS)),loc(addr(temp(0))));	/*	convert for created sound file	*/
+
+		call index_to_time(0,temp(0),temp(1),srate,stereo);	/*	convert it to time	*/
+		misc.buf(0) = time.seconds;		/*	store time back into buffer	*/
+		misc.buf(1) = time.milliseconds;
+		misc.buf(2) = time.microseconds;
+
+		CALL PSMWRITE(L,0,M);				/*	write the whole symbol back to header	*/
+		CALL POLY.OUT(ADDR(MISC.BUF(0)),SYMBOL_LENGTH);
+	END;
+END CONVERT.SOUNDFILE.INFO;
+

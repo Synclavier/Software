@@ -1,0 +1,96 @@
+/* 380-GLID - CHECK FOR PORTAMENTO */
+
+/*
+   04/05/90 - TSS - FIX STUCK MIDI NOTE/EXTRA NOTE OFF BUGS
+   08/24/89 - PF  - Added PATH argument to MIDI.NOTE.OFF and MIDI.NOTE.ON
+   5/15/86 - "official" creation of release-M modules
+*/
+
+BEGIN;                               /* FOR GLIDE CHECK */
+
+   IF (INC.AXE<>0)&(NEW.GPITCH<>0) THEN DO; /* GUITAR NOTE WITH NEW PITCH- PERFORM PITCH TRACKING */
+      NEW.HZ=1;
+      IF OCTRATIO<>1000 THEN DESTF=COMPUTE.GUITAR.OCTAVE.RATIO(GPITCH); /* ALWAYS GO TO GUITAR PITCH (+ CHORUS, PTUNING, OCTRATIO CORRECTION) */
+      ELSE DESTF=GPITCH;               /* NO OCTAVE RATIO CORRECTION NEEDED - AVOID PROCEDURE CALL MOST OF THE TIME */
+
+      I=PTPTR+P.PTUNING;
+      WRITE(MAM)=PAR.PTR+SHR(I,8); WRITE(MAL)=I;
+      IF READ(MD)<0 THEN DESTF=2816;    /* STAY AT A-440 IF UNPITCHED,  HOWEVER */
+
+      I=PTPTR+P.GLIDEBITS;
+      WRITE(MAM)=PAR.PTR+SHR(I,8); WRITE(MAL)=I;
+      IF (READ(MD)&1)=0 THEN CURRF=DESTF; /* GO DIRECTLY THERE */
+      ELSE CALL COMPUTE.GLIDE;      /* ELSE SET UP AND COMPUTE NEW GLIDE INFO */
+
+      DISABLE;
+      IF MIDIRT<>0 THEN DO;         /* SEE IF NEW PITCH REQUIRES NEW KEY NUMBER */
+         WRITE(MAM)=THP;
+         WRITE(MAL)=THD.CXPOS;
+         I         =KEYN+READ(MD);
+         WRITE(MAL)=THD.MIDX;
+         I         =MIDI.MAP.KEY(I+READ(MD));
+
+         K=MIDIINFO&255;
+         MIDIINFO=I\SHL(VELD,8);    /* SAVE INFO FOR NEW SLURRED NOTE */
+
+         IF  (PSTAT<>DELAY.STATE)   /* ON QUE BUT IS PEAK CHECK QUE     */
+         AND (I<>K)                 /* MIDI KEY NUMBER IS DIFFERENT */
+         THEN DO;                   /* THEN NOTE ON WENT OUT - RETRIGGER   */
+            CALL MIDI.NOTE.ON (MIDIRT,MIDIPATH,I,VELD&255);    /* TURN NEW NOTE ON */
+            /******/;               /* NOTE - INTERRUPTS ARE TURNED ON BY MIDI.NOTE.ON */
+            DISABLE;
+            CALL MIDI.NOTE.OFF(MIDIRT, MIDIPATH, K);     	   /* TURN OLD NOTE OFF */
+            /******/;               /* NOTE - INTERRUPTS ARE TURNED ON BY MIDI.NOTE.OFF */
+         END;                       /* ELSE MEANS WE TIED TO NEW PITCH BEFORE OLD PITCH WENT OUT */
+      END;
+      ENABLE;
+   END;
+
+   /* $SUBTITLE - PERFORM PORTAMENTO OR TIMBRE FRAME PITCH OFFSET: */
+
+   IF GLIDE THEN DO;                 /* GLIDE PRESENT */
+      IF (GLIDE&6)=0 THEN DO;        /* EXPONENTIAL GLIDE */
+         DO K=PRIOR.TIME TO SAMPLED.REAL.MILLISECONDS-10 BY 10; /* CORRECT FOR LOST TIME */
+            I=DESTF-CURRF;           /* GET DIFFERENCE */
+            IF I=0 THEN GLIDE=0;     /* IF THERE, THEN DONE */
+            ELSE DO;                 /* CHANGE FREQUENCY */
+              J=I*LIND/1000;         /* COMPUTE FRACTION OF LINEAR DISTANCE TO MOVE */
+              IF J=0 THEN DO;        /* IF NONE, CHECK */
+                 IF I<0 THEN J=-1; ELSE J=1; /* MOVE BY ONE */
+              END;
+              CURRF=CURRF+J;         /* MOVE TO HERE */
+           END;                      /* OF NONZERO AMOUNT TO MOVE */
+        END;
+        NEW.HZ=1;                    /* INDICATE RESET HERTZ */
+      END;                           /* OF EXPONENTIAL GLIDE */
+      ELSE IF (GLIDE&2)<>0 THEN DO;  /* LINEAR GLIDE */
+         DO J=PRIOR.TIME TO SAMPLED.REAL.MILLISECONDS-10 BY 10;
+            CURRF=CURRF+LIND;        /* MOVE AMOUNT DESIRED DURING 10 MS. PERIOD */
+         END;
+         IF ((LIND< 0) AND (CURRF<=DESTF))
+         OR ((LIND>=0) AND (CURRF>=DESTF)) THEN DO; /* REACHED END */
+            CURRF=DESTF; GLIDE=0;    /* MATCH TO DESTF, CANCEL GLIDE */
+         END;
+         NEW.HZ=1;                   /* INDICATE RESET HERTZ BELOW */
+      END;                           /* OF LINEAR GLIDE */
+      ELSE DO;                       /* PERFORM GLIDE FOR PITCH DELTA FUNCTION */
+         I=CURRF;                    /* SAVE CURRENT FREQUENCY IN CASE NO CHANGE */
+         LOAD SAMPLED.REAL.MILLISECONDS-PRIOR.TIME; 
+         DIV 10; MWAIT; MUL 10; MWAIT; /* GET INTEGER # OF 10 MSEC INTERVALS */
+         MUL LIND;                     /* COMPUTE MS. * X.X/MS - DISTANCE */
+         J=SHL(RES,8);               /* GET LSB,  PUT IN UPPER HALF FOR GLIDE COMPARISON */
+         K=SHR(RES,8)+SHL(READ(4),8); /* 16 MSBS */
+         GLIDE=GLIDE+J;              /* FRACTIONAL BITS IN UPPER 8 BITS OF GLIDE */
+         IF GLIDE ILT J THEN K=K+1;  /* CARRY RESULTED */
+         IF DESTF>CURRF THEN DO;
+            CURRF=CURRF+K;
+            IF CURRF>=DESTF THEN DO; CURRF=DESTF; GLIDE=0; END;
+         END;
+         ELSE DO;
+            CURRF=CURRF-K; /* DOWNWARD */
+            IF CURRF<=DESTF THEN DO; CURRF=DESTF; GLIDE=0; END;
+         END;
+         IF CURRF<>I THEN NEW.HZ=1;
+      END;
+   END;    /* OF GLIDE PROCESSING    */
+END;       /* OF BEGIN FOR THIS FILE */

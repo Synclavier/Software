@@ -1,0 +1,187 @@
+/* Program to bootload MONITOR from Winchester Disk
+.
+.  After this program is compiled, it should be saved on a floppy
+.  diskette under the name MONITOR.  When this diskette is placed
+.  into F0 and the LOAD button is pressed, this program will be
+.  loaded by the ROM loader.  This program then searches for MONITOR
+.  on W0.  If MONITOR is found, it loads it into memory and starts
+.  it up. */
+
+configuration modelC, MULDIV, has_boot;
+dcl prg.name data ('Synclavier Bootload - ');
+
+insert ':-xpl:reldat';	 		/* get releasae date */
+insert ':-xpl:syslits';
+insert ':-xpl:scsi'; 			/* get SCSI device drivers */
+insert ':-xpl:scsicmds'; 		/* get SCSI device drivers */
+insert ':-xpl:intrprtr'; 		/* get SCSI device drivers */
+
+dcl DevAdr lit '(shl(s.lun, 8) or shl(s.d24, 4) or s.target)';
+
+winboot: proc(buf);
+   dcl buf       fixed array; /* array to use */
+   dcl scsi      fixed; /* TRUE if we have SCSI */
+   dcl found     fixed; /* TRUE if we found MONITOR */
+   dcl printed   fixed; /* TRUE if message printed */
+   dcl time      fixed; /* no. time units waited so far */
+   dcl (i, j, k) fixed;
+   dcl monitor   data ('MONITOR'); /* name to look for */
+
+   stall: proc returns (fixed); /* print message and stall for 1/2 second */
+      dcl i fixed;
+      dcl timeout      lit '60'; /* no. time units to wait before timeout error */
+
+      if not printed then print;
+      print 'Winchester disk in NOT READY state', character(13),;
+      printed = 1; /* something was printed */
+
+      do i = 0 to 90; /* wait 1/2 second (including time to print out above) */
+         write(3) = 0; /* wait for a clock tick */
+      end;
+
+      time = time + 1; /* count up time units */
+      if time ige timeout /* device did not respond in specified time */
+      then return (1); /* time out occurred */
+      else return (0); /* has not timed out yet */
+   end stall;
+
+   if (read("51") and scsiboard) <> 0 /* we have SCSI */
+   then scsi = 1;
+   else do;
+      scsi = 0;				/* not very scuzzy */
+      write("105") = 0;		/* select W0 */
+      if read("106") <> 0	/* if it isn't ready, assume power up */
+      then do i = 0 to 400; write(3) = 0; end; /* wait two seconds (for VT100 screens) */
+   end;
+
+   print;
+   print string(prg.name), string(rel.date);
+
+   /* set up a default configuration area for the largest Winchester disk supported */
+
+   core(core(1) + 24) = 1; 		/* system device is W0 */
+   core(core(1) + 25) = 3133;   	/* sectors/cylinder */
+   core(core(1) + 26) = 5355; 	/* total cylinders */
+   core(core(1) + 27) = 0; 		/* controller and drive address for this disk */
+
+   if scsi then do; /* SCSI style Winchester? */
+      core(core(1) + 24) = (core(core(1) + 24) or shl(1, 8)); /* set SCSI Winchester type */
+      core(core(1) + 27) = DevAdr;
+
+      found = 0; printed = 0; time = 0;		/* assume drive is not ready				*/
+      
+		while (found == 0)							/* loop until error conditions clear	*/
+		{
+         i = TestUnitReady(DevAdr);
+		 
+		   if (i == S$DeviceBusy)					/* if busy (e.g. from sleep command)	*/
+				found = stall();						/* wait and retry								*/
+				
+			else if (i == S$NotReady)				/* if not ready								*/
+			{
+				if not printed then print;
+				print 'Winchester disk in NOT READY state', character(13),;
+				printed = 1; /* something was printed */
+				
+				j = StartStopUnit(Devadr, 1, 1);	/* issue start stop							*/
+				
+				if (j == S$DeviceBusy)				/* if busy (e.g. from sleep command)	*/
+					found = stall();					/* wait and retry								*/
+				
+				else if (j == S$Good)				/* else if start issues ok, wait here	*/
+				{											/* for ready to avoid tieing up bus		*/
+					while ((found == 0) && (TestUnitReady(DevAdr) != S$Good))
+						found = stall();
+				}
+				
+				else										/* else not ready, but couln't start?	*/
+					found = stall();					/* wait and retry								*/
+			}
+		
+			else if (i == S$Good)
+				found = 1;
+			
+			else											/* a bad scsi status that we do			*/
+				found = stall();						/* not handle...								*/
+     }
+
+      if printed then print;
+
+      if i <> S$Good then do; /* oops! */
+         print; print 'Bootload error:  ',;
+         if i > 0 /* bad sense key */
+         then print 'Bad Sense key from controller: ',i;
+         else if i = S$D24NotThere
+         then print 'D24 not assigned to interface zero.';
+         else if i = S$SelFailed then do;
+            print 'Winchester disk not responding.  Check the cable from the';
+            print 'Winchester disk to the computer and make sure the Winchester is powered up.';
+				if (interp_is_running != 0)
+				{
+					print;
+					print 'You may wish to check your W0 setup configuration using InterChange.';
+				}
+         end;
+         else if i = S$ArbFailed then print 'Fatal system error (arbitration failed).';
+         else print 'Fatal bootload system error.';
+         stop;
+      end;
+   end; /* scsi */
+   else do; /* IMI style Winchester */
+      write("105") = 0; /* select Winchester drive 0 */
+      if read("105") <> "10" then do; /* it wasn't selected! */
+         print;
+         print 'Bootload Error:  D107 not assigned to controller zero.';
+         stop;
+      end;
+
+      if read("106") <> 0 then do; /* winchester not ready */
+         print;
+         print 'Resetting Winchester disk...';
+         print;
+         write("106") = ("200" or "40"); /* reset the Winchester */
+
+         do while (read("106") <> 0); /* wait until the Winchester is reset */
+            if (read("106") and 1) <> 0 then print 'Winchester disk in NOT READY state', character(13),;
+            if (read("106") and 2) <> 0 then print 'Winchester disk trying to send data to computer', character(13),;
+            if (read("106") and 8) <> 0 then do; print 'Cable from D107 board to Winchester disk is not connected properly.'; stop; end;
+         end;
+         print;
+        
+         write("106") = "200"; write("106") = 0; /* clear the state machine */
+      end; /* of winchester not ready */
+   end; /* of IMI Winchester */
+
+   call readdata (0, 0, buf, 1024); /* read in Winchester catalog */
+
+   i = -1; found = 0;
+   do while ((i < 128) and (not found)); /* look for MONITOR */
+      i = i + 1;
+      found = 1; /* assume we found it */
+      do j = 0 to 3; /* see if the name matches */
+         if buf (i*8 + j) <> monitor (j + 1) then found = 0;
+      end;
+   end; /* of look for MONITOR */
+
+   if (not found) then do; /* not there */
+      print;
+      print 'Bootstrap Error:  Could not find file ''MONITOR''.';
+      stop;
+   end;
+
+   j = buf (i*8 + 4); k = buf (i*8 + 6); i = shr(buf (i*8 + 7), 8); /* starting sector and length */
+   call readdata (i, j, buf, k); /* read MONITOR into memory */
+
+   write("300") = addr(buf (0)); /* set source */
+   write("301") = 0; /* destination */
+   write("302") = k; /* length */
+   write("320") = "176003"; /* transfer to ROM core to core copy routine */
+end winboot;
+   
+/* Main Program */
+
+dcl bufptr fixed; /* pointer to first word of free memory */
+
+bufptr = core(c#contab + c#vstart) + core(c#contab + c#vlngth) + core(c#contab + c#stklen); /* find location of free memory */
+
+call winboot(location(bufptr)); /* boot up */

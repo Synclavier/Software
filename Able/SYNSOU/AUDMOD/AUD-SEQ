@@ -1,0 +1,1546 @@
+/* AUD-SEQ  $TITLE  Sequencer control panel */
+
+/* 11/11/88 - LSS - changed 'Sequence Editor' to 'Event List Editor'  */
+/* 10/03/88 - cj - set bits for correct display when using live click */
+/*                 track                                              */
+/* 08/18/88 - cj - redesigned sequencer edit panel for vitc & music   */
+
+dcl Seq.Group                fixed public;   /* Group # of seq panel     */
+dcl Seq.Row                  fixed public;   /* Row above top line       */
+dcl Seq.Size                 fixed public;   /* rows of seq panel        */
+dcl Seq.Screen.Space         fixed;
+dcl Users.Seq.Size           fixed public;
+
+/* Top Row: */
+
+dcl Seq.Drag.Take            fixed;          /* drag time take button    */
+dcl Seq.Drag.Time            fixed;          /* id of drag time field    */
+dcl Seq.Track.Defined        fixed;          /* bits for those defined   */
+dcl Seq.Track.Solo.Buttons   fixed;          /* Id of first solo button  */
+dcl Seq.Track.Number         fixed;          /* Id of track num string   */
+dcl Seq.Track.Name.Gstring   fixed;          /* Id of first name gstring */
+dcl Seq.Track.Out.Gstring    fixed;          /* Id of track output gstr  */
+dcl Seq.Track.Vol.Gstring    fixed;          /* Id of track vol gstr     */
+
+dcl Seq.Event.Take.Table     fixed;
+
+/* Note Area: */
+
+dcl Seq.Pitch.Name.Type       fixed;
+dcl Seq.Pitch.Name.Table      fixed;
+dcl Seq.Key.Number.Type       fixed;
+dcl Seq.Key.Number.Table      fixed;
+dcl Seq.Event.Name.Type       fixed;
+dcl Seq.Event.Name.Table      fixed;
+dcl Seq.Duration.Heading      fixed;
+dcl Seq.Duration.Type         fixed;
+dcl Seq.Duration.Table        fixed;
+dcl Seq.End.Time.Heading      fixed;
+dcl Seq.End.Time.Locked.Table fixed;
+dcl Seq.End.Time.Take.Table   fixed;
+dcl Seq.End.Time.Type         fixed;
+dcl Seq.End.Time.Table        fixed;
+dcl Seq.Velocity.Type         fixed;
+dcl Seq.Velocity.Table        fixed;
+dcl Seq.Caption.Type          fixed;
+dcl Seq.Caption.Table         fixed;
+
+dcl Seq.Heading.Contents      fixed;
+
+dcl Seq.Note.Scroll.Bar      fixed;          /* Id of ntoe scroll bar    */
+dcl Seq.Track.Scroll.Bar     fixed;          /* Id of trak scroll bar    */
+
+dcl Seq.Settings.Command.Table    fixed;     /* display/edit/track       */
+dcl Seq.Verify.Undo.Search        fixed;
+dcl Seq.Add.Commands              fixed;
+dcl Seq.Delete.Move.Play.From     fixed;
+dcl Seq.Move.Copy                 fixed;
+
+dcl Move.Or.Copy                  fixed;
+
+dcl Seq.Dialog.Mode          fixed PUBLIC;
+dcl Seq.Event.Display.Row    fixed;     /* top row of EVENT display area */
+dcl Seq.Event.Display.Size   fixed;     /* number of rows in EVENT display area */
+dcl Seq.Event.Display.Left.X lit '16';  /* x-coordinate of left edge of EVENT display area */
+
+dcl Seq.Perm.Dialog.Row      lit '(Seq.Row+Seq.Size-2)'; /* permanent dialog row */
+dcl Seq.Dialog.Row           lit '(Seq.Row+Seq.Size  )'; /* transparent row to put SEQ EDIT dialogs on */
+dcl Seq.Event.Time.Heading   lit '(Seq.Alloc+ 47)';      /* id of event time heading                   */
+dcl Seq.Event.Time.Type      lit '(Seq.Alloc+ 48)';      /* id of event time type                      */
+dcl Seq.Event.Time.Table     lit '(Seq.Alloc+ 49)';      /* id of event time table                     */
+dcl Seq.Top.Line.First.Id    lit '(Seq.Alloc+ 50)';      /* id of first item on top line               */
+dcl Seq.Top.Line.Last.Id     lit '(Seq.Alloc+ 99)';      /* id of last  item on top line               */
+dcl Seq.Note.Area.First.Id   lit '(Seq.Alloc+100)';      /* id of first item in note area              */
+dcl Seq.Note.Area.Last.Id    lit '(Seq.Alloc+399)';      /* id of last  item in note area              */
+dcl Seq.Dialog.First.Id      lit '(Seq.Alloc+400)';      /* id of first item on dialog line            */
+dcl Seq.Dialog.Last.Id       lit '(Seq.Alloc+449)';      /* id of last  item on dialog line            */
+/*  Seq.Perm.First.Id        lit '(Seq.Alloc+450)';         id of first item in permanent dialog line  */
+/*  Seq.Perm.Last.Id         lit '(Seq.Alloc+499)';         id of last  item in permanent dialog line  */
+
+dcl Seq.Tracks               fixed PUBLIC;
+dcl Seq.Record.Track.Col     fixed;
+
+/* Bits word to control what is displayed: */
+
+dcl Display.Note.Contents    fixed PUBLIC;
+dcl Display.Name.Length      fixed PUBLIC;
+
+dcl Display.Pitch.Name       lit ' 1';
+dcl Display.Key.Number       lit ' 2';
+dcl Display.Event.Name       lit ' 4';
+dcl Display.Duration         lit ' 8';
+dcl Display.End.Time         lit '16';
+dcl Display.Velocity         lit '32';
+dcl Display.Caption          lit '64';
+
+dcl Pitch.Name.Ix            lit ' 0';
+dcl Key.Number.Ix            lit ' 1';
+dcl Event.Name.Ix            lit ' 2';
+dcl Duration.Ix              lit ' 3';
+dcl Lock.Ix                  lit ' 4';
+dcl End.Time.Ix              lit ' 5';
+dcl Velocity.Ix              lit ' 6';
+dcl Caption.Ix               lit ' 7';
+dcl Oursize.Ix               lit ' 8';
+dcl Num.Ixs                  lit ' 9';
+
+dcl Current.Locations(Num.Ixs-1) fixed;
+
+dcl Display.Events           lit ' 256';
+dcl Display.Rtes             lit ' 512';
+dcl Display.Loops            lit '1024';
+
+dcl Defined   fixed;         /* holds length of defined region for erase */
+dcl Spacing   fixed;         /* holds horiz spacing per track            */
+
+/* variables for 'Permanent' dialog line */
+
+dcl Perm.Dialog.Mode             fixed PUBLIC;
+
+dcl Display.#.Of.Tracks          fixed PUBLIC;
+dcl Display.#.Of.Rows            fixed PUBLIC;
+dcl Display.Events.Table         fixed PUBLIC;
+dcl Display.Info.Table           fixed PUBLIC;
+dcl Display.Name.Len.Id          fixed PUBLIC;
+
+dcl Display.Format.Table         fixed PUBLIC;
+
+dcl Display.Ripple.Table         fixed PUBLIC;
+dcl Display.Show.Headings.Table  fixed PUBLIC;
+dcl Display.Scroll.Table         fixed PUBLIC;
+dcl Display.Show.Offsets.table   fixed PUBLIC;
+dcl Display.Print.Table          fixed PUBLIC;
+
+dcl Ripple.Mode                  fixed PUBLIC;
+dcl Show.No.Headings             fixed PUBLIC;
+dcl Seq.Scroll.Mode              fixed public;
+dcl Show.Offsets                 fixed PUBLIC;
+
+dcl Display.Erase.Bounce.Clear   fixed PUBLIC;
+dcl Display.Solo.Track.Switch    fixed PUBLIC;
+dcl Display.Solo.Tracks.#1       fixed PUBLIC;
+dcl Display.Solo.Tracks.#2       fixed PUBLIC;
+dcl Display.DTD.Tracks           fixed PUBLIC;
+
+dcl Display.Solo.Tracks.Base     fixed PUBLIC;
+
+/* Information for refreshing: */
+
+dcl Seq.Refresh              fixed public;
+dcl Seq.Refresh.Time(1)      fixed;
+dcl Seq.Cursor.Begin(1)      fixed public;
+dcl Seq.Cursor.End  (1)      fixed public;
+dcl Seq.Screen.Begin(1)      fixed public;
+dcl Seq.Screen.End  (1)      fixed public;
+dcl Time.Cursor.Row          fixed;
+dcl Seq.Note.Skip            fixed;
+
+dcl Note.Area.Contents(15)   fixed;   /* index by row.  bit is set if any */
+                                      /* info for corresponding track     */
+                                      /* has been printed (ie must be     */
+                                      /* erased)                          */
+
+dcl Note.Area.Force   (15)   fixed;   /* index by row.  bit is set if the */
+                                      /* not information for this track   */
+                                      /* and note must be written even    */
+                                      /* if the new information equals    */
+                                      /* the old information.             */
+
+dcl Event.Time.Enabled        fixed;  /* holds bits for each row of Seq.  */
+                                      /* event.Time.table.   Bit is a 1   */
+                                      /* if corresponding table cell      */
+                                      /* is enabled.                      */
+
+
+dcl Highlighted        (15)   fixed;  /* index by row.  bit is set if     */
+                                      /* the note area has been           */
+                                      /* highlighted                      */
+
+dcl Highlighted.Length        fixed;  /* width of highlight region        */
+
+dcl Ripple.Verify.Rows        fixed;  /* bits for which rows have had     */
+dcl Ripple.Edit.Type          fixed;  /* new start times entered.         */
+dcl Ripple.Edit.Row           fixed;
+dcl Ripple.Edit.Track         fixed;
+dcl Ripple.Edit.Code          fixed;
+
+dcl Seq.Panel.Started.Play    fixed;  /* for operation of 'play.from'     */
+dcl Seq.End.Times.Locked      fixed;  /* true if end times locked         */
+
+
+/* Variables to control selecting and highlighting of notes: */
+
+/* $page - routine to define seq panel */
+
+/* Define basic sequence panel frame, including top line, scroll bar, */
+/* and command button areas:                                          */
+
+DEFINE.SEQUENCER.PANEL: proc(row,size,title) swapable;
+   dcl row               fixed; /* position of top row of panel */
+   dcl size              fixed; /* # of lines in panel (including title) */
+   dcl title             fixed; /* set true to show the panel title */
+   dcl (i,j,k)           fixed;
+   dcl (y1,y2)           fixed;
+   dcl buf           (8) fixed;
+   dcl (first,last)      fixed;
+
+   DEPOSIT.BUTTON.LABEL: proc (Id,Row,Col,Size,Str1,Str2);
+      dcl Id              fixed;
+      dcl (row,col)       fixed;
+      dcl size            fixed;
+      dcl str1            array;
+      dcl str2            array;
+      dcl (buf1,buf2) (8) fixed;
+
+      call Copy.String(Str1,Buf1);
+      call Copy.String(Str2,Buf2);
+
+      call Deposit.Graphics.Button.Table.Label(Id,Row,Col,Size,Buf1,Buf2);
+   end DEPOSIT.BUTTON.LABEL;
+
+   if title then do;
+      call Copy.String('EVENT LIST EDITOR',buf);
+      call Print.Panel.Title(row,buf);
+   end;
+
+   call Set.Auto.Allocation.Id(Seq.Alloc);
+   call Set.Default.Action(O#ACT.Middle.Press);
+
+   y1 = -(size-3)*100;    /* top of command button row              */
+   y2 = -(size-2)*100;    /* bot of command button row              */
+
+   write("313")=addr(misc.buf(0));
+
+   mr13i=O#ICON.Plot;    mr13i=8000; mr13i=0; /* box around sequencer panel */
+   mr13i=O#ICON.Plot;    mr13i=8000; mr13i=(-size*100);
+   mr13i=O#ICON.Plot;    mr13i=   0; mr13i=(-size*100);
+   mr13i=O#ICON.Plot;    mr13i=   0; mr13i=0;
+
+   /* divider between note event area and track titles         */
+   mr13i=O#ICON.Connect; mr13i=   0; mr13i=-100; 
+                         mr13i=8000; mr13i=-100;
+
+   /* divider between note event area and command button strip */
+   mr13i=O#ICON.Connect; mr13i=   0; mr13i=y1;
+                         mr13i=8000; mr13i=y1;
+
+   /* divider between command buttons and permanent dialog line: */
+
+   mr13i=O#ICON.Connect; mr13i=   0; mr13i=y2;
+                         mr13i=8000; mr13i=y2;
+
+   /* vertical dividers on command button strip */
+
+   MR13i = O#Icon.BlockModeOn;
+
+   mr13i=O#ICON.Connect; mr13i=3200; mr13i=y2; /* solid line between      */
+                         mr13i=3250; mr13i=y1; /* track select and verify */
+
+   mr13i=O#ICON.Connect; mr13i=4750; mr13i=y2; /* solid line between      */
+                         mr13i=4800; mr13i=y1; /* search and add note     */
+
+   MR13i = O#Icon.BlockModeOff;
+
+   mr13i=O#ICON.Connect; mr13i=6500; mr13i=y2; /* solid line between      */
+                         mr13i=6500; mr13i=y1; /* add notes and delete events */
+
+   mr13i=O#ICON.End;
+
+   First = Define.Graphics.Icon(S#AA,0,(row-1)*100,0,misc.buf);
+
+   call Set.Default.Action(O#ACT.Middle.Press);
+   call Set.Default.Attr(0,ATTR#Normal\ATTR#AltIntensity);
+   call Set.Default.Attr(1,ATTR#Normal\ATTR#AltIntensity\ATTR#Reverse);
+
+   call            Load.Justified.Take.Icon(Misc.Buf);
+   Seq.Drag.Take = Define.Graphics.Icon(S#AA, -260, row*100, 1, Misc.Buf);
+
+   Seq.Drag.Time = Define.32Bit.MSEC(S#AA,row,1,14,AEE.Time.Format,cf#time,cf#default,cf#default);
+   call Set.Object.Mouse.Access(Seq.Drag.Time, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+   call Set.Object.Action(Seq.Drag.Time,O#ACT.Update.On.Dep,true);
+   call Set.Object.Drag  (Seq.Drag.Time,true,true);
+   call Set.Object.Arrow.Links(Seq.Drag.Time, ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+
+   /* now define the COMMAND bar at the bottom of the panel */
+
+  
+   y1 = (row+size-4)*100;
+   y2 = (row+size-3)*100;
+
+   Seq.Settings.Command.Table = Define.Graphics.Button.Table
+      (s#aa, 0000, y1, 3200, y2, 4, 1, O#GBTAB.Divide);
+
+   Seq.Verify.Undo.Search = Define.Graphics.Button.Table
+      (s#aa, 3250, y1, 4750, y2, 3, 1, O#GBTAB.Divide);
+
+   /* show initial box around VERIFY button if doing ripple edit: */
+   call Highlight.Graphics.Button.Table.Entry
+      (Seq.Verify.Undo.Search, 0, 0, shl(Ripple.Mode <> 0,1), 4, 1);
+
+   Seq.Add.Commands = Define.Graphics.Button.Table
+      (s#aa, 4800, y1, 6500, y2, 2, 2, O#GBTAB.Divide);
+
+   /* define seq.move.copy first since it is actually UNDER the */
+   /* seq.delete.move.play.from table:                          */
+
+   Seq.Move.Copy      = Define.Graphics.Button.Table
+      (s#aa, 7000, y1, 7500, y2, 1, 2, O#GBTAB.Divide);
+
+   Seq.Delete.Move.Play.From = Define.Graphics.Button.Table
+      (s#aa, 6500, y1, 8000, y2, 3, 1, O#GBTAB.Divide);
+
+   Seq.Note.Scroll.Bar = Define.Scroll.Bar(S#AA,O#SBAR.Orient.Ver,
+      O#SBAR.Just.Left, gpos.x(8010), gpos.y((row     -1)*100)-1,
+                                      gpos.y((row+size-1)*100)+1);
+
+   /* Set fill to be horizontal,  4 pixel spacing */
+   call SET.SCROLL.BAR.FILL.PATTERN(Seq.Note.Scroll.Bar, 2);
+
+   disable.deposits = 1;
+   call Activate.Scroll.Bar(Seq.Note.Scroll.Bar,500);
+   disable.deposits = 0;
+   call Set.Scroll.Bar.Bits(Seq.Note.Scroll.Bar,O#SBAR.Bits.Real.Time,true);
+
+   Seq.Track.Scroll.Bar = Define.Scroll.Bar(S#AA, O#SBAR.Orient.Hor,
+                          O#SBAR.Just.Top,
+                          gpos.y((row+size-2)*100), gpos.x(0000), gpos.x(8000));
+
+   disable.deposits = 1;
+   call Activate.Scroll.Bar(Seq.Track.Scroll.Bar,0);
+   disable.deposits = 0;
+   call Set.Scroll.Bar.Bits(Seq.Track.Scroll.Bar,O#SBAR.Bits.Real.Time,true);
+   Last = Seq.Track.Scroll.Bar;
+
+   Seq.Event.Take.Table = Define.Graphics.Button.Table
+      (s#aa, -200, row*100, 0000, y1, 1, size-4, 0);
+
+   Seq.Group = Group.Objects(Seq.Group.Id,Seq.Alloc,Seq.Alloc+499,Get#Screen.Event);
+
+   /* Do not update time table until it is filled: */
+
+   call Activate.Object.Range(First,Seq.Event.Take.Table);
+   call Update.Object.Range  (First,Last);
+
+   /* Fill in graphics button table: */
+
+   call Deposit.Button.Label(Seq.Settings.Command.Table,0,0,1,'Set Display' ,'Contents');
+   call Deposit.Button.Label(Seq.Settings.Command.Table,0,1,1,'Select Time' ,'Format');
+   call Deposit.Button.Label(Seq.Settings.Command.Table,0,2,1,'Set Edit'    ,'Features');
+   call Deposit.Button.Label(Seq.Settings.Command.Table,0,3,1,'Select'      ,'Tracks');
+
+   call Deposit.Button.Label(Seq.Verify.Undo.Search,0,0,1,'Verify' ,NulStr);
+   call Deposit.Button.Label(Seq.Verify.Undo.Search,0,1,1,'      ' ,NulStr);
+   call Deposit.Button.Label(Seq.Verify.Undo.Search,0,2,1,'      ' ,NulStr);
+
+   call Deposit.Button.Label(Seq.Add.Commands,0,0,1,'Add Note -' ,NulStr);
+   call Deposit.Button.Label(Seq.Add.Commands,1,0,1,'Add Note +' ,NulStr);
+   call Deposit.Button.Label(Seq.Add.Commands,0,1,1,'Add Ind Lp' ,NulStr);
+   call Deposit.Button.Label(Seq.Add.Commands,1,1,1,'Add RTE   ' ,NulStr);
+
+   call Deposit.Button.Label(Seq.Delete.Move.Play.From,0,0,1,'Delete' ,'Events');
+   call Deposit.Button.Label(Seq.Delete.Move.Play.From,0,2,1,'Play'   ,'From');
+
+   call Deposit.Button.Label(Seq.Move.Copy,0,0,1,'Move' ,NulStr);
+   call Deposit.Button.Label(Seq.Move.Copy,1,0,1,'Copy' ,NulStr);
+
+   do i = 0 to size-5;
+      call Deposit.Button.Label(Seq.Event.Take.Table, i, 0, 1, 'T', NulStr);
+   end;
+
+   /* Set up Default Note Area contents: */
+
+   if Display.Note.Contents = 0
+   then Display.Note.Contents = Display.Events
+                              \ Display.Loops
+                              \ Display.Event.Name;
+
+   if Display.Name.Length   = 0
+   then Display.Name.Length = 8;
+
+   /* Draw horizontal grid lines as well: */
+
+   vector_mode;
+   call Line_Type (1);
+   call Data_level(2);
+
+   do i = 3 to size-5 by 3;
+      call connect(gpos.x(Seq.Event.Display.Left.X*100-50)+1,
+                   gpos.y((row+i)*100),
+                   gpos.x(8000)-1,
+                   gpos.y((row+i)*100));
+   end;
+
+   call Line_Type (0);
+   call Data_Level(0);
+   transparent_mode;
+
+   Time.Cursor.Row = (-1); /* no time cursor displayed at the moment */
+
+   do i = 0 to 15;         /* indicate no area is highlighted at     */
+      Highlighted(i) = 0;  /* the moment                             */
+   end;
+
+   Ripple.Verify.Rows = 0; /* no new start times pending             */
+   Ripple.Edit.Type   = 0;
+
+end DEFINE.SEQUENCER.PANEL;
+
+/* $page- update table object */
+
+/* Routine to force an update of a table cell so that the */
+/* cell highlights quickly.                               */
+
+Update.Table.Object: proc(Table.Id, Col, Row, Type.Id) swapable;
+   dcl Table.Id    fixed;
+   dcl Col         fixed;
+   dcl Row         fixed;
+   dcl Type.Id     fixed;
+
+   if  (Table.Id = Seq.Event.Time.Table)      /* don't highlight empty */
+   then do;                                   /* event time lines.     */
+      if (Event.Time.Enabled & bits(row)) = 0
+      then return;
+   end;
+
+   /* also,  do not highlight empty areas of the */
+   /* note area:                                 */
+
+   else do;
+      if (Note.Area.Contents(row) & bits(col)) = 0
+      then return;
+   end;
+
+   call Fetch.Table(Table.Id, 0, Row);
+
+   /* check for disabled end time/duration fields on rte notes: */
+
+   if (Fetch.Object.Info(Type.Id, O#Status) & O#STAT.Exhibit) <> 0
+   then do;
+      call DEPOSIT.OBJECT.INFO(Type.Id, O#Trans.Row, Seq.Event.Display.Row + row); /* can you believe fetch.table does not set this information? */
+      call ENABLE.OBJECT (Type.Id);
+      call SET.OBJECT.STATUS(Type.Id, O#STAT.Update, true);
+      call Update.Object (Type.Id);
+      call DISABLE.OBJECT(Type.Id);
+
+      disable.deposits = 1;                  /* keep the table record */
+      call Deposit.Table (Table.Id, 0, Row); /* itself up to date.    */
+      disable.deposits = 0;
+   end;
+
+end Update.Table.Object;
+
+/* force update of transparent mode info for mac: */
+
+Update.Transparent.Mode.Info: proc(row,col) swapable;
+   dcl (row,col) fixed;
+
+   if (Note.Area.Contents(row) & bits(col)) <> 0
+   then do;
+      if Seq.Pitch.Name.Table <> 0
+      then call Update.Table.Object (Seq.Pitch.Name.Table + col, Col, Row, Seq.Pitch.Name.Type + col);
+      if Seq.Key.Number.Table <> 0
+      then call Update.Table.Object (Seq.Key.Number.Table + col, Col, Row, Seq.Key.Number.Type + col);
+      if Seq.Event.Name.Table <> 0
+      then call Update.Table.Object (Seq.Event.Name.Table + col, Col, Row, Seq.Event.Name.Type + col);
+   end;
+end Update.Transparent.Mode.Info;
+
+/* $page - routines to clean up various note selection bomb outs */
+
+/* routine to force an update on any tracks that had new start times */
+/* entered but not changed yet:                                      */
+
+Clean.Out.Verify.Tracks:proc swapable;
+   dcl i fixed;
+
+   if Ripple.Verify.Rows = 0
+   then return;
+
+   do i = 0 to Seq.Event.Display.Size-1;
+      if (Ripple.Verify.Rows & bits(i)) <> 0
+      then do;
+         Note.Area.Force(i) = (-1);     /* force all areas since user may be jogging end times */
+         Seq.Refresh = Seq.Refresh \ 8;
+      end;
+   end;
+
+   Ripple.Verify.Rows = 0;
+   Ripple.Edit.Type   = 0;
+   call Highlight.Graphics.Button.Table.Entry(Seq.Verify.Undo.Search, 0, 0, 0, 2, 0);
+
+end Clean.Out.Verify.Tracks;
+
+/* $page - routines to highlight/unhighlight within the note area: */
+
+dcl Seq.Fill.Pattern lit 'ASC.D';   /* 2 space vertical line (grey) */
+
+Clear.All.Highlights: proc swapable;
+   dcl (i,j,k)  fixed;
+
+   i = 0;                                      /* see if any highlighted */
+   do j = 0 to Seq.Event.Display.Size-1;       /* for speed              */
+      i = i \ Highlighted(j);
+   end;
+
+   if i <> 0 then do;
+
+      Vector_Mode;
+      call Data_Level(1);
+      call Set.Fill.Pattern(Seq.Fill.Pattern);
+      call BlockMode_On;
+
+      do i = 0 to Seq.Event.Display.Size-1;
+         do j = 0 to Seq.Tracks-1;
+            if (Highlighted(i) & bits(j)) <> 0
+            then do;
+
+               call connect(gpos.x((Seq.Event.Display.Left.X + j*spacing)*100),
+                            gpos.y((Seq.Event.Display.Row+i  )*100-15),
+                            gpos.x((Seq.Event.Display.Left.X + j*spacing + Highlighted.Length)*100),
+                            gpos.y((Seq.Event.Display.Row+i-1)*100+5 ));
+
+               Highlighted(i) = Highlighted(i) xor bits(j);
+
+               /* must redraw text immediately on mac */
+
+               if termulator then do;
+                  Transparent_Mode;
+                  call Update.Transparent.Mode.Info(i,j);
+                  Vector_Mode;
+               end;
+            end;
+         end;
+      end;
+
+      call BlockMode_Off;
+      call Set.Fill.Pattern(ASC.UNL);
+      call Data_Level(0);
+      Transparent_Mode;
+   end;
+
+   do i = 0 to 15;         /* indicate no area is highlighted at     */
+      Highlighted(i) = 0;  /* the moment                             */
+   end;
+
+end Clear.all.highlights;
+
+Toggle.Highlight: proc(row, col) swapable;
+   dcl row      fixed;
+   dcl col      fixed;
+   dcl (i,j,k)  fixed;
+
+   Vector_Mode;
+
+   if ((Highlighted(row) & bits(col)) != 0)
+      call Data_Level(1);
+   else
+      call Data_Level(0);
+
+   call Set.Fill.Pattern(Seq.Fill.Pattern);
+   call BlockMode_On;
+
+   call connect(gpos.x((Seq.Event.Display.Left.X + col*spacing)*100),
+                gpos.y((Seq.Event.Display.Row+row  )*100-15),
+                gpos.x((Seq.Event.Display.Left.X + col*spacing + Highlighted.Length)*100),
+                gpos.y((Seq.Event.Display.Row+row-1)*100+5 ));
+
+   Highlighted(row) = Highlighted(row) xor bits(col);
+
+   call BlockMode_Off;
+   call Set.Fill.Pattern(ASC.UNL);
+   call Data_Level(0);
+   Transparent_Mode;
+
+   if termulator then call Update.Transparent.Mode.Info(row,col);
+
+end Toggle.Highlight;
+
+Set.Highlight: proc(row, col) swapable;
+   dcl (row,col) fixed;
+
+   if (Highlighted(row) & bits(col)) = 0
+   then call Toggle.Highlight(row, col);
+
+end Set.Highlight;
+
+Clear.Highlight: proc(row, col) swapable;
+   dcl (row,col) fixed;
+
+   if (Highlighted(row) & bits(col)) <> 0
+   then call Toggle.Highlight(row, col);
+
+end Clear.Highlight;
+
+/* $page - Set Track Scroll Bar */
+
+/* Routine to set scroll bar to math the value in column 1: */
+
+Set.Seq.Track.Scroll.Bar: proc;
+   dcl i fixed;
+   dcl j fixed;
+   dcl k fixed;
+
+   /* avoid infinite loops and user problems if user */
+   /* is already on the scroll.bar                   */
+
+   if Cur.Obj.Id = Seq.Track.Scroll.Bar
+   then return;
+
+   /* get number of possible track numbers for column 0: */
+
+   i = (First.Lod.Track - Num.KBD.Tracks) - (Seq.Tracks-1) - 1;
+
+   j = trkindex(0) - Num.Kbd.Tracks;
+   if j < 0 then j = 0;
+
+   if j > i then j = i;
+
+   load 1000; mul j; mwait; div i;
+   if rem >= shr(i,1) then k = res + 1;
+   else                    k = res    ;
+
+   disable.deposits = 1;
+   call Deposit.Scroll.Bar(Seq.Track.Scroll.Bar, k);
+   disable.deposits = 0;
+
+end Set.Seq.Track.Scroll.Bar;
+
+/* $page - misc plot routines */
+
+/* draw a small R in the track button that is selected for */
+/* recording:                                              */
+
+DRAW.SEQ.RECORD.TRACK.DISPLAY: proc (State) public swapable;
+   dcl State fixed;
+
+   MAP.TRACK.TO.COL: proc (Trk) fixed;
+      dcl (Trk,I) fixed;
+      do I=0 to Seq.Tracks-1;
+         if TrkIndex(I)=Trk then return I;
+      end;
+      return (-1); /* no match found */
+   end MAP.TRACK.TO.COL;
+
+   FILL.BUTTON: proc (Col);
+      dcl Col     fixed;
+      dcl Str (1) fixed;
+      dcl solo    fixed;
+
+      if Col >= 0 then do;
+         solo = Get.Graphics.Button.Table.Highlight(Seq.Track.Solo.Buttons+Col,0,0);   // Get current state
+         
+         if (solo != 0)                                                                // Remove highlighting so R draws correctly
+            Highlight.Graphics.Button.Table.Entry(Seq.Track.Solo.Buttons+Col,0,0,0,2,0);
+
+         call Copy.String('R',Str);
+         call Deposit.Graphics.Button.Table.Label(Seq.Track.Solo.Buttons+Col,0,0,3,Str,NulStr);
+         
+         if (solo != 0)
+            Highlight.Graphics.Button.Table.Entry(Seq.Track.Solo.Buttons+Col,0,0,1,2,0);
+      end;
+   end FILL.BUTTON;
+
+   UNDRAW.R.DISPLAY: proc;
+      if Seq.Record.Track.Col>=0 then do;        /* R display already there */
+         call Fill.Button(Seq.Record.Track.Col); /* turn off R display */
+         Seq.Record.Track.Col=(-1);              /* denote no R displayed */
+      end;
+   end UNDRAW.R.DISPLAY;
+
+   if Seq.Track.Solo.Buttons = 0              /* no R if no solo buttons */
+   then return;                               /* defined                 */
+
+   call Undraw.R.Display;                     /* get rid of any existing R display */
+
+   if State<>0 then do;                       /* DRAW current RECD.TRK display */
+      if Recd.Trk ige Num.Kbd.Tracks then do; /* draw new R display */
+         Seq.Record.Track.Col=Map.Track.To.Col(Recd.Trk);
+         call Fill.Button(Seq.Record.Track.Col);
+      end;
+   end;
+
+end DRAW.SEQ.RECORD.TRACK.DISPLAY;
+
+PLOT.TRACK.LINES: proc (tracks,datalevel,row,col,size) swapable;
+   dcl tracks     fixed;
+   dcl datalevel  fixed;
+   dcl (row,col)  fixed;
+   dcl size       fixed;
+   dcl (x,i)      fixed;
+
+   vector_mode;
+   call Line_Type(1);
+   call Data_level(datalevel);
+
+   do i = 0 to tracks-1;
+      x = gpos.x((col+i*spacing)*100-50);
+      call connect(x,gpos.y((row-1)*100)-1,x,gpos.y((row+size-4)*100)+1);
+   end;
+
+   call Line_Type(0);
+   call Data_Level(0);
+   transparent_mode;
+
+end PLOT.TRACK.LINES;
+
+/* Fill track table with 2 digit numbers: */
+
+Fill.Track.Table: proc(Id, Start) PUBLIC swapable;
+   dcl Id        fixed;
+   dcl Start     fixed;
+   dcl i         fixed;
+   dcl (s1)  (4) fixed;
+
+   do i = 0 to 7;
+      load (Start + i + 1);
+      div  10;
+      s1(0) = 2;
+      s1(1) = shl(asc.0+rem,8) \ (asc.0+res);
+      call Deposit.Graphics.Button.Table.Label(Id, 0, i, 1, s1, NulStr);
+   end;
+
+   call Check.Next.Event;
+
+   do i = 8 to 15;
+      load (Start + i + 1);
+      div  10;
+      s1(0) = 2;
+      s1(1) = shl(asc.0+rem,8) \ (asc.0+res);
+      call Deposit.Graphics.Button.Table.Label(Id, 1, i-8, 1, s1, NulStr);
+   end;
+
+   call Check.Next.Event;
+end Fill.Track.Table;
+
+/* $page - define sequence template   */
+
+/* define items within the top line and within the note area: */
+
+/* routine to undefine prior top line */
+
+UNDEFINE.SEQUENCER.TOP.LINE: proc (row,col) swapable;
+   dcl (row,col) fixed; /* y & x transparent coords of upper left corner of track region */
+   dcl (i,j,k  ) fixed;
+
+   call Draw.Seq.Record.Track.Display(0); /* undraw current R display */
+
+   call cpos(row,col);          /* erase all transparent mode top line */
+   call erase.to.end.of.line;   /* items quickly                       */
+
+   do i = 0 to 15;
+
+      /* Must go through and erase all graphics mode objects: */
+
+      if (Seq.Track.Defined & bits(i)) <> 0
+      then do;
+
+         /* erase solo buttons          */
+         if Seq.Track.Solo.Buttons <> 0
+         then do;
+            call Draw.GBox.Around.Object(Seq.Track.Solo.Buttons+i,2,0,0,0);
+            call Highlight.Graphics.Button.Table.Entry(Seq.Track.Solo.Buttons+I,0,0,0,2,0);
+         end;
+
+         /* erase name strings          */
+         if Seq.Track.Name.Gstring <> 0
+         then do;
+            call Erase.Object   (Seq.Track.Name.Gstring + i);
+         end;
+
+         /* erase output strings        */
+         if Seq.Track.Out.Gstring   <> 0
+         then do;
+            call Erase.Object   (Seq.Track.Out.Gstring + i);
+         end;
+
+         /* erase vol strings           */
+         if Seq.Track.Vol.Gstring   <> 0
+         then do;
+            call Erase.Object   (Seq.Track.Vol.Gstring + i);
+         end;
+
+      end;
+   end;
+
+   /* undefine all objects from the last top line: */
+
+   call Undefine.Object.Range(Seq.Top.Line.First.Id,Seq.Top.Line.Last.Id);
+
+end UNDEFINE.SEQUENCER.TOP.LINE;
+
+UNDEFINE.SEQUENCER.NOTE.AREA: proc (row,col,size,resize) swapable;
+   dcl (row,col,size) fixed; /* y & x transparent coords of upper left corner of track region */
+   dcl (resize      ) fixed; /* 1,2 = undefine note area only           */
+                             /* 3   = undefine note area & event time   */
+   dcl (i,j,k       ) fixed;
+
+   /* NOTE: row is the row of the TOP LINE of the sequence panel */
+
+   DEPOSIT.BUTTON.LABEL: proc (Id,Row,Col,Size,Str1,Str2);
+      dcl Id               fixed;
+      dcl (row,col)        fixed;
+      dcl size             fixed;
+      dcl str1             array;
+      dcl str2             array;
+      dcl (buf1,buf2) (10) fixed;
+
+      call Copy.String(Str1,Buf1);
+      call Copy.String(Str2,Buf2);
+
+      call Deposit.Graphics.Button.Table.Label(Id,Row,Col,Size,Buf1,Buf2);
+   end DEPOSIT.BUTTON.LABEL;
+
+   /* if re-sizing # of columns,  then must erase & undefine */
+   /* earlier information:                                   */
+
+   call Plot.Track.Lines(Seq.Tracks,2,row,col,size); /* turn off any existing track lines */
+   call Clear.All.Highlights;                        /* and any highlighting              */
+
+   do i = 0 to size-5;               /* Quickly erase all transparent */
+      if resize = 3                  /* mode objects                  */
+      then call cpos(row+1+i,0);     /* Erase event time table and    */
+      else call cpos(row+1+i,col);   /* whole line if we are moving   */
+      call erase.to.end.of.line;     /* the event table; else just    */
+      Note.Area.Contents(i)= 0;      /* note area.                    */
+   end;
+
+   do i = 0 to 15;
+
+      /* Must go through and erase all graphics mode objects: */
+
+      if (Seq.Track.Defined & bits(i)) <> 0
+      then do;
+
+         /* Erase Duration Headings:   */
+
+         if Seq.Duration.Heading <> 0
+         then do;
+            call Deposit.Button.Label(Seq.Duration.Heading+i, 0, 0, 1, 'Duration', NulStr);
+         end;
+
+         /* Erase End Time Headings:   */
+
+         if Seq.End.Time.Heading <> 0
+         then do;
+            if Seq.Heading.Contents <> 0
+            then call Deposit.Button.Label(Seq.End.Time.Heading+i, 0, 0, 1, 'Offset Time', NulStr);
+            else call Deposit.Button.Label(Seq.End.Time.Heading+i, 0, 0, 1, 'End Time', NulStr);
+         end;
+
+         /* Erase lock and take icons: */
+
+         if Seq.End.Time.Locked.Table <> 0
+         then do;
+            do j = 0 to Seq.Event.Display.Size-1;
+               call Deposit.Button.Label(Seq.End.Time.Locked.Table+i, j, 0, 1, 'L', NulStr);
+            end;
+            call Highlight.Graphics.Button.Table
+            (Seq.End.Time.Locked.Table+i, 0, 1, 0);
+            call Highlight.Graphics.Button.Table
+            (Seq.End.Time.Locked.Table+i, 0, 1, 1);
+         end;
+
+         if Seq.End.Time.Take.Table <> 0
+         then do j = 0 to Seq.Event.Display.Size-1;
+            call Deposit.Button.Label(Seq.End.Time.Take.Table+i, j, 0, 1, 'T', NulStr);
+         end;
+      end;
+   end;
+
+   /* undefine all objects from the last note area: */
+
+   call Undefine.Object.Range(Seq.Note.Area.First.Id,Seq.Note.Area.Last.Id);
+
+   /* Undefine event time table if changing instructions y/n: */
+
+   if Resize = 3 then do;
+      /* note: depend on deposit.graphics.button.table.label to do nothing */
+      /* if event start time label is not defined.                         */
+      call Deposit.Button.Label (Seq.Event.Time.Heading, 0, 0, 1, 'Event Start Time', NulStr);
+      call Undefine.Object.Range(Seq.Event.Time.Heading, Seq.Event.Time.Table);
+   end;
+end UNDEFINE.SEQUENCER.NOTE.AREA;
+
+/* define items on top line of template: */
+
+Zero.Top.Line.Ids:proc swapable;
+   Seq.Track.Defined      = 0;
+   Seq.Track.Number       = 0;
+   Seq.Track.Solo.Buttons = 0;      /* indicate no such items are */
+   Seq.Track.Name.Gstring = 0;      /* define                     */
+   Seq.Track.Out.Gstring  = 0;
+   Seq.Track.Vol.Gstring  = 0;
+   Seq.Record.Track.Col   =(-1);    /* denote no R displayed      */
+end Zero.Top.Line.Ids;
+
+DEFINE.SEQUENCER.TEMPLATE.TOP.LINE: proc (row,col,tracks) swapable;
+   dcl (row,col)      fixed; /* y & x transparent coords of upper left corner of track region */
+   dcl tracks         fixed; /* number of track columns to define/display */
+   dcl (i,j,k,x,y,z)  fixed;
+   dcl vm             fixed;
+
+   /* VERY IMPORTANT:              */
+
+   /* initialize all id's to zero: */
+
+   call Zero.Top.Line.Ids;
+
+   Seq.Tracks = tracks;              /* save in global var           */
+   load 64; div tracks; Spacing=res; /* transparent chars per column */
+
+   call Set.Auto.Allocation.Id(Seq.Top.Line.First.Id);
+
+   /* Define Solo Buttons, Track Name String, Track Output STring, */
+   /* Track Volume String                                          */
+
+   do i = 0 to tracks-1;
+      Seq.Track.Defined = Seq.Track.Defined \ bits(i);
+   end;
+
+   /* define solo buttons if enough room: */
+
+   if spacing >= 7           
+   then do i = 0 to tracks-1;
+      x=(col+i*spacing)*100;
+      y=(row-1)        *100;
+
+      j=Define.Graphics.Button.Table(S#AA,x,y+16,x+200,y+100-16,1,1,0);
+      call Draw.GBox.Around.Object(j,2,0,0,0);
+
+      if i=0 then Seq.Track.Solo.Buttons = j; /* just save the first one */
+
+   end;
+
+   /* Define track number always.  Leave room for solo button */
+   /* if there is one                                         */
+
+   if spacing >= 7
+   then do i = 0 to tracks-1;
+      j = Define.String(S#AA, row, 3+col+i*spacing, 3, 0);
+      if i=0 then Seq.Track.Number = j; /* just save the first one */
+      call Set.Object.Arrow.Links(j,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+      call Set.Object.Mouse.Access(j,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+   end;
+   else do i = 0 to tracks-1;
+      j = Define.String(S#AA, row, col+i*spacing, 3, 0);
+      if i=0 then Seq.Track.Number = j; /* just save the first one */
+      call Set.Object.Arrow.Links(j,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+      call Set.Object.Mouse.Access(j,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+   end;
+
+   /* define track name string if enough room */
+
+   vm = shr(30 - shl(Ver.Char.Size(1),1) - Ver.Char.Desc(1) , 1); /* vertical margin ver two row table cell for char size #1 */
+
+   if spacing >= 10
+   then do i = 0 to tracks-1;
+      x  = gpos.x((col + i*spacing + 7) * 100);
+      y  = gpos.y((row - 1            ) * 100) - vm - Ver.Char.Size(1) + 2;
+      z  = (spacing - 8) * Tchar.Width / (Hor.Char.Field(1)*10);
+      if z > 32 then z = 32;
+      j  = DEFINE.GRAPHICS.STRING (S#AA, x, y, z, 1, 0, 0);
+      if i=0 then Seq.Track.Name.Gstring = j; /* just save the first one */
+      call Set.Object.Arrow.Links(j,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+   end;
+
+   /* define track output string if enough room */
+
+   if spacing >= 10
+   then do i = 0 to tracks-1;
+      x  = gpos.x((col + i*spacing + 7) * 100);
+      y  = gpos.y((row                ) * 100) + vm;
+      j  = DEFINE.GRAPHICS.STRING (S#AA, x, y, 2, 1, 0, 0);
+      if i=0 then Seq.Track.Out.Gstring = j; /* just save the first one */
+      call Set.Object.Arrow.Links (j,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+      call Set.Object.Mouse.Access(j,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+      call PID(Seq.Panel.Output.Values+i, -1); /*  -1: all blanks */
+   end;
+
+   /* define track volume string if enough room */
+
+   if spacing >= 14
+   then do i = 0 to tracks-1;
+      x  = gpos.x((col + i*spacing + 10) * 100);
+      y  = gpos.y((row                 ) * 100) + vm;
+      j  = DEFINE.GRAPHICS.STRING (S#AA, x, y, 5, 1, 0, 0);
+      if i=0 then Seq.Track.Vol.Gstring = j; /* just save the first one */
+      call Set.Object.Arrow.Links(j,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+      call PID(Seq.Panel.Tvol.Values+i, -1); /* -1 : all blanks */
+   end;
+
+   call Activate.Object.Range  (Seq.Top.Line.First.Id, Seq.Top.Line.Last.Id);
+
+   /* set new scroll bar box position any time # of tracks changes */
+
+   call Set.Seq.Track.Scroll.Bar;
+
+end DEFINE.SEQUENCER.TEMPLATE.TOP.LINE;
+
+
+/* Define objects in sequencer template note area: */
+
+Zero.Note.Area.Ids:proc swapable;
+
+   Seq.Pitch.Name.Type       = 0;   /* initialize to indicate that */
+   Seq.Pitch.Name.Table      = 0;   /* there are no objects        */
+   Seq.Key.Number.Type       = 0;   /* defined in the note area.   */
+   Seq.Key.Number.Table      = 0;
+   Seq.Event.Name.Type       = 0;
+   Seq.Event.Name.Table      = 0;
+   Seq.Duration.Heading      = 0;
+   Seq.Duration.Type         = 0;
+   Seq.Duration.Table        = 0;
+   Seq.End.Time.Heading      = 0;
+   Seq.End.Time.Locked.Table = 0;
+   Seq.End.Time.Take.Table   = 0;
+   Seq.End.Time.Type         = 0;
+   Seq.End.Time.Table        = 0;
+   Seq.Velocity.Type         = 0;
+   Seq.Velocity.Table        = 0;
+   Seq.Caption.Type          = 0;
+   Seq.Caption.Table         = 0;
+
+end Zero.Note.Area.Ids;
+
+/* procedures to look up display format for duration field */
+
+Seq.Format.Left:proc swapable;
+   dcl x data (4,     /* seconds           */
+               4,     /* beats             */
+               2,     /* ms beats          */
+               8,     /* smpte             */
+               2,     /* ft/fra            */
+               1);    /* min/sec           */
+
+   return x(AEE.Time.Format);
+end Seq.Format.Left;
+
+Seq.Format.Right: proc swapable;
+   dcl x data (3,     /* seconds           */
+               3,     /* beats             */
+               3,     /* ms beats          */
+               0,     /* smpte             */
+               2,     /* ft/fra            */
+               3);    /* min/sec           */
+
+   return x(AEE.Time.Format);
+end Seq.Format.Right;
+
+BEGIN.NOTE.AREA.DEFINE: proc(row,col,size,tracks,resize) swapable;
+   dcl (row,col)      fixed; /* y & x transparent coords of upper left corner of track region */
+   dcl size           fixed;
+   dcl tracks         fixed;
+   dcl resize         fixed; /* 0 or 3 = define seq.event.time table plus */
+                             /*          note area items                  */
+                             /* always define note area items             */
+
+   DEPOSIT.BUTTON.LABEL: proc (Id,Row,Col,Size,Str1,Str2);
+      dcl Id               fixed;
+      dcl (row,col)        fixed;
+      dcl size             fixed;
+      dcl str1             array;
+      dcl str2             array;
+      dcl (buf1,buf2) (10) fixed;
+
+      call Copy.String(Str1,Buf1);
+      call Copy.String(Str2,Buf2);
+
+      call Deposit.Graphics.Button.Table.Label(Id,Row,Col,Size,Buf1,Buf2);
+   end DEPOSIT.BUTTON.LABEL;
+
+   /* VERY IMPORTANT:              */
+
+   /* initialize all id's to zero: */
+
+   call Zero.Note.Area.Ids;
+
+   /* compute row for note display,  if enough room */
+
+   if  (Show.No.Headings = 0)  /* if headings desired     */
+   and ((size-4) > 1        )  /* and room for them       */
+   then do;
+      Seq.Event.Display.Row  = row  + 2;
+      Seq.Event.Display.Size = size - 5;
+   end;
+   else do;
+      Seq.Event.Display.Row  = row  + 1;
+      Seq.Event.Display.Size = size - 4;
+   end;
+
+   /* Define event time table if needed: */
+
+   if (Resize = 0)
+   or (Resize = 3)
+   then do;
+
+      if  (Show.No.Headings = 0)  /* if headings desired     */
+      and ((size-4) > 1        )  /* and room for them       */
+      then do;
+         call Define.Graphics.Button.Table
+            (Seq.Event.Time.Heading, 0000, (Seq.Event.Display.Row-2)*100,
+                                     1600, (Seq.Event.Display.Row-1)*100, 1, 1, 0);
+         call Deposit.Button.Label(Seq.Event.Time.Heading, 0, 0, 1, 'Event Start Time', NulStr);
+      end;
+
+      /* use normal reverse video for event table when selected */
+      /* so user knows where the input is going                 */
+
+      call Set.Default.Attr(0,ATTR#Normal\ATTR#AltIntensity);
+      call Set.Default.Attr(1,ATTR#Normal\ATTR#Reverse);
+
+      call Define.32Bit.MSEC(Seq.Event.Time.type,Seq.Event.Display.Row,1,14,AEE.Time.Format,cf#time,cf#default,cf#default);
+      call Set.Object.Mouse.Access(Seq.Event.Time.Type,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+      call Set.Object.Action(Seq.Event.Time.Type,O#ACT.Update.On.Dep,true);
+      call Set.Object.Arrow.Links(Seq.Event.Time.Type,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+
+      call Define.Table(Seq.Event.Time.Table,1,Seq.Event.Display.Size,Seq.Event.Time.Type);
+      call Set.Object.Mouse.Access(Seq.Event.Time.Table,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+      call Set.Object.Drag        (Seq.Event.Time.Table,true,true);
+      call Set.Object.Arrow.Links(Seq.Event.Time.Table,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+
+      call Activate.Object.Range  (Seq.Event.Time.Heading, Seq.Event.Time.Table);
+   end;
+
+   call Plot.Track.Lines(tracks,2,row,col,size); /* draw new track column dividers */
+
+   call Set.Auto.Allocation.Id(Seq.Note.Area.First.Id);
+
+   call Set.Default.Attr  (0,ATTR#Normal                  );
+   call Set.Default.Attr  (1,ATTR#Normal\ATTR#Reverse     );
+end BEGIN.NOTE.AREA.DEFINE;
+
+/* Compute note area information looks at what information the user */
+/* wants to display,  and determines what information will fit on   */
+/* the screen (if any!),  and where each column will start          */
+
+COMPUTE.NOTE.AREA.INFORMATION: proc (locations) swapable;
+   dcl locations      array; /* where columns should be defined           */
+   dcl (i)            fixed;
+   dcl Defined        fixed; /* *** local defined counter                 */
+   dcl OutOfRoom      fixed;
+   dcl OurSize        fixed;
+
+   Defined   = 0;        /* initialized defined length   */
+   OutOfRoom = 0;        /* not out of room yet          */
+
+   do i = 0 to Num.Ixs-1;    /* assume no fields will    */
+      locations(i) = (-1);   /* be able to be displayed  */
+   end;
+
+   /* See if room for pitch name: (there always will) */
+
+   if (Display.Note.Contents & Display.Pitch.Name) <> 0
+   then do;
+      locations(Pitch.Name.Ix) = Defined;
+      defined = defined + 4;
+   end;
+
+   /* See if room for key # table */
+
+   if  ((Display.Note.Contents & Display.Key.Number) <> 0)
+   then do;
+      if (defined + 3) <= spacing
+      then do;
+         locations(Key.Number.Ix) = Defined;
+         defined = defined + 3;
+      end;
+      else OutOfRoom = 1;
+   end;
+
+   /* See if rrom for  Event Name Tables:         */
+
+   if  ((Display.Note.Contents & Display.Event.Name) <> 0)
+   and ((OutOfRoom                                 ) =  0)
+   then do;
+
+      /* be smart here: make the length field longer for as much */
+      /* room as we need.   See how many more columns we would   */
+      /* like to display                                         */
+
+      i = 0;
+      if ((Display.Note.Contents & Display.Duration) <> 0)
+      then i = i +  9;
+      if ((Display.Note.Contents & Display.End.Time) <> 0)
+      then i = i + 14;
+      if ((Display.Note.Contents & (Display.Velocity\Display.Rtes)) <> 0)
+      then i = i +  6;
+
+      /* OurSize = 25;  */      /* we could put up the full name if there */
+                                /* was room, but it slows the drawing     */
+                                /* down so we won't                       */
+
+      Oursize = Display.Name.Length + 1;     /* +1 for space              */
+
+      if (defined + OurSize + i) > spacing   /* if it all will not fit, */
+      then do;                               /* then see what will      */
+
+         /* first priority - shorten name down to desired */
+         /* name display length:                          */
+
+         if (spacing - i - defined) >= (Display.Name.Length+1)
+         then Oursize = spacing - i - defined;
+
+         /* second priority - display full desired name   */
+         /* length:                                       */
+
+         else if (spacing - defined) >= (Display.Name.Length+1)
+         then OurSize = Display.Name.Length + 1;
+
+         /* display any name if possible:                 */
+
+         else if (spacing - defined >= 2)
+         then Oursize = spacing - defined;
+
+         else Oursize = (-1);
+      end;
+
+      if Oursize >= 2           /* if enough room for any name */
+      then do;
+         locations(Event.Name.Ix) = Defined;
+         locations(Oursize.Ix   ) = Oursize;
+         defined = defined + OurSize;
+      end;
+      else OutOfRoom = 1;
+   end;
+
+   /* See if note duration will fit: */
+
+   if  ((Display.Note.Contents & Display.Duration) <> 0)
+   and ((OutOfRoom                               ) =  0)
+   then do;
+      if (defined + 9) <= spacing
+      then do;
+         locations(Duration.Ix) = Defined;
+         defined = defined + 9;
+      end;
+      else OutOfRoom = 1;
+   end;
+
+   /* See if end time will fit: */
+
+   if  ((Display.Note.Contents & Display.End.Time) <> 0)
+   and ((OutOfRoom                               ) =  0)
+   then do;
+
+      if (defined + 2) <= spacing        /* make sure space for 2 */
+      then do;                           /* characters,  but only */
+         locations(Lock.Ix) = Defined;   /* account for 1         */
+         defined = defined + 1;
+      end;
+
+      if (defined + 13) <= spacing
+      then do;
+         locations(End.Time.Ix) = Defined;
+         defined = defined + 13;
+      end;
+      else OutOfRoom = 1;
+   end;
+
+   /* Define Velocity Table:  */
+
+   if  ((Display.Note.Contents & (Display.Velocity\Display.Rtes)) <> 0)
+   and ((OutOfRoom                                              ) =  0)
+   then do;
+      if (defined + 6) <= spacing
+      then do;
+         locations(Velocity.Ix) = Defined;
+         defined = defined + 6;
+      end;
+      else OutOfRoom = 1;
+   end;
+
+   /* Define Caption Table: */
+
+   if  ((Display.Note.Contents & Display.Caption) <> 0)
+   and ((OutOfRoom                               ) =  0)
+   then do;
+      if (defined + 2) <= spacing
+      then do;
+         locations(Caption.Ix) = Defined;
+         defined = spacing;
+      end;
+      else OutOfRoom = 1;
+   end;
+
+   return Defined;
+
+end COMPUTE.NOTE.AREA.INFORMATION;
+
+/* Handy procedure to see if any changes to display contents */
+/* would affect what is shown:                               */
+
+NOTE.AREA.INFORMATION.WOULD.BE.DIFFERENT: proc swapable;
+   dcl temp(Num.Ixs-1) fixed;
+   dcl i               fixed;
+
+   call COMPUTE.NOTE.AREA.INFORMATION(temp);
+
+   do i = 0 to Num.Ixs-1;
+      if temp(i) <> current.locations(i)
+      then return 1;
+   end;
+
+   return 0;      /* no change needed */
+
+end NOTE.AREA.INFORMATION.WOULD.BE.DIFFERENT;
+
+/* routine to define note area: */
+
+DEFINE.SEQUENCER.TEMPLATE.NOTE.AREA: proc (row,col,size,tracks) swapable;
+   dcl (row,col)      fixed; /* y & x transparent coords of upper left corner of track region */
+   dcl size           fixed;
+   dcl tracks         fixed; /* number of track columns to define/display */
+   dcl (i,j,k)        fixed;
+   dcl (y1)           fixed;
+   dcl (l,r)          fixed;
+
+   DEPOSIT.BUTTON.LABEL: proc (Id,Row,Col,Size,Str1,Str2);
+      dcl Id              fixed;
+      dcl (row,col)       fixed;
+      dcl size            fixed;
+      dcl str1            array;
+      dcl str2            array;
+      dcl (buf1,buf2) (8) fixed;
+
+      call Copy.String(Str1,Buf1);
+      call Copy.String(Str2,Buf2);
+
+      call Deposit.Graphics.Button.Table.Label(Id,Row,Col,Size,Buf1,Buf2);
+   end DEPOSIT.BUTTON.LABEL;
+
+   /* Compute what fields are desired, and where the will be: */
+
+   Defined = COMPUTE.NOTE.AREA.INFORMATION(Current.Locations);
+
+   /* Define Pitch Name Tables:                     */
+
+   Highlighted.Length = 0;
+
+   call Set.Default.Action(O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+
+   if Current.Locations(Pitch.Name.Ix) >=0 then do;
+      do i = 0 to tracks-1;
+         j =  Define.String (S#AA, Seq.Event.Display.Row, col+i*spacing+current.locations(pitch.name.ix), 3, 0);
+         if i=0 then Seq.Pitch.Name.Type = j; /* just save the first one */
+         call Set.Object.Action(j,O#ACT.Update.On.Dep,true);
+         call Set.Object.Arrow.Links(j,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+      end;
+      do i = 0 to tracks-1;
+         j = Define.Table(S#AA, 1, Seq.Event.Display.Size, Seq.Pitch.Name.Type+i);
+         if i=0 then Seq.Pitch.Name.Table = j; /* just save the first one */
+         call Set.Object.Arrow.Links(j,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+      end;
+      Highlighted.Length = Current.Locations(pitch.name.ix) + 4 - 1;
+   end;
+
+   /* Define Key Number Tables:         */
+
+   if Current.Locations(Key.Number.Ix) >=0 then do;
+      do i = 0 to tracks-1;
+         j = Define.Fixed.Point(S#AA, Seq.Event.Display.Row, col+i*spacing+current.locations(Key.Number.Ix), 2, 0, cf#right);
+         if i=0 then Seq.Key.Number.Type = j; /* just save the first one */
+         call Set.Object.Arrow.Links(j,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+         call Set.Object.Mouse.Access(j,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+         call Set.Object.Action(j,O#ACT.Update.On.Dep,true);
+      end;
+      do i = 0 to tracks-1;
+         j = Define.Table(S#AA, 1, Seq.Event.Display.Size, Seq.Key.Number.Type+i);
+         if i=0 then Seq.Key.Number.Table = j; /* just save the first one */
+         call Set.Object.Arrow.Links(j,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+         call Set.Object.Mouse.Access(j,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+      end;
+      Highlighted.Length = current.locations(key.number.ix) + 3 - 1;
+   end;
+
+   /* Define Event Name Tables:         */
+
+   if Current.Locations(Event.Name.Ix) >=0 then do;
+      do i = 0 to tracks-1;
+         j = Define.Label(S#AA, Seq.Event.Display.Row, col+i*spacing+current.locations(Event.Name.Ix), Current.Locations(Oursize.ix)-1, NulStr);
+         if i=0 then Seq.Event.Name.Type = j; /* just save the first one */
+         call Set.Object.Action(j,O#ACT.Update.On.Dep,true);
+         call Set.Object.Arrow.Links(j,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+      end;
+      do i = 0 to tracks-1;
+         j = Define.Table(S#AA, 1, Seq.Event.Display.Size, Seq.Event.Name.Type+i);
+         if i=0 then Seq.Event.Name.Table = j; /* just save the first one */
+         call Set.Object.Arrow.Links(j,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+      end;
+      Highlighted.Length = current.locations(event.name.ix) + current.locations(oursize.ix) - 1;
+   end;
+
+   call Set.Default.Action(O#ACT.Middle.Press);
+
+   /* Define note duration */
+
+   y1 = ((Seq.Event.Display.Row-1)+Seq.Event.Display.Size)*100;
+
+   if Current.Locations(Duration.Ix) >=0 then do;
+
+      /* define heading table: */
+
+      if  (Show.No.Headings = 0)  /* if headings desired     */
+      and ((size-4) > 1        )  /* and room for them       */
+      then do i = 0 to tracks-1;
+         j = Define.Graphics.Button.Table
+            (s#aa, (col+i*spacing+current.locations(duration.ix)  )*100, 
+                   (Seq.Event.Display.Row-2)*100,
+                   (col+i*spacing+current.locations(duration.ix)+8)*100, 
+                   (Seq.Event.Display.Row-1)*100, 1, 1, 0);
+         if i=0 then Seq.Duration.Heading = j; /* just save the first one */
+         call Deposit.Button.Label(j, 0, 0, 1, 'Duration', NulStr);
+      end;
+
+      l = Seq.Format.Left;
+      r = Seq.Format.Right;
+      do i = 0 to tracks-1;
+         j = Define.32Bit.MSEC(S#AA, Seq.Event.Display.Row , col+i*spacing+current.locations(duration.ix),8,AEE.Time.Format,cf#dur,l,r);
+         if i=0 then Seq.Duration.Type = j; /* just save the first one */
+         call Set.Object.Arrow.Links(j,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+         call Set.Object.Mouse.Access(j,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+         call Set.Object.Action(j,O#ACT.Update.On.Dep,true);
+      end;
+      do i = 0 to tracks-1;
+         j = Define.Table(S#AA, 1, Seq.Event.Display.Size, Seq.Duration.Type+i);
+         if i=0 then Seq.Duration.Table = j; /* just save the first one */
+         call Set.Object.Arrow.Links(j,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+         call Set.Object.Mouse.Access(j,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+         call Set.Object.Drag(j,true,true);
+      end;
+   end;
+
+   /* Define lock table, note end time */
+
+   if Current.Locations(Lock.Ix) >=0 then do;
+
+      /* define the "L" table */
+
+      do i = 0 to tracks-1;
+         j = Define.Graphics.Button.Table
+            (s#aa, (col+i*spacing+current.locations(lock.ix)  )*100, 
+                   (Seq.Event.Display.Row-1)*100, 
+                   (col+i*spacing+current.locations(lock.ix)+1)*100,
+                    y1, 1, Seq.Event.Display.Size, 0);
+         if i=0 then Seq.End.Time.Locked.Table = j; /* just save the first one */
+         do k = 0 to Seq.Event.Display.Size-1;
+            call Deposit.Button.Label(j, k, 0, 1, 'L', NulStr);
+         end;
+         if (Seq.End.Times.Locked & bits(i)) <> 0
+         then call Highlight.Graphics.Button.Table(j, -1, 1, 0);
+         if Show.Offsets <> 0
+         then call Highlight.Graphics.Button.Table(j, -1, 1, 1);
+      end;
+   end;
+
+   if Current.Locations(End.Time.Ix) >=0 then do;
+
+      /* define heading table: */
+
+      if  (Show.No.Headings = 0)  /* if headings desired     */
+      and ((size-4) > 1        )  /* and room for them       */
+      then do i = 0 to tracks-1;
+         j = Define.Graphics.Button.Table
+            (s#aa, (col+i*spacing+current.locations(end.time.ix)+1 )*100, 
+            (Seq.Event.Display.Row-2)*100,
+                   (col+i*spacing+current.locations(end.time.ix)+12)*100, 
+            (Seq.Event.Display.Row-1)*100, 1, 1, 0);
+         if i=0 then Seq.End.Time.Heading = j; /* just save the first one */
+         Seq.Heading.Contents = Show.Offsets;  /* save what we put there  */
+         if Seq.Heading.Contents <> 0          /* for erasing             */
+         then call Deposit.Button.Label(j, 0, 0, 1, 'Offset Time', NulStr);
+         else call Deposit.Button.Label(j, 0, 0, 1, 'End Time',    NulStr);
+      end;
+
+      /* define the "T" table */
+
+      do i = 0 to tracks-1;
+         j = Define.Graphics.Button.Table
+            (s#aa, (col+i*spacing+current.locations(end.time.ix)   )*100+6, 
+                   (Seq.Event.Display.Row-1)*100, 
+                   (col+i*spacing+current.locations(end.time.ix)+1 )*100-6,
+                    y1, 1, Seq.Event.Display.Size, 0);
+         if i=0 then Seq.End.Time.Take.Table = j; /* just save the first one */
+         do k = 0 to Seq.Event.Display.Size-1;
+            call Deposit.Button.Label(j, k, 0, 1, 'T', NulStr);
+         end;
+      end;
+
+      if AEE.Time.Format = O#MSEC.Smpte /* suppress bits display on end time */
+      then k = 0;                       /* string for better jogging         */
+      else k = cf#default;
+
+      do i = 0 to tracks-1;
+         j = Define.32Bit.MSEC(S#AA, Seq.Event.Display.Row , col+i*spacing+current.locations(end.time.ix)+1,11,AEE.Time.Format,cf#time,cf#default,k);
+         if i=0 then Seq.End.Time.Type = j; /* just save the first one */
+         call Set.Object.Arrow.Links(j,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+         call Set.Object.Mouse.Access(j,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+         call Set.Object.Action(j,O#ACT.Update.On.Dep,true);
+      end;
+      do i = 0 to tracks-1;
+         j = Define.Table(S#AA, 1, Seq.Event.Display.Size, Seq.End.Time.Type+i);
+         if i=0 then Seq.End.Time.Table = j; /* just save the first one */
+         call Set.Object.Arrow.Links(j,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+         call Set.Object.Mouse.Access(j,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+         call Set.Object.Drag(j,true,true);
+      end;
+   end;
+
+   /* Define Velocity Table:  */
+
+   if Current.Locations(Velocity.Ix) >=0 then do;
+      do i = 0 to tracks-1;
+         j =  Define.String (S#AA, Seq.Event.Display.Row, col+i*spacing+current.locations(velocity.ix), 5, 0);
+         if i=0 then Seq.Velocity.Type = j; /* just save the first one */
+         call Set.Object.Arrow.Links(j,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+         call Set.Object.Mouse.Access(j,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+         call Set.Object.Action(j,O#ACT.Update.On.Dep,true);
+      end;
+      do i = 0 to tracks-1;
+         j = Define.Table(S#AA, 1, Seq.Event.Display.Size, Seq.Velocity.Type+i);
+         if i=0 then Seq.Velocity.Table = j; /* just save the first one */
+         call Set.Object.Arrow.Links(j,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+         call Set.Object.Mouse.Access(j,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+      end;
+   end;
+
+   /* Define Caption Table: */
+
+   if Current.Locations(Caption.Ix) >=0 then do;
+      do i = 0 to tracks-1;
+         j = Define.String (S#AA, Seq.Event.Display.Row, col+i*spacing+current.locations(caption.ix), spacing-current.locations(caption.ix)-1, 0);
+         if i=0 then Seq.Caption.Type = j; /* just save the first one */
+         call Set.Object.Arrow.Links(j,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+         call Set.Object.Mouse.Access(j,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+         call Set.Object.Action(j,O#ACT.Update.On.Dep,true);
+      end;
+      do i = 0 to tracks-1;
+         j = Define.Table(S#AA, 1, Seq.Event.Display.Size, Seq.Caption.Type+i);
+         if i=0 then Seq.Caption.Table = j; /* just save the first one */
+         call Set.Object.Arrow.Links(j,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+         call Set.Object.Mouse.Access(j,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+      end;
+   end;
+
+   call Activate.Object.Range  (Seq.Note.Area.First.Id, Seq.Note.Area.Last.Id);
+
+end DEFINE.SEQUENCER.TEMPLATE.NOTE.AREA;

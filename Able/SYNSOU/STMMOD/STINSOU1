@@ -1,0 +1,602 @@
+/* STINSOU1  $TITLE  Routines to process input for Modify2 menu 
+
+   Modified:
+   11/18/91 - PF  - More quick update support
+   08/02/89 - SJS - added support for Sample Rate Conversion & 'THREE' algorithm
+   04/14/89 - SJS - changed speech to 'ONE' and music to 'TWO'
+   12/13/88 - cj  - changed 'smart' to 'speech'
+   09/08/88 - SJS - Changed TSM length to SFTime format
+   08/25/88 - MWH - Add "real" DSP user interface
+   07/20/88 - MWH - Add stereo to DSP interface
+   05/19/88 - SJS - Added Sample Rate Conversion code
+
+*/
+
+   /* $Subtitle TSM routines */
+
+   TIME.SCALE.MODIFY: proc (c.or.e,ratio) public swapable; /* time compress or expand a sound file */
+      dcl c.or.e       fixed; /* 0=compress, 1=expand */
+      dcl ratio        fixed; /* compression/expansion factor (1-65535) */
+
+      dcl old.name (4) fixed;
+      dcl new.name (4) fixed;
+      dcl old.base (1) fixed;
+      dcl new.base (1) fixed;
+      dcl old.sflen (2) fixed; /* 3-word SFM format lengths */
+      dcl new.sflen (2) fixed;
+      dcl old.32len (1) fixed; /* 32-bit format length */
+      dcl new.32len (1) fixed;
+      dcl #secs        fixed;
+      dcl status       fixed;
+      dcl rate         fixed; /* current sound file sample rate */
+      dcl type         fixed; /* if current sound file is stereo */
+      dcl dsp.alg      fixed;
+      dcl (i,j,k)      fixed;
+      dcl tsm.opts(TSM.opt#array.size) fixed;
+      dcl rec(POLY.HIST.REC.LEN-1)     fixed;
+
+      dcl dbug lit '0';
+      debug.print: proc (s,n1,n2,n3); /************/
+         dcl s fixed array;
+         dcl (n1,n2,n3) fixed;
+         if dbug=0 then return;
+         call cpos(23,0); call erase.to.end.of.line;
+         call ps(s); call pc("72"); call pc(32); call pnum(n1,0); call pc(32); call pnum(n2,0); call pc(32); call pnum(n3,0);
+         call tty_wait; disable; write("324")=read("50"); enable;
+      end debug.print;
+
+      if inc.dsp.code=0 then return;
+      if inc.stmm    =0 then return;      /* a Post M feature */
+
+      if not Select.DSP70 then do;       /* could not find DSP70 */
+         call tsm.d24.error;
+         return;
+      end;
+
+      if File.Search('.TSMDATA',3,-2,0,1)
+      then do;                        /* sine/cosine table and hanning window coefs */
+         TSMData_There = true;        /* data file found */
+         TSMData_MS    = F#MS_Sector;
+         TSMData_LS    = F#LS_Sector;
+         TSMData_Words = F#Words;
+         if TSMData_Words=0 then TSMData_Words=shl(F#LS_Length,8);
+      end;
+
+      if not TSMData_There then do;       /* data tables were found earlier */
+         call tsm.datafile.error;
+         return;
+      end;
+
+      if dbug then call debug.print('C.Or.E, Ratio:',c.or.e,ratio,0); /***********/
+
+      call LOOK.UP.SF.INFO;           /* check if it is okay */
+      if sf.type<>1 then return;
+
+      rate=stm.sample.rate;           /* save the sampling rate of the current sound file */
+      type=stereo;                    /* also type        */
+
+      do i=0 to 4; old.name(i)=FNBUF(i); end; /* save name of original file */
+
+      call psmread(sfile.base,sf.hdr,sf.valid.data); /* look up length of file to process */
+      do i=0 to 2; old.sflen(i)=read(psd); end;      /* load into temp */
+      call Convert.SF.Len.To.Samples(old.sflen,old.32len);
+
+      if c.or.e=0  /* compute length of compressed/expanded file */
+      then call Compute.Compressed.Length(old.32len,new.32len,ratio);
+      else call Compute.Expanded.Length  (old.32len,new.32len,ratio);
+
+      call Convert.Samples.To.SF.Len(new.32len,new.sflen);
+
+      if (new.sflen(0)<>0) or (new.sflen(1) igt 30000)
+      then do;                      /* new file will be too long */
+         call nomem.error; return;
+      end;
+
+      if dbug then call debug.print('OLD.SFLEN',old.sflen(0),old.sflen(1),old.sflen(2)); /***********/
+      if dbug then call debug.print('NEW.SFLEN',new.sflen(0),new.sflen(1),new.sflen(2)); /***********/
+
+      #secs=new.sflen(1)+(new.sflen(2)<>0);    /* total sectors of sample data */
+
+      if CREATE.SOUND.FILE(#secs+shr(BL.POLY,8),rate,0,type)<>0 then do;  /* try to create the output file */
+         do i=0 to 4; new.name(i)=FNBUF(i); end; /* save name of new file */
+
+         call PS.LOCK;                 /* lock out a reboot */
+         call DRAW.MESSAGE('Performing Time Scale Modification...');
+         call tty_wait;
+
+         do i=0 to 4; FNBUF(i)=old.name(i); end;
+         FNBUF(0)=8;
+         LNBUF(0)=0;
+         call ps.search;
+         call copy32(SFILE.BASE,old.base);    /* get original current sound file */
+         call add16(shr(bl.poly,8),old.base); /* compute ptr to sample data */
+
+         do i=0 to 4; FNBUF(i)=new.name(i); end;
+         FNBUF(0)=8;
+         LNBUF(0)=0;
+         call ps.search;
+         call copy32(SFILE.BASE,new.base);    /* get original current sound file */
+         call add16(shr(bl.poly,8),new.base); /* compute ptr to sample data */
+
+         if dbug then call debug.print(old.name,old.base(0),old.base(1),0); /***********/
+         if dbug then call debug.print(new.name,new.base(0),new.base(1),0); /***********/
+
+         if tsm.algorithm <> 0
+         then do; /* if not doing alg THREE */
+            Status = Time.Scale.Modify.Samples(old.base,old.32len,new.base,new.32len,c.or.e,ratio,stereo);
+         end;
+         else do;
+            dsp.alg                  = dsp#ac_tsm;
+            tsm.opts(tsm.opt#ratio)  = ratio;
+            tsm.opts(tsm.opt#c.or.e) = c.or.e;
+            tsm.opts(tsm.opt#stereo) = stereo;
+            Status = Modify.Samples(old.base,old.32len,new.base,new.32len,stereo,dsp.alg,tsm.opts);
+         end;
+
+         if Status<>0 then do; /* TSM was successful */
+
+            call sub16(shr(bl.poly,8),new.base); /* recompute ptr to start of file */
+
+            /* set SF.VALID.DATA, SF.DATA.END, MARK.END */
+
+            call psmwrite(new.base,sf.hdr,sf.valid.data); /* VALID.DATA */
+            do i=0 to 2; write(psd)=new.sflen(i); end;
+
+            call INDEX_TO_TIME(new.sflen(0),new.sflen(1),new.sflen(2),rate,type);
+
+            call psmwrite(new.base,sf.hdr,sf.data.end); /* DATA.END */
+            write(psd)=Time.Seconds;
+            write(psd)=Time.MilliSeconds;
+            write(psd)=Time.MicroSeconds;
+
+            call psmwrite(new.base,sf.hdr,sf.mark.end); /* MARK.END */
+            write(psd)=Time.Seconds;
+            write(psd)=Time.MilliSeconds;
+            write(psd)=Time.MicroSeconds;
+
+            /* GO THROUGH SYMBOLS AND ADJUST THEIR TIMES ACCORDING TO */
+            /* TIME SCALE MODIFICATION EFFECT */
+
+            /* loop over symbols in original file and */
+            /* compute corresponding times in new file */
+            /* then copy into new file header */
+
+            /* do same for MARK.START and MARK.END */
+
+            /* call ADD_MARK(new.base,mstart,mark.start.time); *//* add original mark start symbol to the sound file header and symbol table */
+            /* call ADD_MARK(new.base,mend,mark.end.time);     *//* add original mark end symbol to the sound file header and symbol table  */
+
+            /* maybe set file type (mixed or sampled, etc) */
+            /* maybe set up new caption                    */
+
+
+            /* clean up after successful execution */
+
+            call PS.SETUP(new.base);          /* set up new file */
+            call PS.UNLOCK;
+            call ERASE.KEYBOARD.TIMBRE;
+            call COPY.KBD.TIMBRES(0,1);       /* clear the split keyboard timbre */
+            call SELECT.PARTIAL(0);           /* select the first partial */
+            call CREATE.PATCH.PARTIAL(0,NEWFNAME); /* create a patch timbre */
+            call CLEAR.PARAMETERS;            /* clear all previous active parameters */
+            call clear.display;               /* clear the Synclavier window */
+
+            new.poly.contents = new.poly.contents \ 1;
+
+            call BUILD.POLY.HIST.REC(new.base,0,rec);
+            call ADD.POLY.TO.HIST(rec);
+
+         end;
+         else do;                             /* had some error with TSM */
+            call PS.UNLOCK;                   /* leave error message     */
+         end;
+      end;
+
+   end TIME.SCALE.MODIFY;
+
+   /* $Subtitle Sample Rate Conversion routine */
+
+   SRC: proc (new.rate) public swapable;
+      dcl new.rate     fixed;
+
+      dcl old.name (4) fixed;
+      dcl new.name (4) fixed;
+      dcl old.base (1) fixed;
+      dcl new.base (1) fixed;
+      dcl old.sflen (2) fixed; /* 3-word SFM format lengths */
+      dcl new.sflen (2) fixed;
+      dcl old.32len (1) fixed; /* 32-bit format length */
+      dcl new.32len (1) fixed;
+      dcl #secs        fixed;
+      dcl status       fixed;
+      dcl rate         fixed; /* current sound file sample rate */
+      dcl type         fixed; /* if current sound file is stereo */
+      dcl ratio        fixed; /* #### ? */
+      dcl (i,j,k)      fixed;
+      dcl rec(POLY.HIST.REC.LEN-1) fixed;
+
+      /* #### */
+      if inc.dsp.code=0 then return;
+      if inc.stmm    =0 then return;      /* a Post M feature */
+
+      if not Select.DSP70 then do;       /* could not find DSP70 */
+         call tsm.d24.error;
+         return;
+      end;
+
+      call LOOK.UP.SF.INFO;           /* check if it is okay */
+      if sf.type<>1 then return;
+
+      rate=stm.sample.rate;           /* save the sampling rate of the current sound file */
+      type=stereo;                    /* also type        */
+
+      do i=0 to 4; old.name(i)=FNBUF(i); end; /* save name of original file */
+
+      call psmread(sfile.base,sf.hdr,sf.valid.data); /* look up length of file to process */
+      do i=0 to 2; old.sflen(i)=read(psd); end;      /* load into temp */
+      call Convert.SF.Len.To.Samples(old.sflen,old.32len);
+
+      if (0)  /* #### compute length of compressed/expanded file */
+      then call Compute.Compressed.Length(old.32len,new.32len,ratio);
+      else call Compute.Expanded.Length  (old.32len,new.32len,ratio);
+
+      call Convert.Samples.To.SF.Len(new.32len,new.sflen);
+
+      if (new.sflen(0)<>0) or (new.sflen(1) igt 30000)
+      then do;                      /* new file will be too long */
+         call nomem.error; return;
+      end;
+
+      #secs=new.sflen(1)+(new.sflen(2)<>0);    /* total sectors of sample data */
+
+      if CREATE.SOUND.FILE(#secs+shr(BL.POLY,8),rate,0,type)<>0 then do;  /* try to create the output file */
+         do i=0 to 4; new.name(i)=FNBUF(i); end; /* save name of new file */
+
+         call PS.LOCK;                 /* lock out a reboot */
+         call DRAW.MESSAGE('Performing Sample Rate Conversion...');
+         call tty_wait;
+
+         do i=0 to 4; FNBUF(i)=old.name(i); end;
+         FNBUF(0)=8;
+         LNBUF(0)=0;
+         call ps.search;
+         call copy32(SFILE.BASE,old.base);    /* get original current sound file */
+         call add16(shr(bl.poly,8),old.base); /* compute ptr to sample data */
+
+         do i=0 to 4; FNBUF(i)=new.name(i); end;
+         FNBUF(0)=8;
+         LNBUF(0)=0;
+         call ps.search;
+         call copy32(SFILE.BASE,new.base);    /* get original current sound file */
+         call add16(shr(bl.poly,8),new.base); /* compute ptr to sample data */
+
+         /* #### stuff options array here */
+         /* ####Status = Modify.Samples(old.base,old.32len,new.base,new.32len,stereo,options);*/
+
+         if Status<>0 then do; /* SRC was successful */
+
+            call sub16(shr(bl.poly,8),new.base); /* recompute ptr to start of file */
+
+            /* #### set SF.VALID.DATA, SF.DATA.END, MARK.END #### */
+
+            call psmwrite(new.base,sf.hdr,sf.valid.data); /* VALID.DATA */
+            do i=0 to 2; write(psd)=new.sflen(i); end;
+
+            call INDEX_TO_TIME(new.sflen(0),new.sflen(1),new.sflen(2),rate,type);
+
+            call psmwrite(new.base,sf.hdr,sf.data.end); /* DATA.END */
+            write(psd)=Time.Seconds;
+            write(psd)=Time.MilliSeconds;
+            write(psd)=Time.MicroSeconds;
+
+            call psmwrite(new.base,sf.hdr,sf.mark.end); /* MARK.END */
+            write(psd)=Time.Seconds;
+            write(psd)=Time.MilliSeconds;
+            write(psd)=Time.MicroSeconds;
+
+            /* #### write new sample rate to header */
+
+            /* #### set MARK.START and MARK.END */
+
+            /* call ADD_MARK(new.base,mstart,mark.start.time); *//* add original mark start symbol to the sound file header and symbol table */
+            /* call ADD_MARK(new.base,mend,mark.end.time);     *//* add original mark end symbol to the sound file header and symbol table  */
+
+            /* maybe set file type (mixed or sampled, etc) */
+            /* maybe set up new caption                    */
+
+
+            /* clean up after successful execution */
+
+            call PS.SETUP(new.base);          /* set up new file */
+            call PS.UNLOCK;
+            call ERASE.KEYBOARD.TIMBRE;
+            call COPY.KBD.TIMBRES(0,1);       /* clear the split keyboard timbre */
+            call SELECT.PARTIAL(0);           /* select the first partial */
+            call CREATE.PATCH.PARTIAL(0,NEWFNAME); /* create a patch timbre */
+            call CLEAR.PARAMETERS;            /* clear all previous active parameters */
+            call clear.display;               /* clear the Synclavier window */
+
+            new.poly.contents = new.poly.contents \ 1;
+
+            call BUILD.POLY.HIST.REC(new.base,0,rec);
+            call ADD.POLY.TO.HIST(rec);
+
+         end;
+         else do;                             /* had some error with SRC */
+            call PS.UNLOCK;                   /* leave error message     */
+         end;
+      end;
+
+   end SRC;
+
+   /* $Subtitle DSP Debug routines */
+
+   DSP.Debug: proc (the.function);
+      dcl the.function     fixed;
+      dcl (i,j,k)          fixed;
+
+      do case (the.function);
+         do;/* Edit to Symbol Table */
+            /* need to look up start of symbol table in poly */
+            call Edit.to.Symbol(debug.length);/* make current edit list into symbol table of current sf */
+         end;
+         do;/* PITCH detection */
+            i =  Pitch.Detect(SFILE.BASE,debug.length);
+            call cpos (23,0);/* #### make more elegant later */
+            call ps('Period = ');call pnum(i,0);/* #### ditto */
+         end;
+         do;/* PEEK */
+            call cpos (23,0);/* #### make more elegant later */
+            call ps('Toggle = ');call pnum(debug.toggle,0);/* #### ditto */
+            call ps('Start  = ');call pnum(debug.start,0);/* #### ditto */
+            call ps('Repeat = ');call pnum(debug.repeat,0);/* #### ditto */
+            call tty_wait;
+            stop 0;
+            if Peek.At.DSP70.Memory(debug.toggle,debug.start,debug.repeat) = 0 then do;;
+               call cpos(23,0);
+               call ps('Peek failed ');
+            end;
+         end;
+         do;/* SR Conv */
+            call SR.Convert(debug.srate);
+         end;
+      end;/* of do case (the.function) */
+
+   end DSP.Debug;
+
+   STM_MODIFY2_INPUT_CRET:proc swapable;
+      dcl ratio    fixed;
+      dcl new.rate fixed;
+      dcl i        fixed;
+      dcl buf(30)  fixed;
+      dcl alg( 8)  fixed;
+
+      if stm.cmd.line<>0 then do;           /* if on the command line */
+
+         call LOOK.UP.SF.INFO;              /* get sf info handy      */
+
+         if (inc.stmm) and (inc.dsp.code)
+         and (stm.choice=stm.tsm)
+         then do;
+            if (token(0)<>0) then do;
+               call CHANGE.TSM.MENU(tsm.option);
+               call POS.STM.ALPHA.CURSOR;       /* position menu cursor */
+            end;
+            else if sf.type <> 1
+            then call no.sound.file;            /* error message        */
+            else if not Select.DSP70 then do;   /* could not find DSP70 */
+               call tsm.d24.error;
+            end;
+            else do;
+               call copy.string('Loading ',buf);
+
+               if tsm.algorithm = 0             /* select algorithm */
+               then call copy.string('THREE',alg);
+               else if tsm.algorithm = 1
+               then call copy.string('ONE',alg);
+               else call copy.string('TWO',alg);
+
+               call append.to.str(buf,alg);
+               call append.to.str(buf,' algorithm...');
+               call DRAW.MESSAGE(buf);
+
+               i = Load.DSP70(alg);              /* load selected algorithm */
+
+               if i = 0
+               then call tsm.load.err;           /* error loading algorithm */
+               else do;
+                  ratio = tsm.ratio; /* expecting unsigned number with 4 numbers following decimal point */
+                  if ratio < 10000                         /* compression */
+                  then do;
+                     bitmsb=0;bitlsb=10000;
+                     call ratio_multiply(10000,ratio);
+                     ratio = bitlsb;
+                  end;
+                  if (ratio ige 10000) and (ratio ile 20000)
+                  then do;
+                     load 0; uload ratio-10000; div 10000;   /* map TSM factor onto */
+                     ratio = res+(rem ige shr(10000,1));     /* 0-65536 scale       */
+                  end;
+                  call TIME.SCALE.MODIFY((tsm.ratio >= 10000),ratio);
+               end;
+               call SED.COMMAND.ATTRIBUTE.DEPOSIT; /* clean up after command */
+            end;
+         end;
+
+         else if (inc.stmm) and (inc.dsp.code)
+         and (stm.choice=stm.src)
+         then do;
+            if (token(0)<>0) then do;
+               /* new.rate = CHANGE.SRC.MENU; #### */
+               call POS.STM.ALPHA.CURSOR;       /* position menu cursor */
+            end;
+            else if sf.type <> 1
+            then call no.sound.file;            /* error message        */
+            else if not Select.DSP70 then do;   /* could not find DSP70 */
+               call tsm.d24.error;
+            end;
+            else do;
+               call copy.string('Loading ',buf);
+
+               call copy.string('SRC ',alg);
+
+               call append.to.str(buf,alg);
+               call append.to.str(buf,' algorithm...');
+               call DRAW.MESSAGE(buf);
+
+               i = Load.DSP70(alg);              /* load selected algorithm */
+               if i <> 0 then do;
+                  call tsm.load.err;
+               end;
+               else call SRC(new.rate); /* pass ratio to SRC */
+            end;
+
+         end;
+
+         else if (inc.stmm) and (inc.debug.code)
+         and (stm.choice=stm.debug)
+         then do;
+            if (token(0)<>0) then do;
+               call CHANGE.DEBUG.MENU(debug.option);
+               call POS.STM.ALPHA.CURSOR;       /* position menu cursor */
+            end;
+            else do;
+               call DSP.Debug(debug.function);/* process debug stuff */
+            end;
+         end;
+
+      end;                                  /* of if on the command line */
+      else call POS.STM.ALPHA.CURSOR;       /* position menu cursor */
+   end STM_MODIFY2_INPUT_CRET;
+
+   /* $Subtitle Sample-to-Memory Modify II Input Handler */
+
+   STM_MODIFY2_INPUT: PROC(ch) SWAPABLE;         /* character handler for while in Modify II mode */
+      dcl (ch)           fixed;
+
+      if ch=cret then do;                      /* CR: if carriage return */
+         call STM_MODIFY2_INPUT_CRET;
+      end;
+      else if ((ch>=sp) and (ch<=asc.tilde)) then do; /* if a typed character */
+         if ((stm.cmd.line=0) and ((asc.a<=ch) and (ch<asc.y))) then do; /* if not on the command line and typed a valid menu character */
+            stm.last.select.mode=stm.select.mode;    /* save the last selection */
+            if (((ch>=asc.a) and (ch<=asc.c)) or (ch=asc.x)) then do;
+               if ch=asc.x
+               then stm.select.mode=stm.modify2;
+               else stm.select.mode=ch-asc.a;        /* map the new selection */
+               if stm.select.mode<>stm.last.select.mode then do;
+                  call ERASE.COMMAND.MENU;           /* erase previous command menu */
+                  call DRAW.COMMAND.MENU;
+               end;
+               call POS.STM.ALPHA.CURSOR;            /* position menu cursor */
+            end;
+            else do;
+               stm.choice=ch-asc.a;                  /* map the new selection */
+               if stm.choice <= stm.tsm or stm.choice = stm.debug then do;
+                 if sf.type=1 then do;        /* have a current sound file */
+                     stm.cmd.line=1;          /* indicate that command dialog is active */
+                     call ERASE.COMMAND.MENU;
+                     call ERASE.COMMAND.LETTERS;
+                     call DRAW.COMMAND.PROMPT(stm.choice);
+                     if not Select.DSP70 then do; /* could not find DSP70 */
+                        call tsm.d24.error;
+                     end;
+                  end;
+                  else call no.sound.file;  /* error message */
+               end;
+					else if (stm.choice=stm.monoize)
+					{
+						if (sf.type == 1)
+						{	//	if stereo sound file available
+							if (stereo != 0)	Monoize_Stereo_Soundfile(SFILE.BASE);
+							else					no.mono.sound();								//	must process a stereo sound file
+						}
+						else						no.sound.file();								//	otherwise sound file missing
+					}
+               call POS.STM.ALPHA.CURSOR;       /* position menu cursor */
+            end;
+         end;
+         else if ((stm.cmd.line<>0)						/* if on the command line, input characters in token */
+         and (token(0) ILT stm.max.tlen)) then do;	/* if token length within limits */
+            if  (stm.choice = stm.tsm)         /* TSM */
+            AND (tsm.option = 0)               /* On Algorithm switch */
+            then do;
+               if ch = sp
+               then call CHANGE.TSM.MENU(tsm.option);
+            end;
+            else if (stm.choice = stm.debug)   /* Debug */
+            and ((debug.option = 0)            /* and on function switch */
+            or   (debug.option = 1 and debug.function = 2))
+            then do;
+               if ch = sp
+               then call CHANGE.DEBUG.MENU(debug.option);
+            end;
+            else do;
+               call pbyte(token,token(0),ch);
+               token(0)=token(0)+1;
+            end;
+            call POS.STM.ALPHA.CURSOR;       /* position menu cursor */
+         end;
+      end;          /* of char between space and tilde */
+      else if (ch=del) or (ch="32") then do;           /* DELETE or CTRL-Z: Erase last char */
+         if token(0)<>0 then do;                  /* chars to delete */
+            token(0)=token(0)-1;
+            call POS.STM.ALPHA.CURSOR;
+            call pc(sp); call pc(bs);
+         end;
+      end;
+      else if (ch=u.arr) or (ch=d.arr) or (ch=r.arr) or (ch=l.arr) or (ch=home) then do; /* if any of the arrow keys */
+         if ((stm.cmd.line<>0) and (stm.choice=stm.tsm)) then do;
+            if  (tsm.option > 0)                         /* if we just typed in a new value */
+            and (token(0)  <> 0)
+            then call CHANGE.TSM.MENU(tsm.option);
+            tsm.last.option=tsm.option;                 /* save previous selection */
+            if (ch=l.arr) then do;                      /* left arrow */ 
+               tsm.option=tsm.option - 1;
+               if tsm.option < 0 then tsm.option = tsm.max.option;
+            end;
+            else if (ch=r.arr) then do;                 /* right arrow */
+               tsm.option=tsm.option + 1;
+               if tsm.option > tsm.max.option then tsm.option = 0;
+            end;
+            else if (ch=u.arr) then do;                 /* up arrow */ 
+               if tsm.option > 2                        /* if second line exists */
+               then tsm.option = 0;                     /* and we're on it */
+            end;
+            else if (ch=d.arr) then do;                 /* down arrow */
+               if tsm.max.option > 2                    /* if second line exists */
+               then tsm.option=3;                       /* go to it */
+            end;
+            else tsm.option=0;               /* home */
+            call POS.STM.ALPHA.CURSOR;       /* position menu cursor */
+         end;                                /* of arrow key for tsm */
+         else if ((stm.cmd.line<>0) and (stm.choice=stm.debug)) then do;
+            if (ch=l.arr) then do;                      /* left arrow */ 
+               debug.option=debug.option - 1;
+               if debug.option < 0 then debug.option = debug.max.option;
+            end;
+            else if (ch=r.arr) then do;                 /* right arrow */
+               debug.option=debug.option + 1;
+               if debug.option > debug.max.option then debug.option = 0;
+            end;
+            else if (ch=u.arr) then do;                 /* up arrow */ 
+               if debug.option > 1                        /* if second line exists */
+               then debug.option = 0;                     /* and we're on it */
+            end;
+            else if (ch=d.arr) then do;                 /* down arrow */
+               if debug.max.option > 1                    /* if second line exists */
+               then debug.option=0;                       /* go to it */
+            end;
+            else debug.option=0;               /* home */
+            call POS.STM.ALPHA.CURSOR;       /* position menu cursor */
+         end;
+         else do;
+            if sf.type=1 then do;            /* if sound file available */
+               new.cursor=MOVE.GRAPHIC.CURSORS(ch);
+               if new.cursor<>0 then return;
+            end;
+            else call no.sound.file;                    
+            call POS.STM.ALPHA.CURSOR;       /* position menu cursor */
+         end;
+      end;                                   /* of arrow or home key */
+   end STM_MODIFY2_INPUT;

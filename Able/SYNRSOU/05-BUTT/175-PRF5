@@ -1,0 +1,1137 @@
+/* :SYNRSOU:05-BUTT:175-PRF5  $TITLE ADDITIONAL BUTTON ROUTINES */
+
+/*
+Modified:
+1998/06/22 - TY  - Inserted code into MISC.BUTTON to let the user see which Poly Frequency Table
+						 is in use by the current sequence without having to change it.
+1991/09/12 - cj  - Added cue lock protocol recording
+1991/06/26 - cj  - Quickly set up GPI motion tallies on seq motion change
+1991/04/26 - cj  - Processed new tempo events as needed
+1991/02/13 - CJ  - Check for magic #6.  Check for tempo/meter map
+1991/02/07 - PF  - Create system event at tempo/meter changes for screen updates
+1991/01/30 - MWH - Report which tracks have had new notes
+1991/01/14 - PF  - Update VK Tempo display at Meter changes
+1991/01/10 - MWH - Report which tracks have had new notes
+1991/01/09 - PF  - various bug fixes for sequencer and MIDInet
+1990/10/10 - PF  - Always display current Tempo/Meter in VK window
+1990/10/10 - CJ  - Fixed bug withup start up button display code
+1990/09/06 - TSS - ENHANCED PRESSURE CALIBRATION FOR REV 2 TRIPP KBD
+1990/07/10 - PF  - Replace calls to DISPLAY.BEAT.NUMBER with NEW.BEAT.NUMBER flag
+1990/06/15 - CJ  - USE FORCE.TIME.MESSAGE INSTEAD OF LAST TIME MESSAGE
+						 TO FORCE A CURRENT TIME MESSAGE
+1989/11/30 - MWH - Don't allow protocol processing to halt main loop forever
+1989/09/26 - cj  - ORed track bits to get correct cue definitions
+1989/09/20 - MWH - Set cue tracks when creating a cue after DTD recording
+1989/09/19 - MWH - Change event bit when creating a cue after DTD recording
+1989/07/14 - MWH - Send event packets from PERFORM
+1989/07/07 - TSS - Added code to run Pressure Calibration
+1989/06/30 - cj  - modified PERFORM to send out events over RS422 protocol
+						 and to process protocol input messages
+1988/12/01 - CJ  - SET NEW.POLY.CONTENTS WHEN CHANGING POLY BIN PREFERENCE FROM VK
+1988/11/10 - PF  - bug fix for SPLIT function and STOP button
+1988/10/14 - TSS - Moved several blocks of button code to PERFORM from 300-MAIN
+1988/07/12 - TSS - Fixed bug in timbre entry write
+1988/06/22 - EG  - ERASE TEMP UNDO TRACKS BEFORE NAH.COLLECT (SAVING SEQ.)
+1988/05/05-TSS,PF- ADDED HELD.MIDI.BUTTON TO KBD.SPECIAL CHECK
+1988/04/20 - SGS - default timbre name = sound filename if it's the only sound file in timbre
+1988/04/20 - SGS - Split 174-PRF4 to -> 174-PRF4 and 175-PRF5
+*/
+
+/* $SUBTITLE  PROCESS BANK BUTTONS */
+
+BANK.BUTTON:PROC(BNK,VALUE,ORK) PUBLIC SWAPABLE;        /* PROCESS BANK BUTTON PRESS */
+   DCL (BNK,VALUE,ORK) FIXED;
+
+   IF VALUE=0 THEN RETURN;    /* NOTHING TO DO ON RELEASE  */
+
+   IF (NEW.PAN<>0)&(INFO.MODE<>0) THEN DO;   /* INFO MODE            */
+      CALL INFO.BUTTON.PRESS;                /* GET OUT OF INFO MODE */
+   END;
+
+   // A bank button on ORK - set VKP butmode; it will be displayed by DISPLAY.BANK.BUTTONS
+   if (ORK==1)
+      BUTMODE=1;
+
+   OUR.BANK=BNK;              /* SAVE OUR BANK NUMBER FOR REFERENCE */
+   CALL DISPLAY.BANK.BUTTONS; /* LIGHT THE BUTTON DURING THE DISKREAD */
+   CALL PANEL.RESCAN;         /* PRESENT IT TO USER */
+
+   IF HELD.MIDI.BUTTON<>0 THEN DO; /* MIDI BUTTON PRESSED - DOING PROGRAM CHANGE */
+      IF BNK.LEN<>0 THEN DO;  /* TRASH ANY BANK CURRENTLY IN MEMORY */
+         BNK.PTR=BNK.PTR+BNK.LEN;
+         BNK.LEN=0;
+      END;
+      RETURN;                 /* PROGRAM CHANGE ACTUALLY OCCURS ON ENTRY PRESS */
+   END;
+
+   /* LOOK FOR .NEWDATA  IF NOT THERE,  ALLOW READ OF .BNKDATA */
+
+   VALUE=FIND.NEW.BANK(OUR.BANK); /* LOOK FOR .NEWDATA, .BNKDATA, .PATDATA ON DISK */
+
+   IF  (BANK.WRITE<>0)            /* FOR WRITE - SPECIAL CHECKS */
+   AND (VALUE     <>0)            /* AND FILE WAS FOUND         */
+   THEN DO;
+      IF (DISK_CHECK(SHR(BANK.DEV,8))&2)<>0
+      THEN DO;
+         VALUE=0;
+         CALL DISPLAY.ERR(54);
+      END;
+      IF (SHR(ACTIVE.BANK.LEN+255,8)  IGT  OUR.BANK.STR)
+      THEN DO;                    /* BANK WILL NOT FIT ON WRITE */
+         VALUE=0;
+         CALL DISPLAY.ERR(15);
+      END;
+      IF PAT.FORMAT<>0 THEN DO;   /* TRYING TO WRITE TO .PATDATA */
+         VALUE=0;
+         CALL DISPLAY.ERR(19);
+      END;
+   END;
+
+   IF VALUE<>0 THEN DO;   /* BANK FOUND */
+      IF BANK.WRITE=0 THEN DO;         /* TRY TO READ BANK INTO MEMORY */
+         CALL READ.IN.BANK;            /* READ IN; CONVERT .PATDATA FORMAT IF POSSIBLE */
+         ABRT.LIMIT=0;                 /* TRY TO READ BANK - ABORT AFTER BUFFER EXHAUSTED */
+         CALL CLEAR.DISPLAY;           /* REMOVE POSSIBLE ERROR DISPLAYS */
+      END;
+      ELSE DO;                         /* DO A BANK WRITE */
+         IF BNK.LEN=0 THEN CALL DISPLAY.ERR(12); /* BUT WE HAVE LOST THE BANK,  SO WE CAN NOT */
+         ELSE DO;                      /* WRITE OUT A BANK */
+            IF NEW.PAN<>0 THEN CALL CLEAR.DISPLAY; /* CLEAR DISPLAY BEFORE WRITE ON NEW PANEL */
+
+            CALL EXT.WRITEDATA(BANK.DEV,BANK.SEC,BNK.PTR,0,0,ACTIVE.BANK.LEN); /* WRITE OUT FROM EXT MEMORY */
+
+            CALL DISK.MESSAGE(SHR(ACTIVE.BANK.LEN+255,8));
+            NEW.ENTRY.WRITES=NEW.ENTRY.WRITES \ BITS(OUR.BANK); /* CAUSE REFRESH OF TIMBRE DIR */
+         END;
+      END;
+   END; /* OF BANK READ OR WRITE */
+END BANK.BUTTON;
+
+/* $SUBTITLE  PROCESS TIMBRE BUTTONS */
+
+TIMBRE.BUTTON:PROC(TMB, VALUE, ORK) PUBLIC SWAPABLE;
+   DCL TMB					FIXED; /* BUTTON NUMBER: 0-7    */
+   DCL VALUE				FIXED; /* 1=PRESSED, 0=RELEASED */
+   DCL ORK   				FIXED; /* 1=ORK,     0=VPK      */
+
+   DCL (K, L)				FIXED;
+   DCL CUR.TMB.PTR		FIXED;
+   DCL CUR.TMB.END		FIXED;
+   DCL CUR.TMB.LEN		FIXED;
+   DCL KYBD.TMB.LEN		FIXED;
+   DCL REMAIN.TMB.LEN	FIXED;
+   DCL LEN.DIFF			FIXED;
+   DCL NEW.BANK.LEN		FIXED;
+   DCL NAMEARRAY(8)		FIXED;	//	16 character timbre name to be stored
+
+   IF (HELD.RTE.BUTTONS)<>0 THEN RETURN;   /* DO NOTHING IF IN RTE MODE */
+
+   IF VALUE=0 THEN RETURN;                 /* NOTHING TO DO ON RELEASE  */
+
+   IF (NEW.PAN<>0)&(INFO.MODE<>0) THEN DO;   /* INFO MODE            */
+      CALL INFO.BUTTON.PRESS;                /* GET OUT OF INFO MODE */
+   END;
+
+   IF HELD.TRINF.BUTTON = 1                /* TRACK ROUTING BUTTON HELD */
+   AND POLYNUMS > 1 THEN DO;               /* ON A MULTIPLE POLY BIN SYSTEM */
+      IF TMB < POLYNUMS THEN DO;           /* IF BUTTON IS VALID POLY BIN */
+         IF TROUT.TRK# = (-1) THEN K=0;    /* KEYBOARD TIMBRE */
+         ELSE DO;
+            K=TBUT.MAPPING(TROUT.TRK#);    /* MAP TO ACTUAL TRACK NUMBER */
+            IF  (K >= FIRST.LOD.TRACK)
+            AND (K < LAST.LOD.TRACK)
+            THEN RETURN;                   /* IGNORE IF THIS IS A LIVE TRACK */
+         END;
+         CALL TRK.HEAD.STORE(K,THD.POLY,TMB); /* STORE NEW POLY BIN NUMBER */
+         CALL DISPLAY.PAR;                    /* CAUSE REDISPLAY */
+         NEW.PRM.INFO  = NEW.PRM.INFO \ 16;   /* INDICATE OVERALL CHANGE  */
+         NEW.POLY.CONTENTS = NEW.POLY.CONTENTS \ 2;  /* tell I-screen to refresh */
+      END;
+      RETURN;
+   END;
+
+   IF (NEW.PAN<>0)&(ORK=0)&(BUTMODE<>0) THEN DO;   /* NEW PANEL, BANK OR SEQUENCE RECALL SELECTED */
+      IF (BUTMODE=(-1)) THEN DO;           /* MUST SELECT */
+         CALL DISPLAY.ERR(22);             /* BUTTON MODE ERROR */
+         WRITE("50")=7;                    /* GET THE GUY'S ATTENTION */
+         RETURN;
+      END;
+      IF BUTMODE=1 THEN TMB=TMB+BANK.L;    /* MAP TO BANK RECALL OF BANK ACTIVE */
+      ELSE              TMB=TMB+SEQR.L;    /* ELSE SEQUENCE RECALL */
+      CALL STACK.ON.PANEL(BUTTON.LIST.HELD+TMB);   /* MAP TO PRESS OF THAT BUTTON */
+      RETURN;
+   END;
+
+   ELSE IF (ORK=1)                         /* old panel - timbre recall - set VKP Timbre button */
+      BUTMODE=0;
+
+   OUR.TIMBRE=TMB;              /* SAVE OUR ENTRY NUMBER FOR REFERENCE */
+   CALL DISPLAY.TIMBRE.RECALL.BUTTONS;   /* DISPLAY THEM */
+   CALL PANEL.RESCAN;
+
+   IF HELD.MIDI.BUTTON<>0 THEN DO;       /* PERFORM MIDI PROGRAM CHANGE */
+
+      DISABLE;           /* DISABLE INTERRUPTS FOR FOLLOWING CODE */
+
+      IF (NEW.PROGRAM.STAK(0)<PGM.CHG.LIST.SIZE) THEN DO;
+         NEW.PROGRAM.STAK(0)=NEW.PROGRAM.STAK(0)+1;
+         NEW.PROGRAM.STAK(NEW.PROGRAM.STAK(0))=SHL(OUR.BANK,3)+OUR.TIMBRE; /* BANK*8+ENTRY */
+         IF DRIVE.SELECT.ACTIVE<>0                       /* SHIFT FUNCTION */
+         THEN NEW.PROGRAM.STAK(NEW.PROGRAM.STAK(0))=NEW.PROGRAM.STAK(NEW.PROGRAM.STAK(0))+64;
+         IF TRK.HEAD.LOOKUP(0,THD.MIDI)<>0               /* KEYBOARD MIDI OUTPUT ENABLED */
+         THEN CALL MIDI.PROGRAM.CHANGE(NEW.PROGRAM.STAK(NEW.PROGRAM.STAK(0))); /* SEND OUT MIDI PORT */
+         NEW.PROGRAM.STAK(NEW.PROGRAM.STAK(0))=NEW.PROGRAM.STAK(NEW.PROGRAM.STAK(0))\128;    /* IN CASE RECORDING */
+
+         ENABLE;         /* ENABLE INTERRUPTS */
+
+         RETURN;
+      END;
+
+      ENABLE;            /* IN CASE ABOVE "IF" FAILS */
+
+   END;
+
+   IF ENTRY.WRITE<>0 THEN DO;            /* WRITE OUT ENTRY */
+
+		IF (READ.IN.BANK) THEN DO;          /* GET BANK FROM DISK HERE - IF NOT THERE, ERR4 HAS BEEN DISPLAYED */
+
+			IF (DISK_CHECK(SHR(BANK.DEV,8))&2)<>0
+			THEN CALL DISPLAY.ERR(54);       /* WRITE PROTECTED FLOPPY */
+			ELSE IF BNK.LEN=0 THEN CALL DISPLAY.ERR(14);       /* NOT ENOUGH MEMORY FOR OPERATION */
+			ELSE IF (PAT.FORMAT<>0) THEN CALL DISPLAY.ERR(19); /* .PATDATA WRITE NOT ALLOWED */
+			ELSE DO;                         /* OK SO FAR -- CONTINUE */
+				/* GET TIMBRE NAME - DO THIS BEFORE COMPUTING TIMBRE PTRS */
+				/* IN CASE WE WIND UP CREATING A TINFO FRAME FOR TIMBRE 0 */
+				CALL LOOKUP.TIMBRE.NAME(0,NAMEARRAY);
+
+				IF NAMEARRAY(0)<>0 THEN DO;                 /* >0 SOUND FILES IN TIMBRE */
+					DO K=0 TO NAMEARRAY(0)-1;                /* CHANGE INVALID CHARS TO SPACES */
+						L=BYTE(NAMEARRAY,K);
+						IF (L < SP)
+						{	L	= SP;
+							PBYTE(NAMEARRAY,K,L);
+						}
+					END;
+
+					DO K=NAMEARRAY(0) TO 15;
+						CALL PBYTE(NAMEARRAY,K,SP);           /* SPACE FILL */
+					END;
+
+					NAMEARRAY(0)=16;
+
+					IF (TIM.HEAD.LOOKUP(0,TIM.TINFO.POINTER) == NULL)
+					{	//	CREATE T.FRAME IF ONE NOT THERE AND TRY AGAIN
+						CALL CREATE.TINFO.FRAME;
+
+						IF (TIM.HEAD.LOOKUP(0,TIM.TINFO.POINTER) == NULL) THEN DO;	/* OUT OF MEMORY	*/
+							CALL NOMEM.ERROR;                     /* TERMINAL ERROR MESSAGE	*/
+							CALL DISPLAY.ERR(11);                 /* DISPLAY 'OUT OF MEMORY'	*/
+							RETURN 0;
+						END;
+					}
+
+					K = READ(MD);
+
+					DO L = 1 TO 8;										/* STORE NAME */
+						CALL P.STORE(K+L+(TI.NAME-1), NAMEARRAY(L));
+					END;
+				END;
+
+				CUR.TMB.PTR		= FIND.TIMBRE(BNK.PTR,TMB);      /* FIND CURRENT TIMBRE         */
+				CUR.TMB.END 	= FIND.TIMBRE(BNK.PTR,TMB+1);    /* AND THE END OF IT           */
+				KYBD.TMB.LEN	= FIND.TIMBRE(PAR.PTR,1);        /* FIND END OF KEYBOARD TIMBRE (same as LENGTH OF KEYBOARD TIMBRE) */
+
+				CUR.TMB.LEN		= CUR.TMB.END-CUR.TMB.PTR;     /* LENGTH OF TIMBRE IN BANK    */
+				REMAIN.TMB.LEN	= ACTIVE.BANK.LEN-CUR.TMB.END; /* LENGTH OF REMAINING TIMBRES */
+				LEN.DIFF			= KYBD.TMB.LEN-CUR.TMB.LEN;    /* GET DIFFERENCE IN LENGTH    */
+
+				IF (KYBD.TMB.LEN IGT CUR.TMB.LEN) THEN DO;	/* IF KEYBOARD TIMBRE IS LONGER THAN TIMBRE IN BANK */
+					NEW.BANK.LEN=ACTIVE.BANK.LEN+LEN.DIFF;		/* GET NEW LENGTH OF BANK      */
+					IF NEW.BANK.LEN ILT LEN.DIFF THEN
+						NEW.BANK.LEN	= (-1);						/* OVERFLOW OCCURRED */
+					ELSE DO;
+						NEW.BANK.LEN=NEW.BANK.LEN+255;			/* ROUND             */
+						IF NEW.BANK.LEN ILT 255 THEN
+							NEW.BANK.LEN	= (-1);					/* OVERFLOW DURING ROUNDING */
+						ELSE NEW.BANK.LEN=SHR(NEW.BANK.LEN,8);	/* NEW # OF SECTORS IN BANK */
+					END;
+				END;
+				ELSE NEW.BANK.LEN=SHR(ACTIVE.BANK.LEN+LEN.DIFF+255,8); /* ELSE NO OVERFLOW CHECK NEEDED */
+
+				/* CHECK FOR THREE FINAL POSSIBLE ERROR CONDITIONS */
+				IF      (NEW.BANK.LEN IGE 255)           THEN CALL DISPLAY.ERR(15); /* TIMBRE BANK TOO LARGE - MUST LIMIT TO 64K FOR NOW */
+				ELSE IF (NEW.BANK.LEN IGT OUR.BANK.STR)  THEN CALL DISPLAY.ERR(15); /* RESULTING BANK IS TOO LARGE FOR THIS .NEWDATA CONFIGURATION */
+
+				ELSE DO;                        /* CAN PUT TIMBRE IN BANK */
+					IF GET.BNK.STORAGE(NEW.BANK.LEN)=0
+					THEN DO;                     /* FIND THE STORAGE FOR LARGER BANK */
+						CALL DISPLAY.ERR(14);     /* NOT ENOUGH AVAILABLE MEMORY FOR OLD BANK+NEW TIMBRE */
+					END;
+					ELSE DO;
+						IF NEW.PAN<>0 THEN CALL CLEAR.DISPLAY;      /* CLEAR DISPLAY BEFORE WRITE ON NEW PANEL */
+
+						CALL COPY.EXT.MEM(BNK.PTR,CUR.TMB.END,
+												BNK.PTR,CUR.TMB.PTR+KYBD.TMB.LEN,
+												REMAIN.TMB.LEN);          /* COPY REMAINING TIMBRES TO NEW PLACE IN BANK */
+						CALL COPY.EXT.MEM(PAR.PTR,0,
+												BNK.PTR,CUR.TMB.PTR,
+												KYBD.TMB.LEN);            /* COPY KEYBOARD TIMBRE INTO PLACE */
+						IF OUR.BANK.STR<>BANK.STRIDE
+						THEN CALL COMPACT.TIMBRES(BNK.PTR,8);       /* COMPACT THEM FOR DISK WRITE IF NOT WRITING TO .BNKDATA */
+						ELSE ACTIVE.BANK.LEN=FIND.TIMBRE(BNK.PTR,8);/* FIND RESULTING COMPACTED LENGTH */
+						IF SHR(ACTIVE.BANK.LEN+255,8) IGT OUR.BANK.STR
+						THEN STOP(3);                               /* SHOULD NEVER HAPPEN - ONLY IF CORRUPTED BANK FILE - KEEP FROM TRASHING DISK */
+						CALL EXT.WRITEDATA(BANK.DEV,BANK.SEC,BNK.PTR,0,0,ACTIVE.BANK.LEN);
+						CALL DISK.MESSAGE(SHR(ACTIVE.BANK.LEN+255,8));
+						NEW.ENTRY.WRITES=NEW.ENTRY.WRITES \ BITS(OUR.BANK); /* CAUSE REFRESH OF TIMBRE DIR */
+					END;
+				END;
+			END;	/* OF OK TO TRY TO DO WRITE */
+		END;	/* BANK FOUND */
+	END;	/* OF ENTRY WRITE */
+
+   /* $PAGE - PERFORM TIMBRE RECALL */
+
+   ELSE DO; /* CASE FOR ENTRY RECALL */
+
+      /* FIRST CHECK TO SEE IF WE NEED TO COPY THE KEYBOARD TIMBRE OUT TO A TRACK */
+
+      IF  ((RECALL.STATE < 3)
+      AND (KEYBOARD.TIMBRE.CONTROL <> 0))
+      OR  ((RECALL.STATE = 3)
+      AND (KEYBOARD.TIMBRE.CONTROL = TIMB.DEST))
+      THEN CALL RESET.KEYBOARD.TIMBRE.CONTROL(0);
+
+      /* NOW MOVE TIMBRE TO KEYBOARD OR TRACK (SMT) */
+
+      DO CASE (RECALL.STATE); /* PERFORM SPECIFIED KIND OF RECALL */
+
+        DO; /* STATE 0 - NORMAL RECALL */
+          IF SPLIT.KEYBOARD THEN CALL ERASE.TIMBRE(1); /* FREE UP MEMORIES */
+          SPLIT.KEYBOARD=0;          /* INDICATE KEYBOARD NO LONGER SPLIT */
+          CALL COPY.TIMBRE(-1,0);    /* BRING TIMBRE TO KEYBOARD */
+        END;
+
+        DO; /* STATE 1 - MOVE TIMBRE TO UPPER KEYBOARD ONLY */
+          IF SPLIT.KEYBOARD=0 THEN CALL COPY.KBD.TIMBRES(0,1); /* MOVE KEYBOARD TO LOWER HALF */
+          IF COPY.TIMBRE(-1,0)<>0 THEN DO; /* MOVE TIMBRE TO KEYBOARD */
+             SPLIT.KEYBOARD=1; /* AND INDICATE SPLIT KEYBOARD IN EFFECT */
+          END;
+          ELSE IF SPLIT.KEYBOARD=0 THEN CALL ERASE.TIMBRE(1); /* TRY TO RECOVER SPACE IF ABORTED MOVE */
+        END;
+
+        DO; /* STATE 2 - MOVE TO LOWER KEYBOARD ONLY */
+          CALL COPY.TIMBRE(-1,1); /* MOVE TO LOWER KEYBOARD */
+          SPLIT.KEYBOARD=1; /* INDICATE SPLIT KEYBOARD */
+        END;
+
+        DO; /* STATE 3 - MOVE TIMBRE TO SEQUENCER (AFTER SMT) */
+          CALL COPY.TIMBRE(-1,TIMB.DEST);
+        END;
+
+      END; /* OF DO CASE */
+
+      IF RECALL.STATE<>0 THEN DO; /* CLEAN UP FROM SKT & SMT */
+        CALL ABORT.BOUNCE.SMT.SKT; /* DO IT, PRESENT CORRECT TIMBRE DISPLAY */
+      END;
+
+   END;
+
+END TIMBRE.BUTTON;
+
+/* $SUBTITLE  Process Sequencer Recall Buttons */
+
+SEQUENCER.RECALL.BUTTON:PROC(SEQ,VALUE,ORK) PUBLIC SWAPABLE;
+   DCL (SEQ,VALUE,ORK)  FIXED;
+   DCL (J,FOUND)        BOOLEAN;
+	DCL (THE_NAME) (Cur.Seq.Path.Name.Wlen) fixed;
+	dcl Get.Normalized.Device.Name proc (fixed,array) external; 					/* compute string for name */
+	dcl APPEND.TO.STR              proc (array,array) returns(fixed) external;	/* appends s2 to s1 */
+
+   DCL OLD.PREFIX     LIT '"042523"'; /* 'SE' */
+
+	ALLOW.TRACK.GROUP.DEFINE = FALSE;	/* DISALLOW GROUP DEFINE AFTER SELECTIVE RECALL */
+
+   IF VALUE=0 THEN RETURN;      /* NOTHING TO DO ON BUTTON RELEASE */
+
+   IF (NEW.PAN<>0)&(INFO.MODE<>0) THEN DO;   /* INFO MODE            */
+      CALL INFO.BUTTON.PRESS;                /* GET OUT OF INFO MODE */
+   END;
+
+   IF (HELD.RTE.BUTTONS\HELD.MIDI.BUTTON)<>0 THEN RETURN; /* DON'T CHANGE ANYTHING */
+
+   // A sequence recall button on ORK - set VKP butmode; it will be displayed by DISPLAY.BANK.BUTTONS
+   if (ORK==1)
+      BUTMODE=2;
+
+   CALL CLEAR.LOWER;            /* CLEAR WINDOW FOR LATER MESSAGE  */
+   CALL STOP.RECD.MOVE.PLAY.XPOS.CONT.ERAS;
+   CALL ABORT.BOUNCE.SMT.SKT;   /* KILL FUNCTIONS                  */
+   OUR.SEQ=SEQ;                 /* SAVE CURRENT SEQUENCER NUMBER   */
+   CALL DISPLAY.SEQUENCER.RECALL.BUTTONS;
+   CALL PANEL.RESCAN;
+
+   DO J = 0 TO SHR(SQ0DATA(0) + 1,1); /* COPY NAME INTO MISC.BUF */
+      MISC.BUF(J) = SQ0DATA(J);
+   END;
+   CALL PBYTE(MISC.BUF,3,BYTE(MISC.BUF,3) + SEQ); /* INSERT PROPER SEQUENCE NUMBER INTO NAME */
+
+   J = 0; FOUND = FALSE; /* FILE NOT FOUND YET */
+   DO WHILE (NOT FOUND) AND (J <= 1); /* LOOP OVER VARIOUS CONTORTIONS OF THE SEQ0DATA NAME ON VARIOUS LEVELS */
+      FOUND = FILE.SEARCH(MISC.BUF, 1, ACTIVE.LEVEL, 0, 0); /* SEARCH ACTIVE LEVEL FIRST */
+
+		IF (FOUND == TRUE)
+		{
+			Get.Normalized.Device.Name(ACTIVE.LEVEL, THE_NAME);
+			Append.To.Str(THE_NAME, MISC.BUF);
+		}
+
+		ELSE IF (DRIVE.SELECT.ACTIVE == 0)				/* SEARCH SYSTEM LEVEL IF NOT DOING DRIVE SELECT & NOT FOUND ON USER LEVEL	*/
+		{															/* E.G. ALLOW OPERATION WITH 8 GLOBAL .SQ0DATA FILES...							*/
+     		FOUND = FILE.SEARCH(MISC.BUF, 1, 0, 0, 0);
+
+			IF (FOUND == TRUE)
+			{
+				Get.Normalized.Device.Name(0, THE_NAME);
+				Append.To.Str(THE_NAME, MISC.BUF);
+			}
+		}
+
+      IF (NOT FOUND) AND (J = 0)
+      THEN MISC.BUF(1) = OLD.PREFIX; 					/* START FILE WITH 'SE' INSTEAD OF '.S' */
+      J = J + 1;
+   END;
+
+	IF FOUND THEN DO;				/* IF IT WAS FOUND, THEN SEQUENCE EXISTS, OTHERWISE MESSAGE WAS DISPLAYED */
+		IF (ENTRY.WRITE\BANK.WRITE) THEN DO;			/* WRITE OUT SEQUENCE */
+			IF (DISK_CHECK(SHR(F#MS_SECTOR,8))&2)<>0
+			THEN CALL DISPLAY.ERR(54);						/* WRITE PROTECTED DISK */
+			ELSE DO;
+				CALL ERASE.TRACK(UNDO.TRK);				/* WANT TO MAKE SURE THESE TRACKS */
+				CALL ERASE.TRACK(UNDO.TMP.TRK);			/* ARE NOT SAVED WITH THE SEQUENCE */
+
+				CALL NAH.COLLECT;								/* CLEAN UP NOTE AREA */
+				J=FIND.TIMBRE(PAR.PTR,NUM.KBD.TRACKS);	/* GET POINTER TO AFTER KEYBOARD TIMBRES */
+				J=SHR(PAR.TOP-J+255,8);						/* LENGTH OF SEQ TIMBRES IN SECTORS */
+				J=J+BAS.LEN;									/* ADD BASE LENGTH    */
+				IF J ILT BAS.LEN THEN CALL DISPLAY.ERR(6);
+				ELSE DO;
+					J=J+NAH.LEN;
+					IF J ILT NAH.LEN THEN CALL DISPLAY.ERR(6);
+					ELSE DO;
+						J=J+INF.LEN;
+						IF J ILT INF.LEN THEN CALL DISPLAY.ERR(6);
+						ELSE DO;
+							IF F#LS_LENGTH ILT J
+							THEN CALL DISPLAY.ERR(6);		/* TOO LONG TO WRITE TO DISK */
+							ELSE DO;
+								call READDATA(F#MS_Sector, F#LS_Sector, Misc.Buf, 256);
+								if  (((Misc.Buf(MAGIC.NUMBER) = MAGIC#5)
+								||    (Misc.Buf(MAGIC.NUMBER) = MAGIC#6)
+								||    (Misc.Buf(MAGIC.NUMBER) = MAGIC#7))
+								&&   ((Misc.Buf(SEQ.PROT)&1) <> 0))
+								then do;
+									call DISPLAY.ERR(58);	/* sequence file is protected */
+								end;
+								ELSE DO;
+									CALL WRITE.SEQUENCE(F#MS_SECTOR,F#LS_SECTOR);	/* WILL CLEAR DISPLAY OR PRESENT MESSAGE */
+
+									call GID(Cur.Seq.Path.Name);	/* update global seq path name on seq store from button panel */
+									call COPY.OUT(addr(THE_NAME(0)), Cur.Seq.Path.Name.Wlen);
+								END;
+							END;
+						END;
+					END;
+				END;
+			END;
+		END;							/* OF WRITE OUT		*/
+		ELSE DO;						/* READ IN SEQUENCE	*/
+			IF (TRY.TO.READ.SEQ(F#MS_SECTOR,F#LS_SECTOR) == TRUE)	/* READ SEQUENCE */
+			{																		/* if could read sequence, then update	*/
+				if (NUM.OF.HELD.TRACK.BUTTONS == 0)						/* global current seq path name if not */
+				{																	/* selective track recall              */
+					call GID(Cur.Seq.Path.Name);							/* update global seq path name on seq recall from button panel */
+					call COPY.OUT(addr(THE_NAME(0)), Cur.Seq.Path.Name.Wlen);
+				}
+			}
+		END;
+	END;								/* SEQUENCE EXISTS		*/
+	ELSE CALL DISPLAY.ERR(4);	/* SEQUENCE NOT FOUND	*/
+
+END SEQUENCER.RECALL.BUTTON;
+
+/* $SUBTITLE  ROUTINE TO PROCESS MISC BUTTONS */
+
+MISC.BUTTON:PROC(BUT,VALUE,ORK) PUBLIC SWAPABLE;    /* MISCELLANEOUS BUTTONS */
+   DCL (I,K,BUT,VALUE,ORK)    FIXED;
+   DCL (LAST) FIXED STATIC;
+
+   IF BUT=(SLIB.L   -MISC.L) THEN BUT=DSEL.L-MISC.L;  /* MAP SLIB TO DSEL FOR NOW */
+   IF BUT=(SCALE.A.L-MISC.L) THEN HELD.SCALE.ADJUST.BUTTON=HELD.SCALE.ADJUST.BUTTON XOR 1; /* KEEP TRACK OF HELD SCALE ADJUST BUTTON */
+
+   IF HELD.MIDI.BUTTON<>0 THEN DO;
+      IF  (BUT<>20) AND (BUT<>21) AND (BUT<>22) /* BANK,ENTRY,OR SEQ      */
+      AND (BUT<>24)                   /* BANK OVERWRITE         */
+      AND (BUT<>25)                   /* WRITE                  */
+      AND (BUT<>26)                   /* DRIVE SELECT (LIBRARY) */
+      THEN RETURN; /* IGNORE BUTTON UNLESS SPECIAL CLEAN UP REQUIRED */
+   END;
+
+   IF HELD.RTE.BUTTONS<>0 THEN DO;             /* DO NOTHING IF IN RTE MODE */
+      IF  (NEW.PAN<>0) & (BUT=28) & (VALUE<>0) /* PRESSING INFO WHILE HOLDING */
+      AND ((HELD.RTE.BUTTONS & BITS(1))<>0)    /* PRESSURE RTE BUTTON */
+      THEN DO;                                 /* TOGGLE PRESSURE CALIBRATION MODE */
+
+         IF PRESSURE.CALIBRATION.MODE=0 THEN DO; /* CALIBRATION TURNED OFF */
+            IF (MAP.THERE<>0) THEN DO;           /* MAP FILE EXISTS        */
+               WRITE(MAM) = PMAP.PTR;
+               WRITE(MAL) = 128;                 /* INITIALIZE LIST OF KEYS CALIBRATED */
+               DO I=1 TO NUM.KEYS; WRITE(MDI)=0; END; /* CLEAR KEY 'DONE' BITS */
+               WRITE(MDI)=0;                     /* CLEAR SATURATION RESET BIT */
+
+               PRESSURE.CALIBRATION.MODE = 1;    /* ENABLE CALIBRATION MODE */
+					ANY.MISC.FUNCTIONS        = TRUE;
+
+               /*                  01234567890123456789012345678901 */
+               CALL CLEAR.DISPLAY;
+               CALL EMIT.STRING(0,'Pressure        Calibration:  ON');
+            END;
+            ELSE DO;                             /* NO MAP FILE - NO CALIBRATION */
+               /*                  01234567890123456789012345678901 */
+               CALL CLEAR.DISPLAY;
+               CALL EMIT.STRING(0,'CANNOT FIND     .SMAP-7 FILE!   ');
+               LAST.ERR=0;
+            END;
+         END;
+
+         ELSE DO;                                /* DISABLE PRESSURE CALIBRATION MODE */
+            PRESSURE.CALIBRATION.MODE = 0;
+            /*                  01234567890123456789012345678901 */
+            CALL CLEAR.DISPLAY;
+            CALL EMIT.STRING(0,'Pressure        Calibration: OFF');
+         END;
+
+         SUPRESS.BEAT.DISPLAY=1;                 /* STOP BEAT DISPLAYS MOMENTARILY */
+         BEAT.DISPLAY.TIME=REAL.MILLISECONDS;    /* HOLD DISPLAY FOR 5 SECONDS */
+         BOTH.DISPLAY=1;
+      END;
+
+      IF  (BUT<>24)                   /* BANK OVERWRITE         */
+      AND (BUT<>25)                   /* WRITE                  */
+      AND (BUT<>26)                   /* DRIVE SELECT (LIBRARY) */
+      THEN RETURN;                    /* IGNORE BUTTON UNLESS SPECIAL CLEAN UP REQUIRED */
+   END;
+
+   IF VALUE<>0 THEN DO;               /* PRESSING MISC BUTTON */
+
+      IF (NEW.PAN<>0)&(INFO.MODE<>0)&(BUT<>(INFO.L-MISC.L)) THEN DO;   /* INFO MODE            */
+         CALL INFO.BUTTON.PRESS;      /* GET OUT OF INFO MODE IF OTHER BUTTON PRESSED */
+      END;
+
+      IF BUT<8 THEN DO;         			/* ROOM FOR 8 TOGGLE BUTTONS THAT AFFECT PARTIALS */
+         DO I=0 TO 3;           			/* TEST EACH OF 4 PARTIALS */
+            IF (SELECTED.PARTIALS&BITS(I))<>0
+            THEN DO;           			/* SELECTED PARTIAL */
+
+               PTPTR=TIM.HEAD.LOOKUP(0,TIM.PARTIAL.POINTERS+I);  /* GET POINTER TO FRAME 0 FOR THIS PARTIAL */
+
+               IF BUT<2 THEN DO;               /* PORTAMENTO TOGGLES */
+                  K=P.LOOKUP(PTPTR+P.GLIDEBITS);
+                  WRITE(MD)=K XOR BITS(BUT);   /* TOGGLE PORT ON/OFF OR PORT LOG/LIN BUTTONS */
+                  CALL COMPUTE.LOGS(0);        /* SET GLIDE BIT IN OPTIONS WORD */
+               END;
+               ELSE DO;
+                  K=P.LOOKUP(PTPTR+P.VIBWAVE);
+                  WRITE(MD)=K XOR BITS(BUT+2); /* TOGGLE "20", "40", OR "100" IN VIBWAVE (INV, QUAN, RAISE) */
+               END;
+               NEW.PRM.INFO=NEW.PRM.INFO\BITS(I);  /* SET BIT TO INDICATE OVERALL CHANGE */
+            END;
+         END;
+         IF NEW.PAN=0 THEN CALL DISPLAY.PAR;   /* REDISPLAY POSSIBLE VIBRATO WAVE WITH NEW IQR BITS. */
+         CALL COMPUTE.TOGGLE.DISPLAY;          /* DISPLAY ALL TOGGLES ON PANEL */
+      END;
+      ELSE IF BUT<16 THEN DO;   /* ROOM FOR 8 TOGGLE BUTTONS THAT AFFECT WHOLE TIMBRE */
+         IF RECD<>0 THEN DO;    /* RECORDING - CHANGE TBITS ONLY */
+            CALL TRK.HEAD.LOOKUP(0,THD.CTBITS);
+            WRITE(MD)=READ(MD) XOR MISC.TOGGLE.BITS(BUT-8);
+            NEW.TOGGLES=1;
+         END;
+         ELSE DO;               /* CHANGE IN TIMBRE */
+            PTPTR=TIM.HEAD.LOOKUP(0,TIM.MISC.POINTER); /* POINTER FOR NEW FORMAT */
+            K=P.LOOKUP(PTPTR);
+            WRITE(MD)=K XOR MISC.TOGGLE.BITS(BUT-8); /* TOGGLE APPROPRIATE BIT */
+
+            LOAD READ(MD);                           /* STORE IN D4567 TEMP */
+            CALL TIM.HEAD.LOOKUP(0,TIM.TOPTIONS);
+            WRITE(MD)=(READ(MD)&(NOT(BIT.REPEAT\BIT.ARPEG)))\(RES&(BIT.ARPEG\BIT.REPEAT));
+
+            NEW.PRM.INFO=NEW.PRM.INFO\16;      /* SET BIT TO INDICATE OVERALL CHANGE */
+         END;
+         RESET.FILTERS=1;                      /* IN CASE FILTER STUFF CHANGED */
+         CALL COMPUTE.TOGGLE.DISPLAY;          /* PRESENT NEW FILTER BITS, REPEAT, ARPEG */
+         CALL TRK.HEAD.LOOKUP(0,THD.UPD.PARS); /* GET AT UPD.PAR VARIABLE */
+         WRITE(MD)=READ(MD)\N.REPRATE;         /* RECOMPUTE FOR KBD TIMBRE */
+         NEW.INFO=1;                           /* SET FLAG FOR IMMEDIATE ENTRY */
+      END;
+
+      /* $PAGE - PROCESS UNUSUAL BUTTONS */
+
+      ELSE DO; 									/* PROCESS HARD TO DESCRIBE FUNCTIONS */
+         DO CASE(BUT-16);     				/* BRANCH FOR INDESCRIBABLE ONES */
+            DO; SCALE.ADJUST.IS.ACTIVE=0; HGS=0; END; 			/* HGS1 (SELECTS COEFFS 1-12) */
+            DO; SCALE.ADJUST.IS.ACTIVE=0; HGS=1; END; 			/* HGS2 (SELECTS COEFFS 13-24)*/
+            DO;                    										/* NEW HGS FUNCTION - ON, OFF, BLINK */
+              IF (HELD.SCALE.ADJUST.BUTTONS<>0) THEN CALL TOGGLE.BLINK; /* TOGGLE BLINK MODE */
+              ELSE DO;                                			/* SWITCH MODES */
+                IF SCALE.ADJUST.IS.ACTIVE<>0 THEN HGS=0; 		/* JUST TURN OFF SCALE ADJUST, RETURN TO COEFFS 1-12 */
+                ELSE DO; HGS=HGS+1; IF HGS=2 THEN HGS=0; END; 	/* BUT LIMIT TO ON,OFF FOR NOW */
+              END;
+              SCALE.ADJUST.IS.ACTIVE=0;       						/* TRASH SCALE ADJUST */
+            END;
+            DO;                    										/* SCALE ADJUST BUTTON */
+               IF (IN.BLINK.MODE<>0) THEN CALL TOGGLE.BLINK;   /* EXIT BLINK MODE ON SCALE ADJUST */
+               SCALE.ADJUST.IS.ACTIVE=1;
+            END;
+            IF NEW.PAN<>0 THEN DO;                    			/* BANK BUTTON ON NEW PANEL */
+               BUTMODE=1; CALL DISPLAY.BANK.BUTTONS;
+               IF (NEW.PAN)&(BANK.WRITE<>0)
+               THEN CALL DISPLAY.ERR(25);
+            END;
+            IF NEW.PAN<>0 THEN DO;                    			/* ENTRY BUTTON ON NEW PANEL */
+               BUTMODE=0; CALL DISPLAY.TIMBRE.RECALL.BUTTONS;
+               IF (NEW.PAN)&(ENTRY.WRITE<>0)
+               THEN DO;
+                  CALL DISPLAY.ERR(24);
+                  CALL EMIT.NUMBER(31,OUR.BANK+1,0,LEFT.JUST);
+               END;
+            END;
+            IF NEW.PAN<>0 THEN DO;                   				/* SEQUENCE BUTTON */
+               BUTMODE=2; CALL DISPLAY.SEQUENCER.RECALL.BUTTONS;
+               IF (NEW.PAN)&(ENTRY.WRITE<>0)
+               THEN CALL DISPLAY.ERR(26);
+            END;
+            ;                   /* RESERVED */
+            DO;                 /* BANK OVERWRITE */
+               BANK.WRITE=1; CALL ON(BNKOVWRT.L);
+            END;
+            DO;                 /* ENTRY WRITE */
+               ENTRY.WRITE=1; CALL ON(ENTRYWRT.L);
+               IF NEW.PAN<>0 AND ORK=0 THEN DO;
+                  BANK.WRITE=1;           /* NEW PANEL - BANK WRITE AS WELL */
+                  BUTMODE=(-1);           /* DISABLE BUTTONS ETC ON WRITE */
+                  CALL DISPLAY.BMODE;     /* DISPLAY CORRECT BMODE BUTTON (new panel only) */
+                  CALL DISPLAY.ERR(23);   /* GIVE MESSAGE */
+               END;
+            END;
+				DO;
+					CALL PRESS.DSEL.BUTTON;		/* DRIVE SELECT BUTTON */
+				END;
+				DO;                           /* split.L SPLIT BUTTON        */
+              IF (BOUNCE\SMT\TPAN\CHAIN\TGRP)<>0 THEN CALL ABORT.BOUNCE.SMT.SKT;
+					SPLT=1;                  	/* INDICATE SPECIAL CASE */
+					CALL SKT.SPLT.SUB(-1);   	/* PROCESS SPLIT AS SPECIAL CASE OF SKT */
+            END;
+
+				IF NEW.PAN<>0 THEN DO;        /* INFO BUTTON PRESSED - TOGGLE INFO MODE */
+               CALL INFO.BUTTON.PRESS;    /* PROCESS INFO BUTTON PRESS */
+            END;
+
+         END; /* OF DO CASE */
+
+         IF  (BUT<=(SCALE.A.L-MISC.L))   /* EITHER HGS1, HGS2, HGS, OR SCALE ADJUST */
+         AND ((NEW.PAN=0)\(INFO.MODE=0)) /* AND OLD KBD OR NOT INFO MODE */
+         THEN DO;                        /* UPDATE DISPLAYS FOR HGS & SCALE ADJUST PRESSES */
+            CALL DISPLAY.HGS;
+            CALL CLEAR.UPPER;
+				/* DISPLAY WHICH POLY FREQ TABLE IS IN USE BY THE SEQUENCE.  (IF ANY OF THE HARMONIC	*/
+				/*	COEFFICIENT BUTTONS ARE ACTIVE, THEN THIS DISPLAY WILL BE IMMEDIATELY OVERWRITTEN.)	*/
+				IF POLY.FRE.PTR<>FRE.PTR THEN DO;	/* THE NEW POLY FREQ TABLE IS LOADED */
+					WRITE(MAM)=BAS.PTR;
+					WRITE(MAL)=SEQ.POLY.FREQ.TABLE;
+					CALL CLEAR.LOWER;
+					IF READ(MD)<>0
+					THEN CALL EMIT.STRING(16,'New Freq Table');
+					ELSE CALL EMIT.STRING(16,'Orig Freq Table');
+				END;
+            CALL DISPLAY.PAR;
+            CALL DISPLAY.LENGTH.LOOP;		/* CALL IF POLY PATCH LIST PARTIAL IS SELECTED */
+            NEW.PRM.INFO=NEW.PRM.INFO\15;	/* CHECK ALL PARTIALS AGAIN ON HGS CHANGE */
+         END;
+      END; /* OF UNUSUAL BUTTONS */
+
+      IF ((LAST=HGS1.L-MISC.L)&(BUT=HGS2.L-MISC.L)) /* HGS1 AND HGS2 */
+      OR ((LAST=HGS2.L-MISC.L)&(BUT=HGS1.L-MISC.L)) /* HGS2 AND HGS1 */
+      THEN DO; /* TOGGLE BLINK MODE HERE */
+         SCALE.ADJUST.IS.ACTIVE=0; HGS=0; /* RESTORE TO HGS1 (SELECTS COEFFS 1-12) */
+         CALL TOGGLE.BLINK; /* TOGGLE BLINK.MODE & DISPLAY NEW HGS */
+      END;
+      LAST=BUT;
+
+   END; /* PRESSING BUTTON */
+
+   ELSE DO; /* RELEASING MISC BUTTON */
+      IF BUT=(bnkovwrt.l-misc.l) THEN DO; BANK.WRITE =0; CALL OFF(BNKOVWRT.L); END;
+      IF BUT=(entrywrt.l-misc.l) THEN DO;             /* WRITE */
+         ENTRY.WRITE=0; IF NEW.PAN<>0 THEN BANK.WRITE=0;
+         CALL OFF(ENTRYWRT.L);
+         IF (NEW.PAN)&(LAST.ERR>=22)&(LAST.ERR<=26)
+         THEN CALL DISPLAY.ERR(27);  /* REMOVE MESSAGES IF WRITE NOT PERFORMED */
+      END;
+      IF BUT=(dsel.l-misc.l) THEN DO;             /* RELEASE DRIVE SELECT */
+         CALL RELEASE.DRIVE.SELECT;  /* USE SUBROUTINE */
+		END;
+      LAST=0;
+   END;
+END MISC.BUTTON;
+
+/* $PAGE - PROCESS BUTTON PRESSES */
+
+DCL (KBD.SPECIAL)    FIXED PUBLIC;   /* SET TRUE IF SPECIAL CHECK IN KEYBOARD SCAN IS REQUIRED (DONE THIS WAY FOR SPEED) */
+
+NEW.BUTTON:PROC PUBLIC SWAPABLE;
+   DCL (LPN,VALUE,ORK) FIXED;
+
+   PUSH.SYSTEM.PDL;
+
+   DO WHILE NEW.BUTTON.LIST(0) <> 0;      /* STAY HERE AS LONG AS BUTTONS TO PROCESS */
+
+      LPN=NEW.BUTTON.LIST(NEW.BUTTON.LIST(0)); /* LOOK UP INFO FROM STACK */
+      NEW.BUTTON.LIST(0)=NEW.BUTTON.LIST(0)-1; /* FREE UP */
+      VALUE = ROT(LPN,1)&1;                    /* GET BUTTON.LIST.HELD:  1 = BUTTON PRESSED, 0 = BUTTON RELEASED */
+      ORK   = ROT(LPN,2)&1;                    /* GET BUTTON.LIST.ORK :  1 = BUTTON ORK,   , 0 = VPK             */
+      LPN   = LPN&BUTTON.LIST.MASK;            /* EXTRACT LPN */
+
+      IF      LPN = 0 THEN DO; /* ZERO IS AN UNDEFINED BUTTON ON THE PANEL */
+      END;
+
+      ELSE IF LPN < PSEL.L+4  /* PARTIAL TIMBRE BUTTON PRESSED/RELEASED */
+      THEN CALL PARTIAL.BUTTON(LPN-PSEL.L,VALUE);
+
+      ELSE IF LPN < MPAR.L+64 /* A PARAMETER OR MISC PARAMETER BUTTON */
+      THEN CALL PARAMETER.BUTTON(LPN-PAR.L,VALUE);
+
+      ELSE IF LPN < SEQ.L+32  /* SEQUENCER BUTTON (START, STOP, ETC.) */
+      THEN CALL SEQUENCER.BUTTON(LPN-SEQ.L,VALUE);
+
+      ELSE IF LPN < TRAK.L+32 /* TRACK BUTTON */
+      THEN CALL TRACK.BUTTON(LPN-TRAK.L,VALUE);
+
+      ELSE IF LPN < RTE.L+32  /* RTE BUTTON */
+      THEN CALL RTE.BUTTON(LPN-RTE.L,VALUE);
+
+      ELSE IF LPN < BANK.L+8  /* BANK BUTTON */
+      THEN CALL BANK.BUTTON(LPN-BANK.L,VALUE,ORK);
+
+      ELSE IF LPN < TIMB.L+8  /* TIMBRE BUTTON */
+      THEN CALL TIMBRE.BUTTON(LPN-TIMB.L,VALUE,ORK);
+
+      ELSE IF LPN < SEQR.L+8  /* SEQUENCER RECALL BUTTONS */
+      THEN CALL SEQUENCER.RECALL.BUTTON(LPN-SEQR.L,VALUE,ORK);
+
+      ELSE CALL MISC.BUTTON(LPN-MISC.L,VALUE,ORK); /* MISC BUTTON (DRIVE SELECT, FILTER BUTTONS, ETC.) */
+
+      KBD.SPECIAL=(   RECALL.STATE              OR  HELD.KBD.ENV.BUTTONS
+                   OR HELD.SCALE.ADJUST.BUTTONS OR  HELD.KCV.BUTTON
+                   OR HELD.TRINF.BUTTON         OR  HELD.MIDI.BUTTON
+                   OR (PRESSURE.CALIBRATION.MODE<>0)
+                  ); /* SET UP WORD FOR QUICK KEYBOARD CHECKS */
+
+      TOGGLE=0;                                /* SET TOGGLE TO SCAN PANEL QUICKLY AFTER ANY BUTTON PRESS OR RELEASES */
+
+   END;                                        /* OF LOOP WHILE BUTTONS TO PROCESS */
+
+   POP.SYSTEM.PDL;
+
+END NEW.BUTTON;
+
+/* $SUBTITLE  Main Procedure 'PERFORM'  -  CALLED TO PERFORM A BUTTON DIRECTED COMMAND */
+
+DCL HANDLE.MISC.NEW.PAN.FUNCS  PROC; 	/* FORWARD DCL */
+
+PERFORM:PROC PUBLIC; 					/* PERFORM A PANEL-DIRECTED COMMAND */
+	DCL (OLD.SWIT)           FIXED;
+	DCL (OLD.TOGG)           FIXED;
+	DCL (I,J     )           FIXED;
+	DCL (LAST.SMPTE.TIME)    FIXED STATIC;
+	DCL BUF   (3)            FIXED;
+	DCL TIME1 (1)            FIXED;
+	DCL TIME2 (1)            FIXED;
+	DCL TIME3 (1)            FIXED;
+	DCL TIME4 (1)            FIXED;
+	DCL TEMP  (1)            FIXED;
+
+	DCL (EVENT,EVENT_BITS)   FIXED;
+	DCL SMPTE.EVENT.INTERVAL LIT   '500';
+	DCL FORCE.TIME.MESSAGE    FIXED EXTERNAL;
+	dcl Set.DTD.Motion.Tallies       proc external;
+	dcl Cue.Lock.Case fixed          external;
+	dcl Cue.Lock.Time array          external;
+	dcl AEE.Current.Project.Rate     fixed external;  /* Current Project Sample Rate */
+	dcl AEE.Current.Project.Base     array external;  /* Current project base sample #     */
+	dcl cue.e.msb        lit '  3';   /* end   msb sample #        */
+
+	DCL (OS.TO.ABLE.MAP) DATA  /* map OS events to ABLE screen event codes: */
+		(	get.new.timbre.info, get.new.seq.info,  get.entry.writes,
+			get.prm.info,        get.dtd.info,      get.poly.contents,
+			get.ertyp,           get.smpte.event,   get.new.clavier.info);
+
+	IF (SWITCHBITS(0)<>OLD.SWIT) THEN DO;      /* CHANGE IN FOOT SWITCHES (REPEAT,ARPEGG) */
+		CALL COMPUTE.TOGGLE.DISPLAY;            /* NEW DISPLAY REQUIRED */
+		OLD.SWIT=SWITCHBITS(0);                 /* SAVE */
+	END;
+
+	WRITE(MAM)=TRK.HEAD;                       /* DO LOOKUP HERE DIRECTLY   */
+	WRITE(MAM)=READ(MD);                       /* TO KEEP CODE FASTER       */
+	WRITE(MAL)=THD.CTBITS;                     /* GET AT THE TBITS VARIABLE */
+
+	IF (READ(MD)<>OLD.TOGG) THEN DO;           /* TOGGLES HAVE CHANGED */
+		OLD.TOGG=READ(MD);                      /* SAVE                 */
+		CALL COMPUTE.TOGGLE.DISPLAY;            /* DO NEW DISPLAY       */
+	END;
+
+   // Despite its name, HANDLE.MISC.NEW.PAN.FUNCS handles all
+   // button presses.
+	IF (ANY.MISC.FUNCTIONS != 0)					/* IF SOMETHING SPECIAL IN THE AIR...		*/
+		HANDLE.MISC.NEW.PAN.FUNCS();				/* USED FOR BOTH NEW & OLD PANELS...		*/
+
+	/* Now check for any Operating System events and parse them out */
+	/* to remote devices as needed.                                 */
+
+	/* Check some operating system variables to create special      */
+	/* events here:                                                 */
+
+	if ertyp <> 0 then do;            /* latch & report user errors */
+		new.ertyp     = new.ertyp \ 1; /* create event               */
+		LATCHED.ERTYP = ertyp;         /* latch code                 */
+		ertyp         = 0;             /* clear ertyp                */
+	end;
+
+	/* create new.smpte.events at a reasonable rate:                */
+
+	if  (new.smpte.info<>0)				/* new SMPTE time available      */
+	and ((real.milliseconds-last.smpte.time) igt smpte.event.interval)
+	then do;
+		last.smpte.time = real.milliseconds;
+		new.smpte.info  = 0;
+		new.smpte.event = new.smpte.event \ 1;
+		Most.Recent.AEE.Activity = 1;	/* also indicate that most recent activity is */
+												/* most likely a VITC movement                */
+	end;
+
+	/* First,  quickly see if there are any operating system        */
+	/* events:                                                      */
+
+	write("313") = addr(new.timbre.info);  /* address of n.t.i to R13  */
+	write("300") = 0;                      /* 0 to r0                  */
+	rpc num.of.OS.events;                  /* quickly OR event bits    */
+	write("230") = read("373");            /* MR13I to OR0             */
+
+	if read("300") <> 0 then do;           /* if any events, pass out  */
+
+		/* Check for special things to do here for all events:          */
+
+		if new.seq.info <> 0 then do;
+
+			/* If a sequence is recalled, set all the other relevant New Seq   */
+			/* info bits so everything gets updated.  Also restore the         */
+			/* audition cue on the audition cue track if we need to:           */
+
+			if new.seq.info then do;
+				new.seq.info = new.seq.info \ (2 \ 4 \ 8 \ 128 \ 256 \ 512 \ 2048 \ 4096 \ 16384);
+				write(MAM) = D115D.Note.Change.Tracks;
+				write(MAL) = 2;
+				rpc 50;          /* Quickly announce note changes on all 200 tracks */
+				write(MDI) = "177777";
+				rpc 50;          /* (Don't RPC too long so interrupts happen accurately) */
+				write(MDI) = "177777";
+				rpc 50;
+				write(MDI) = "177777";
+				rpc 50;
+				write(MDI) = "177777";
+
+				if  (Current.Cue.Audition              <> 0) /* in audition mode   */
+				and (LOAD.SEQ.GLOBALS(Cue.Audition.Track)=0) /* but no audition track */
+				then do;
+					call ERASE.CUE.AUDITION.TRACK;
+					call PLACE.CUE.ON.AUDITION.TRACK;
+				end;
+			end;
+
+			/* Check for special system functions here.  Recompute the current */
+			/* cue times whenever the SPEED changes, since the current cue     */
+			/* times are stored as milliseconds:                               */
+
+			if (new.seq.info&8)<>0
+			then call Deposit.A.New.Current.Cue(0);
+
+			/* Check for updating vk display for tempo/meter changes:          */
+
+			if (new.seq.info&16)<>0
+			then do;
+				IF      (UPPER.DISP = (CLICK.L   -PAR.L))
+				THEN CALL DISPLAY.CLICK.RATE(samp.click.rate);
+				ELSE IF (UPPER.DISP = (BPM.L     -PAR.L))
+				THEN CALL DISPLAY.METER;
+				ELSE IF (UPPER.DISP = (CLICKVAL.L-PAR.L))
+				THEN CALL DISPLAY.CLICK.VALUE(LOOKUP.CLICK.VALUE(LOC(ADDR(SAMPLED.ACTUAL.SEQUENCE.TIME.MSB))));
+			end;
+
+			if (new.seq.info&128)<>0      /* force a current time message next time we sample the */
+			then do;                      /* time base on motion change                           */
+				force.time.message = 1;
+				call Set.DTD.Motion.Tallies;
+			end;
+
+			/* Keep track of whether is moving the sequencer around (using     */
+			/* VITC), or scrubbing/playing the DTD.  Makes the DTD "take"      */
+			/* buttons work intelligently:                                     */
+
+			if ((Play <> 0)&(Move = 0))			/* if the sequencer moves,    */
+			then Most.Recent.AEE.Activity = 1;	/* then user is using the     */
+															/* sequencer.                 */
+		end;
+
+		if new.dtd.info <> 0 then do;
+
+			/* Set DTD.Play.State as needed when the DTD has stopped playing   */
+			/* a cue:                                                          */
+
+			if (new.dtd.info&8)<>0
+			then do;
+				if  (DTD.Play.State <> 0)    /* if we think he is playing */
+				and (DTD.Play.State <> 8)    /* only if not seq recording */
+				and (cur.dtd.playing = 0)    /* but he is not             */
+				then call STOP.DTD.PLAY.STATE;
+			end;
+
+			/* Create a new current cue that reflects the most recent    */
+			/* allocate mode recording if the allocate mode recording    */
+			/* was initiated over the protocol:                          */
+
+			if (new.dtd.info&16)<>0    /* change in DTD punch in/out     */
+			then do;                   /* or DTD ready enabled           */
+
+				/* See if doing allocate recording from protocol device:  */
+
+				if Armed.for.Protocol.DTD.Recording <> 0  /* only for     */
+				then do;                                  /* protocol     */
+
+					/* See if we are through recording:                    */
+
+					call FETCH.DTD.DRIVE.STATUS(buf);
+
+					Protocol.Recording.State = buf(0);
+
+					/* If we are recording or armed,  keep track of which  */
+					/* tracks we actually record on:                       */
+
+					if Protocol.Recording.State <> 0 then do;
+						/* Keep track of recording tracks if recording      */
+						if ((Protocol.Recording.State & 2) <> 0)
+						then do;
+							Protocol.Recording.Drives = Protocol.Recording.Drives \ buf(1);
+						end;
+					end;
+
+					/* else if we are no longer armed or recording,        */
+					/* then see if any recording actually occurred         */
+					/* if we were doing allocate mode recording:           */
+
+					else if Armed.for.Protocol.DTD.Recording = 1
+					then do;
+
+						/* See if the allocate times have changed, if so    */
+						/* assume it means we did a recording.  Define a    */
+						/* cue that covers the recorded area and create a   */
+						/* system event saying the allocate recording has   */
+						/* been completed.                                  */
+
+						call FETCH.DTD.SYNC.POINT        (   time3, time4);
+						call FETCH.DTD.AUTO.ALLOCATE.TIME(0, time1, time2);
+
+						/* time1 = length of DTD track(s) now                 */
+						/* time2 = length of current project                  */
+						/* time3 = disk address we started recording at       */
+						/* timr4 = sequencer time we started recording at     */
+						/* note: presumably TIME3 = PROTOCOL.RECORDING.TIME)  */
+
+						/* Create the cue if we actually recorded some audio: */
+
+						if  (Cue.Lock.Case = 0)  /* simple allocate           */
+						and (COM32(time1, Protocol.Recording.Time) = lw#igt)
+						then do;
+
+							/* Update the lod's sync time in case we            */
+							/* are blocking cues (makes little sense            */
+							/* here however since we know recording has         */
+							/* already stopped!!)                               */
+
+							call SET.DTD.SYNC.POINT(time1);
+
+							/* Create this cue as a current cue:                */
+
+							call SET.DTD.CURRENT.REEL(0);           /* sel "CUE" */
+
+							call CREATE.DTD.AUTO.ALLOCATE.CUE
+								(Protocol.Recording.Time,    /* disk start time */
+								time1,                      /* disk end   time */
+								Protocol.Recording.Drives,  /* track bits      */
+								time4);                     /* sync time       */
+
+							write(mam) = Current.Cue.Ptr;           /* copy      */
+							call COPY.OUT(addr(misc.buf(0)), 256);  /*      out  */
+
+							/* Set up all the AEE global variables and create    */
+							/* whatever new cue events are needed:               */
+
+							call Deposit.A.New.Current.Cue(1);
+
+							/* Update the protocol.recording.time in case        */
+							/* we someday start blocking cues:                   */
+
+							call COPY32(time1, Protocol.Recording.Time);
+
+							/* Create a system event telling everyone that       */
+							/* the allocate mode recording has been completed:   */
+
+							new.dtd.info = new.dtd.info \ 32768;
+
+						end;
+
+						/* Else see if we need to modify the current cue        */
+
+						else if Cue.Lock.Case <> 0
+						then do;
+							if  (Cue.Lock.Case = 2)  /* possible extension       */
+							and (COM32(time1, Cue.Lock.Time) = lw#igt)
+							then do;
+								call Msec.To.DTD.Sample.#(time1 , CF#Time, SAMP.SPEED, AEE.Current.Project.Rate, AEE.Current.Project.Base, temp);
+								write(mam) = Current.Cue.Ptr;
+								write(mal) = CUE.E.MSB;
+								write(mdi) = temp(0);     /* set new out time */
+								write(mdi) = temp(1);     /* for cur cue      */
+							end;
+							call Deposit.A.New.Current.Cue(1);
+							new.dtd.info = new.dtd.info \ 32768;
+						end;
+
+						/* And indicate we are no longer armed for protocol	*/
+						/* recording:														*/
+
+						Armed.for.Protocol.DTD.Recording = 0;
+						DTD.Play.State                   = 0;
+
+					end;
+
+					/* Else if doing punch-in recording,  no other clean-up */
+					/* to do:                                               */
+
+					else do;
+						Armed.for.Protocol.DTD.Recording = 0;
+						DTD.Play.State                   = 0;
+					end;
+
+				end;
+			end;
+
+			/* Set up global information right away - even through we will */
+			/* probably see an event shortly that will re-compute          */
+			/* everything again after all the error checking is complete.  */
+
+			if (new.dtd.info&32)<>0
+			then do;
+				call SET.UP.AEE.DTD.GLOBALS;
+
+				/* Also create new seq event for the new safe/ready status  */
+				/* of the DTD tracks:                                       */
+
+				new.seq.info = new.seq.info \ (4096 \ 16384);
+
+				/* Also create a new dtd event for new track information    */
+				/* when the project is called up:                           */
+
+				new.dtd.info = new.dtd.info \ 16384;
+			end;
+		end;
+
+		/* Send events out to able screen code                          */
+
+		write("313") = addr(new.timbre.info);  /* address of n.t.i to R13  */
+		do i = 0 to 8;                         /* check those events of    */
+			j = OS.TO.ABLE.MAP(i);              /* interest to ABLE code.   */
+			get.ABLE.array(j) = get.ABLE.array(j) \ (read("373"));
+		end;
+
+		/* But do not report DTD scrolling events to ABLE screens unless   */
+		/* they have enabled for DTD scrolling.   Must be done this way    */
+		/* because the ABLE screens cannot enable for specific event       */
+		/* bits:                                                           */
+
+		if get.item.enabled(get.dtd.scrolling) = 0
+		then new.ABLE.dtd.info = new.ABLE.dtd.info & (not(8));
+
+		/* Send events out to RS422 protocol devices:                      */
+
+		write(mam) = D115D.Event.Enable.Ptr;				/* check enable bits  */
+
+		do i = 0 to (shl(num.d115d.bds,1) - 1);			/* check each channel */
+			if d115d.chans(i) > 0 then do;					/* if active, do it   */
+				write("313")	= addr(new.timbre.info);	/* addr(n.t.i) to R13 */
+				write( mal )	= i*num.of.OS.events;		/* index to bits      */
+				j					= read(mal)						/* compute ending     */
+									+ num.of.OS.events;			/* pointer.           */
+
+				do while (read(mal) < j);              /* skip events        */
+
+					if (read(mdi) & read("373")) <> 0   /* if event is of     */
+					then do;                            /* interest, send it  */
+
+						write(mal  ) = read(mal  ) - 1;  /* back up md         */
+						write("313") = read("313") - 1;  /* back up r13        */
+
+						event = (read(mal) - (i*num.of.OS.events));
+						event_bits = read(mdi) & read("373");
+
+						/* send protocol message to this device saying there      */
+						/* is an event pending that is of interest to it:         */
+
+						buf(0) = L#Timbre_Info_Event;          /* All event types are this length */
+						buf(1) = i & 1;                        /* Channel number */
+						buf(2) = T#Timbre_Info_Event + event;  /* Message type (T#xxx) */
+						buf(3) = event_bits;
+
+						/* Wait here for message to be accepted */
+						/* by the d115:                         */
+
+						do while (fast.send.protocol.packet(addr(buf(0)),shr(i,1)) = 0);
+							interp_run_host_non_timer();
+						end;
+					end;
+				end;
+			end;
+		end;
+
+		/* Send event out to D50 termulator as well:                     */
+
+		D50.Termulator.Clavier.Info = D50.Termulator.Clavier.Info \ new.clavier.info;
+
+		/* And zero out the Operating System event variables:            */
+
+		write("313") = addr(new.timbre.info);  /* address of n.t.i to R13  */
+		rpc num.of.OS.events;
+		write("373") = 0;                      /* 0 to MR13I               */
+	end;
+
+	/* Now process any protocol input packets */
+
+	if (PLAY = 0)          /* Determine how long to hang processing packets */
+	then j = 200;          /* If we're not playing, allow a longer time */
+	else j = 20;           /* If we are playing, better not be too long */
+
+	i = real.milliseconds;                  /* Start a timer so we don't get stuck here forever */
+	do while ((protocol.packet.there        /* An unprocessed packet is still around */
+	OR         num.of.new.packets) <> 0)    /* OR packets in RS232 rotary buffer */
+	AND ((real.milliseconds - i) ilt j);    /* Let other real time processing happen before too long */
+		call Process.Protocol.Message;       /* Try to process the packet now */
+	end;
+END PERFORM;

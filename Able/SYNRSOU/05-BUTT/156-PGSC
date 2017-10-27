@@ -1,0 +1,118 @@
+/* 156-PGSC  $TITLE  NON-REAL TIME GUITAR SCANNING - Guitar switches, buttons, knobs */
+
+/*
+   8/14/86 - eeg - added necessary external declarations
+   8/07/86 - eeg - changed milliseconds to real.milliseconds
+   5/15/86 - "official" creation of release-M modules
+*/
+
+ /* external definitions needed by this procedure...
+    they are not in a global file because this file is used only for guitar compilations */
+
+dcl onthr  fixed external; /* on threshold */
+dcl offthr fixed external; /* off threshold */
+dcl throfs fixed external; /* threshold offset */
+dcl thrdat fixed external; /* raw threshold data */
+dcl (gvol,grte,gsus,gholdsw,pgholdsw) fixed external; 
+
+if toggle=0 then do; /* scan every other time */
+
+   if new.gdisplay<>0 then do;  /* first display any changes due to timbre recall, etc. */
+      call gdisp; /* must display new lights on timbre recall too */
+      new.gdisplay=0;
+   end;
+
+   if fake.it=0 then do; /* read switches from guitar */
+      disable; /* must disable interrupts briefly since interrupt routine uses guitar */
+      write(D134)=16+6; gswitchu=read(D135); /* read 8 upper buttons */
+      write(D134)=16+7; gswitchl=read(D135); /* read 8 lower buttons */
+      enable;
+   end;
+
+   if gswitchu<>old.gswitchu then do; /* only process upper switch if change */
+      call new.upper.switch;
+   end;
+
+   if (prev.gswitchl<>0)\(gswitchl<>0) then do; /* process lower switches */
+      call process.lower.switches;
+   end;
+
+   if gswitchl<>old.gswitchl then do; /* change in switches lower */
+      call change.lower.switch;
+   end;
+
+   /* now display appropriate buttons */
+
+   i=(gbu\old.gswitchu)\(shl(gbl\old.gswitchl,8)); /* compute basic word with all bits - include all being held */
+   if (real.milliseconds&"300")=0 then i=(i)&(not(gblu\shl(gbll,8))); /* turn of bits to be blinked */
+   if (play<>0)&(gb.state=0)&(beat.number<>0) then do; /* display sliding beat numbers if playing & sequencer control */
+      i=i\bits((beat.number-1)&3);
+   end;
+
+   if fake.it=0 then do; /* write out lights, scan threshold, scan knobs */
+      disable;
+      write(D134)=16+7; /* select output register address */
+      write(D135)=i; /* write out to guitar panel */
+      enable;
+      if (read(D134)&"300")<>old.thr then do; /* change in threshold switch */
+         old.thr=read(D134)&"300"; /* get new settings */
+         do case shr(old.thr,6);
+            do; onthr=35; thrdat=28*20; throfs=3; end; /* middle sensitivity */
+            do; onthr=90; thrdat=60*20; throfs=6; end; /* low    sensitivity (up) */
+            do; onthr=20; thrdat=18*20; throfs=2; end; /* high   sensitivity (down) */
+         end;
+      end;
+      disable;
+      write(D134)=24;   ngvol=read(D135);  /* synthesized guitar volume 0-255 */
+      write(D134)=24+1; ngrte=read(D135);  /* grte knob */
+      if ngrte>rte.max then ngrte=rte.max; /* limit to max */
+      write(D134)=24+2; gsus=read(D135);   /* gsus knob */
+      write(D134)=24+3; j=240-read(D135);  /* get volume pedal */
+      if j>rte.max then j=rte.max;         /* limit to rtemax to allow for leakage */
+      if j<0       then j=0;               /* allow some leakage here to */
+      write(5)=ngvol; write(6)=j; j=read(5); write(7)=rte.max; ngvol=read(5); /* scale by pedal */
+      write(D134)=24+4; j=240-read(D135);  /* get rte    pedal */
+      if j>rte.max then j=rte.max;         /* limit to max to allow for leakage */
+      if j<0       then j=0;               /* allow some leakage here to */
+      write(5)=ngrte; write(6)=j; j=read(5); write(7)=rte.max; ngrte=read(5); /* scale by pedal */
+      write(D134)=24+5;                    /* get hold switch */
+      if read(D135)>64 then gholdsw=0;     /* switch not pressed */
+      else                  gholdsw=1;     /* hold switch pressed */
+      enable;
+      if (ngvol<gvol)\(ngvol>gvol+2) then do; /* change in guitar volume */
+         gvol=ngvol; new.gvol=1;
+      end;
+      if (ngrte<grte)\(ngrte>grte+2) then do; /* change in guitar rte */
+         grte=ngrte; new.grte=1;
+      end;
+   end;
+
+   /* $PAGE - simulate guitar button panel (old clavier only) */
+
+   else do; /* simulate guitar */
+      if new.pan=0 then do;
+         dcl cr lit '"130"';
+         dcl dr lit '"131"';
+         write(cr)="20";  /* write number to lights now. begin by disabling external write */
+         write(cr)="10";  /* select register */
+         write(dr)=i;     /* write out guitar bits */
+         write(cr)="20";  /* back to computer address */
+         write(cr)="260"; /* start output display */
+      end;
+      fake.lites=i; /* store lights for display. fake.lites moved to displaysw(0) in scan.axe (09-new3) */
+      onthr=30; thrdat=20*20; throfs=2; /* middle sensitivity for faking */
+      ngvol=fake.datas(0); ngrte=fake.datas(1); gsus=fake.datas(2);
+      if fake.datas(5)>64 then gholdsw=0; /* switch not pressed */
+      else                     gholdsw=1; /* hold switch pressed */
+      if ngvol<>gvol then do; gvol=ngvol; new.gvol=1; end;
+      if ngrte<>grte then do; grte=ngrte; new.grte=1; end;
+   end;
+
+   if grte>rte.max then grte=rte.max; /* limit to max */
+
+   write(5)=thrdat; write(7)=20+gsus; /* compute new off threshold from knob */
+   thrdat=read(5)-throfs;
+   if thrdat<0 then thrdat=0; /* must be non-negative */
+   offthr=thrdat+3; /* store for use by interrupt routine - provide minimum of 3 */
+
+end; /* of scan every other time */

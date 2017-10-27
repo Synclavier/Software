@@ -1,0 +1,1395 @@
+/*	:SYNSOU:AUDMOD:AUD-CUE4  $TITLE  other shuttle/cue functions
+
+Modified:
+2001/02/10 - TY  - Cue Rename function now initializes new.name string with the current cue name
+						 or the previously attempted name in case of "duplicate name" error.
+1989/06/14 - cj  - added new dialog messages to 'get.cue.dialog'
+1989/05/05 - cj  - added "Place Cue", "Place Event", "Repl Event" to
+						 load.shuttle.divider.icon
+1989/05/03 - TSS - Merged changes for Optical disk to DTD transfer project
+1988/11/17 - MWH - Remove obsolete procedure
+1988/07/29 - cj  - used different mechanism for refreshing wave displays
+1988/05/10 - EEG - Modified icon fills to work faster with termulator
+1988/04/04 - MWH - Add buttons over left arrows of scroll bars for waves
+1988/03/30 - MWH - Add LOD wave display data compression and transfer
+*/
+
+Handle.Dialog.Mouse.Button:proc (OK.Button,Cancel.Button) swapable;
+	dcl OK.Button		fixed;
+	dcl Cancel.Button	fixed;
+	dcl (px,py)			fixed;
+	dcl (j)				fixed;
+
+	if (abs(Last.Event.Info) = 1)					/*	press of right			*/
+	then do;
+		return 1;
+	end;
+	else if Last.Event.Info = (-2) then do;	/*	must map ourselves	*/
+		px = Mouse(press.x);
+		py = Mouse(press.y);
+		j = Map.Point.To.Object(px,py);
+		if j = OK.Button then do;
+			return 1;
+		end;
+		else if j = Cancel.Button then do;
+			return -1;
+		end;
+		else do;
+			call Display.Notice(NT#MustRespondToDialog,ATTR#Reverse,NulStr,2,0,0);
+			return 0;
+		end;
+	end;
+	else do;
+		return 0;
+	end;
+end Handle.Dialog.Mouse.Button;
+
+
+Define.Cue.Dialog:proc (group,message,Message.Label.Array,	Save.Button.Array,
+												  OK.Button.Array,		Cancel.Button.Array,
+												  New.Name.Array) swapable;
+	dcl Group					fixed;
+	dcl Message					fixed;
+	dcl Message.Label.Array	array;
+	dcl Save.Button.Array	array;
+	dcl OK.Button.Array		array;
+	dcl Cancel.Button.Array	array;
+	dcl New.Name.Array		array;
+	dcl line(40)				fixed;
+	dcl Row						fixed;
+
+	dcl cname(shr(cue.name.l,1))	fixed;
+
+	dcl Message.Label	lit 'Message.Label.Array(0)';
+	dcl Save.Button	lit 'Save.Button.Array	(0)';
+	dcl OK.Button		lit 'OK.Button.Array		(0)';
+	dcl Cancel.Button	lit 'Cancel.Button.Array(0)';
+	dcl New.Name		lit 'New.Name.Array		(0)';
+
+	if		  group = Cue.Group		then row = Cue.Row + Cue.Size;
+	else if group = Shuttle.Group	then row = Shuttle.Row + Shuttle.Size;
+	else										  row = Optical.Row + Optical.Size;
+
+	do case message;
+		;		/*	null	*/
+		do;	/*	Current Cue Not Saved	*/
+			Message.Label = Define.Label(S#AA, Row, 0, 49, NulStr);
+			if Current.Cue.Protect=0
+			then Save.Button	= Define.Label(S#AA, Row, 58, 0, '[SAVE]');
+			OK.Button			= Define.Label(S#AA, Row, 65, 0, '[OK]');
+			Cancel.Button		= Define.Label(S#AA, Row, 70, 0, '[CANCEL]');
+			call Deposit.Label(Message.Label, 'Your cue is NOT SAVED (Click Right Button for OK)');
+		end;
+		do;	/*	Rename	*/
+			Message.Label	= Define.Label(S#AA, Row, 0, 30, NulStr);
+			New.Name			= Define.String(S#AA, Row, 30, 32, 0);
+			/*	OK.Button	= Define.Label(S#AA,Row, 65, 0, '[OK]');	*/
+			Cancel.Button	= Define.Label(S#AA,Row, 70, 0, '[CANCEL]');
+			call Deposit.Label(Message.Label,'Enter new cue NAME');
+			//	initialize with current cue name
+			write(mam) = Current.Cue.Ptr;
+			write(mal) = CUE.NAME;
+			Copy.In(addr(misc.buf(0)),17);
+			Deposit.String(New.Name,misc.buf);
+		end;
+		do;	/*	Cue name already exists, enter another	*/
+			Message.Label	= Define.Label(S#AA,Row,0,30,NulStr);
+			New.Name			= Define.String(S#AA,Row,30,32,0);
+			/*	OK.Button	= Define.Label(S#AA,Row,65,0,'[OK]');	*/
+			Cancel.Button	= Define.Label(S#AA,Row,70,0,'[CANCEL]');
+			call Deposit.Label(Message.Label,'Name exists, enter another');
+			//	initialize with previously attempted new cue name (which is still in SCSI area)
+			write(mam) = SCSI.Ptr;
+			write(mal) = CUE.NAME;
+			Copy.In(addr(misc.buf(0)),17);
+			Deposit.String(New.Name,misc.buf);
+		end;
+		do;	/*	Cue is in another project	*/
+			Message.Label	= Define.Label(S#AA,Row,0,55,NulStr);
+			OK.Button		= Define.Label(S#AA,Row,65,0,'[OK]');
+			call Deposit.Label(Message.Label,'Cue is in another project; cannot edit');
+		end;
+		do;	/*	delete	*/
+			Message.Label	= Define.Label(S#AA,Row,0,55,NulStr);
+			OK.Button		= Define.Label(S#AA,Row,65,0,'[OK]');
+			Cancel.Button	= Define.Label(S#AA,Row,70,0,'[CANCEL]');
+			if Group = Cue.Group then	call Deposit.Label(Message.Label,'Click OK to DELETE current cue');
+			else								call Deposit.Label(Message.Label,'Click Again to DELETE current cue');
+		end;
+		do;	/*	Recall Cue	*/
+			Message.Label	= Define.Label(S#AA,Row,0,30,NulStr);
+			New.Name			= Define.String(S#AA,Row,30,32,0);
+			/*	OK.Button	= Define.Label(S#AA,Row,65,0,'[OK]');	*/
+			Cancel.Button	= Define.Label(S#AA,Row,70,0,'[CANCEL]');
+			call Deposit.Label(Message.Label,'Enter cue NAME to recall');
+		end;
+		do;	/*	Cue is protected	*/
+			Message.Label	= Define.Label(S#AA,Row,0,55,NulStr);
+			Cancel.Button	= Define.Label(S#AA,Row,70,0,'[CANCEL]');
+			call Deposit.Label(Message.Label,'Cue is protected - Cannot Save, Delete, or Rename');
+		end;
+		do;	/*	transfer cue to poly	*/
+			if Group = Shuttle.Group
+			then call copy.string('Click Again to Transfer Cue ',line);
+			else call copy.string('Transfer Cue ',line);
+			write(mam) = Current.Cue.Ptr;
+			write(mal) = CUE.NAME;
+			call COPY.IN(addr(cname(0)),17);
+			call append.to.str(line,cname);
+			if Group <> Shuttle.Group
+			then call append.to.str(line,' To Poly Memory');
+
+			Message.Label	= Define.Label(S#AA,Row,0,60,NulStr);
+			OK.Button		= Define.Label(S#AA,Row,65,0,'[OK]');
+			Cancel.Button	= Define.Label(S#AA,Row,70,0,'[CANCEL]');
+			call Deposit.Label(Message.Label,line);
+		end;
+		do;	/*	Cue name already exists	*/
+			Message.Label	= Define.Label(S#AA,Row,0,68,NulStr);
+			OK.Button		= Define.Label(S#AA,Row,70,0,'[  OK  ]');
+			call Deposit.Label(Message.Label,'A Cue already exists with this name - you may wish to choose another');
+		end;
+		do;	/*	Place Mode Button	*/
+			Message.Label	= Define.Label(S#AA,Row,0,65,NulStr);
+			OK.Button		= Define.Label(S#AA,Row,70,0,'[  OK  ]');
+			call Deposit.Label(Message.Label,'Cues are placed by SYNC time - other modes are not yet available');
+		end;
+		do;	/*	Sound file already exists	*/
+			Message.Label	= Define.Label(S#AA,Row,0,50,NulStr);
+			OK.Button		= Define.Label(S#AA,Row,58,0,'[REPLACE]');
+			Cancel.Button	= Define.Label(S#AA,Row,70,0,'[CANCEL]');
+			call Deposit.Label(Message.Label,'Sound file by that name already exists');
+		end;
+		do;	/*12-Also replace cue in sequence?       [YES]    [NO]       [CANCEL]	*/
+				/*	0         1         2         3         4         5         6         7				*/
+				/*	01234567890123456789012345678901234567890123456789012345678901234567890123456789	*/
+				/*	Also replace cue in sequence?                     [YES]     [NO]      [CANCEL]	*/
+			Message.Label	= Define.Label(S#AA,Row,0,29,NulStr);
+			Save.Button		= Define.Label(S#AA,Row,50,0,'[YES]');
+			OK.Button		= Define.Label(S#AA,Row,60,0,'[NO]');
+			Cancel.Button	= Define.Label(S#AA,Row,70,0,'[CANCEL]');
+			call Deposit.Label(Message.Label,'Also replace cue in sequence?');
+		end;
+		do;	/*	13-Note: saving this cue will not affect your sequence   [OK]    [CANCEL]	*/
+				/*	0         1         2         3         4         5         6         7				*/
+				/*	01234567890123456789012345678901234567890123456789012345678901234567890123456789	*/
+				/*	Note: saving this cue will not affect your sequence         [OK]      [CANCEL]	*/
+			Message.Label	= Define.Label(S#AA,Row,0,51,NulStr);
+			OK.Button		= Define.Label(S#AA,Row,60,0,'[OK]');
+			Cancel.Button	= Define.Label(S#AA,Row,70,0,'[CANCEL]');
+			call Deposit.Label(Message.Label,'Note: saving this cue will not affect your sequence');
+		end;
+		do;	/*	14-Warning: saving this cue will modify 99 events in your sequence [OK] [CANCEL]	*/
+				/*	0         1         2         3         4         5         6         7				*/
+				/*	01234567890123456789012345678901234567890123456789012345678901234567890123456789	*/
+				/*	Warning: saving this cue will modify 99 events in your sequence  [OK] [CANCEL]	*/
+			Message.Label	= Define.Label(S#AA,Row,0,63,NulStr);
+			OK.Button		= Define.Label(S#AA,Row,65,0,'[OK]');
+			Cancel.Button	= Define.Label(S#AA,Row,70,0,'[CANCEL]');
+			call COPY.STRING('Warning: saving this cue will modify ', line);
+			if Events.That.Will.Be.Modified IGT 99
+			then Events.That.Will.Be.Modified = 99;
+			call CONV.FIXED.TO.STR (Events.That.Will.Be.Modified,0,2,cf#unsigned\cf#append\cf#left\cf#nofill,line);
+			if Events.That.Will.Be.Modified = 1
+			then call append.to.str(line,' event' );
+			else call append.to.str(line,' events');
+			call append.to.str(line,' in your sequence');
+			call Deposit.Label(Message.Label,line);
+		end;
+	end;
+end Define.Cue.Dialog;
+
+GET.CUE.DIALOG: proc (Group,message) returns (fixed) PUBLIC swapable;
+	dcl Group			fixed;
+	dcl message			fixed;
+	dcl (i, j)			fixed;
+	dcl Message.Label	fixed;
+	dcl Save.Button	fixed;
+	dcl OK.Button		fixed;
+	dcl No.Button		fixed;
+	dcl Cancel.Button	fixed;
+	dcl New.Name		fixed;
+	dcl tmp		(1)	fixed;
+	dcl exit				fixed;
+	dcl row				fixed;
+
+	dcl Cue.Menu.Name.Table.Id	fixed external;
+
+	/*	Message:	0 - Null
+		 1 - Current Cue is not saved   [SAVE] [OK] [CANCEL]
+		 2 - New name            [NAME]        [OK] [CANCEL]
+		 3 - Name already exists [NAME]        [OK]
+		 4 - Cue is in another project         [OK]
+		 5 - Press OK to Delete                [OK]
+		 6 - Recall cue          [NAME]        [OK] [CANCEL]
+		 7 - Cue is protected                       [CANCEL]
+		 8 - Transfer cue to Poly              [OK] [CANCEL]
+		 9 - Cue name already exists           [OK]
+		10 - Other modes not available         [OK]
+		11 - Sound file already exists  [REPLACE]   [CANCEL]
+		12 - Also replace cue in sequence?     [YES]    [NO]       [CANCEL]
+		13 - Note: saving this cue will not affect your sequence             [OK] [CANCEL]
+		14 - Warning: saving this cue will modify 99 events in your sequence [OK] [CANCEL]
+	*/
+
+	if (Cue.Group\Shuttle.Group\Optical.Group) = 0 then return true;		/*	No cue editor; proceed	*/
+
+	if		  group = Cue.Group		then row = Cue.Row + Cue.Size;
+	else if group = Shuttle.Group	then row = Shuttle.Row + Shuttle.Size;
+	else if group = Optical.Group	then row = Optical.Row + Optical.Size;
+
+	if GID(Edit.Dialog.Is.Open)				/*	in the middle of an edit command	*/
+	then call Close.Edit.Command.Dialog;	/*	clean up	*/
+
+	/*	use cue panel id space always:	*/
+
+	if Cue.Group <> 0
+	then call Set.Auto.Allocation.Id(Cue.Alloc+500);
+	else if Shuttle.Group <> 0
+	then call Set.Auto.Allocation.Id(Shuttle.Alloc+500);
+	else if Optical.Group <> 0
+	then call Set.Auto.Allocation.Id(Optical.Alloc+500);
+
+	call Set.Default.Action(O#ACT.Middle.Press);
+	call Set.Default.Attr(0,ATTR#Normal\ATTR#Reverse);
+	call Set.Default.Attr(1,ATTR#Normal\ATTR#Reverse\ATTR#AltIntensity);
+
+	Disable.Deposits = true;
+
+	call Define.Cue.Dialog(group,message,loc(addr(Message.Label)),
+													 loc(addr(Save.Button)),
+													 loc(addr(OK.Button)),
+													 loc(addr(Cancel.Button)),
+													 loc(addr(New.Name)));
+
+	call Deposit.Object.Info(Message.Label,O#EraseMethod,O#ERAS.Whole.Line);
+
+	Disable.Deposits = false;
+
+	call Set.Default.Attr(0,ATTR#Normal);
+	call Set.Default.Attr(1,ATTR#AltIntensity\ATTR#Reverse);
+
+	/*	10 Objects MAX in Dialog Bar for now	*/
+	if Cue.Group <> 0
+	then call Activate.Object.Range(Cue.Alloc+500,Cue.Alloc+510);
+	else if Shuttle.Group <> 0
+	then call Activate.Object.Range(Shuttle.Alloc+500,Shuttle.Alloc+510);
+	else if Optical.Group <> 0
+	then call Activate.Object.Range(Optical.Alloc+500,Optical.Alloc+510);
+
+	if (message = 2) or (message = 3) or (message = 6)	/*	Select name for name prompts	*/
+	then call Select.New.Cur.Obj(New.Name,-1,-1);		/////	<<==	can we position the cursor at end of string?
+
+	if (message <> 5) and (message <> 8) then do;
+		if Cue.Group <> 0
+		then do i = Cue.Alloc+500 to Cue.Alloc+510;
+			call Update.Object(i);
+		end;
+		else if Shuttle.Group <> 0
+		then do i = Shuttle.Alloc+500 to Shuttle.Alloc+510;
+			call Update.Object(i);
+		end;
+		else if Optical.Group <> 0
+		then do i = Optical.Alloc+500 to Optical.Alloc+510;
+			call Update.Object(i);
+		end;
+	end;
+
+	if Message = 1 then call GET_ENABLE(Get.Mouse.Button);
+
+	do while exit = 0;
+		i = Get.Next.Screen.Event;
+
+		if (i = Get.Mouse.Button) then do;
+			exit = Handle.Dialog.Mouse.Button(OK.Button,Cancel.Button);
+		end;
+
+		else if (Screen.Event.Group = Cue.Group)
+		or		  (Screen.Event.Group = Shuttle.Group)
+		or		  (Screen.Event.Group = Optical.Group)
+		then do;
+
+			if i = Get.Screen.Event then do;
+
+				if Screen.Event.Id = Save.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						if message = 1 then do;				/*	'save'	*/
+							call Save.Current.Cue(Cue.Group);
+							exit = 1;
+						end;
+						if message = 12 then do;			/*	'yes'		*/
+							exit = 2;
+						end;
+					end;
+				end;
+
+				else if Screen.Event.Id = OK.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						exit = 1;
+					end;
+				end;
+
+				else if (Screen.Event.Id = Cancel.Button) then do;
+					if Screen.Event.Info = S#MouseSelect
+					then exit = -1;
+				end;
+
+				else if (Screen.Event.Id = New.Name) then do;
+					if Screen.Event.Info = S#Deposit then do;
+						call Fetch.String(New.Name,misc.buf);	/*	Put name in SCSI area	*/
+						call clean.cue.name(misc.buf);
+						write(mam) = SCSI.Ptr;
+						write(mal) = CUE.NAME;
+						call Copy.Out(addr(misc.buf(0)),17);
+						exit = 1;
+					end;
+				end;
+
+				else if (Shuttle.Group<>0)
+				and	  (Screen.Event.Id = Shuttle.Edit.Table)
+				then do;
+					if (Screen.Event.Info = S#MouseSelect)
+					or (Screen.Event.Info = S#MouseActivate) then do;
+						call Map.Graphics.Button.Table.Mouse.Press(Shuttle.Edit.Table,tmp);
+
+						j = tmp(1)*4 + tmp(0);	/*	get command #	*/
+
+						if ((message=5) and (j=13))
+						or ((message=8) and (j=15))
+						then exit=1;
+						else call Display.Notice(NT#MustRespondToDialog,ATTR#Reverse,NulStr,3,0,0);
+					end;
+				end;
+
+				/*	detect double click on 'SAVE' button	*/
+
+				else if (((Shuttle.Group<>0)
+				and		 (Screen.Event.Id = Shuttle.Cue.Save.Button))
+				or			((Cue.Group<>0)
+				and		 (Screen.Event.Id = Cue.Save.Button)))
+				and	  (message >= 12)
+				and	  (message <= 14)
+				then do;
+					if (Screen.Event.Info = S#MouseSelect)
+					or (Screen.Event.Info = S#MouseActivate) then do;
+						if message = 12 then exit = 2;
+						else				 exit = 1;
+					end;
+				end;
+
+				else if (Screen.Event.Info = S#MouseSelect)
+				or		  (Screen.Event.Info = S#MouseActivate)
+				then call Display.Notice(NT#MustRespondToDialog,ATTR#Reverse,NulStr,1,0,0);
+			end;
+		end;
+
+		else do;	/*	Outside group; <> Cue.Group	*/
+
+			if (i = Get.Screen.Event) then do;
+				if (message = 6) then do;
+					if	(Screen.Event.Id = Cue.Menu.Name.Table.Id)
+					&	(Screen.Event.Info = S#MouseSelect)
+					then do;
+						j = COMPUTE.CUE.MENU.CELL.ID(Screen.Event.Table.Col,Screen.Event.Table.Row,-1);
+						if j <> 0 then do;
+							call Fetch.DTD.Cue(j,misc.buf);
+							write(mam) = SCSI.Ptr;
+							write(mal) = CUE.NAME;
+							call Copy.Out(addr(misc.buf(Cue.Name)),17);
+							exit = 1;
+						end;
+					end;
+				end;
+
+				else if ((Screen.Event.Info = S#MouseSelect)
+				or			(Screen.Event.Info = S#MouseActivate))
+				then call Display.Notice(NT#MustRespondToDialog,ATTR#Reverse,NulStr,2,0,0);
+			end;
+		end;
+	end;
+
+	call Erase.Object(Message.Label);	/*	Erases message and whole line	*/
+	if Cue.Group <> 0
+	then call Undefine.Object.Range(Cue.Alloc+500,Cue.Alloc+599);
+	else if Shuttle.Group <> 0
+	then call Undefine.Object.Range(Shuttle.Alloc+500,Shuttle.Alloc+599);
+	else if Optical.Group <> 0
+	then call Undefine.Object.Range(Optical.Alloc+500,Optical.Alloc+599);
+
+	call Select.New.Cur.Obj(Corner.Label,-1,-1);
+
+	if Message = 1 then call GET_DISABLE(Get.Mouse.Button);
+
+	if exit < 0 then exit = 0;	/*	for cancel	*/
+	return exit;
+end GET.CUE.DIALOG;
+
+/*	DEBUG ROUTINE FOR PRINTING OUT CUE CONTENTS	*/
+
+TIMS.CUE.DEBUG.ROUTINE:proc (Current.Cue.Ptr) swapable;
+	dcl (Current.Cue.Ptr)	fixed;
+	dcl (base,len)				fixed;
+	dcl i							fixed;
+
+	lookup:proc(Current.Cue.Ptr,ptr,arr);
+		dcl Current.Cue.Ptr	fixed;
+		dcl ptr					fixed;
+		dcl arr					array;
+
+		write(mam) = Current.Cue.Ptr + shr(ptr,8);
+		write(mal) = ptr;
+		arr(0) = read(mdi);
+		arr(1) = read(mdi);
+	end lookup;
+
+	doit:proc(Current.Cue.Ptr,ptr);
+		dcl Current.Cue.Ptr	fixed;
+		dcl ptr					fixed;
+		dcl t (1)				fixed;
+
+		call lookup(Current.Cue.Ptr,ptr,t);
+		call pnum(t(0),0);call ps('  ');call pnum(t(1),0);
+
+	end;
+
+	call clear.term;
+
+	call PS('Cue In     '); call doit(Current.Cue.Ptr,Cue.S.Msb);call PS('      ');
+	call PS('Cue Out    '); call doit(Current.Cue.Ptr,Cue.E.Msb);
+	call PCR;
+
+	call PS('Edit In    '); call doit(Current.Cue.Ptr,Cue.Edit.In.Msb);call PS('      ');
+	call PS('Edit Out   '); call doit(Current.Cue.Ptr,Cue.Edit.Out.Msb);
+	call PCR;
+
+	call PS('Trks       '); call doit(Current.Cue.Ptr,Cue.Trks);   call PCR;
+	call PS('Sync SBits '); call doit(Current.Cue.Ptr,Cue.SMPT.Msb); call PCR;
+	call PS('Offset     '); call doit(Current.Cue.Ptr,Cue.off.Msb); call PCR;
+	call PS('Cue Id#, SMPTE Mode  '); call doit(Current.Cue.Ptr,cue.alloc#); call PCR;
+	call PS('Cue Bits & Samp Rate '); call doit(Current.Cue.Ptr,Cue.bits); call PCR;
+	call PS('Cue.In.S#.Msb/Lsb    '); call doit(Current.Cue.Ptr,Cue.in.s#.Msb); call PCR;
+	call PCR;
+
+	call lookup(Current.Cue.Ptr,Cue.List.Ptr,loc(addr(base)));
+
+	do i = base to base + len - 1 by Cue.Seg.Stride;
+		call PS('Sync '); call doit(Current.Cue.Ptr, i + S#Sync.Msb);call PS('    ');
+		call PS('In   '); call doit(Current.Cue.Ptr, i + S#In.Msb);call PS('    ');
+		call PS('Out  '); call doit(Current.Cue.Ptr, i + S#Out.Msb);call PS('    ');
+		call PS('Trks '); call doit(Current.Cue.Ptr, i + S#DriveBits1);call PS('    ');
+		call PCR;
+	end;
+
+	call Select.New.Cur.Obj(Corner.Label,-1,-1);
+
+end TIMS.CUE.DEBUG.ROUTINE;
+
+/*	$page - Specific routines to handle graphics character reel table	*/
+
+/*	Fill.AEE.Shuttle.Reel.Table fills a graphics region	*/
+/*	whose ids are passed with the reel codes					*/
+
+dcl Reel.Table.Csize		lit ' 1';	/*	char size to use	*/
+
+Fill.AEE.Shuttle.Reel.Table:proc(id,leader.id) swapable;
+	dcl id			fixed;
+	dcl leader.id	fixed;
+	dcl (i, j)		fixed;
+	dcl str1(3)		fixed;
+	dcl str2(1)		fixed;
+
+	/*	fill in alpha numerics	*/
+
+	call Copy.String('CUE',str1);
+	str2(0) = 0;
+
+	call Deposit.Graphics.Button.Table.Label
+	(Id, 0, 0, Reel.Table.Csize, str1, str2);
+
+	do j = 1 to 3;					/*	clipboards	*/
+		call Copy.String('CLIP',str1);
+		str2(0) = 1;
+		str2(1) = ASC.0 + j;
+		call Deposit.Graphics.Button.Table.Label
+		(Id, 0, j, Reel.Table.Csize, str1, str2);
+		call Check.Next.Event;	/*	keep mouse going	*/
+	end;
+
+	do i = 1 to 2;			/*	rows	*/
+		do j = 0 to 3;		/*	reels	*/
+			call Copy.String('REEL',str1);
+			str2(0) = 1;
+			str2(1) = ASC.A + (i-1)*4 + j;
+			call Deposit.Graphics.Button.Table.Label
+			(Id, i, j, Reel.Table.Csize, str1, str2);
+			call Check.Next.Event;	/*	keep mouse going	*/
+		end;
+	end;
+
+	/*	fill in alpha numerics for Leader button below reel table	*/
+
+	call Copy.String('LEADER',str1);
+	str2(0) = 0;
+
+	call Deposit.Graphics.Button.Table.Label
+	(leader.id, 0, 0, Reel.Table.Csize, str1, str2);
+
+end Fill.AEE.Shuttle.Reel.Table;
+
+
+/*	$page - Specific routines to handle graphics character edit command table	*/
+
+/*	Fill.AEE.Shuttle.Edit.Table fills a graphics region	*/
+/*	whose ids are passed with the edit commands				*/
+
+Fill.AEE.Shuttle.Edit.Table:proc(id) swapable;
+	dcl id		fixed;
+
+	/*	fill in alpha numerics	*/
+
+	fillsub:proc (Id, row, col, str1, str2, csize);
+		dcl Id			fixed;
+		dcl row			fixed;
+		dcl col			fixed;
+		dcl str1			array;
+		dcl str2			array;
+		dcl csize		fixed;
+
+		call Deposit.Graphics.Button.Table.Label
+		(Id, row, col, csize, str1, str2);
+
+		call Check.Next.Event;	/*	keep mouse going	*/
+
+	end fillsub;
+
+	call fillsub(Id, 0, 0, 'COPY'    , NulStr, 1);
+	call fillsub(Id, 0, 1, 'CUT'     , NulStr, 1);
+	call fillsub(Id, 0, 2, 'DELETE'  , NulStr, 1);
+	call fillsub(Id, 0, 3, 'CLEAR'   , 'EDITS',1);
+	call fillsub(Id, 1, 0, 'EXCHANGE', NulStr, 1);
+	call fillsub(Id, 1, 1, 'CHAIN'   , NulStr, 1);
+	call fillsub(Id, 1, 2, 'PASTE'   , NulStr, 1);
+	call fillsub(Id, 1, 3, 'EXTRACT' , NulStr, 1);
+	call fillsub(Id, 2, 0, 'FILL'    , NulStr, 1);
+	call fillsub(Id, 2, 1, 'SLIDE'   , NulStr, 1);
+	call fillsub(Id, 2, 2, NulStr    , NulStr, 1);
+/*	call fillsub(Id, 2, 3, 'UNDO'    , NulStr, 2);	*/
+	call fillsub(Id, 3, 0, 'RENAME'  , NulStr, 1);
+	call fillsub(Id, 3, 1, 'DELETE'  , 'CUE',  1);
+	call fillsub(Id, 3, 2, 'RECALL'  , NulStr, 1 );
+	call fillsub(Id, 3, 3, 'TRANSFER', 'TO POLY', 1);
+
+end Fill.AEE.Shuttle.Edit.Table;
+
+/*	$page - Specific routines to handle graphics character Sbar Control table	*/
+
+
+/*	Fill.AEE.Shuttle.Sbar.Control.Table fills a graphics region	*/
+/*	whose ids are passed with the scroll bar control info			*/
+
+Fill.AEE.Shuttle.Sbar.Control.Table:proc(id) swapable;
+	dcl id		fixed;
+
+	/*	fill in alpha numerics	*/
+
+	fillsub:proc (Id, row, col, str1, str2, csize);
+		dcl Id			fixed;
+		dcl row			fixed;
+		dcl col			fixed;
+		dcl str1			array;
+		dcl str2			array;
+		dcl csize		fixed;
+
+		call Deposit.Graphics.Button.Table.Label
+		(Id, row, col, csize, str1, str2);
+
+		call Check.Next.Event;	/*	keep mouse going	*/
+
+	end fillsub;
+
+	call fillsub(Id, 0, 0, 'CUE'  , NulStr, 1);
+	call fillsub(Id, 0, 1, 'HOLD' , NulStr, 1);
+	call fillsub(Id, 0, 2, 'PROJ' , NulStr, 1);
+	call fillsub(Id, 1, 0, '0.5'  , NulStr, 1);
+	call fillsub(Id, 1, 1, '2.0'  , NulStr, 1);
+	call fillsub(Id, 1, 2, '5.0'  , NulStr, 1);
+
+end Fill.AEE.Shuttle.Sbar.Control.Table;
+
+/*	$page - routines to handle graphics character source table	*/
+
+
+/*	Fill.AEE.Shuttle.Source.Table fills a graphics region	*/
+/*	whose ids are passed with the track numbers				*/
+
+Fill.AEE.Shuttle.Source.Table:proc(id) swapable;
+	dcl id				fixed;
+	dcl (i, j)			fixed;
+	dcl (st1,st2) (2)	fixed;
+
+
+	do i = 0 to 3;			/*	rows	*/
+		do j = 0 to 3;		/*	cols	*/
+			st1(0) = 2;
+			load (i*4+j+1); div 10;
+			st1(1) = (asc.0+res) + shl(asc.0+rem,8);
+			call Deposit.Graphics.Button.Table.Label
+			(Id, i, j, 1, st1, st2);
+			call Check.Next.Event;	/*	keep mouse going	*/
+		end;
+	end;
+
+end Fill.AEE.Shuttle.Source.Table;
+
+
+/*	$page - routine to define shuttle panel divider	*/
+
+Load.Shuttle.Divider.Icon:proc (arr) swapable;
+	dcl arr	array;
+
+	write("313") = addr(arr(0));
+
+	/*	there is a pattern here:  start at top row (first row) and go	*/
+	/*	down to bottom row (ninth row).  for each row, draw any new		*/
+	/*	horizontal lines (beginning at left, going to right).  Then		*/
+	/*	draw any new vertical lines that start at the TOP of this		*/
+	/*	row (also going from left to right); draw them down as far		*/
+	/*	as they go																		*/
+
+	/*	top line	*/
+
+	MR13i		= O#Icon.Connect;	/*	between Cue proj/comment and Prot Indicator	*/
+		MR13i	= 7700;
+		MR13i	=  100;
+		MR13i	= 7700;
+		MR13i	=    0;
+
+	MR13I		= O#ICON.Connect;
+		MR13i	= - 10;				/*	horiz bar under top line		*/
+		MR13i	=    0;
+		MR13i	= 8010;
+		MR13i	=    0;
+
+	/*	second line	*/
+
+	MR13I		= O#ICON.Connect;
+		MR13i	= - 10;				/*	horiz bar under time display	*/
+		MR13i	= -100;				/*	and under "show cues"			*/
+		MR13i	= 1900;
+		MR13i	= -100;
+
+	MR13I		= O#ICON.Connect;
+		MR13i	= 6500;				/*	horiz bar under "show edit"	*/
+		MR13i	= -100;
+		MR13i	= 7100;
+		MR13i	= -100;
+
+	MR13I		= O#ICON.Connect;	/*	vert bar to right of time display	*/
+		MR13I	= 1600;				/*	all the way down to the lower		*/
+		MR13I	=    0;				/*	scroll bar								*/
+		MR13I	= 1600;
+		MR13I	= -400;
+
+	MR13I		= O#ICON.Connect;	/*	vert bar to right of show cues	*/
+		MR13I	= 1900;				/*	button and down by scissors		*/
+		MR13I	=    0;
+		MR13I	= 1900;
+		MR13I	= -200;
+
+	MR13I		= O#ICON.Connect;	/*	vert bar to left of show edit		*/
+		MR13I	= 6500;				/*	button and down by scissors		*/
+		MR13I	=    0;
+		MR13I	= 6500;
+		MR13I	= -200;
+
+	MR13I		= O#ICON.Connect;	/*	vert bar to right of "show edit"	*/
+		MR13I	= 6800;				/*	all the way down to the lower		*/
+		MR13I	=    0;				/*	scroll bar								*/
+		MR13I	= 6800;
+		MR13I	= -400;
+
+	MR13I		= O#ICON.Connect;	/*	vert bar to left of graphics		*/
+		MR13I	= 7100;				/*	region shuttle disk table			*/
+		MR13I	=    0;
+		MR13I	= 7100;
+		MR13I	= -300;
+
+	/*	third row	*/
+
+	MR13I		= O#ICON.Connect;
+		MR13i	= - 10;				/*	horiz bar under play icon			*/
+		MR13i	= -200;
+		MR13i	=  600;
+		MR13i	= -200;
+
+	MR13I		= O#ICON.Connect;
+		MR13i	=  700;				/*	horiz bar under zooms, mag			*/
+		MR13i	= -200;				/*	forms top line of sbar				*/
+		MR13i	= 1600;				/*	controls switch						*/
+		MR13i	= -200;
+
+	MR13I		= O#ICON.Connect;
+		MR13i	= 6800;				/*	horiz bar under right mag			*/
+		MR13i	= -200;
+		MR13i	= 7100;
+		MR13i	= -200;
+
+	MR13I		= O#ICON.Connect;	/*	vert bar to	right of play icon	*/
+		MR13I	=  300;				/*					right of cont icon	*/
+		MR13I	= -100;				/*					right of stop icon	*/
+		MR13I	=  300;
+		MR13I	= -400;
+
+	MR13I		= O#ICON.Connect;	/*	vert bar to left of zoom in		*/
+		MR13I	=  700;				/*	forms left edge of sbar table		*/
+		MR13I	= -100;				/*	also divides block, save			*/
+		MR13I	=  700;
+		MR13I	= -500;
+
+	MR13I		= O#ICON.Connect;	/*	vert bar between zoomin				*/
+		MR13I	= 1000;				/*	and zoom out							*/
+		MR13I	= -100;
+		MR13I	= 1000;
+		MR13I	= -200;
+
+	MR13I		= O#ICON.Connect;	/*	vert bar between zoom back			*/
+		MR13I	= 1300;				/*	and magnifier							*/
+		MR13I	= -100;
+		MR13I	= 1300;
+		MR13I	= -200;
+
+	/*	fourth row	*/
+
+	MR13I		= O#ICON.Connect;
+		MR13i	= - 10;				/*	horiz bar under pause icond		*/
+		MR13i	= -300;
+		MR13i	=  600;
+		MR13i	= -300;
+
+	MR13I		= O#ICON.Connect;	/*	horiz bar under graphics region	*/
+		MR13I	= 6800;				/*	shuttle disk table					*/
+		MR13I	= -300;				/*	forms line on top of memories		*/
+		MR13I	= 8000;
+		MR13I	= -300;
+
+	MR13I		= O#ICON.Connect;
+		MR13I	=  600;				/*					right of fast icon	*/
+		MR13I	= -200;				/*					right of slow icon	*/
+		MR13I	=  600;
+		MR13I	= -400;
+
+	/*	fifth row	*/
+
+	MR13I		= O#ICON.Connect;
+		MR13i	= - 10;				/*	horiz bar under stop icon	*/
+		MR13i	= -400;				/*	above block button			*/
+		MR13i	= 8000;				/*	forms bottom of sbar			*/
+		MR13i	= -400;				/*	ctrl table box					*/
+										/*	run all the way across		*/
+	/*	sixth row	*/				/*	so that area fills below	*/
+										/*	do not blow up					*/
+	MR13I		= O#ICON.Connect;
+		MR13i	= - 10;				/*	horiz bar under block, save		*/
+		MR13i	= -500;
+		MR13i	= 1850;
+		MR13i	= -500;
+
+	MR13I		= O#ICON.Connect;	/*	vert bar between save and blank	*/
+		MR13I	= 1300;
+		MR13I	= -400;
+		MR13I	= 1300;
+		MR13I	= -500;
+
+	MR13i	= O#Icon.StartPoly;
+		 MR13i	= "137";
+
+	MR13I		= O#ICON.Connect;	/*	vert bars to left of reel area	*/
+		MR13I	= 1850;
+		MR13I	= -400;
+		MR13I	= 1850;
+		MR13I	= -800;
+
+	MR13I		= O#ICON.Connect;	/*	for fill									*/
+		MR13I	= 1900;
+		MR13I	= -800;
+		MR13I	= 1900;
+		MR13I	= -400;
+
+	MR13i		= O#Icon.EndPoly;
+		MR13i	= 1875;
+		MR13i	= -500;
+
+	MR13i	= O#Icon.StartPoly;
+		MR13i	= "137";
+
+	MR13I		= O#ICON.Connect;	/*	vert bars to left of edit table	*/
+		MR13I	= 3100;
+		MR13I	= -400;
+		MR13I	= 3100;
+		MR13I	= -800;
+
+	MR13I		= O#ICON.Connect;	/*	for fill									*/
+		MR13I	= 3150;
+		MR13I	= -800;
+		MR13I	= 3150;
+		MR13I	= -400;
+
+	MR13i		= O#Icon.EndPoly;
+		MR13i	= 3125;
+		MR13i	= -500;
+
+	MR13i		= O#Icon.StartPoly;
+		MR13i	= "137";
+
+	MR13I		= O#ICON.Connect;	/*	vert bars to rite of edit table	*/
+		MR13I	= 5350;
+		MR13I	= -400;
+		MR13I	= 5350;
+		MR13I	= -800;
+
+	MR13I		= O#ICON.Connect;	/*	for fill									*/
+		MR13I	= 5400;
+		MR13I	= -800;
+		MR13I	= 5400;
+		MR13I	= -400;
+
+	MR13i		= O#Icon.EndPoly;
+		MR13i	= 5375;
+		MR13i	= -500;
+
+	/*	seventh row	*/
+
+	MR13I		= O#ICON.Connect;
+		MR13i	= 1200;				/*	horiz bar under audition button	*/
+		MR13i	= -600;
+		MR13i	= 1850;
+		MR13i	= -600;
+
+	MR13I		= O#ICON.LineType;	MR13I = 1;	/*	dotted lines		*/
+	MR13I		= O#ICON.Connect;
+		MR13i	= 5400;				/*	horiz bar between cue times, edit times	*/
+		MR13i	= -600;
+		MR13i	= 8000;
+		MR13i	= -600;
+	MR13I = O#ICON.LineType;		MR13I = 0;	/*	solid  lines		*/
+
+	MR13I		= O#ICON.Connect;	/*	vert bar to left of audition		*/
+		MR13I	= 1200;
+		MR13I	= -500;
+		MR13I	= 1200;
+		MR13I	= -600;
+
+/*	eighth row	*/
+
+	MR13I		= O#ICON.Connect;
+		MR13i	= - 10;				/*	horiz bar above place buttons		*/
+		MR13i	= -700;
+		MR13i	= 1200;
+		MR13i	= -700;
+
+	MR13I		= O#ICON.Connect;
+		MR13i	= 1900;				/*	horiz bar under reel table			*/
+		MR13i	= -700;
+		MR13i	= 3100;
+		MR13i	= -700;
+
+	MR13I		= O#ICON.Connect;
+		MR13i	= 3150;				/*	double horiz line above rename,	*/
+		MR13i	= -707;				/*	delete cue, recall, xfer to ply	*/
+		MR13i	= 5350;
+		MR13i	= -707;
+
+	MR13I		= O#ICON.Connect;
+		MR13i	= 3150;				/*	double horiz line under rename,	*/
+		MR13i	= -793;				/*	delete cue, recall, xfer to ply	*/
+		MR13i	= 5350;
+		MR13i	= -793;
+
+	MR13I		= O#ICON.Connect;
+		MR13i	= 1200;				/*	vertical line to right of place buttons	*/
+		MR13i	= -700;
+		MR13i	= 1200;
+		MR13i	= -800;
+
+	MR13I		= O#ICON.Connect;
+		MR13i	= 2500;				/*	vertical line to right of LEADER button	*/
+		MR13i	= -700;				/*	underneath the reel table.						*/
+		MR13i	= 2500;
+		MR13i	= -800;
+
+	MR13I		= O#ICON.End;
+end Load.Shuttle.Divider.Icon;
+
+/*	$page - slide segment sync time	*/
+
+/*	this routine is called to slide the sync/in times of a	*/
+/*	segment and/or the out time of a segment forwards or		*/
+/*	backwards in time														*/
+
+/*	note: as of 10/20/87, routine does no garbage collecion	*/
+/*	and only correctly handles the simple cases					*/
+
+/*	12/2/87 - cj - modified to slide all segments that are	*/
+/*	represented by this flag.											*/
+
+SLIDE.SEGMENT.SYNC.TIME:proc(Time,Origtime,Origpix,Pixel) swapable;
+	dcl Time			array;	/*	pass new time to assign			*/
+	dcl Origtime	array;	/*	pass original time (not used)	*/
+	dcl Origpix		fixed;	/*	original	pixel pos of E flag	*/
+	dcl Pixel		fixed;	/*	new		pixel pos dragged to	*/
+
+	dcl Stime	(1)	fixed;
+
+	dcl (base,len)		fixed;	/*	declare in order				*/
+	dcl (l,m)			fixed;
+	dcl (ptr)			fixed;
+
+	dcl (sync)	(1)	fixed;	/*	holds sync time				*/
+	dcl (in)		(1)	fixed;	/*	holds in   time				*/
+	dcl (out)	(1)	fixed;	/*	holds out  time				*/
+	dcl (temp)	(1)	fixed;	/*	holds change in sync time	*/
+	dcl (slen)	(1)	fixed;	/*	holds length of segment		*/
+	dcl (send)	(1)	fixed;	/*	holds sync end time			*/
+
+	dcl (nsync)	(1)	fixed;	/*	holds new sync	time			*/
+	dcl (nin  )	(1)	fixed;	/*	holds new in	time			*/
+	dcl (nout )	(1)	fixed;	/*	holds new out	time			*/
+
+	lookup:proc(ptr,arr);
+		dcl ptr	fixed;
+		dcl arr	array;
+
+		write(mam) = Current.Cue.Ptr + shr(ptr,8);
+		write(mal) = ptr;
+		arr(0) = read(mdi);
+		arr(1) = read(mdi);
+	end lookup;
+
+	store:proc(ptr,arr);
+		dcl ptr	fixed;
+		dcl arr	array;
+
+		write(mam) = Current.Cue.Ptr + shr(ptr,8);
+		write(mal) = ptr;
+		write(mdi) = arr(0);
+		write(mdi) = arr(1);
+	end store;
+
+	/*	Convert passed times to samples from milliseconds	*/
+
+	call Msec.To.DTD.Sample.#(Time, CF#Time, S$Speed, AEE.Current.Project.Rate, Zero.Zero, Stime);
+
+	/*	look up base and length of cue	*/
+
+	call lookup(Cue.List.Ptr,loc(addr(base)));
+
+	/*	look through all segments.  slide any in times or end times that	*/
+	/*	were represented by this e flag												*/
+
+	if base <> 0
+	then
+	do ptr = base to base + len - 1 by Cue.Seg.Stride;
+
+		write(mam) = Current.Cue.Ptr + shr(ptr + S#SPixelPointer,8);
+		write(mal) = ptr + S#SPixelPointer;
+		l = read(mdi);					/*	S#SpixelPointer	*/
+		m = read(mdi);					/*	S#EpixelPointer	*/
+
+		/*	see if segment start is represented in this E flag	*/
+
+		if (l = Origpix)				/*	segment starts	at this E flag	*/
+		or (m = Origpix)				/*	segment ends	at this E flag	*/
+		then do;							/*	make change							*/
+
+			/*	store new pixel now (even if it does not match checked time	*/
+			/*	below) so user can quickly grab it again.  if it is wrong,	*/
+			/*	draw flags and edits will eventually move it to the right	*/
+			/*	place again																	*/
+
+			if l = Origpix then do;
+				write(mam) = Current.Cue.Ptr + shr(ptr + S#SPixelPointer,8);
+				write(mal) = ptr + S#SPixelPointer;
+				write(md ) = pixel;
+			end;
+
+			if m = Origpix then do;
+				write(mam) = Current.Cue.Ptr + shr(ptr + S#EPixelPointer,8);
+				write(mal) = ptr + S#EPixelPointer;
+				write(md ) = pixel;
+			end;
+
+			/*	look up original info	*/
+
+			call lookup(ptr+S#Sync.Msb,sync);		/*	get original sync time	*/
+			call lookup(ptr+S#In.Msb,in);				/*	get original in	time	*/
+			call lookup(ptr+S#Out.Msb,out);			/*	get original out	time	*/
+
+			if out(0) = (-1)								/*	seg extends to end		*/
+			then do;
+				call COPY32(out, send);					/*	sync end is also inf.	*/
+				call STR32(0,0,slen);					/*	length is meaningless	*/
+			end;
+			else do;											/*	compute send, slen		*/
+				call SUB32(out,in,slen);				/*	get seg length				*/
+				call ADD32(sync,slen,send);			/*	and sync end				*/
+			end;
+
+			/*	change start time if it was under	*/
+			/*	this E flag									*/
+
+			if l = Origpix									/*	change start time			*/
+			then do;											/*	of segment					*/
+
+				if COM32(Stime,sync) >= lw#ieq		/*	new time is larger		*/
+				then do;
+					call SUB32(Stime,sync,temp);		/*	get amount larger			*/
+					if  (out(0)	<> (-1)	 )				/*	if new seg is finite		*/
+					and (m		<> Origpix)				/*	and not changing it		*/
+					then do;									/*	then check limit			*/
+						if COM32(temp,slen) = lw#igt	/*	past end of seg?			*/
+						then call COPY32(slen,temp);	/*	limit to end of seg		*/
+					end;
+					call ADD32(sync,temp,nsync);		/*	get new sync				*/
+					call ADD32(in	,temp,nin  );		/*	new in time					*/
+				end;
+
+				else do;										/*	new time is earlier		*/
+					call SUB32(sync,Stime,temp);		/*	get amount earlier		*/
+					if COM32(temp,in) = lw#igt			/*	move to before in time	*/
+					then call COPY32(in,temp);			/*	limit to start of disk	*/
+					call SUB32(sync,temp,nsync);		/*	get new sync				*/
+					call SUB32(in	,temp,nin  );		/*	new in time					*/
+				end;
+
+				call store(ptr+S#Sync.Msb,nsync);	/*	save new sync time		*/
+				call store(ptr+S#In.Msb,nin);			/*	and new in time			*/
+
+			end;
+
+			/*	slide segment end time if it was represented	*/
+			/*	by the E flag that was dragged					*/
+
+			if  (out(0) <> (-1))							/*	if seg legth finite		*/
+			and (m = Origpix)								/*	and we want to change	*/
+			then do;											/*	it, then do so				*/
+
+				if COM32(Stime,send) >= lw#ieq		/*	new time is larger		*/
+				then do;
+					call SUB32(Stime,send,temp);		/*	get amount larger			*/
+					call ADD32(out,temp,nout);			/*	compute new out time		*/
+				end;
+
+				else do;											/*	new time is earlier		*/
+					call SUB32(send,Stime,temp);			/*	get amount earlier		*/
+					if  (l <> Origpix)						/*	if not changing in		*/
+					and (COM32(temp,slen) = lw#igt)		/*	and out would be < in	*/
+					then call COPY32(slen,temp);			/*	limit to in time			*/
+					else if (COM32(temp,out) = lw#igt)	/*	else check for lim		*/
+					then call COPY32(out,temp);			/*	of 0,0						*/
+					call SUB32(out,temp,nout);
+				end;
+
+				call store(ptr+S#Out.Msb ,nout );		/*	for prior segment			*/
+
+			end;
+		end;
+	end;
+
+	if Current.Cue.Audition <> 0	/*	keep audition cue up to date			*/
+	then call PLACE.CUE.ON.AUDITION.TRACK;
+
+	if Shuttle.Group <> 0 then do;			/*	set anchor time and scroll	*/
+		call Set.Shuttle.Flags.And.Edits;	/*	set in/out flags and edits	*/
+	end;
+
+end SLIDE.SEGMENT.SYNC.TIME;
+
+Invalidate.Wave.Display:proc (bar) swapable;
+	dcl bar		fixed;	/*	0 = fine bar, 1 = coarse bar	*/
+	dcl bar.id	fixed;
+	dcl i			fixed;
+
+	if bar = 0 then do;									/*	Invalidate fine wave				*/
+		if Fine.Shuttle.Wave <> 1 then return;		/*	Wave display is not up			*/
+		bar.id = Shuttle.Fine.Bar;
+		Fine.Shuttle.Wave = 2;							/*	Wave display is not valid		*/
+	end;
+	else do;													/*	Invalidate coarse wave			*/
+		if Fine.Shuttle.Wave = 1						/*	Fine wave display is up			*/
+		then call Invalidate.Wave.Display(0);		/*	Redraw fine wave display too	*/
+		if Coarse.Shuttle.Wave <> 1 then return;	/*	Wave display is not up			*/
+		bar.id = Shuttle.Coarse.Bar;
+		Coarse.Shuttle.Wave = 2;						/*	Wave display is not valid		*/
+	end;
+
+	i = Fetch.Scroll.Bar(bar.id);
+	call Deactivate.Scroll.Bar(bar.id);
+	call Update.Object(bar.id);						/*	Draw deactivated to erase wave	*/
+	call Activate.Scroll.Bar(bar.id,i);
+
+end Invalidate.Wave.Display;
+
+Erase.Wave.Display:proc (bar) swapable;
+	dcl bar		fixed;	/*	0 = fine bar, 1 = coarse bar	*/
+	dcl bar.id	fixed;
+	dcl i			fixed;
+	dcl code		fixed;
+
+	if bar = 0 then do;
+		bar.id = Shuttle.Fine.Bar;
+		code = Fine.Shuttle.Wave;
+	end;
+	else do;
+		bar.id = Shuttle.Coarse.Bar;
+		code = Coarse.Shuttle.Wave;
+	end;
+
+	/*	Set/Clear the 'transparent' bit depending on whether we	*/
+	/*	are still in "show wave" or not.									*/
+
+	i = Fetch.Scroll.Bar(bar.id);
+	call Deactivate.Scroll.Bar(bar.id);
+	call Update.Object(bar.id);
+	if code = 0
+	then call Set.Scroll.Bar.Bits(bar.id,O#SBAR.Bits.Transparent,0);
+	else call Set.Scroll.Bar.Bits(bar.id,O#SBAR.Bits.Transparent,1);
+	call Activate.Scroll.Bar(bar.id,i);
+
+end Erase.Wave.Display;
+
+Handle.Wave.Display:proc (bar) public swapable;
+	dcl (bar)				fixed;	/*	0 = fine bar, 1 = coarse bar	*/
+	dcl (bar.id)			fixed;
+	dcl (x1, x2)			fixed;
+	dcl (y1, y2)			fixed;
+	dcl (pixels)			fixed;
+	dcl (pix.offset)		fixed;
+	dcl (max, min)			fixed;
+	dcl (in, out)	(1)	fixed;
+	dcl (d, t)		(1)	fixed;
+	dcl (i, j, k, l)		fixed;
+
+	if bar = 0 then do;
+		bar.id = Shuttle.Fine.Bar;
+		lod.mam = AEE.Fine.Wave;
+		call COPY32(AEE.Fine.In.Time, in);
+		call COPY32(AEE.Fine.Out.Time, out);
+	end;
+	else do;
+		bar = 1;						/*	Bar had better be 0 or 1 only!	*/
+		bar.id = Shuttle.Coarse.Bar;
+		lod.mam = AEE.Coarse.Wave;
+		call COPY32(AEE.Shuttle.In.Time, in);
+		call COPY32(AEE.Shuttle.Out.Time, out);
+	end;
+
+	call REMOVE.ERR;						/*	remove prior msg	*/
+	call DISPLAY.NOTICE (NT#CompressingCue, ATTR#Reverse, NulStr, 0, 0, 0);
+
+	/*	Coordinates JUST inside scroll bar	*/
+	x1 = gpos.x(1900)+3;								/*	Left X	*/
+	x2 = gpos.x(6500)-3;								/*	Right X	*/
+	y1 = gpos.y((Shuttle.Row+3-bar)*100)-3;	/*	Top Y		*/
+	y2 = gpos.y((Shuttle.Row+4-bar)*100)+3;	/*	Bottom Y	*/
+	pixels = x2 - x1 + 1;							/*	Width of wave display area	*/
+
+	/*	How much time is represented between middle and edge of scroll box	*/
+	call SUB32(out,in,d);				/*	Delta time for the whole bar, mid-box to mid-box at the sides	*/
+	LOAD	d(lw#lsb);
+	ULOAD	d(lw#msb);
+	i = pixels - SB.Hwidth;
+	DIV i;									/*	Divide by whole bar less 2 half boxes	*/
+	if REM > shr(i,1)
+	then j = RES + 1;						/*	j is now "time per pixel"	*/
+	else j = RES;
+	LOAD j;
+	MUL shr(SB.Hwidth,1);				/*	Half of scroll box width	*/
+	d(lw#lsb) = RES;		/*	We now have (d / pixels) * (1/2 box pixels)	*/
+	d(lw#msb) = URES;		/*	ie: the TIME represented by 1/2 scroll box	*/
+
+	/*	Adjust the in and out times by the "1/2 scroll box time" (d)		*/
+	call COPY32(in,t);					/*	Save original in time	*/
+	if COM32(d,in) = lw#igt
+	then call STR32(0,0,in);
+	else call SUB32(in,d,in);			/*	Subtract d from the in time		*/
+	if COM16(zero.time,in) = lw#igt	/*	(but limit to zero.time)			*/
+	then call STR32(0,zero.time,in);
+	call ADD32(d,out,out);				/*	Add d to the out time				*/
+
+	/*	See if wave display really starts at the left edge of the window	*/
+	call SUB32(t,in,t);					/*	Get change to the "in" time		*/
+	LOAD	t(lw#lsb);						/*	Compute delta in time...			*/
+	ULOAD	t(lw#msb);
+	DIV	j;									/*	... divided by "time per pixel"	*/
+	pix.offset = shr(SB.Hwidth,1) - RES;			/*	RESult is in pixels	*/
+	if pix.offset < 0
+	then pix.offset = 0;
+	pixels = pixels - pix.offset;		/*	We only want display this wide	*/
+
+   if (simulate_dtd) {
+      j = interp_fetch_real_micros(0) & 0x3F;
+      write(MAM)=lod.mam;
+      do i = 0 to 99;
+         write(mdi) = 0;
+      end;
+      do i = 100 to 199;
+         write(mdi) = 255 + shl(255,8);
+      end;
+      do i = 200 to 200+j-1;
+         write(mdi) = 128 + shl(128,8);
+      end;
+      do i = 200+j to 1023;
+         write(mdi) = interp_fetch_real_micros(0) + shl(interp_fetch_real_micros(0), 8);
+      end;
+      pixels = pixels + pix.offset;
+      pix.offset = 0;
+   }
+
+   else {
+      /*	We must put the current cue in the DTD's temp area so it will follow	*/
+      /*	the complete edit segment list when displaying the waveform				*/
+      call LOAD.DTD.TEMP.CUE(Current.Cue.Ptr);	/*	store current cue in temp area	*/
+
+      i = TRANSFER.COMPRESSED.CUE(0,pixels,in,out);
+   }
+
+   call DISPLAY.NOTICE (NT#EraseNotice,ATTR#Normal,NulStr,0,0,0);
+
+   if i = 0 then do;				/*	Data compression failed - message has been presented	*/
+		if ERTYP = err.lod		/*	show error message in wave display	*/
+		then do;						/*	if unable to transfer					*/
+			call push.graphics.attributes;
+			transparent_mode;
+			vector_mode;
+			call data_level(2);
+			call viewport(x1,x2,y2,y1);
+			call window(0,x2-x1,1,y1-y2);
+
+			call move_to(15,15);
+			alpha_mode;
+			call pc(ESC);
+			call pc(scolon-1);
+			call pstring(ERSYM);
+			call pop.graphics.attributes;
+			ertyp = 0;
+		end;
+		if bar = 0
+		then Fine.Shuttle.Wave	 = 1;	/*	indicate display is complete, even	*/
+		else Coarse.Shuttle.Wave = 1;	/*	though nothing was shown.				*/
+	end;
+
+	else if i = 2 then do;		/*	Data compression incomplete	*/
+		/*	nothing - leave Fine/Coarse shuttle wave = 2 so we return here	*/
+	end;
+
+	else do;							/*	Data compression succeeded		*/
+		call push.graphics.attributes;
+
+		/*	Initialize	*/
+
+		transparent_mode;
+		vector_mode;
+/*		call blockmode_on;				*/
+/*		call data_level(1);				*/	/*	Erase	*/
+/*		call set.fill.pattern("137");	*/	/*	Solid	*/
+/*		call connect(x1,y1,x2,y2);		*/
+/*		call blockmode_off;				*/
+
+		call data_level(2);				/*	Complement	*/
+		call viewport(x1,x2,y2,y1);
+		call window(0,x2-x1,20,235);  // Expand range slightly to make up for smaller scroll bar
+
+		write(MAM)=lod.mam;
+
+		do i=pix.offset to (pixels+pix.offset)-1;
+			j = read(MDI);
+			max = shr(j,8);	/*	Get MAX	*/
+			min = j & "377";	/*	Get MIN	*/
+         if (min <  20) min =  20;
+         if (min > 235) min = 235;
+         if (max <  20) max =  20;
+         if (max > 235) max = 235;
+			call connect(i,max,i,min);
+			if (i & 7) = 0 then do;		/*	Every 8 pixels	*/
+				k = read(MAM);
+				l = read(MAL);
+				call check.next.event;	/*	Keep mouse movement going	*/
+				write(MAM) = k;
+				write(MAL) = l;
+			end;
+		end;
+
+		call pop.graphics.attributes;
+
+		if bar = 0
+		then Fine.Shuttle.Wave	 = 1;
+		else Coarse.Shuttle.Wave = 1;
+
+	end;		/*	of data compression succeeded	*/
+
+end Handle.Wave.Display;
+
+Handle.Shuttle.Project.Switch:proc (prjcap, prname, prstring, prnum, code) public swapable;
+	dcl prjcap				fixed;	/*	pass id of project/caption switch	*/
+	dcl prname				fixed;	/*	pass id of project name label			*/
+	dcl prstring			fixed;	/*	pass id of porject name string		*/
+	dcl prnum				fixed;	/*	pass id of project number				*/
+	dcl code					fixed;	/*	1000 = increment/decrement				*/
+											/*	1 - 50 = select proj						*/
+
+	dcl i						fixed;
+	dcl p.y					fixed;
+	dcl t.y					fixed;
+	dcl dir					fixed;
+	dcl proj.title (12)	fixed;
+	dcl proj.num			fixed;
+
+	/*	disallow project switch if	*/
+	/*	showing caption				*/
+
+	if prjcap <> 0 then do;
+		if Fetch.Switch(prjcap) <> 0
+		then return;
+	end;
+
+	if code	= 1000 then do;								/*	up/down					*/
+		p.y	= mouse(press.y);								/*	if click is in upper	*/
+		t.y	= tpos.y(p.y);									/*	half of the transp	*/
+		if p.y > gpos.y(t.y*100-50) then	dir = -1;	/*	row, then dir is up	*/
+		else										dir = +1;
+		proj.num = AEE.Current.Project + dir;
+	end;
+	else proj.num = code - 1;								/*	number typed in		*/
+
+	call STOP.DTD.PLAYBACK;
+
+	if proj.num < 0  then proj.num = 0;
+	if proj.num > 49 then proj.num = 49;
+
+	call Fetch.DTD.Song.Directory(proj.num);
+	write(mam) = SCSI.Ptr;
+	write(mal) = 1;
+	do i = 1 to 12;
+		proj.title(i) = read(mdi);
+	end;
+	proj.title(0)=24;
+
+	disable.deposits = 1;
+	if prname<>0 then do;
+		call Deposit.Label(prname, proj.title);
+		call Update.Object(prname);
+	end;
+	if prstring<>0 then do;
+		call Deposit.String(prstring, proj.title);
+		call Update.Object(prstring);
+	end;
+	if prnum <>0 then do;
+		call Deposit.Fixed.Point(prnum, proj.num+1);
+		call Update.Object(prnum);
+	end;
+	disable.deposits = 0;
+
+	call ASK.FOR.DTD.CURRENT.PROJECT (proj.num);
+
+end Handle.Shuttle.Project.Switch;
+

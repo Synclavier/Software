@@ -1,0 +1,298 @@
+/*	$Title  :SYNSOU:STMMOD:STDRSOUF  Sample-To-Memory Sound Editor Graphic Display Routine
+
+Modified:
+1999/10/14 - TY  - Added a call to Build.TDS.Patch.Str and removed a redundant call to
+						 POS.STM.ALPHA.CURSOR in UPDATE.SOUND.EDITOR.DISP
+1988/07/07 - MWH - Erase crossfade even when it's 65535 (-1)
+1988/04/18 - MWH - Add zero line
+1987/08/07 - MWH - Update all to support max 4 poly bins, 512mb/bin
+1987/02/09 - BSW - This is part of the STM screen module, STDRMOD
+*/
+
+	STM_SED_DISPLAY: proc swapable;	/*	draws the outline for left and right sound files	*/
+		call SET.STM.TERMINAL.DISPLAY.VARIABLES;	/*	set the display variables based on terminal type	*/
+		dcl fade.set	fixed static;
+
+		stm.choice=0;								/*	initialize menu selection		*/
+		stm.cmd.line=0;							/*	initialize command line			*/
+		stm.file.name(0)=0;						/*	initialize to no name displayed	*/
+		prev.tot.time(0)=(-1);					/*	initialize to no tot time		*/
+		prev.stm.sample.rate=(-1);				/*	initialize to no sample rate	*/
+		prev.cursor.time(0)=(-1);				/*	initialize to no cursor time	*/
+		prev.stm.left.voltage=(-1);			/*	initialize to no left signal level	*/
+		prev.stm.right.voltage=(-1);			/*	initialize to no right signal level	*/
+		prev.stm.resolution=(-1);
+		stm.crossfade.drawn=false;				/*	initialize to no crossfade		*/
+		caption(0)=0;								/*	initialize to no sound file caption	*/
+		if stm.resolution=0
+		then stm.resolution=5;					/*	initialize drawing resolution	*/
+		if fade.set=0 then do;					/*	only set crossfade once			*/
+			fade.set=1;
+			stm.crossfade=5;						/*	initialize crossfade				*/
+		end;
+		SAMPLE.TO.MEMORY	 = 0 ;				/*	initialize							*/
+		stm.display.erased = 0 ;
+		pasting.edit=0;							/*	initialize pasting edit buffer flag	*/
+		fill.file=0;								/*	intialize fill file flag		*/
+		cross.loop=0;
+		saving.current=0;							/*	initialize saving current flag	*/
+		unlabeling.current=0;					/*	initialize unlabeling current flag	*/
+		mix.level=0;								/*	initialize mixing default value flag	*/
+
+		vector_mode;
+		call data_level(0);
+		call viewport(0,screen.width,0,screen.height);
+		call window  (0,screen.width,0,screen.height);
+
+		if D44_PRESENT
+		then call plot.mouse.hole(mouse.hole.lowerx,mouse.hole.lowery);	/*	if device available plot the mouse hole	*/
+
+		call imove(sound.file.name.setx,sound.file.namey);	/*	print the current filename setting	*/
+		call pstring('Current Filename: ');
+
+		call imove(sound.file.len.setx,sound.file.sety);	/*	print the current file length setting	*/
+		call pstring('Length: ');
+
+		call imove(sound.file.secsx,sound.file.sety);		/*	print the length label and rate setting	*/
+		call pstring(' Secs');
+		call imove(sound.file.level.x,sound.file.sety);
+		call pstring(' Left: ');
+		call imove(sound.file.voltx,sound.file.sety);		/*	print the volts label	*/
+		call pstring(' volts');
+
+		call imove(sound.file.ratex,sound.file.sety);		/*	print the current filename setting	*/
+		call pstring('Rate: ');
+		call imove(sound.file.ratekHz,sound.file.sety);		/*	print the rate label	*/
+		call pstring(' kHz');
+
+		call imove(sound.file.scale.voltx,sound.file.scale.sety);
+		call pstring('V');
+		call imove(sound.file.xx,sound.file.scale.sety);
+		call pstring(' x ');
+		call imove(sound.file.scale.secx,sound.file.scale.sety);
+		call pstring('secs');
+		if (mg600<>0) then do;
+			call imove(sound.file.reso.setx,sound.file.reso.sety);
+			call pstring('Resolution:');
+		end;
+
+		call imove(sound.file.name.setx,sound.file.cursory);	/*	print the current filename setting	*/
+		call pstring('Crossfade: ');
+		call imove(sound.file.crossms,sound.file.cursory);		/*	print the label in msec	*/
+		call pstring('  ms');
+		call imove(sound.file.cursor.x,sound.file.cursory);
+		call pstring('Cursor: ');
+		call imove(sound.file.cursor.sec,sound.file.cursory);
+		call pstring(' Secs');
+		call imove(sound.file.level.x,sound.file.cursory);
+		call pstring('Right:');
+		call imove(sound.file.voltx,sound.file.cursory);		/*	print the rate label	*/
+		call pstring(' volts');
+
+		call draw_rect(left.rect.minx,left.rect.miny,left.rect.maxx,left.rect.maxy);		/*	draw left window for sound file	*/
+
+		call draw_rect(right.rect.minx,right.rect.miny,right.rect.maxx,right.rect.maxy);	/*	draw right window for sound file	*/
+
+		call draw_rect(landscape.left-1,landscape.bot,landscape.right+1,landscape.top);	/*	draw landscape box	*/
+
+		/*	draw the menu box( left,bottom,right,top)	*/
+		if mg600 then do;
+			call draw_rect(20,100,1000,230);
+			call connect  (225,100,225,230);
+		end;
+		else do;
+			call draw_rect(10,35,632,125);
+			call connect (138,35,138,125);
+		end;
+
+		call DRAW.LEFT.CHANNEL.LABEL;
+
+		call viewport (left.rect.minx,left.rect.maxx,left.rect.miny-tic.space,left.rect.miny);	/*	label left window	*/
+		call window   (0,total.time,0,tic.space);	/*	draw tic marks	*/
+		call draw_time_tics;
+
+		call DRAW.RIGHT.CHANNEL.LABEL;
+
+		call viewport (right.rect.minx,right.rect.maxx,right.rect.miny-tic.space,right.rect.miny);	/*	label left window	*/
+		call window   (0,total.time,0,tic.space);	/*	draw tic marks	*/
+		call draw_time_tics;
+
+		call DRAW.CROSSFADE;						/*	draws crossfade	*/
+		call DRAW.SOUND.FILE.VERT.FACTOR;	/*	draws current sound file vertical scale factor	*/
+		call DRAW.SOUND.FILE.HOR.FACTOR;		/*	draws current horizontal sound file scale factor	*/
+		if mg600<>0
+		then call DRAW.RESOLUTION;				/*	draws drawing resolution	*/
+		call DRAW.GRAPHICS.CURSORS(stm.graphx,2);
+		transparent_mode;
+
+	end STM_SED_DISPLAY;
+
+	/*	$Subtitle Display Sample-To-Memory Sound Editor Screen	*/
+
+	STM.SOUND.EDITOR.DISP: proc public swapable;	/*	draws Sample-To-Memory Sound Editor Screen	*/
+		dcl i	fixed;
+
+		if inc.stm=0 then return;
+
+		call clear.term;
+
+		call cpos(0,0);			/*	Draw Horizontal line across the top for title	*/
+		call DRAW.HOR(79);
+
+		call cpos(0,23);				/*	put on the finishing touches	*/
+		call DRAW.TEE(t.right);		/*	draw a right T	*/
+		call ps(' SAMPLE-TO-MEMORY SOUND EDITOR ');
+		call DRAW.TEE(t.left);		/*	draw a left T	*/
+
+		call PRINT.CCAT;
+
+		call DRAW.COMMAND.MENU;				/*	draw the command menu selection	*/
+		call POS.STM.ALPHA.CURSOR;			/*	position menu cursor	*/
+
+		call STM_SED_DISPLAY;				/*	draw the left and right sound outlines	*/
+
+		if stm.zero.line <> 0
+		then call DRAW.ZERO.LINE(0,display.width,2);	/*	draw the zero line in the center of each waveform box	*/
+
+		call EXTSET(trd.ptr,0,3328,0);	/*	clear out 13 sectors of display area in external memory	*/
+		new.poly.contents = new.poly.contents \ 1;
+
+	end STM.SOUND.EDITOR.DISP;
+
+	/*	$Subtitle Process Sound File Changes	*/
+
+	UPDATE.SOUND.EDITOR.DISP: proc returns (fixed) public swapable;
+		dcl (i,j)	fixed;
+
+		/*	Returns 0 when exit is normal  1 - if caused by STM.EXIT.CHECK	*/
+
+		if inc.stm=0 then return 0;		/*	if system is not configured for poly, get out!	*/
+
+		call LOOK.UP.SF.INFO; Build.TDS.Patch.Str();
+
+		if  (stm.select.mode=stm.store )
+		and (stm.choice	  =stm.record)
+		and (stm.cmd.line   <>0			 )
+		then do;
+	  	 // Update display if user changes sample rate from control panel
+		 if (stm.record.device == stm.record.device.dig    )
+		 && (stm.record.rate   != interp_get_dig_stm_rate())
+		 {
+			stm.record.rate = interp_get_dig_stm_rate();
+			SET.RECORD.PARMS(2);
+			SET.RECORD.MENU (2);
+			POS.STM.RECORD.CURSOR();
+		 }
+
+         if stm.display.erased=0 then do;
+				call ERASE.GRAPHICS.CURSORS(stm.graphx,2);	/*	erase previous graphics cursors	*/
+				stm.graphx=0;											/*	set it to zero	*/
+				call ERASE.SOUND.DISPLAY;							/*	erase what was there previously	*/
+				call DRAW.GRAPHICS.CURSORS(stm.graphx,2);
+			end;
+
+			if (num.of.d50.in.chars<>0)					/*	character typed	*/
+			or (new.poly.contents	  )
+			then do;
+				new.poly.contents = new.poly.contents \ 1;
+				return 1;										/*	process it.  most likely will return here	*/
+			end;
+
+			stm.display.erased=1;							/*	display is now erased	*/
+
+         if  ((stm.record.device = stm.record.device.stm)   /* stm mono or stereo    */
+         and  (((polyadcs(0)   )=0)               			/* and no adc in bin 0   */
+         or    ((READ.STM.CONFIG(0)&1)=0)) )      			/* or no sampling units  */
+         or  ((stm.record.device = stm.record.device.d66)   /* or d66 mono adc       */
+         and  ((core(core(1)+17)&"20000")=0))     			/* and d66 not configged */
+		 or  ((stm.record.device = stm.record.device.dig)	/* or digital input		 */
+		 and  (((read("51") & 0x8000) == 0) or ((read("57") & 0x4000) == 0)))
+			then do;												/*	if not configured for D66 mono hardware	*/
+				call no.stm.hardware;
+				sample.to.memory=0;							/*	cannot record	*/
+			end;
+			else call SAMPLE.INTO.MEMORY;
+		end;
+
+		else if (stm.select.mode=stm.display )
+		and (stm.choice=stm.symbols)
+		and (stm.cmd.line<>0)
+		and (inc.stmm)											/*	SYMBOLS is a STM release M feature	*/
+		then call DISP.SYMBOL.CATALOG;					/*	display the symbol catalog	*/
+
+		else do;
+			if sf.type=0 then do;							/*	none available	*/
+				call mouse.switch(0);						/*	turn off all cursors	*/
+				call ERASE.GRAPHICS.CURSORS(stm.graphx,2);	/*	erase previous graphics cursors	*/
+				call ERASE.SOUND.DISPLAY;					/*	erase what was there previously	*/
+				if STM.EXIT.CHECK<>0 then do;
+					call DRAW.GRAPHICS.CURSORS(stm.graphx,2);	/*	put graphics cursor back where we found it	*/
+					call mouse.switch(1);							/*	turn on crosshair cursor	*/
+					transparent_mode;
+					new.poly.contents = new.poly.contents \ 1;
+					return 1;									/*	if new partial or timbre return immediately	*/
+				end;
+				call DISPLAY.SOUND.FILE.MESSAGE(1);		/*	sound file not available	*/
+				call DRAW.GRAPHICS.CURSORS(stm.graphx,2);
+				call mouse.switch(1);						/*	turn on crosshair cursor	*/
+			end;
+
+			else if sf.type<0 then do;								/*	no file name available	*/
+				call mouse.switch(0);
+				call ERASE.GRAPHICS.CURSORS(stm.graphx,2);	/*	erase graphics cursors	*/
+				call ERASE.SOUND.DISPLAY;							/*	erase what was there previously	*/
+				if STM.EXIT.CHECK<>0 then do;
+					call DRAW.GRAPHICS.CURSORS(stm.graphx,2);	/*	put graphics cursor back where we found it	*/
+					transparent_mode;
+					new.poly.contents = new.poly.contents \ 1;
+					return 1;											/*	if new partial or timbre return immediately	*/
+				end;
+				call DISPLAY.SOUND.FILE.MESSAGE(2);				/*	This partial does not use a sound file	*/
+				call DRAW.GRAPHICS.CURSORS(stm.graphx,2);
+				call mouse.switch(1);
+			end;
+
+			else if (locked<>0) and (stm.sample.rate<>lock.sample.rate)	/*	if a sound file is locked and the sound files do not have equal sample rates	*/
+			then call incompat.sf.rates;							/*	indicate that the sound files are incompatible	*/
+
+			else return (DRAW.SOUND.DISPLAY(SFILE.BASE));	/*	update means check display	*/
+		end;																/*	of if not recording	*/
+		return 0;
+
+	end UPDATE.SOUND.EDITOR.DISP;
+
+	/*	$Subtitle Sample-to-Memory Sound Editor Character Handling	*/
+
+	SED.COMMAND.ATTRIBUTE.DEPOSIT: proc public swapable;	/*	parses parameter and updates sound file	*/
+		dcl val		fixed;
+		dcl (i,j)	fixed;
+
+		token(0)=0;
+		saving.current=0;								/*	reset current sound file save indicator	*/
+		replace.file=0;
+		unlabeling.current=0;
+		pasting.edit=0;								/*	reset pasting edit buffer flag	*/
+		fill.file=0;									/*	reset fill file flag	*/
+		cross.loop=0;
+		mix.level=0;									/*	reset mix defualt flag	*/
+		call ERASE.COMMAND.PROMPT(stm.choice);	/*	erase the command line	*/
+		stm.cmd.line=0;								/*	indicate that we are no longer on the command line	*/
+
+		if (stm.select.mode=stm.display)			/*	if on the symbol catalog redraw entire screen	*/
+		and (stm.choice=stm.symbols)
+		and (inc.stmm)
+		then call STM.SOUND.EDITOR.DISP;
+
+		else call DRAW.COMMAND.MENU;				/*	otherwise redraw the menu	*/
+
+		if (stm.select.mode=stm.store)
+		and (stm.choice=stm.record)
+		then do;
+			new.poly.contents = new.poly.contents \ 1;
+			SAMPLE.TO.MEMORY=0;						/*	in case we did not even get there	*/
+			stm.display.erased=0;
+		end;
+		call POS.STM.ALPHA.CURSOR;					/*	position menu cursor	*/
+	end SED.COMMAND.ATTRIBUTE.DEPOSIT;
+
+

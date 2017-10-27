@@ -1,0 +1,1417 @@
+/*	$Title :SYNSOU:STMMOD:STEDSOUA  Editing Routines - Combine, Exchange, Extract Mono, Delete, and Extract	*/
+
+/*
+Modified:
+
+2002/03/25 - TY  - Added Monoize_Stereo_Soundfile()
+1991/11/18 - PF  - More quick update support
+1989/07/31 - TSS - Added more length checking to COMBINE.SOUND.FILES
+1988/08/17 - MWH - Fix stacked error problem with CUT
+1988/05/09 - MWH - Remove "16 sample fades"; extract now allows real ones
+1988/04/27 - MWH - Clean up; move some procedures since STEDLIB is too big
+1988/04/14 - MWH - Allow different crossfades at start and end
+1988/04/13 - MWH - Add fade in and fade out to extract
+1988/04/12 - MWH - Preserve mark start, mark end where possible
+1988/03/14 - TSS - Made GET.SAMPLE.TIME public
+1988/03/01 - LSS - Fixed word lengths in header setup (off-by-one bug)
+1988/02/12 - MWH - Expand crossfade times to 65.535 seconds; improve
+1987/12/14 - MWH - Merge poly updates with N-Final plus AEE sources
+1987/08/14 - MWH - Update all to support max 4 poly bins, 512mb/bin
+1987/08/06 - MWH - Merge CWJ edits
+1987/07/14 - MWH - new interface for PS.SETUP
+1987/02/06 - BSW - this is part of the command module called STEDMOD
+*/
+
+dcl (a.wrd,a.sec)	fixed;	/*	result variables for SUBTRACT.ADDRESS	*/
+
+/*	An unsigned routine where first address must be larger than second	*/
+SUBTRACT.ADDRESSES: proc (sec1,wrd1,sec2,wrd2);
+
+	dcl sec1			fixed;
+	dcl wrd1			fixed;
+	dcl sec2			fixed;
+	dcl wrd2			fixed;
+	dcl  i			fixed;
+
+	/*	note: if second address is larger than first address, a.sec and a.wrd are limited to zero	*/
+
+	sec1=sec1+shr(wrd1,8);								/*	normalize	*/
+	wrd1=wrd1&255;
+	sec2=sec2+shr(wrd2,8);
+	wrd2=wrd2&255;
+
+	a.wrd = wrd1 - wrd2;									/*	new word address; possible negative	*/
+	if sec2 igt sec1 then do;							/*	if not enough material for subtraction	*/
+		a.sec=0;												/*	limit to 0	*/
+		a.wrd=0;
+	end;
+	else a.sec = sec1 - sec2;							/*	new sector address	*/
+	i = 0;
+	do while a.wrd < 0;									/*	if we need to borrow some words	*/
+		a.wrd = a.wrd + 256;
+		i = i + 1;											/*	count sector borrows	*/
+	end;
+	if i <> 0 then do;									/*	if borrows normalizing word	*/
+		if i igt a.sec then do;							/*	if not enough sectors to lend	*/
+			a.sec=0;											/*	limit to 0	*/
+			a.wrd=0;
+		end;
+		else a.sec = a.sec - i;
+	end;
+end SUBTRACT.ADDRESSES;
+
+/*	extracts filename from string given the string starting position, pads it with zeroes and checks if valid	*/
+GET.FILENAME: proc(parm,parm.ptr,file.name) fixed swapable;
+	/*	returns ending string location if a valid filename extracted from the string and 0 if not	*/
+	dcl parm			fixed array;	/*	string	*/
+	dcl parm.ptr	fixed;			/*	starting location of filename	*/
+	dcl file.name	fixed array;	/*	file name	*/
+	dcl ch			fixed;			/*	character from string	*/
+	dcl i				fixed;
+
+	file.name(0)=0;
+	ch=byte(parm,parm.ptr);
+	do while (parm.ptr<parm(0) and (ch<>comma));
+		if (file.name(0)<shl(f#name_len,1))
+		then call pbyte(file.name,file.name(0),ch);
+		file.name(0)=file.name(0)+1;
+		parm.ptr=parm.ptr+1;
+		ch=byte(parm,parm.ptr);
+	end;
+	if not valid_filename(file.name) then do;
+		do i=0 to file.name(0)-1;
+			call pbyte(parm,i,byte(file.name,i));
+		end;
+		parm(0)=file.name(0);
+		call invalid.filename;
+		return 0;
+	end;
+	do i=file.name(0) to (shl(f#name_len,1)-1);	/*	pad file name with zeroes	*/
+		call pbyte(file.name,i,0);
+	end;
+	return parm.ptr;
+end GET.FILENAME;
+
+GET.STM.EDIT.TIMES: proc (base) fixed swapable;	/*	gets begin and end edit sample times from token	*/
+	dcl base		fixed array;	/*	current sound file base	*/
+	dcl begin.loc(6)	fixed;	/*	beginning of specified point	*/
+	dcl end.loc(6)		fixed;	/*	ending of specified point	*/
+	dcl ch				fixed;
+	dcl i					fixed;
+	/*
+	Note:  Returns 0 if cannot find the sample edit time and 1 if it can.
+	Sets globals stm.begin.time and stm.end.time.
+	*/
+	tok.ptr=0;
+	ch=byte(token,tok.ptr);		/*	get the first character of the token	*/
+
+	begin.loc(0)=0;				/*	determine the beginning cut location	*/
+	do while (ch<>comma) and (tok.ptr<token(0));
+		call pbyte(begin.loc,begin.loc(0),ch);
+		begin.loc(0)=begin.loc(0)+1;
+		tok.ptr=tok.ptr+1;
+		ch=byte(token,tok.ptr);
+	end;
+
+	if GET.SAMPLE.TIME(base,begin.loc)<>0 then do;	/*	if a valid sample time for the first location	*/
+		do i=0 to 2;
+			stm.begin.time(i)=some.time(i);
+		end;
+	end;
+	else return 0;
+
+	if (tok.ptr=token(0)) then do;		/*	only one argument supplied	*/
+		call stm.time.format;				/*	Use Time,Time Format	*/
+		return 0;
+	end;
+
+	tok.ptr=tok.ptr+1;						/*	skip comma	*/
+	end.loc(0)=0;
+	ch=byte(token,tok.ptr);
+
+	if (tok.ptr=token(0)) then do;		/*	only one argument supplied	*/
+		call stm.time.format;				/*	Use Time,Time Format	*/
+		return 0;
+	end;
+
+	do while (tok.ptr<token(0)) and (ch<>comma);	/*	find the end cut location and stop if we get to the fill filename	*/
+		call pbyte(end.loc,end.loc(0),ch);
+		end.loc(0)=end.loc(0)+1;
+		tok.ptr=tok.ptr+1;
+		ch=byte(token,tok.ptr);
+	end;
+
+	if GET.SAMPLE.TIME(base,end.loc)<>0 then do;			/*	get the sample time associated with token value and put it in some.time	*/
+		do i=0 to 2;
+			stm.end.time(i)=some.time(i);
+		end;
+	end;
+	else return 0;
+
+	if (COMPARE_TIMES(stm.begin.time,stm.end.time,3)>0) then do;	/*	see that begin time is less than end time	*/
+		do i=0 to 2;
+			some.time(i)=stm.end.time(i);
+		end;
+		do i=0 to 2;
+			stm.end.time(i)=stm.begin.time(i);
+		end;
+		do i=0 to 2;
+			stm.begin.time(i)=some.time(i);
+		end;
+	end;
+	if compare_times(stm.begin.time,tot.time,3)>0 then do;	/*	if the end time specified is larger than the total time available	*/
+		tok.ptr=0;
+		token(0)=tok.ptr;
+		call CONVERT.SAMPLE.TIME.TO.STRING(stm.begin.time);
+		call overflow.error;
+		return 0;
+	end;
+	else if compare_times(stm.end.time,tot.time,3)>0 then do;	/*	if the end time specified is larger than the total time available	*/
+		tok.ptr=0;
+		token(0)=tok.ptr;
+		call CONVERT.SAMPLE.TIME.TO.STRING(stm.end.time);
+		call overflow.error;
+		return 0;
+	end;
+	return 1;		/*	successful in finding times	*/
+end GET.STM.EDIT.TIMES;
+
+/*	$page	*/
+
+MOVE.SYMBOL: proc (old.base,new.base,symbol_index,time.change,dir,marks) fixed swapable;	/*	Moves symbol from old sound file and inserts it into new sound file.	*/
+	/*	Returns number of symbols in new sound file	*/
+	dcl old.base					fixed array;	/*	file base address of old sound file	*/
+	dcl new.base					fixed array;	/*	file base address of new sound file	*/
+	dcl symbol_index				fixed;			/*	points beyond where symbol belongs in old sound file	*/
+	dcl time.change				fixed array;	/*	difference in old and new symbol times		*/
+	dcl dir							fixed;			/*	direction of time change	*/
+	dcl marks						fixed;			/*	0 = don't; 1 = do copy mark start/end		*/
+	dcl new_number_of_symbols	fixed;			/*	number of symbols in the new sound file	*/
+	dcl sym.time(2)				fixed;			/*	old symbol time	*/
+	dcl sym.name(4)				fixed;			/*	old symbol name	*/
+	dcl is_mark_start				fixed;			/*	true if moving mark start	*/
+	dcl is_mark_end				fixed;			/*	true if moving mark end		*/
+	dcl (i,j)						fixed;
+
+	call psmread(old.base,SF.SYM+shr(symbol_index,5),(shl(symbol_index,3)+3)&255);	/*	get symbol name	*/
+	call poly.in(addr(sym.name(0)),5);
+
+	if marks = 1 then do;	/*	If allowed to move mark start/end	*/
+		if		  eqstr(sym.name,mstart) = 0 then is_mark_start	= true;
+		else if eqstr(sym.name,mend)	 = 0 then is_mark_end	= true;
+	end;
+
+	if (FIND_NAME(new.base,sym.name)<0)						/*	not a duplicate name		*/
+	OR is_mark_start = true										/*	OR is a mark start/end	*/
+	OR is_mark_end	  = true										/*	(marks are always there, but may be moved)	*/
+	then do;
+
+		call psmread(old.base,SF.SYM+shr(symbol_index,5),shl(symbol_index,3)&255);	/*	read old symbol time	*/
+		call poly.in(addr(sym.time(0)),3);
+		if dir=0														/*	subtract time change from old symbol time	*/
+		then do;
+			if (COMPARE_TIMES(sym.time,time.change,3)<0)	/*	do not copy symbol if would be minus...	*/
+			{
+				call psmread(new.base,SF.HDR,sf.number.of.symbols);	/*	find current number of symbols in new sound file	*/
+				return (read(psd));
+			}
+			do i=0 to 2;											/*	map it to new symbol time	*/
+				sym.time(i)=sym.time(i)-time.change(i);
+			end;
+		end;
+		else do i=0 to 2;											/*	add it to old symbol time	*/
+			sym.time(i)=sym.time(i)+time.change(i);
+		end;
+
+		call TIME_NORMALIZE(sym.time);
+
+		/*	If moving a mark start/end, add_mark does it all for us	*/
+		if		  is_mark_start = true then call add_mark(new.base,mstart,sym.time);
+		else if is_mark_end	 = true then call add_mark(new.base,mend,sym.time);
+
+		call psmread(new.base,SF.HDR,sf.number.of.symbols);	/*	find current number of symbols in new sound file	*/
+		new_number_of_symbols=read(psd);
+
+		if is_mark_start = true	/*	If moving a mark, we're done	*/
+		OR is_mark_end	  = true
+		then return(new_number_of_symbols);
+
+		symbol_index=FIND_TIME(new.base,sym.time);		/*	symbol index points to one beyond where symbol belongs	*/
+
+		if symbol_index<new_number_of_symbols then do;	/*	if within the limits of new sound file check for duplicate times	*/
+			call psmread(new.base,SF.SYM,symbol_index * symbol_length);
+			do i=0 to 2;						/*	read into another temporary array other than some.time!!	*/
+				some.other.time(i)=read(psd);
+			end;
+			if COMPARE_TIMES(sym.time,some.other.time,3)=0	/*	if duplicate times do not move symbol	*/
+			then return (new_number_of_symbols);
+		end;
+
+		j=new_number_of_symbols;
+		do while j>symbol_index;							/*	move the symbols to make room for new symbol	*/
+			call psmread(new.base,SF.SYM+shr(j-1,5),shl(j-1,3)&255);
+			call poly.in(addr(copy.buf(0)),symbol_length);
+			call psmwrite(new.base,SF.SYM+shr(j,5),shl(j,3)&255);
+			call poly.out(addr(copy.buf(0)),symbol_length);
+			j=j-1;
+		 end;
+
+		/*	add symbol to new sound file	*/
+		call psmwrite(new.base,SF.SYM+shr(symbol_index,5),shl(symbol_index,3)&255);
+		call poly.out(addr(sym.time(0)),3);
+		call poly.out(addr(sym.name(0)),5);
+
+		/*	update number of symbols	*/
+		new_number_of_symbols=new_number_of_symbols+1;
+		call psmwrite(new.base,SF.HDR,sf.number.of.symbols);
+		write(psd)=new_number_of_symbols;
+
+	end;
+	return (new_number_of_symbols);
+
+end MOVE.SYMBOL;
+
+/*	$Subtitle Get the crossfade time from the token typed in	*/
+
+GET.CROSSFADE.TIME: proc(cross.ptr) fixed swapable;	/*	Read Token Routine and Convert to a crossfade time and put in array some.time	*/
+	/*	returns 1 and sets some.time if it got a valid crossfade time	*/
+	dcl cross.ptr	fixed;
+	dcl parm(5)		fixed;
+	dcl ch			fixed;
+	dcl sav.err		fixed;
+	dcl i				fixed;
+
+	tok.ptr=cross.ptr;
+	i=0;
+	ch = byte(token,tok.ptr);
+	do while (tok.ptr<token(0))	/*	get the entire time and make sure the right length	*/
+	AND (i<11)
+	AND ch <> a.comma;
+		call pbyte(parm,i,ch);
+		i=i+1;
+		tok.ptr=tok.ptr+1;
+		ch = byte(token,tok.ptr);
+	end;
+	parm(0)=i;
+	if i >= 11 then do;
+		i=0; tok.ptr=cross.ptr;		/*	stuff format problem into token	*/
+		do while tok.ptr<token(0);
+			call pbyte(token,i,byte(token,tok.ptr));
+			i=i+1;
+			tok.ptr=tok.ptr+1;
+		end;
+		token(0)=i;
+		tok.ptr=0;
+		call format.error;
+		return 0;
+	end;
+	else do;
+		sav.err = ertyp;				/*	Save any pending error	*/
+		ertyp = 0;						/*	Be sure error we see is ours	*/
+		call CONV.STR.TO.SFTIME(parm,some.time);
+		if ertyp<>0
+		then return 0;
+		ertyp = sav.err;				/*	Restore pending error (if any)	*/
+		return 1;
+	end;
+end GET.CROSSFADE.TIME;
+
+/*	$Subtitle Combine Two Mono Sound Files	*/
+
+COMBINE.SOUND.FILES: proc public swapable;	/*	combines two mono sampled sound files	*/
+	/*	 Note: The sound file types must be mono and have the identical sampling rates	*/
+
+	dcl left.name(4)					fixed;	/*	left sound file name	*/
+	dcl right.name(4)					fixed;	/*	right sound file name	*/
+	dcl left.base (1)					fixed;	/*	location in poly if file in poly	*/
+	dcl right.base (1)				fixed;	/*	location in poly if file in poly	*/
+	dcl new.base (1)					fixed;	/*	address of new sound file area	*/
+	dcl (left.#secs,right.#secs)	fixed;	/*	sector lengths of files	*/
+	dcl (left.rate,right.rate)		fixed;	/*	sample rate of the two sound files	*/
+	dcl left.time(2)					fixed;	/*	time corresponding to valid data-1	*/
+	dcl right.time(2)					fixed;	/*	time corresponding to valid data-1	*/
+	dcl #secs							fixed;	/*	sector length of combined sound file	*/
+	dcl ch								fixed;	/*	character in filename	*/
+	dcl len (1)							fixed;
+	dcl prev.part						fixed static;	/*	previous sound file partial	*/
+	dcl new_number_of_symbols		fixed;	/*	number of symbols in new sound file	*/
+	dcl old_number_of_symbols		fixed;	/*	number of symbols in old sound file	*/
+	dcl (i,j,k)							fixed;
+	dcl rec(POLY.HIST.REC.LEN-1)	fixed;
+
+	RECOVER.KEY.TIMBRE: proc fixed;		/*	recovers current keyboard timbre and erases it from old location	*/
+		call COPY.KBD.TIMBRES(1,0);
+		call ERASE.TIMBRE(1);
+		call SELECT.PARTIAL(prev.part);		/*	select the original partial	*/
+	end RECOVER.KEY.TIMBRE;
+
+	if inc.stmm=0 then return;					/*	combine is a STM release M feature	*/
+
+	/*	parse the token for the two sound filenames and check if valid filenames	*/
+
+	tok.ptr=0;
+	ch=byte(token,tok.ptr);
+	if ch=comma then do;							/*	if combining the current sound file for stereo	*/
+		call LOOK.UP.SF.INFO;
+		if sf.type=1 then do;					/*	if sound file available	*/
+			left.name(0)=8;						/*	set up left and right partial names	*/
+			do i=1 to 4;
+				left.name(i)=FNBUF(i);
+			end;
+			if token(0)=1 then do;				/*	if combining with itself	*/
+				right.name(0)=8;
+				do i=1 to 4;
+					right.name(i)=FNBUF(i);
+				end;
+			end;
+			else do;									/*	if second sound file typed in	*/
+				tok.ptr=tok.ptr+1;
+				if GET.FILENAME(token,tok.ptr,right.name)=0
+				then return;
+			end;
+		end;
+		else do;										/*	if sound file not available	*/
+			call no.sound.file;
+			return;
+		end;
+	end;
+
+	/*	$page	*/
+
+	else do;											/*	if user typed in first name	*/
+		tok.ptr=GET.FILENAME(token,tok.ptr,left.name);
+		if tok.ptr=0 then return;				/*	if invalid filename	*/
+
+		tok.ptr=tok.ptr+1;										/*	skip comma	*/
+		if (ch=comma) and (tok.ptr<token(0)) then do;	/*	see if a right sound file is specified	*/
+			if GET.FILENAME(token,tok.ptr,right.name)=0
+			then return;
+		end;
+		else do;											/*	current sound file is the right sound file	*/
+			call LOOK.UP.SF.INFO;
+			if sf.type=1 then do;					/*	if sound file available	*/
+				right.name(0)=8;						/*	set up left and right partial names	*/
+				do i=1 to 4;
+					right.name(i)=FNBUF(i);
+				end;
+			end;
+			else do;										/*	if sound file not available	*/
+				call no.sound.file;
+				return;
+			end;
+		end;
+	end;
+
+	split.keyboard=0;
+	prev.part=FIND.PARTIAL;			/*	remember the previously selected partial in case of error	*/
+	call COPY.KBD.TIMBRES(0,1);	/*	copy current keyboard timbre	*/
+
+	/*	set up sound files on first and second partials of keyboard timbre	*/
+
+	call ERASE.KEYBOARD.TIMBRE;	/*	get rid of timbre #0			*/
+	call SELECT.PARTIAL(0);			/*	select the first partial	*/
+
+	call CREATE.PATCH.PARTIAL(0,left.name);
+	call CREATE.PATCH.PARTIAL(1,right.name);
+	if ertyp<>0 then do;
+		call RECOVER.KEY.TIMBRE;	/*	recover keyboard timbre	*/
+		return;
+	end;
+
+	/*	$page	*/
+
+	call SELECT.PARTIAL(0);							/*	select the left sound file	*/
+	call LOOK.UP.SF.INFO;							/*	check if it is okay	*/
+	if sf.type<>1 then do;							/*	if not a sound file	*/
+		call RECOVER.KEY.TIMBRE;					/*	recover keyboard timbre	*/
+		return;
+	end;
+	call copy32(SFILE.BASE,left.base);
+	if stereo<>0 then do;							/*	sound file must be mono for combine	*/
+		call RECOVER.KEY.TIMBRE;					/*	recover keyboard timbre	*/
+		do i=0 to left.name(0)-1;					/*	set token for error message	*/
+			call pbyte(token,i,byte(left.name,i));
+		end;
+		token(0)=left.name(0);
+		call no.stereo.sound;
+		return;
+	end;
+	left.rate=stm.sample.rate;						/*	left period index	*/
+	do i=0 to 2;										/*	left total time	*/
+		left.time(i)=tot.time(i);
+	end;
+
+	call SELECT.PARTIAL(1);							/*	select second, right sound file	*/
+	call LOOK.UP.SF.INFO;
+	if sf.type<>1 then do;							/*	if not a sound file		*/
+		call RECOVER.KEY.TIMBRE;					/*	recover keyboard timbre	*/
+		return;
+	end;
+	call copy32(SFILE.BASE,right.base);
+
+	if stereo<>0 then do;							/*	sound file must be mono for combine	*/
+		call RECOVER.KEY.TIMBRE;					/*	recover keyboard timbre	*/
+		do i=0 to right.name(0)-1;					/*	set token for error message	*/
+			call pbyte(token,i,byte(right.name,i));
+		end;
+		token(0)=right.name(0);
+		call no.stereo.sound;
+		return;
+	end;
+	right.rate=stm.sample.rate;					/*	right sample rate	*/
+
+	if left.rate<>right.rate then do;
+		call RECOVER.KEY.TIMBRE;					/*	recover keyboard timbre	*/
+		call incompat.sf.rates;						/*	sampling rates must be the same for combine	*/
+		return;
+	end;
+
+	do i=0 to 2;										/*	right total time	*/
+		right.time(i)=tot.time(i);
+	end;
+
+	/*	$page	*/
+
+	call TIME_TO_INDEX(left.time(0),left.time(1),left.time(2),left.rate,stereo);
+	left.#secs=sector.numb;
+	if sector.offset igt 0				/*	round up to nearest sector	*/
+	then left.#secs=left.#secs+1;
+	call TIME_TO_INDEX(right.time(0),right.time(1),right.time(2),right.rate,stereo);
+	right.#secs=sector.numb;
+	if sector.offset igt 0				/*	round up to nearest sector	*/
+	then right.#secs=right.#secs+1;
+
+	if (left.#secs igt 30000) or (right.#secs igt 30000) then do;
+		call nomem.error;			/*	not enough memory for stereo sound file creation	*/
+		call RECOVER.KEY.TIMBRE;
+		return;
+	end;
+
+	if left.#secs ige right.#secs
+	then #secs=left.#secs;
+	else #secs=right.#secs;
+
+	/*	double the size of the largest valid data area and add header	*/
+	call str32(0,#secs,len);
+	call add16(  #secs,len);
+	call add16(shr(BL.POLY,8),len);
+
+	if (len(lw#msb)<>0) or (len(lw#lsb) igt 30000) then do;
+		call nomem.error;			/*	not enough memory for stereo sound file creation	*/
+		call RECOVER.KEY.TIMBRE;
+		return;
+	end;
+
+	if CREATE.SOUND.FILE(len(lw#lsb),left.rate,0,1)<>0 then do;	/*	if an area can be created large enough for stereo file	*/
+		call copy32(SFILE.BASE,new.base);	/*	things may have moved so get left and right base again	*/
+		call SELECT.PARTIAL(0);				/*	select the left sound file	*/
+		call LOOK.UP.SF.INFO;				/*	check if it is okay	*/
+		if sf.type<>1 then do;
+			call RECOVER.KEY.TIMBRE;		/*	recover keyboard timbre	*/
+			return;
+		end;
+		call copy32(SFILE.BASE,left.base);
+
+		call SELECT.PARTIAL(1);				/*	select second, right sound file	*/
+		call LOOK.UP.SF.INFO;
+		if sf.type<>1 then do;
+			call RECOVER.KEY.TIMBRE;		/*	recover keyboard timbre	*/
+			return;
+		end;
+		call copy32(SFILE.BASE,right.base);
+
+		call DRAW.MESSAGE('Combining Sound Files ...');
+		call PS.LOCK;
+
+		if left.#secs ige right.#secs		/*	find the shorter sound file	*/
+		then #secs=right.#secs;
+		else #secs=left.#secs;
+
+		do i = 0 to #secs-1;
+			call psmread(left.base,shr(BL.POLY,8)+i,0);	/*	read in left samples	*/
+			call poly.in(addr(copy.buf(0)),ALT.COPY.BLEN);
+			call psmread(right.base,shr(BL.POLY,8)+i,0);	/*	read in right samples	*/
+			call poly.in(addr(misc.buf(0)),ALT.COPY.BLEN);
+			call psmwrite(new.base,shr(BL.POLY,8)+i+i,0);
+			do k=0 to ALT.COPY.BLEN-1;
+				write(psd)=copy.buf(k);	/*	write out the left samples to stereo sound file	*/
+				write(psd)=misc.buf(k);	/*	write out the right samples to stereo sound file	*/
+			end;
+			timeshare_with_host();								//	keep mac alive
+		end;
+
+		/*	$page	*/
+		if left.#secs igt right.#secs then do;	/*	find the longer sound file	*/
+			/*	if left sound file is larger than right, then zero out right samples	*/
+			write("300")	= addr(misc.buf(0));
+			rpc ALT.COPY.BLEN;
+			write("360")	= 0;
+
+			do i = right.#secs to left.#secs-1;
+				call psmread(left.base,shr(BL.POLY,8)+i,0);	/*	read in left samples	*/
+				call poly.in(addr(copy.buf(0)),ALT.COPY.BLEN);
+				call psmwrite(new.base,shr(BL.POLY,8)+i+i,0);
+				do k=0 to ALT.COPY.BLEN-1;
+					write(psd)=copy.buf(k);	/*	write out the left samples to stereo sound file	*/
+					write(psd)=misc.buf(k);	/*	write out zeroes	*/
+				end;
+				timeshare_with_host();								//	keep mac alive
+			end;
+		end;
+
+		else if right.#secs igt left.#secs then do;	/*	right sound file larger than left	*/
+			/*	if right sound file is larger than left, then zero out left samples	*/
+			write("300")	= addr(copy.buf(0));
+			rpc ALT.COPY.BLEN;
+			write("360")	= 0;
+
+			do i = left.#secs to right.#secs-1;
+				call psmread(right.base,shr(BL.POLY,8)+i,0);	/*	read in right samples	*/
+				call poly.in(addr(misc.buf(0)),ALT.COPY.BLEN);
+				call psmwrite(new.base,shr(BL.POLY,8)+i+i,0);
+				do k=0 to ALT.COPY.BLEN-1;
+					write(psd)=copy.buf(k);	/*	write out zeroes	*/
+					write(psd)=misc.buf(k);	/*	write out the right samples	*/
+				end;
+				timeshare_with_host();
+			end;
+		end;
+
+		call psmread(left.base,SF.HDR,sf.number.of.symbols);		/*	combine symbols in the sound file headers	*/
+		old_number_of_symbols=read(psd);
+		call psmread(new.base,SF.HDR,sf.number.of.symbols);
+		new_number_of_symbols=read(psd);
+
+		do j=0 to 2;															/*	no differences between symbol times	*/
+			some.time(j)=0;
+		end;
+		i=0;
+		do while (i<old_number_of_symbols) and (new_number_of_symbols<max.symbols);
+			new_number_of_symbols=MOVE.SYMBOL(left.base,new.base,i,some.time,0,1);	/*	insert all of the symbols into the new sound file	*/
+			i=i+1;
+		end;
+
+		call PS.SETUP(new.base);					/*	update Synclavier info for modified sound file	*/
+		call PS.UNLOCK;
+		call ERASE.KEYBOARD.TIMBRE;
+		call COPY.KBD.TIMBRES(0,1);				/*	restore split keyboard timbre	*/
+		call SELECT.PARTIAL(0);						/*	set up keyboard timbre with new stereo sound file	*/
+		call CREATE.PATCH.PARTIAL(0,NEWFNAME);
+		if ertyp<>0 then do;
+			call ERASE.MESSAGE;
+			return;
+		end;
+
+		call clear.display;									/*	clear synclavier window message	*/
+		call ERASE.MESSAGE;									/*	erase message that we are combining the two sound files	*/
+		new.poly.contents = new.poly.contents \ 1;	/*	force the display to be updated	*/
+
+		call BUILD.POLY.HIST.REC(new.base,0,rec);		/*	show a new file created	*/
+		call ADD.POLY.TO.HIST(rec);
+
+	end;															/*	of if creation of an area large enough	*/
+	else call RECOVER.KEY.TIMBRE;
+end COMBINE.SOUND.FILES;
+
+Monoize_Stereo_Soundfile: proc (base) public swapable;
+	dcl base			fixed array;		//	file base of current stereo sound
+	dcl old.base(1)		fixed;		//	32 bit poly base
+	dcl new.base(1)		fixed;		//	location in poly (if file in poly)
+	dcl old.sectors		fixed;		//	original stereo file sector length
+	dcl new.sectors		fixed;		//	new mono file sector length
+	dcl sector.offset		fixed;
+	dcl copy.buf.index	fixed;
+	dcl rec(POLY.HIST.REC.LEN-1)	fixed;
+
+	psmread(base, 0, BL.LEN);			//	get current sound file block length in sectors
+	old.sectors	= read(psd);			//	get valid data length
+
+	old.sectors	= old.sectors - shr(BL.POLY, 8);	//	subtract the poly sector and the three soundfile header sectors
+	new.sectors	= shr(old.sectors+1, 1);			//	find the sector length of the monoed data
+
+	if (CREATE.SOUND.FILE(new.sectors+shr(BL.POLY,8), stm.sample.rate, 0, 0) != 0)	//	if there is room for mono sound file
+	{
+		copy32(SFILE.BASE, new.base);	//	the call to CREATE.SOUND.FILE just set SFILE.BASE to the newly created soundfile
+		LOOK.UP.SF.INFO();				//	this will reset SFILE.BASE to the original soundfile
+		if (sf.type == 1)					//	if a sound file
+		{
+			dcl left32(1)		fixed;
+			dcl right32(1)		fixed;
+			dcl max32(1)		fixed;	//	maximum sample value (positive or negative)
+			dcl absmax32(1)	fixed;	//	temporary absolute value of max
+
+			dcl numerator		fixed;	//	for unsigned ratio scaling
+			dcl denominator	fixed;	//	for unsigned ratio scaling
+			dcl bNeedToScale	boolean;
+
+			copy32(SFILE.BASE, old.base);
+
+			/////////////////////////////////////////////////////////////////////////////
+			//	phase 1:	scan for peak so we can compute scaling ratio
+
+			DRAW.MESSAGE('Scanning for Peak...');
+
+			do sector.offset = 0 to old.sectors-1;
+				psmread(old.base, shr(BL.POLY,8)+sector.offset, 0);
+				poly.in(addr(copy.buf(0)), ALT.COPY.BLEN);
+
+				do copy.buf.index = 0 to ALT.COPY.BLEN-2 by 2;
+					//	set up signed 32-bit representations of the left and right samples
+					left32(1) = copy.buf(copy.buf.index);
+					if (left32(1) < 0)	left32(0)	= -1;
+					else						left32(0)	= 0;
+					right32(1) = copy.buf(copy.buf.index+1);
+					if (right32(1) < 0)	right32(0)	= -1;
+					else						right32(0)	= 0;
+
+					//	sum both sides
+					add32(left32, right32, left32);
+
+					//	compare absolute values to determine if max32 should be updated
+					copy32(left32, right32);						//	copy for temporary absolute value
+					if (right32(0) != 0)		neg32(right32);	//	absolute value
+					copy32(max32, absmax32);						//	copy for temporary absolute value
+					if (absmax32(0) != 0)	neg32(absmax32);	//	absolute value
+
+					if (com32(right32, absmax32) == lw#igt)	copy32(left32, max32);
+				end;
+				timeshare_with_host();
+			end;
+
+			//	compute numerator and denominator from max32
+			//	max32 is a signed 32-bit number restricted to the range of -65536 to 65534
+			//	this restriction allows us to cut several corners...
+			bNeedToScale	= false;
+
+			if (max32(0) == 0)
+			{	//	max32 is positive, scale by 32767/max32 if needed to prevent overflow
+				if (max32(1) igt 32767)
+				{
+					numerator		= 32767;
+					denominator		= max32(1);
+					bNeedToScale	= true;
+				}
+			}
+			else
+			{
+				if (max32(1) == 0)
+				{	//	special case:	(max32 == -65536), scale by 1/2
+					numerator		= 1;
+					denominator		= 2;
+					bNeedToScale	= true;
+				}
+				else
+				{	//	max32 is negative, scale by 32768/(-max32) if needed to prevent overflow
+					if (max32(1) ilt 32768)
+					{
+						numerator		= 32768;
+						denominator		= -max32(1);
+						bNeedToScale	= true;
+					}
+				}
+			}
+
+			/////////////////////////////////////////////////////////////////////////////
+			//	phase 2:	merge channels
+
+			DRAW.MESSAGE('Combining Left and Right Channels to Mono Sound File...');
+
+			PS.LOCK();	//	lock out a reboot so poly stays in shape
+
+			do sector.offset = 0 to old.sectors-1;
+				//	set up where in polymemory to read from
+				psmread(old.base, shr(BL.POLY,8)+sector.offset, 0);
+				//	copy one sector of data into copy.buf
+				poly.in(addr(copy.buf(0)), ALT.COPY.BLEN);
+				//	set up where in polymemory to write to
+				//		if (sector.offset is even)	word.offset = 0;
+				//		if (sector.offset is odd)	word.offset = 128;
+				psmwrite(new.base, shr(BL.POLY,8)+shr(sector.offset,1), shl(sector.offset&1,7));
+
+				do copy.buf.index = 0 to ALT.COPY.BLEN-2 by 2;
+					//	set up signed 32-bit representations of the left and right samples
+					left32(1) = copy.buf(copy.buf.index);
+					if (left32(1) < 0)	left32(0)	= -1;
+					else						left32(0)	= 0;
+					right32(1) = copy.buf(copy.buf.index+1);
+					if (right32(1) < 0)	right32(0)	= -1;
+					else						right32(0)	= 0;
+
+					//	sum both sides
+					add32(left32, right32, BITMSBARRAY);
+
+					if (bNeedToScale == false)
+					{
+						write(psd) = BITLSB;
+					}
+					else
+					{
+						if (BITMSB == 0)
+						{	//	the sum is positive
+							load BITLSB; mul numerator; mwait; div denominator;
+							BITLSB = res; write("313") = rem;
+							//	round: the fdiv method
+							load 0; uload read("313"); div denominator;
+							if (res < 0)	BITLSB = BITLSB+1;
+							write(psd) = BITLSB;
+						}
+						else
+						{	//	the sum is negative
+							if (BITLSB == 0)
+							{	//	special case:	(the sum == -65536), we know our ratio can only be 1/2 so write -32768
+								write(psd) = -32768;
+							}
+							else
+							{
+								load -BITLSB; mul numerator; mwait; div denominator;
+								BITLSB = res; write("313") = rem;
+								//	round: the fdiv method
+								load 0; uload read("313"); div denominator;
+								if (res < 0)	BITLSB = BITLSB+1;
+								write(psd) = -BITLSB;
+							}
+						}
+					}
+				end;
+				timeshare_with_host();
+			end;
+/*
+			//	if ALT.COPY.BLEN were less than 256 we would use the following loops instead...
+			do sector.offset = 0 to old.sectors-1;
+				do word.offset = 0 to 256-ALT.COPY.BLEN by ALT.COPY.BLEN;
+					psmread(old.base, shr(BL.POLY,8)+sector.offset, word.offset);
+					poly.in(addr(copy.buf(0)), ALT.COPY.BLEN);
+					psmwrite(new.base, shr(BL.POLY,8)+shr(sector.offset,1), shl(sector.offset&1,7)|shr(word.offset,1));
+				end;
+			end;
+*/
+			//	set up mark start and mark end
+			psmread(old.base, SF.HDR, sf.mark.start);
+			poly.in(addr(misc.buf(0)), 6);
+			psmwrite(new.base, SF.HDR, sf.mark.start);
+			poly.out(addr(misc.buf(0)), 6);
+
+			//	copy the number of symbols across
+			psmread(old.base, SF.HDR, sf.number.of.symbols);
+			numerator = read(psd);
+			psmwrite(new.base, SF.HDR, sf.number.of.symbols);
+			write(psd) = numerator;
+
+			//	copy both symbol sectors across
+			do sector.offset = 0 to 1;
+				psmread(old.base, SF.SYM+sector.offset, 0);
+				poly.in(addr(misc.buf(0)), 256);
+				psmwrite(new.base, SF.SYM+sector.offset, 0);
+				poly.out(addr(misc.buf(0)), 256);
+			end;
+
+			PS.SETUP(new.base);		//	update Synclavier info for modified sound file
+			PS.UNLOCK();				//	allow a reboot with poly memory intact
+			SELECT.PARTIAL(0);
+			CREATE.PATCH.PARTIAL(0, NEWFNAME);
+
+			ERASE.MESSAGE();
+			clear.display();			//	clear the Synclavier VK window
+			new.poly.contents = new.poly.contents | 1;	//	force the display to be updated
+
+			Build.Poly.Hist.Rec(new.base, 0, rec);
+			Add.Poly.To.Hist(rec);
+		}	//	end of if a sound file
+	}	//	end of if there is room for mono sound file
+end;	//	end of Monoize_Stereo_Soundfile()
+
+/*	$Subtitle Exchange Left Channel with Right Channel of Stereo Sound File	*/
+
+EXCHANGE.STEREO.SOUND: proc (base) public swapable;	/*	exchange Left with Right of stereo sound	*/
+	dcl base		fixed array;	/*	file base of current stereo sound	*/
+	dcl new.base (1)	fixed;	/*	file base of stereo sound file with exchanged left and right	*/
+	dcl old.base (1)	fixed;	/*	local place to keep "base"	*/
+	dcl (i,j,k)			fixed;
+	dcl #secs			fixed;	/*	file length in sectors	*/
+	dcl rec(POLY.HIST.REC.LEN-1)	fixed;
+
+	if inc.stmm=0 then return;				/*	Exchange Stereo sound file is a release M feature	*/
+
+	call psmread(base,0,BL.LEN);			/*	find the file length of the current stereo sound file	*/
+	#secs=read(psd);
+
+	if CREATE.SOUND.FILE(#secs,stm.sample.rate,0,1)<>0 then do;	/*	create a new sound file for exchange	*/
+		call copy32(SFILE.BASE,new.base);	/*	current sound file may have moved with creation	*/
+		call LOOK.UP.SF.INFO;					/*	so find current filename again	*/
+		if sf.type=1 then do;					/*	if a sound file	*/
+			call copy32(SFILE.BASE,old.base);
+			call DRAW.MESSAGE('Exchanging Left with Right...');
+			call PS.LOCK;							/*	lock out a reboot	*/
+			#secs=#secs-shr(BL.POLY,8);
+
+			do i = 0 to #secs-1;					/*	do for all sectors of samples	*/
+				call psmread(old.base,shr(BL.POLY,8)+i,0);
+				call poly.in(addr(copy.buf(0)),ALT.COPY.BLEN);
+				call psmwrite(new.base,shr(BL.POLY,8)+i,0);
+				do k=0 to ALT.COPY.BLEN-2 by 2;
+					write(psd)=copy.buf(k+1);	/*	left=right	*/
+					write(psd)=copy.buf(k);		/*	right=left	*/
+				end;
+				timeshare_with_host();
+			end;
+
+			/*	set up mark start and mark end	*/
+			call psmread(old.base,SF.HDR,sf.mark.start);	/*	also sf.mark.end	*/
+			call poly.in(addr(misc.buf(0)),6);
+			call psmwrite(new.base,SF.HDR,sf.mark.start);
+			call poly.out(addr(misc.buf(0)),6);
+
+			/*	update number of symbols	*/
+			call psmread(old.base,SF.HDR,sf.number.of.symbols);
+			i=read(psd);
+			call psmwrite(new.base,SF.HDR,sf.number.of.symbols);
+			write(psd)=i;
+
+			/*	update symbols	*/
+			do i=0 to 1;
+				call psmread(old.base,SF.SYM+i,0);
+				call poly.in(addr(misc.buf(0)),256);
+				call psmwrite(new.base,SF.SYM+i,0);
+				call poly.out(addr(misc.buf(0)),256);
+			end;
+
+			call PS.SETUP(new.base);		/*	update Synclavier info for modified sound file	*/
+			call PS.UNLOCK;					/*	allow a reboot with poly memory intact	*/
+
+			call SELECT.PARTIAL(0);			/*	set up keyboard timbre with new stereo sound file	*/
+			call CREATE.PATCH.PARTIAL(0,NEWFNAME);	/*	find the current partial and point to the first timbre frame	*/
+			if ertyp<>0 then do;
+				call ERASE.MESSAGE;
+				return;
+			end;
+
+			/*	$page	*/
+
+			call clear.display;				/*	clear the Synclavier window	*/
+			call ERASE.MESSAGE;
+			new.poly.contents = new.poly.contents \ 1;	/*	force the display to be updated	*/
+
+			call Build.Poly.Hist.Rec(new.base,0,rec);
+			call Add.Poly.To.Hist(rec);
+
+		end;										/*	of if a sound file	*/
+	end;											/*	of if file creation was successful	*/
+
+end EXCHANGE.STEREO.SOUND;
+
+/*	$Subtitle Extract mono sound file (i.e., left or right channel) from stereo sound file	*/
+
+EXTMONO.SOUND.FILE: proc (base) public swapable;	/*	extract mono sound file from stereo file	*/
+	dcl base		fixed array;	/*	current sound file base address	*/
+	dcl channel			fixed;	/*	0-> left channel 1-> right channel	*/
+	dcl old.base (1)	fixed;	/*	32 bit poly base	*/
+	dcl new.base (1)	fixed;	/*	location in poly if file in poly	*/
+	dcl #secs			fixed;	/*	file sector length	*/
+	dcl #nsecs			fixed;	/*	new file sector length	*/
+	dcl (i,j,k)			fixed;
+	dcl ch				fixed;	/*	character from token array	*/
+	dcl rec(POLY.HIST.REC.LEN-1)	fixed;
+
+	if inc.stmm=0 then return;					/*	extract mono is a release M STM feature	*/
+
+	tok.ptr=0;
+	ch=byte(token,tok.ptr);
+	if (ch=asc.l) or (ch=asc.r) then do;
+		if ch=asc.l then channel=0;
+		else channel=1;
+	end;
+	else do;
+		call left.or.right.channel;
+		return;
+	end;
+
+	call psmread(base,0,BL.LEN);				/*	get current sound file length	*/
+	#secs=read(psd);								/*	get valid data length	*/
+
+	#secs=(#secs-shr(BL.POLY,8));
+	#nsecs=shr(#secs+1,1);						/*	find the sector length of left and right channel data	*/
+
+	if CREATE.SOUND.FILE(#nsecs+shr(BL.POLY,8),stm.sample.rate,0,0)<>0 then do;	/*	if there is room for mono sound file	*/
+		call copy32(SFILE.BASE,new.base);	/*	the location of current sound file may have changed	*/
+		call LOOK.UP.SF.INFO;					/*	so find current filename again	*/
+		if sf.type=1 then do;					/*	if a sound file	*/
+			call copy32(SFILE.BASE,old.base);
+
+			call PS.LOCK;							/*	lock out a reboot so poly stays in shape	*/
+			do case (channel);
+				{	/*	CASE 0:	Left Channel	*/
+					call DRAW.MESSAGE('Extracting Left Channel as Mono Sound File...');
+					do i = 0 to #secs-1;			/*	extract all of the left samples	*/
+						call psmread(old.base,shr(BL.POLY,8)+i,0);
+						call poly.in(addr(copy.buf(0)),ALT.COPY.BLEN);
+						call psmwrite(new.base,shr(BL.POLY,8)+shr(i,1),shl(i&1,7));	/*	put them in the new sound file	*/
+						do k=0 to ALT.COPY.BLEN-2 by 2;
+							write(psd)=copy.buf(k);	/*	get left samples	*/
+						end;
+						timeshare_with_host();
+					end;
+				}
+				{	/*	CASE 1:	right channel	*/
+					call DRAW.MESSAGE('Extracting Right Channel as Mono Sound File...');
+					do i = 0 to #secs-1;	/*	extract all of the right samples	*/
+						call psmread(old.base,shr(BL.POLY,8)+i,0);
+						call poly.in(addr(copy.buf(0)),ALT.COPY.BLEN);
+						call psmwrite(new.base,shr(BL.POLY,8)+shr(i,1),shl(i&1,7));	/*	put them in the new sound file	*/
+						do k=1 to ALT.COPY.BLEN-1 by 2;
+							write(psd)=copy.buf(k);	/*	get right samples	*/
+						end;
+						timeshare_with_host();
+					end;
+				}
+			end;	/*	end of do case channel	*/
+
+			/*	set up mark start and mark end	*/
+			call psmread(old.base,SF.HDR,sf.mark.start);
+			call poly.in(addr(misc.buf(0)),6);
+			call psmwrite(new.base,SF.HDR,sf.mark.start);
+			call poly.out(addr(misc.buf(0)),6);
+
+			/*	update number of symbols	*/
+			call psmread(old.base,SF.HDR,sf.number.of.symbols);
+			i=read(psd);
+			call psmwrite(new.base,SF.HDR,sf.number.of.symbols);
+			write(psd)=i;
+
+			/*	update symbols	*/
+			do i=0 to 1;
+				call psmread(old.base,SF.SYM+i,0);
+				call poly.in(addr(misc.buf(0)),256);
+				call psmwrite(new.base,SF.SYM+i,0);
+				call poly.out(addr(misc.buf(0)),256);
+			end;
+
+			call PS.SETUP(new.base);		/*	update Synclavier info for modified sound file	*/
+			call PS.UNLOCK;					/*	allow a reboot with poly memory intact	*/
+			call SELECT.PARTIAL(0);
+			call CREATE.PATCH.PARTIAL(0,NEWFNAME);
+			if ertyp<>0 then do;
+				call ERASE.MESSAGE;			/*	recover	*/
+				return;
+			end;
+
+			/*	$page	*/
+
+			call clear.display;				/*	clear the Synclavier window	*/
+			call ERASE.MESSAGE;
+			new.poly.contents = new.poly.contents \ 1;	/*	force the display to be updated	*/
+
+			call Build.Poly.Hist.Rec(new.base,0,rec);
+			call Add.Poly.To.Hist(rec);
+
+		end;										/*	of if a sound file	*/
+	end;
+
+end EXTMONO.SOUND.FILE;
+
+/*	$Subtitle Delete Samples From Current Sound File	*/
+
+DELETE.SAMPLES: proc (base,cross.start) public swapable;		/*	deletes a section of the sound file	*/
+	dcl base						fixed array;	/*	current sound file address base	*/
+	dcl cross.start					fixed;	/*	start of crossfade in token array	*/
+	dcl (begin.sec,begin.wrd)		fixed;	/*	address of beginning location	*/
+	dcl (end.sec,end.wrd)			fixed;	/*	address of end location	*/
+	dcl (tot.slen,tot.wlen)			fixed;
+	dcl (delete.sec,delete.wrd)	fixed;
+	dcl delete.time(2)				fixed;	/*	time of deleted section	*/
+	dcl last.time(2)					fixed;	/*	time of SF piece after delete	*/
+	dcl old.base (1)					fixed;	/*	32 bit original poly file base	*/
+	dcl new.base (1)					fixed;	/*	address base of file without samples	*/
+	dcl (end.slen,end.wlen)			fixed;	/*	length of end of sound file	*/
+	dcl #secs							fixed;	/*	sector length of new sound file	*/
+	dcl crossfade.time(2)			fixed;
+	dcl temp.crossfade				fixed;
+	dcl (ssec1,swrd1)					fixed;	/*	source 1 address for crossfade	*/
+	dcl (ssec2,swrd2)					fixed;	/*	source 2 address for crossfade	*/
+	dcl (dsec,dwrd)					fixed;
+	dcl new_number_of_symbols		fixed;	/*	number of symbols in new sound file	*/
+	dcl (i,j)							fixed;
+	dcl rec(POLY.HIST.REC.LEN-1)	fixed;
+
+	if inc.stmm=0 then return;					/*	DELETE is a STM release M feature	*/
+
+	if GET.STM.EDIT.TIMES(base)=0				/*	if no good stm edit times	*/
+	then return;
+
+	call TIME_TO_INDEX(stm.begin.time(0),stm.begin.time(1),stm.begin.time(2),stm.sample.rate,stereo);	/*	find the address of the beginning time	*/
+	begin.sec=sector.numb;
+	begin.wrd=sector.offset;
+	call TIME_TO_INDEX(stm.end.time(0),stm.end.time(1),stm.end.time(2),stm.sample.rate,stereo);	/*	find the address of the ending time	*/
+	end.sec=sector.numb;
+	end.wrd=sector.offset;
+
+	call subtract.addresses(end.sec,end.wrd,begin.sec,begin.wrd);	/*	find the number of samples to delete	*/
+	delete.sec=a.sec;
+	delete.wrd=a.wrd;
+	call INDEX_TO_TIME(0,delete.sec,delete.wrd,stm.sample.rate,stereo);
+	delete.time(0)=time.seconds;
+	delete.time(1)=time.milliseconds;
+	delete.time(2)=time.microseconds;
+
+	if COMPARE_TIMES(delete.time,tot.time,3)<=0 then do;	/*	if the delete time is less than total time of current sound file	*/
+		call DRAW.MESSAGE('Deleting Samples from Sound File...');
+
+		/*	calculate half of the crossfade sector length	*/
+
+		if GET.CROSSFADE.TIME(cross.start)<>0
+		then call copy_time(some.time,crossfade.time);
+		else return;
+
+		if crossfade.time(0) ige 65 then temp.crossfade=65535;	/*	Limit to 16 bits of milliseconds	*/
+		else temp.crossfade=(crossfade.time(0)*1000)+crossfade.time(1);	/*	convert to milliseconds	*/
+
+		/*	find sector length of the end piece of the sound file after the delete	*/
+		call psmread(base,SF.HDR,sf.valid.data);	/*	find number of valid samples	*/
+		write("300")=read(psd);
+		tot.slen=read(psd);
+		tot.wlen=read(psd);
+		call subtract.addresses(tot.slen,tot.wlen,end.sec,end.wrd);
+		end.slen=a.sec;			/*	save length of end piece	*/
+		end.wlen=a.wrd;
+		call INDEX_TO_TIME(0,end.slen,end.wlen,stm.sample.rate,stereo);
+		last.time(0)=time.seconds;
+		last.time(1)=time.milliseconds;
+		last.time(2)=time.microseconds;
+
+		i=0;	/*	Haven't changed crossfade time yet	*/
+
+		/*	Half of crossfade can't be longer than sound file before delete	*/
+		if COMPARE_TIMES(crossfade.time,stm.begin.time,3) > 0 then do;
+			call copy_time(stm.begin.time,crossfade.time);
+			i=1;
+		end;
+
+		/*	Half of crossfade also can't be longer than end piece of sound file	*/
+		if COMPARE_TIMES(crossfade.time,last.time,3) > 0 then do;
+			call copy_time(last.time,crossfade.time);
+			i=1;
+		end;
+
+		/*	notify user if we change crossfade length	*/
+		if i <> 0 then do;
+			/*	Convert half to full crossfade time	*/
+			temp.crossfade=(crossfade.time(0)*2000)+shl(crossfade.time(1),1);	/*	convert to milliseconds	*/
+			crossfade.time(0) = 0;
+			crossfade.time(1) = temp.crossfade;
+			crossfade.time(2) = 0;
+			call time_normalize(crossfade.time);
+			tok.ptr=0;
+			token(0)=tok.ptr;
+			call CONVERT.SAMPLE.TIME.TO.STRING(crossfade.time);	/*	converts an unsigned number between 0 and 999 to a string	*/
+			call crossfade.override;					/*	tell the user	*/
+		end;
+
+		/*	find the total time of the sound file after the deletion	*/
+		call subtract.addresses(tot.slen,tot.wlen,delete.sec,delete.wrd);
+		#secs=a.sec;
+		if a.wrd>0
+		then #secs=#secs+1;
+
+		/*	$page	*/
+
+		if CREATE.SOUND.FILE(#secs+shr(BL.POLY,8),stm.sample.rate,0,stereo)<>0 then do;
+			call copy32(SFILE.BASE,new.base);	/*	things may have changed	*/
+			call LOOK.UP.SF.INFO;					/*	so find current filename again	*/
+			if sf.type=1 then do;					/*	if a sound file	*/
+				call copy32(SFILE.BASE,old.base);
+				call PS.LOCK;							/*	lock out a reboot	*/
+
+				/*	check here for the case of deleting out to the end of the
+					file - need to help this algorithm along a bit (LSS)	*/
+				if ((not stereo) and ((end.slen = 0) and (end.wlen = 1)))	/*	delete is specified to last sample in file	*/
+				then j = 1;	/*	offset for copy below is one word	*/
+				else if ((stereo) and ((end.slen = 0) and (end.wlen = 2)))	/*	out to the end of stereo file	*/
+				then j = 2;	/*	offset for copy below is two words	*/
+				else j = 0;	/*	no offset is needed if not deleting to end of file	*/
+
+				call COPY.POLY.MEM(old.base,shr(BL.POLY,8),0,new.base,shr(BL.POLY,8),0,begin.sec,begin.wrd+j);	/*	copy up to the beginning	*/
+
+				call COPY.POLY.MEM(old.base,shr(BL.POLY,8)+end.sec,end.wrd,new.base,shr(BL.POLY,8)+begin.sec,begin.wrd,end.slen,end.wlen-j);	/*	copy the sound file after the delete	*/
+
+				/*	Get half the total crossfade, since we split 50/50 around the deleted part	*/
+				call GET.CROSSFADE.WRD.LEN(shr(temp.crossfade,1),stm.sample.rate,stereo);
+
+				call subtract.addresses(shr(BL.POLY,8)+begin.sec,begin.wrd,xfade.sec,xfade.wrd);
+				ssec1=a.sec;
+				swrd1=a.wrd;
+				call subtract.addresses(shr(BL.POLY,8)+end.sec,end.wrd,xfade.sec,xfade.wrd);
+				ssec2=a.sec;
+				swrd2=a.wrd;
+				dsec=ssec1;
+				dwrd=swrd1;
+				call POLY.CROSS.FADE(old.base,ssec1,swrd1,old.base,ssec2,swrd2,new.base,dsec,dwrd,temp.crossfade,stm.sample.rate,stereo);
+
+				/*	Set MARK.END to be last valid sample in file	*/
+				j = begin.wrd + end.wlen;	/*	get word length	*/
+				i = begin.sec + end.slen + shr(j,8);	/*	sector length	*/
+				j = (j&255) - (1+stereo);	/*	subtract one sample from length	*/
+				if j < 0 then do;	/*	need to borrow from sectors	*/
+					j = j&255; i = i - 1;
+				end;
+				call INDEX_TO_TIME(0,i,j,stm.sample.rate,stereo);
+				call psmwrite(new.base,SF.HDR,sf.mark.end);
+				write(psd)=time.seconds;
+				write(psd)=time.milliseconds;
+				write(psd)=time.microseconds;
+				call SET.SYMBOL.TIME(new.base,mend,time.seconds,time.milliseconds,time.microseconds);
+
+				/*	Set DATA.END the same as MARK.END	*/
+				call psmwrite(new.base,SF.HDR,sf.data.end);
+				write(psd)=time.seconds;
+				write(psd)=time.milliseconds;
+				write(psd)=time.microseconds;
+				call SET.SYMBOL.TIME(new.base,ENDNAME,time.seconds,time.milliseconds,time.microseconds);
+
+				/*	Set VALID.DATA to be length of data in file	*/
+				call psmwrite(new.base,SF.HDR,sf.valid.data);
+				write(psd)=0;
+				write(psd)=begin.sec+end.slen+shr(begin.wrd+end.wlen,8);
+				write(psd)=(begin.wrd+end.wlen)&255;
+
+				/*	delete the symbols associated with the deleted samples	*/
+
+				call psmread(new.base,SF.HDR,sf.number.of.symbols);
+				new_number_of_symbols=read(psd);
+
+				/*	include all of the symbols up to the beginning deletion time	*/
+				do i=0 to 2;	/*	no differences between old and new symbol times	*/
+					some.time(i)=0;
+				end;
+				i=0;
+				j=FIND_TIME(old.base,stm.begin.time);
+				do while (i<j) and (new_number_of_symbols<max.symbols);
+					new_number_of_symbols=MOVE.SYMBOL(old.base,new.base,i,some.time,0,1);	/*	insert all of the symbols into the new sound file	*/
+					i=i+1;
+				end;
+				/*	include the symbols from the end of the deletion to the end of the sound file	*/
+				i=FIND_TIME(old.base,stm.end.time);									/*	include the symbols after the deletion time	*/
+				call GET.SAMPLE.TIME(old.base,endname);
+				j=FIND_TIME(old.base,some.time);										/*	include the symbols after the deletion time	*/
+
+				do while (i<j) and (new_number_of_symbols<max.symbols);
+					new_number_of_symbols=MOVE.SYMBOL(old.base,new.base,i,delete.time,0,1);
+					i=i+1;
+				end;																		/*	of if not a duplicate name	*/
+
+				call PS.SETUP(new.base);
+				call PS.UNLOCK;
+				call SELECT.PARTIAL(0);				/*	select the first partial	*/
+				call CREATE.PATCH.PARTIAL(0,NEWFNAME);				/*	turn this partial into a patch partial	*/
+				call CLEAR.PARAMETERS;				/*	get rid of active parms	*/
+
+				call ERASE.MESSAGE;
+				new.poly.contents = new.poly.contents \ 1;	/*	force the display to be updated	*/
+
+				call Build.Poly.Hist.Rec(new.base,0,rec);
+				call Add.Poly.To.Hist(rec);
+
+			end;
+		end;												/*	of creating new sound file was succesful	*/
+	end;														/*	of if beginning time is less than end time	*/
+end DELETE.SAMPLES;
+
+/*	$Subtitle Extract Samples from Current Sound File	*/
+
+/*	extracts the specified section of the current sound file and puts contents in a new sound file	*/
+EXTRACT.SAMPLES: proc (base,cross.start,cross.2) public swapable;	
+	dcl base						fixed array;	/*	current sound file base	*/
+	dcl cross.start					fixed;	/*	start of crossfade in token array	*/
+	dcl cross.2							fixed;	/*	zero or start of second crossfade	*/
+	dcl (begin.sec,begin.wrd)		fixed;	/*	address of beginning location	*/
+	dcl (end.sec,end.wrd)			fixed;	/*	addres of ending location	*/
+	dcl (aft.sec,aft.wrd)			fixed;	/*	length of sound file section after extract	*/
+	dcl aft.time(2)					fixed;
+	dcl extract.time(2)				fixed;	/*	extraction sample time	*/
+	dcl extract.sec					fixed;
+	dcl extract.wrd					fixed;
+	dcl #secs							fixed;
+	dcl old.base (1)					fixed;
+	dcl new.base (1)					fixed;
+	dcl wrd.len							fixed;
+	dcl pre.crossfade					fixed;	/*	crossfade before extract	*/
+	dcl pre.xfade.time(2)			fixed;
+	dcl post.crossfade				fixed;	/*	crossfade after extract	*/
+	dcl post.xfade.time(2)			fixed;
+	dcl new_number_of_symbols		fixed;	/*	number of symbols in new sound file	*/
+	dcl edit.offset.time(2)			fixed;	/*	how far to slide symbols	*/
+	dcl (i,j)							fixed;
+	dcl rec(POLY.HIST.REC.LEN-1)	fixed;
+
+	if inc.stmm=0 then return;					/*	extract is a STM release M feature	*/
+
+	if GET.STM.EDIT.TIMES(base)=0				/*	if we cannot get good edit times	*/
+	then return;
+
+	call TIME_TO_INDEX(stm.begin.time(0),stm.begin.time(1),stm.begin.time(2),stm.sample.rate,stereo);	/*	find the address of the beginning time	*/
+	begin.sec=sector.numb;
+	begin.wrd=sector.offset;
+	call TIME_TO_INDEX(stm.end.time(0),stm.end.time(1),stm.end.time(2),stm.sample.rate,stereo);			/*	find the address of the ending time	*/
+	end.sec=sector.numb;
+	end.wrd=sector.offset;
+	call subtract.addresses(end.sec,end.wrd,begin.sec,begin.wrd);
+	#secs=a.sec;
+	wrd.len=a.wrd;
+	call INDEX_TO_TIME(0,#secs,wrd.len,stm.sample.rate,stereo);
+	extract.time(0)=time.seconds;
+	extract.time(1)=time.milliseconds;
+	extract.time(2)=time.microseconds;
+	extract.sec=#secs;
+	extract.wrd=wrd.len;
+
+	/*	find the sector length of the sound file piece after the extract	*/
+	call psmread(base,SF.HDR,sf.valid.data);
+	write("300")=read(psd);
+	aft.sec=read(psd);
+	aft.wrd=read(psd);
+	call subtract.addresses(aft.sec,aft.wrd,end.sec,end.wrd);
+	aft.sec=a.sec;
+	aft.wrd=a.wrd;
+
+	call INDEX_TO_TIME(0,aft.sec,aft.wrd,stm.sample.rate,stereo);
+	aft.time(0)=time.seconds;
+	aft.time(1)=time.milliseconds;
+	aft.time(2)=time.microseconds;
+
+	if GET.CROSSFADE.TIME(cross.start)<>0
+	then do;
+		call copy_time(some.time,pre.xfade.time);
+		call copy_time(some.time,post.xfade.time);
+	end;
+	else return 0;
+
+	if cross.2 <> 0 then do;	/*	If user specified a different ending crossfade	*/
+		if GET.CROSSFADE.TIME(cross.2) <> 0
+		then call copy_time(some.time,post.xfade.time);
+	end;
+
+	/*	limit size of crossfade to available data	*/
+
+	i=0;	/*	Haven't changed crossfade time yet	*/
+	j=0;
+
+	/*	Pre crossfade can't be longer than sound file before extract	*/
+	if COMPARE_TIMES(pre.xfade.time,stm.begin.time,3) > 0 then do;
+		call copy_time(stm.begin.time,pre.xfade.time);
+		i=1;
+	end;
+
+	/*	Post crossfade can't be longer than sound file after extract	*/
+	if COMPARE_TIMES(post.xfade.time,aft.time,3) > 0 then do;
+		call copy_time(aft.time,post.xfade.time);
+		j=1;
+	end;
+
+	/*	notify user if we change crossfade length	*/
+	if i <> 0 OR j <> 0 then do;
+		/*	Display truncation message showing changed crossfade	*/
+		if		  i <> 0 then call COPY_TIME(pre.xfade.time, some.time);
+		else if j <> 0 then call COPY_TIME(post.xfade.time,some.time);
+		tok.ptr=0;
+		token(0)=tok.ptr;
+		call CONVERT.SAMPLE.TIME.TO.STRING(some.time);	/*	converts an unsigned number between 0 and 999 to a string	*/
+		call crossfade.override;					/*	tell the user	*/
+	end;
+
+	pre.crossfade	= ( pre.xfade.time(0) * 1000) +  pre.xfade.time(1);
+	post.crossfade	= (post.xfade.time(0) * 1000) + post.xfade.time(1);
+
+	/*	Get length of total extract including pre and post crossfades	*/
+	call GET.CROSSFADE.WRD.LEN(pre.crossfade+post.crossfade,stm.sample.rate,stereo);
+	wrd.len=wrd.len+xfade.wrd;
+	#secs=#secs+xfade.sec+shr(wrd.len,8);
+	wrd.len=wrd.len&255;
+	if COMPARE_TIMES(extract.time,tot.time,3)<0 then do;	/*	if the extraction time is within limits of current sound file	*/
+
+		if CREATE.SOUND.FILE(#secs+(wrd.len<>0)+shr(BL.POLY,8),stm.sample.rate,0,stereo)<>0 then do;
+			call copy32(SFILE.BASE,new.base);	/*	things may have changed	*/
+			call LOOK.UP.SF.INFO;					/*	so find current filename again	*/
+			if sf.type=1 then do;					/*	if a sound file	*/
+				call copy32(SFILE.BASE,old.base);
+				call DRAW.MESSAGE('Extracting Samples from Sound File...');
+				call PS.LOCK;							/*	lock out a reboot	*/
+
+				/*	copy into a new file	*/
+				call GET.CROSSFADE.WRD.LEN(pre.crossfade,stm.sample.rate,stereo);	/*	calculate the crossfade word length	*/
+				call subtract.addresses(shr(BL.POLY,8)+begin.sec,begin.wrd,xfade.sec,xfade.wrd);
+				call COPY.POLY.MEM(base,a.sec,a.wrd,new.base,shr(BL.POLY,8),0,#secs,wrd.len);
+
+				/*	construct fade-in at start	*/
+				call GET.CROSSFADE.WRD.LEN(pre.crossfade,stm.sample.rate,stereo);
+				call subtract.addresses(shr(BL.POLY,8)+begin.sec,begin.wrd,xfade.sec,xfade.wrd);
+				call POLY.FADE(old.base,a.sec,a.wrd,new.base,shr(BL.POLY,8),0,pre.crossfade,stm.sample.rate,stereo,0);
+
+				/*	construct fade-out at end	*/
+				call POLY.FADE(old.base,shr(BL.POLY,8)+end.sec,end.wrd,new.base,shr(BL.POLY,8)+xfade.sec+extract.sec,
+				xfade.wrd+extract.wrd,post.crossfade,stm.sample.rate,stereo,1);
+
+				/*	Set MARK.END to be last valid sample in file	*/
+				i = #secs;	/*	sector length	*/
+				j = wrd.len - (1+stereo);	/*	subtract one sample from length	*/
+				if j < 0 then do;	/*	need to borrow from sectors	*/
+					j = j&255; i = i - 1;
+				end;
+				call INDEX_TO_TIME(0,i,j,stm.sample.rate,stereo);
+				call psmwrite(new.base,SF.HDR,sf.mark.end);
+				write(psd)=time.seconds;
+				write(psd)=time.milliseconds;
+				write(psd)=time.microseconds;
+				call SET.SYMBOL.TIME(new.base,mend,time.seconds,time.milliseconds,time.microseconds);
+
+				/*	Set DATA.END the same as MARK.END	*/
+				call psmwrite(new.base,SF.HDR,sf.data.end);
+				write(psd)=time.seconds;
+				write(psd)=time.milliseconds;
+				write(psd)=time.microseconds;
+				call SET.SYMBOL.TIME(new.base,ENDNAME,time.seconds,time.milliseconds,time.microseconds);
+
+				/*	Set VALID.DATA to be length of data in file	*/
+				call psmwrite(new.base,SF.HDR,sf.valid.data);
+				write(psd)=0;
+				write(psd)=#secs;
+				write(psd)=wrd.len;
+
+				/*	Set data type	*/
+				call psmwrite(new.base,SF.HDR,sf.file.data.type);
+				write(psd)=2;	/*	extracted data	*/
+
+				/*	Set caption	*/
+				call psmwrite(new.base,SF.HDR,sf.id.field.bytes);
+				call copy_out_string(extcap);
+
+				/*	Calculate amount to slide symbols over by	*/
+				do i=0 to 2;
+					edit.offset.time(i) = stm.begin.time(i) - pre.xfade.time(i);
+				end;
+				call time_normalize(edit.offset.time);
+
+				/*	Move symbols to new file	*/
+				call psmread(new.base,SF.HDR,sf.number.of.symbols);
+				new_number_of_symbols=read(psd);
+				i=FIND_TIME(old.base,stm.begin.time);									/*	include the symbols from the beginning extraction time	*/
+				j=FIND_TIME(old.base,stm.end.time);										/*	to the end of the extraction time	*/
+				do while (i<j) and (new_number_of_symbols<max.symbols);	/*	do while less than extraction time and number of symbols in new sound file is less than max	*/
+					new_number_of_symbols=MOVE.SYMBOL(old.base,new.base,i,edit.offset.time,0,1);
+					i=i+1;
+				end;	/*	of if not a duplicate name	*/
+
+				call PS.SETUP(new.base);
+				call PS.UNLOCK;
+				call SELECT.PARTIAL(0);				/*	select the first partial	*/
+				call CREATE.PATCH.PARTIAL(0,NEWFNAME);				/*	turn this partial into a patch partial	*/
+				call CLEAR.PARAMETERS;				/*	get rid of active parms	*/
+				call ERASE.MESSAGE;
+				new.poly.contents = new.poly.contents \ 1;		/*	force the display to be updated	*/
+
+				call Build.Poly.Hist.Rec(new.base,0,rec);
+				call Add.Poly.To.Hist(rec);
+
+			end;
+		end;	/*	of creating new sound file was succesful	*/
+	end;
+
+end EXTRACT.SAMPLES;
+

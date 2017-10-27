@@ -1,0 +1,635 @@
+/*
+
+New England Digital Corporation
+Direct-To-Disk Diagnostic Menu
+Jan 1987, Bill Leathers
+
+This program is a combination of the SYNCL1. (C.J.) and TSTMENU (from
+the diagnostic disk). This program is included on the diagnostic
+disk along with the catalog .DTDXCAT.  When this program is selected
+from the diagnostic menu, .DTDXCAT is set as the alternate catalog,
+and diagnostics in that catalog can be selected and downloaded to the
+Direct-To-Disk by pressing the DTD reset button.
+
+Modified:
+  05/13/88 WSL - Added t#macintosh terminal type
+  12/23/87 WSL - To wait for terminal and program selection before
+                 downloading program.
+
+*/
+
+insert ':NEWDIAGS:datelit';
+
+configuration modelC, noMULDIV, memory 32*1024;
+
+insert ':-xpl:asciidef';
+insert ':-xpl:strings';  /* string functions */
+insert ':-xpl:catrtns'; /* catalog routines */
+insert ':-xpl:scsilits'; /* SCSI literals */
+insert ':-xpl:termutil';     /* termutil won't work, (interrupt problem)  */
+                             /* without INITIALIZED flag in when d03int */
+dcl initialized boolean; initialized = false;
+
+
+dcl debug       lit '1';
+dcl inc_poly    lit '1';
+dcl inc_mono    lit '0';
+dcl d16         lit '"16"';
+
+dcl msg_line lit '20';
+
+
+                  /***** MULTIPLY DIVIDE LITERALS: *****/
+
+DCL loadm  LIT 'WRITE(5)=';             /* LOAD         */
+DCL ULOAD  LIT 'WRITE(4)=';             /* LOAD UPPER   */
+DCL REM    LIT 'READ(4)'  ;             /* QUOTIENT REMAINDER               */
+DCL MUL    LIT 'WRITE(6)=';
+DCL DIV    LIT 'WRITE(7)=';  
+DCL RES    LIT 'READ(5)'  ;             /* RESULT       */
+DCL URES   LIT 'READ(4)'  ;             /* UPPER RESULT */
+
+DCL MWAIT  LIT 'WRITE("324")=RES';      /* D5 TO ATNV TO WAIT FOR MUL/DIV */
+DCL RPC    LIT 'WRITE("010")=(-1)+';    /* REPEAT COUNTER: */  
+
+dcl catalog_name data('.dtdxcat');
+
+dcl scsibits data (256,512,1024,2048);
+dcl bits     data (1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768);
+
+
+dcl (i,j,k,chr,bugi)      fixed;
+dcl maxblk           fixed; /* total number of test programs on menu */
+dcl block(f#len-1)   fixed; /* FCB block */
+dcl str(f#name_len)  fixed; /* string to hold name */
+dcl testnum          fixed; /* number of test corresponding to FCB number + 1 */
+dcl prog_num         fixed; /* one more than the FCB # of test program */
+dcl last_prog        fixed; /* number of the last program on menu */
+dcl (msw,lsw)        fixed;
+
+dcl catstat           fixed;
+dcl new.info          fixed;
+dcl dtd_terminal_type fixed;  dtd_terminal_type = 1;  /* Pericom */
+dcl buf_pointer       fixed;
+dcl setup             boolean;
+
+dcl catalog.buffer (c#dir_max - 1) fixed;
+call set_catbuf (addr(catalog.buffer (0)), 0);
+
+dcl real.milliseconds fixed;
+when d03int then real.milliseconds=real.milliseconds+5;
+
+
+dcl (scsi.busy)            fixed;  /* 1   = lod has been selected - must abort it */
+                                   /* 2,3 = reset in progress                     */
+dcl (scsi.reset.time)      fixed;  /*       timer for reset                       */
+dcl (screen)               fixed;
+
+
+/*************************************************************************/
+dcl display_dtd_terminal_type lit 'call display_dterm';
+display_dterm: proc;
+
+  pos(17,25); erase_line;
+  pstring('DTD Terminal type: ');
+
+  do case dtd_terminal_type;
+     pstring('VT640');
+     pstring('Monterey MG600');
+     pstring('McIntosh');
+     pstring('VT100');
+     pstring('ADM 3,5,11');
+     pstring('DQ640');
+     pstring('Datamedia');
+     pstring('Other');
+  end; /* case */
+end;
+/*************************************************************************/
+select: proc(prog_num); /* select a program with cursor */
+  dcl prog_num        fixed;                  
+  dcl i               fixed; 
+
+  pos(msg_line,7); erase_line;
+  call get_fcb(prog_num - 1, block); /* get program FCB */
+  call clean_FCBname(block, str); /* get FCB name in string format */
+  str(0) = 8; /* set string length to 8 */
+
+  if (prog_num & 1 <> 0) then pos((5 + int(prog_num/2)),13);  
+  else pos((5 + int((prog_num-1)/2)),45); /* position on menu */
+
+  reverse(true);             /* reverse video */
+  pstring('==>  ');          /* display arrow */
+  wchar(prog_num + "100");   /* print program letter */
+  pstring('.  ');            /* and follow with a period */
+  pstring(str);              /* print program name */
+  reverse(false);            /* undo reverse video */
+end select;
+
+/*************************************************************************/
+deselect: proc(prog_num); /* de-select a program with cursor */
+  dcl prog_num        fixed;
+  dcl i               fixed; 
+
+  call get_fcb(prog_num - 1, block); /* get program FCB */
+  call clean_FCBname(block, str); /* get FCB name in string format */
+  str(0) = 8; /* set string length to 8 */
+
+  if (prog_num & 1 <> 0) then pos((5 + int(prog_num/2)),13);
+  else pos((5 + int((prog_num-1)/2)),45); /* position on menu */
+
+  pstring('     ');           /* erase arrow ==> */
+  wchar(prog_num + "100");    /* refresh program letter */
+  pstring('.  ');             /* follow with a period */
+  pstring(str);               /* refresh program name */
+end deselect;
+
+
+/**************************************************************************/
+dcl display_dtd_diagnostics lit 'call display_dtd';
+display_dtd: proc;
+  dcl (i,j,k,chr) fixed;
+
+  clear_screen;
+  display_dtd_terminal_type;
+  pos(2,17); pstring('Direct-To-Disk Diagnostic Programs  - ');
+  display_release_date;
+  pos(3,17); pstring('----------------------------------------------');
+  pos(5,18);
+
+  call read_catalog('', -1);              /* read catalog sector */
+  maxblk = 0;                             /* initialize for first program */
+  do i = 0 to c#dir_size/c#len - 1;       /* do for each FCB in catalog */
+    call get_fcb(i, block);               /* get an FCB from catalog */
+    if (block(f#nm) <> 0) then do;        /* skip over the holes */
+      call clean_fcbname(block, str);     /* get FCB name in string format */
+      if ((strcmp(str, 'MONITOR') <> 0) & /* file is not the MONITOR */
+      ((block(f#nm) and "177") <> dot))   /* and is not a system file (begins with '.') */
+      then do;                            /* we have a valid test program */
+        maxblk = maxblk + 1;              /* count one more test program */
+        str(0) = 8;                       /* set full name length */
+        call put_fcb(maxblk-1, block);    /* write FCB in MAXBLK-1 location of catalog buffer */
+        wchar(maxblk + "100");            /* print program letter */
+        pstring('.  ');                   /* add a period after it */
+        pstring(str);                     /* print the program name */
+        if ((maxblk & 1) <> 0) then       /* position cursor */
+         pos((5 + int((maxblk-1)/2)),50);
+        else pos((5 + int(maxblk/2)),18); 
+      end;
+    end;
+  end;
+
+  last_prog =  maxblk; /* save the total number of programs on the menu */
+
+  pos(21,7);  
+  pstring('Specify the DTD diagnostic terminal type using <SPACE BAR>, select');
+  pos(22,7);
+  pstring('a program by letter or arrow keys,  and press <RETURN> when ready.  ');
+  pos(23,7); 
+  pstring('<SPACE BAR> - Change terminal type                  <BREAK> - Exit');
+
+  prog_num = 1; /* initialize to the first program on menu */
+  call select(prog_num); /* put the cursor on first program */
+  call get_fcb(testnum-1, block); /* get the FCB of the selected test program */
+  call clean_fcbname(block, str); /* get name in string format */
+
+end display_dtd;
+
+/***************************************************************************/
+dcl scrunch_dtd_cat lit 'call scrunch';
+scrunch: proc;
+  dcl (i,j,k,chr) fixed;
+
+  call read_catalog('', -1);               /* read catalog sector */
+  maxblk = 0;                              /* initialize for first program */
+  do i = 0 to c#dir_size/c#len - 1;        /* do for each FCB in catalog */
+     call get_fcb(i, block);               /* get an FCB from catalog */
+     if (block(f#nm) <> 0) then do;        /* skip over the holes */
+      call clean_fcbname(block, str);      /* get FCB name in string format */
+      if ((strcmp(str, 'MONITOR') <> 0) &  /* file is not the MONITOR */
+      ((block(f#nm) and "177") <> dot))    /* and is not a system file (begins with '.') */
+        then do;                           /* we have a valid test program */
+           maxblk = maxblk + 1;            /* count one more test program */
+           str(0) = 8;                     /* set full name length */
+           call put_fcb(maxblk-1, block);  /* write FCB in MAXBLK-1 location of catalog buffer */
+        end;
+     end;
+  end;
+
+  call select(prog_num); 
+  call get_fcb(testnum-1, block); /* get the FCB of the selected test program */
+  call clean_fcbname(block, str); /* get name in string format */
+
+end scrunch;
+/***************************************************************************/
+dcl process_dtd_menu lit 'call prodtd';
+prodtd: proc;
+  dcl (i,j,k) fixed;
+
+  if ((chr >= lower.a) and (chr <= lower.z)) then chr = chr - "40"; /* convert to upper case */
+
+  if ((chr >= bs    ) & (chr <= ff      )) \
+     ((chr >= cur.up) & (chr <= cur.left)) \
+     ((chr >= asc.a ) & (chr <  last_prog + asc.a)) then do;
+
+    if ((chr = cur.up) or (chr = vt)) then do; /* cursor up */
+       if prog_num > 2 then do; /* if we can move up */
+          pos(msg_line,7); erase_line;
+          call deselect(prog_num); /* deselect current program */
+          prog_num = prog_num - 2; /* update current program number */
+          call select(prog_num); /* select that program */
+       end;
+    end;
+
+    if ((chr = cur.down) or (chr = lf)) then do; /* cursor down */
+       if prog_num <= (last_prog - 2) then do; /* if we can move down */
+          pos(msg_line,7); erase_line;
+          call deselect(prog_num); /* deslect the current program */
+          prog_num = prog_num + 2; /* update current program number */
+          call select(prog_num); /* select that program */
+       end;
+    end;
+
+    if ((chr = cur.right) or (chr = ff)) then do; /* cursor right */
+       if (prog_num & 1 <> 0) and (prog_num <> last_prog) then do; /* if we can move to the right */
+          pos(msg_line,7); erase_line;
+          call deselect(prog_num); /* deselect the current program */
+          prog_num = prog_num + 1; /* update the current program number */
+          call select(prog_num); /* select that program */
+       end;
+    end;
+
+    if ((chr = cur.left) or (chr = bs)) then do; /* cursor left */
+       if ((prog_num & 1) = 0) then do; /* if we can move to the left */
+          pos(msg_line,7); erase_line;
+          call deselect(prog_num); /* deselect the current program */
+          prog_num = prog_num - 1; /* update the current program number */
+          call select(prog_num); /* select that program */
+       end;
+    end;
+
+    if (chr >= asc.a) & (chr < last_prog + asc.a) then do;
+       pos(msg_line,7); erase_line;
+       call deselect(prog_num); /* deselect the current program */
+       prog_num = chr - "100";  /* set the current program number */
+       call select(prog_num);   /* select that program */
+    end;
+
+    call get_fcb(testnum-1, block); /* get the FCB of the selected test program */
+    call clean_fcbname(block, str); /* get name in string format */
+
+    if findfile(str) = -1 then do; /* set the catalog variables for this program */
+       pos(msg_line,10); erase_line;
+       pstringr('System error - press <RETURN> to continue ...'); /* FINDFILE returned an error */
+       chr = rchar;
+       call exit(0);
+    end;
+  end;
+
+end prodtd;
+
+/***************************************************************************/
+dcl abort.scsi procedure;
+run.syn.loop:proc;
+   dcl (i,j) fixed;
+   do i=0 to 100; end;
+end run.syn.loop;
+
+/***************************************************************************/
+dcl display_message lit 'call display_msg';
+display_msg:proc(msg);   
+   dcl msg array;
+
+   pos(msg_line,7); erase_line;
+   pstring(msg);
+end display_msg;
+
+/***************************************************************************/
+/* Synclavier simulated initialization: */
+
+START:;
+
+/***************************************************************************/
+/* $page  -  ABORT.SCSI,  SCSI/LOD  Variables */
+/* Lod-specific variables */
+
+dcl (look.for.lod  )  fixed;              /* set to 1 to poll for lod        */
+dcl (lod.running   )  fixed;              /* set true if lod there & running */
+dcl (send.update.ms)  fixed;              /* time of last update        */
+dcl (syncl.target.#)  lit '7';
+dcl (lod.target.#  )  lit '6';
+dcl (lod.d24.#     )  fixed;
+dcl (scsi.out.buf  )  (4096)  fixed;
+dcl misc.buf (256) fixed;
+
+
+/* new LOD routines: */
+
+/* abort.scsi:
+
+      Called from main loop when software wants to do input/output from
+      scsi.   It terminates any live overdub scsi i/o that is currently
+      going on. */
+
+
+abort.scsi:proc;
+   dcl (i) fixed;
+
+   do case (scsi.busy);
+
+      do;                               /* case 0 - no action needed  */
+      end;
+
+      do;                               /* case 1 - lod is selected   */
+         write(ScsiData)=0;             /* remove DATA6               */
+         do i=0 to 99;                  /* wait for possible busy     */
+         end;                           /* REQ could be down here     */
+         write(ScsiBus )=S$SEL\S$ATN;   /* leave SEL,  gnd ATN        */
+         do while (read(ScsiBus)&S$BSY)<>0;
+         end;
+         write(ScsiBus )=0;             /* releset SEL and ATN        */
+      end;
+
+      do;                               /* case 2 - reset pulse       */
+         do while real.milliseconds<scsi.reset.time+10;  
+         end;
+         write(ScsiBus) = 0;
+         scsi.reset.time=real.milliseconds;
+         do while real.milliseconds<scsi.reset.time+2000;
+         end;
+      end;
+
+      do;                               /* case 3 - end of reset      */
+         do while real.milliseconds<scsi.reset.time+2000;
+         end;
+      end;
+
+   end;
+   scsi.busy=0;
+end abort.scsi;
+
+
+/* $page - RESET.LOD.SCSI */
+/***************************************************************************/
+/* reset.lod.scsi - issue reset to scsi port */
+
+reset.lod.scsi:proc;
+
+   display_message('Resetting SCSI/LOD port...');
+   scsi.busy=2;                                 /* reseting          */
+   write(ScsiBus) = S$RST;                      /* issue reset       */
+   scsi.reset.time=real.milliseconds;
+   do while real.milliseconds<scsi.reset.time+10;  
+      call run.syn.loop;
+      if scsi.busy=0 then return;               /* reset completed by main loop */
+   end;
+   scsi.busy=3;
+   write(ScsiBus) = 0;
+   scsi.reset.time=real.milliseconds;
+   do while real.milliseconds<scsi.reset.time+2000;
+      call run.syn.loop;
+      if scsi.busy=0 then return;               /* reset completed by main loop */
+   end;
+   scsi.busy=0;
+end reset.lod.scsi;
+
+
+/***************************************************************************/
+/* send.to.lod - procedure to send a message to lod computer */
+
+/* routine is passed:
+
+   1. a message type.   see Live Overdub printout for message
+      protocols (1='hello', 4='reboot', 200-202='load')
+
+   2. a byte length. (scsi.out.buf(0)) 
+
+   3. a message      (scsi.out.buf   ) */
+
+
+/* routine sends message to live overdub.   will return if
+   live overdub has gone off the air */
+   
+/* returns message acknowledgement code received. */
+
+/* error messages for terminal are spun off here. */
+
+dcl (scsibuf) (512)    fixed;
+dcl ddudev             fixed;
+dcl ddusec             fixed;
+dcl ddulen             fixed;
+
+send.to.lod:proc(msgtype);
+   dcl (msgtype)         fixed;
+
+   dcl (i,j,k)           fixed;
+
+   send.again:;
+
+   write(ScsiSel)=S$SelectEnable \ Scsibits (lod.d24.#);  /* select this d24 */
+   write(ScsiBus) = 0;
+   write(ScsiData)= 0;
+
+   i=real.milliseconds+2000;                   /* retry timer        */
+   do while  ((read(ScsiBus )&S$BusMask )<>0)  /* check for bus bysy */
+   or        ((read(ScsiData)&S$DataMask)<>0); /* or reset needed    */
+      if (msgtype == 1)								  /* bus in use and		*/	
+	  		return (1);									  /* hello msg - wait	*/
+			
+      if real.milliseconds >= i then do;       /* gonzo              */
+         call reset.lod.scsi;                  /* issue reset        */
+         return 0;                             /* not sent           */
+      end;
+      
+		call run.syn.loop;
+      
+		write(ScsiSel)=S$SelectEnable \ Scsibits (lod.d24.#);  
+      write(ScsiBus) = 0;
+      write(ScsiData)= 0;
+   end;
+
+   scsi.busy=1;          /* set scsi.busy so main loop knows what is happening */
+
+   write(ScsiSel)  =S$SelectEnable \ Scsibits (lod.d24.#);  /* select this d24 */
+   write(ScsiData) =bits(lod.target.#);        /* single initiator   */
+   write(ScsiBus)  =S$SEL;                     /* gnd SEL            */
+
+   i=real.milliseconds;                        /* retry timer        */
+   if lod.running<>0 then i=i+5000;            /* 5 seconds if run   */
+   else                   i=i+10;              /* 10 msec for srch   */
+   do while (read(ScsiBus)&S$BSY)=0;           /* or not found       */
+      if real.milliseconds>= i then do;        /* gonzo              */
+         write(ScsiBus) = 0;
+         write(ScsiData)= 0;
+         scsi.busy      = 0;
+         lod.running    = 0;                   /* not running        */
+         look.for.lod   = 1;                   /* try to find one    */
+         if msgtype<>1 then display_message('Timeout Error in Multi-Track Computer');
+         return 0;
+      end;
+      call run.syn.loop;
+      if scsi.busy=0 then goto send.again;     /* aborted by main l  */
+   end;
+
+   write(ScsiData)=0;                          /* release DATA       */
+   write(ScsiBus )=0;                          /* release SEL        */
+
+   write(ScsiByte)=msgtype;                 /* message            */
+   if msgtype>=128 then do;                 /* data               */
+      do i=0 to shr(scsi.out.buf(0)+1,1);
+         write(ScsiWord)=scsi.out.buf(i);
+      end;
+   end;
+
+   i=read(ScsiByte);                           /* get reply          */
+   if i>=128 then do;                          /* long message       */
+      scsibuf(0)=read(ScsiWord);               /* get length, bytes  */
+      if scsibuf(0)>1024 then do;               /* limit to 512words */
+         do j=1 to 512;                        /* length in bytes    */
+            scsibuf(j)=read(ScsiWord);
+         end;
+         do j=513 to shr(scsibuf(0)+1,1);
+            k=read(ScsiWord);
+         end;
+         scsibuf(0)=1024;
+      end;
+      else do j=1 to shr(scsibuf(0)+1,1);
+         scsibuf(j)=read(ScsiWord);
+      end;
+   end;
+
+   scsi.busy=0;
+
+   if i=128 then do;                           /* message for terminal */
+      display_message(scsibuf);
+      scsibuf(0)=0;
+      i=3;                                     /* convert to type 3    */
+   end;
+
+   return i;                                   /* message type         */
+
+end send.to.lod;
+
+
+/***************************************************************************/
+/* interrogate.lod - send message to lod to find out */
+/* if loader rom or main code is running.   load     */
+/* main code if loader is running.                   */
+
+interrogate.lod:proc (status);
+  dcl (j,status) fixed;
+
+  if (status=2) then do;             /* loader running     */
+    if not locate(str,-1) then do;  
+      pos(msg_line,10); erase_line;
+      display_message('Diagnostic file ');  pstring(str);
+      pstring(' not loaded. Press <RETURN> to continue ...');
+      chr = rchar;
+      pos(msg_line,10); erase_line;
+      look.for.lod=0;   lod.running=0;
+      goto start;
+    end;
+    else do;
+      display_message('Starting Up Multi-Track Computer...');
+      scsi.out.buf(0)=2; scsi.out.buf(1)=0;
+      call send.to.lod(200);       /* send load address */
+
+      msw = 0; lsw = 0;
+      do while ((msw ILT f#ms_length) or ((msw = f#ms_length) and (lsw ILT f#ls_length)));
+        scsi.out.buf(0)=512;
+        call readdata(f#ms_sector, f#ls_sector, location(addr(scsi.out.buf(1))),256);
+
+        if lsw = 0 then do;
+          buf_pointer = scsi.out.buf(2);
+          do case dtd_terminal_type;
+            scsi.out.buf(buf_pointer + c#ptype + 1) = shl(t#vt640,8);
+            scsi.out.buf(buf_pointer + c#ptype + 1) = shl(t#mg600,8);
+            scsi.out.buf(buf_pointer + c#ptype + 1) = shl(t#macintosh,8);
+            scsi.out.buf(buf_pointer + c#ptype + 1) = shl(t#vt100,8);
+            scsi.out.buf(buf_pointer + c#ptype + 1) = shl(t#adm3,8);
+            scsi.out.buf(buf_pointer + c#ptype + 1) = shl(t#dq640,8);
+            scsi.out.buf(buf_pointer + c#ptype + 1) = shl(t#datamedia,8);
+            scsi.out.buf(buf_pointer + c#ptype + 1) = shl(t#unknown,8);
+          end;
+        end;
+
+        call send.to.lod(201);  /* send load data */
+        call run.syn.loop;
+        f#ls_sector = f#ls_sector + 1;
+        if f#ls_sector = 0 then f#ms_sector = f#ms_sector + 1;
+        lsw = lsw + 1;
+        if lsw = 0 then msw = msw + 1;
+      end;
+
+      scsi.out.buf(0)=2; scsi.out.buf(1)=lsw;
+      call send.to.lod(202);       /* send checksum/execute */
+    end;                            /* will check next loop time */
+    scrunch_dtd_cat;
+  end;
+
+end interrogate.lod;
+
+/***************************************************************************/
+/********************     Main Program     *********************************/
+/***************************************************************************/
+
+catstat = enter_alternate(catalog_name,2);
+if catstat = false then do;
+   pos(msg_line,10); erase_line; 
+   pstring('Error: could not enter .DTDXCAT  - Press <RETURN> to continue ...');
+   chr = rchar;
+   call exit(0);
+end;
+
+if (read("51")&"40000")<>0 then do;     /* scsi board exists        */
+   lod.d24.#    = 0;                    /* start here               */
+   look.for.lod = 1;
+   if debug then lod.d24.#=3; /* start here for speed */
+end;
+screen=1;
+
+display_dtd_diagnostics;
+setup = true;
+do forever;
+   LOOP_START:;
+   chr = peek;
+   if chr >= 0 then do;
+      chr = rchar;
+      if chr = 0 then call exit(0);
+      if chr = sp then do;                 /* Space Bar */
+         dtd_terminal_type = (dtd_terminal_type + 1) mod 8;
+         display_dtd_terminal_type;
+      end;
+      if (chr = cr) and setup then do;
+         setup = false;
+         pos(21,7); erase_line; 
+         pstring('To run another program, select one here, then reset the DTD or exit');
+         pos(22,7); erase_line;
+         pstring('the current program using <BREAK> on the DTD diagnostic terminal. ');
+      end;
+      call select(prog_num); /* these three calls put the cursor back */
+      call get_fcb(testnum-1, block); /* get the FCB of the selected test program */
+      call clean_fcbname(block, str); /* get name in string format */
+      process_dtd_menu;
+   end;
+   if setup then goto LOOP_START;
+
+   call run.syn.loop;                        /* main program          */
+
+   if real.milliseconds>=send.update.ms   /* else removed */
+   then do;                               /* time for lod activity  */
+
+      if (look.for.lod<>0) then do;       /* find a lod if possible */
+         write(ScsiSel)  =S$SelectEnable \ Scsibits (lod.d24.#);  /* select this d24 */
+         if (read(ScsiSel) & Scsibits(lod.d24.#))=0 then do;      /* board does not exist */
+            lod.d24.#=(lod.d24.#+1)&3;             /* try other d24      */
+         end;
+         else do;
+            i=send.to.lod(1);                      /* try to send 'HELLO'  */
+            if i<>0 then call interrogate.lod(i);  /* if answer, check     */
+            else lod.d24.#=(lod.d24.#+1)&3;        /* else try another d24 */
+         end;
+         send.update.ms=real.milliseconds+1000;    /* approx once per second        */
+      end;           /* of look.for.lod<>0          */
+   end;              /* of lod activity timer       */
+
+end;

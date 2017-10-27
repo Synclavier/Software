@@ -1,0 +1,173 @@
+/* MODIFIED:
+
+   06/09/89 - TSS - Moved PERFORM call into RUN.SYN.LOOP
+
+*/
+
+BEGIN;
+
+// Run host is called from GetSou when there are no
+// terminal events that need processing. This means we are really
+// out of things to do.
+// We will run_host once.
+// We will get woken up on the deferred task again.
+dcl last_perform_loop_time fixed;
+
+RUN.HOST:  PROC PUBLIC;
+    // Time for another perform iteration - return immediately.
+    // Examine.next.event will call run.syn.loop
+    interp_check_interrupts();
+
+    if (REAL.MILLISECONDS != last_perform_loop_time || newkey != 0)
+        return;
+
+    // Run host once. Return not at timer level.
+    interp_run_host_non_timer();
+END RUN.HOST;
+
+// CHILL.OUT.AND.RUN.SYN will run MAIN.LOOP and PERFORM (if run.syn <> 0), and then
+// run the mac in all cases.
+
+// This is called when we know we have to wait for a while (like for a voice to decay to 0
+// whilst mouse scrubbing).  It will always let the mac run for a bit, and will run our
+// work-horse loops if run.syn allows us to do so.
+
+CHILL.OUT.AND.RUN.SYN:  PROC PUBLIC;
+   if (run.syn != 0)
+   {
+      last_perform_loop_time = REAL.MILLISECONDS;
+
+      call MAIN.LOOP;                                    // Keep LOD happy and start notes
+      
+      while (newkey != 0)                                // Start new notes right away
+         call MAIN.LOOP;
+         
+      call PERFORM;
+
+      while (newkey != 0)                                // Start new notes right away
+         call MAIN.LOOP;
+   }
+
+   interp_run_host_non_timer();
+END CHILL.OUT.AND.RUN.SYN;
+
+// run.syn.loop is called frequentlly from the terminal code.
+// If run.syn == 0, it indicates an error. We will just run the host and return (but not at timer level)
+// If run.syn <> 0 we will check for new notes to start. We will return right away after that
+// unless 5 msecs has gone by since we last checked for new buttons.
+// So every 5 msecs we check for new buttons as well as new notes.
+run.syn.loop:  proc public;
+   dcl (save.mam,save.mal,save.r13) fixed;
+   dcl save.#.vars             (15) fixed;               /* used to save current values of # vars  */
+   dcl i fixed;
+   dcl free.r0 lit 'if 0 then write("300")=read("300")'; /* compiler trick!                        */
+
+   // Can't run syn = just chill and return - but not at timer level...
+   if (run.syn == 0) {
+      interp_run_host_non_timer();
+      return;
+   }
+
+   IF (0)                                                // ANALYZE RESPONSE
+   {
+      DCL (A,B) FIXED STATIC;
+      A = A+1;
+      IF (A == 1000)
+      {
+         SEND 'run.syn.loop ', kbd.milliseconds - B;
+         A = 0;
+         B = kbd.milliseconds;
+      }
+   }
+
+   // Process interrupts
+   interp_check_interrupts();
+
+   // Still 5 msecs has not gone by - return
+   if (REAL.MILLISECONDS == last_perform_loop_time && newkey == 0)
+      return;
+
+   // Now do a full 5-millisecond interval pass through the main
+   // loop and button processing code
+   /* save these registers so programmers don't have to worry about them */
+   last_perform_loop_time = REAL.MILLISECONDS;
+
+   save.mam=read(mam  );
+   save.mal=read(mal  );
+   save.r13=read("313");
+
+   /* Copy # variables into a temp area */
+   if inc.poly or (modc<>0) then do; /* Fast model C technique */
+      write("313")=addr(#trk);
+      write("303")=addr(save.#.vars(0));
+      rpc 16;   /* there are 16 # vars */
+      write("363")=read("373");  /* core to core copy */
+   end;
+   else do;                          /* Use slower model B technique */
+      write("313")=addr(#trk);
+      write("303")=addr(save.#.vars(0));
+      free.r0;
+      do i=0 to 7;                   /* do a core to core copy */
+         write("363")=read("373"); write("363")=read("373");
+      end;
+   end;
+
+   call MAIN.LOOP;            // process DTD and real time loop.  Note that 311-samp will always
+   
+   while (newkey != 0)        // Start new notes right away
+      call MAIN.LOOP;
+         
+   call PERFORM;
+   
+   while (newkey != 0)        // Start new notes right away
+      call MAIN.LOOP;
+         
+   if inc.poly or (modc<>0) then do;
+      write("313")=addr(#trk);
+      write("303")=addr(save.#.vars(0));
+      rpc 16;   /* there are 16 # vars */
+      write("373")=read("363");      /* core to core copy */
+   end;
+   else do;                          /* have to use slower technique */
+      write("313")=addr(#trk);
+      write("303")=addr(save.#.vars(0));
+      free.r0;
+      do i=0 to 7;                   /* do a core to core copy */
+         write("373")=read("363"); write("373")=read("363");
+      end;
+   end;
+
+   write(mam)=trk.head;            /* look up #ptr again */
+   write(mal)=#trk;                /* in case main.loop  */
+   #ptr=read(md);                  /* cause memory to move around */
+
+   /* now restore the registers saved above */
+   write(mam  )=save.mam;
+   write(mal  )=save.mal;
+   write("313")=save.r13;
+
+    // Code to instrument what level we leave run.syn.loop at
+    if (0) {
+        dcl wasTimer    fixed   static;
+        dcl wasDeferred fixed   static;
+        dcl wasIOKit    fixed   static;
+        dcl wasOther    fixed   static;
+        dcl timer       fixed   static;
+
+        dcl it fixed;
+        it = interp_current_level(0);
+
+        if (it == 1) wasTimer    = wasTimer    + 1;
+        if (it == 2) wasDeferred = wasDeferred + 1;
+        if (it == 3) wasIOKit    = wasIOKit    + 1;
+        if (it == 4) wasOther    = wasOther    + 1;
+
+        timer = timer + 1;
+        if (timer == 100) {
+            send 'wasTimer', wasTimer, ' wasDeferred', wasDeferred, ' wasIOKit', wasIOKit, ' wasOther', wasOther;
+            timer = 0;
+        }
+    }
+end run.syn.loop;
+
+END;

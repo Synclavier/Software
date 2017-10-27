@@ -1,0 +1,1331 @@
+/*	:SYNSOU:STORMOD:DIR-MENU  $TITLE  Code to Run the Menus	*/
+
+/*
+Modified:
+2000/03/08 - TY  - Prevented long window titles from plotting over buttons
+2000/02/25 - TY  - Made changes to accommodate display of sound file loops
+1990/10/19 - cj  - Updated screen on change of laser disk event
+1989/05/02 - TSS - Merged changes for Optical disk to DTD transfer project
+1988/03/16 - SGS - Added memory boxes and menu toggle button
+1988/03/09 - MWH - Re-do part of my edit from 1/15 (someone merged HALF of it!)
+1988/01/15 - MWH - Add column to display second poly bin if there
+1987/10/29 - LSS - Display bug fixes for final Release N
+*/
+
+/*	$SUBTITLE  Code to Run the Device Menu	*/
+
+Verify.Device: proc (Device) swapable;
+	dcl Device	fixed;
+
+	if Device<=LaserDev then do;	/*	a real disk device	*/
+		if Find_Device(Device)<>0
+		then return true;				/*	and drive exists	*/
+	end;
+	else if inc.poly then do;		/*	poly version	*/
+		call set.cur.bin(0);			/*	select first poly bin	*/
+		if Com16(0,PolyAmount)<>LW#IEQ then do;	/*	if poly memory	*/
+			if ((Device=PolyCacheDev) and (Cache.Secs<>0))
+			or ( Device=PolyMemDev								)
+			then return true;
+		end;
+	end;
+
+	return false;	/*	if we get to here, device is no good	*/
+
+end Verify.Device;
+
+Open.Device.Menu: proc (TopRow,NumLines) public swapable;
+	dcl TopRow			fixed;	/*	row of top of table						*/
+	dcl NumLines		fixed;	/*	max number of device lines allowed	*/
+	dcl Id				fixed;
+	dcl FirstId			fixed;
+	dcl DevList			data (PolyCacheDev,LaserDev,PolyMemDev,1,6,7,2,3,4,5,-1);
+	dcl (Dev,NewDev)	fixed;
+	dcl (Row,Col)		fixed;
+	dcl NumDevices		fixed;
+	dcl Str	(8)		fixed;	/*	used to hold device names	*/
+	dcl XCol1			lit '00';
+	dcl XCol2			lit '(XCol1+9)';
+	dcl XCol3			lit '(XCol2+9)';
+
+	if GID(FullScreenMode)=0 then do;
+		call Set.Auto.Allocation.Id(OBJ$Device);	/*	reset id #	*/
+
+		FirstId=Define.Label(s#aa,TopRow,XCol1,8,'DEVICES:');
+		call Set.Object.Mouse.Access(Id,0);	/*	no Mouse access allowed	*/
+	end;
+
+	NumDevices=0;
+	Dev		 =0;	/*	start with 1st device in list	*/
+	Row		 =TopRow;
+	Col		 =XCol2;
+
+	do while (DevList(Dev)<>(-1))				/*	loop through possible devices	*/
+	and		(Row ilt (TopRow+NumLines));	/*	until menu is full	*/
+
+		NewDev=DevList(Dev);
+		if Verify.Device(NewDev) then do;	/*	device exists	*/
+
+			if (NewDev			<>1)		/*	not the current catalog device	*/
+			or (core(LOC.CCNM)<>0)		/*	or actually in a subcatalog	*/
+			then do;							/*	put new device onto menu		*/
+
+				if GID(FullScreenMode)<>0 then do;	/*	add to dev list	*/
+					call PID(DevMenuButtons+NumDevices,NewDev);
+				end;
+
+				else do;										/*	define menu buttons	*/
+					Id=Define.Device.Icon(s#aa,Row,Col,NewDev,ASC.1+NumDevices);
+
+					call PID(DevMenuButtons+NumDevices,Id);	/*	save id of button	*/
+
+					Str(0)=0;
+
+					if NewDev=LaserDev
+					then call Copy.String('Optical Disk',Str);
+					else call Get.Device.Name(NewDev,Str);
+
+					Id=Define.Label(s#aa,Row,Col+DeviceIconChars,Str(0),Str);
+
+					call Set.Object.Mouse.Access(Id,0);	/*	no Mouse access allowed	*/
+				end;
+
+				NumDevices=NumDevices+1;
+
+				if (NewDev<2) or (NewDev>7) then do;	/*	not a simple device	*/
+					Col=XCol2; Row=Row+1;					/*	next menu position	*/
+				end;
+				else do;
+					if Col=XCol2
+					then Col=XCol3;
+					else do;
+						Row=Row+1; Col=XCol2;
+					end;
+				end;
+			end;
+
+		end;
+
+		Dev=Dev+1;	/*	step to next device in list	*/
+	end;
+
+	call PID(NumDevMenuButtons,NumDevices);	/*	save number of buttons	*/
+
+	if GID(FullScreenMode)=0 then do;
+		Id=Group.Objects(GRP$Device,FirstId,Id,Get#Screen.Event|Get#Poly.Contents);
+		call PID(DeviceGrp,Id);
+
+		call Activate.Group.Objects(GID(DeviceGrp));
+		call Update.Group.Objects	(GID(DeviceGrp));
+	end;
+
+end Open.Device.Menu;
+
+/*	$SUBTITLE	*/
+
+Turn.Off.Selected.Boxes: proc (BaseButton,NumButtons) swapable;
+	dcl BaseButton	fixed;	/*	loc of first button id	*/
+	dcl NumButtons	fixed;	/*	loc of number of button ids	*/
+	dcl (i,j)		fixed;
+	dcl Id			fixed;
+
+	/*	turn off any selected boxes	*/
+	do i=0 to GID(NumButtons)-1;
+		Id=GID(BaseButton+i);
+		if Id<>0 then do;	/*	this button actually exists	*/
+			if Locate.Object(Id) then do;
+				J=Read.Object(Object.Ptr+O#UserData);
+				if ((shr(J,8)&1)<>0) then do;
+					call Toggle.Box.HighLight(Object.Ptr,0);
+				end;
+			end;
+		end;
+	end;
+
+end Turn.Off.Selected.Boxes;
+
+Close.Device.Menu: proc public swapable;
+
+	call Turn.Off.Selected.Boxes(DevMenuButtons,NumDevMenuButtons);
+	call Erase.Group.Objects	 (GID(DeviceGrp));
+	call Undefine.Group.Objects (GID(DeviceGrp));
+	call Ungroup.Objects			 (GID(DeviceGrp));
+
+	call PID(DeviceGrp,-1);	/*	no longer defined	*/
+end Close.Device.Menu;
+
+/*	$SUBTITLE	*/
+
+Open.Sort.Menu: proc (TopRow) swapable;
+	dcl TopRow		fixed;	/*	row of top of table				*/
+	dcl Id			fixed;
+	dcl FirstId		fixed;
+	dcl Str	(7)	fixed;
+	dcl XCol1		lit '28';
+	dcl XCol2		lit '(XCol1+6)';
+
+	if GID(FullScreenMode)<>0 then do;
+		call PID(SortMenuButtons,	 Compute.SortFormat(SORT$Filename,FILTER$None));
+		call PID(SortMenuButtons+1, Compute.SortFormat(SORT$Category,FILTER$None));
+		call PID(SortMenuButtons+2, Compute.SortFormat(SORT$Category,FILTER$Filename));
+		call PID(NumSortMenuButtons,3);
+		return;
+	end;
+
+	call Set.Auto.Allocation.Id(OBJ$Sort);		/*	reset id #	*/
+
+	FirstId=Define.Label(s#aa,TopRow,XCol1,5,'SORT:');
+	call Set.Object.Mouse.Access(FirstId,0);	/*	no Mouse access allowed	*/
+
+	call PID(SortMenuButtons,Define.Device.Icon(s#aa,TopRow,XCol2,Compute.SortFormat(SORT$Filename,FILTER$None),A.A));
+	Str(0)=0; call Append.To.Str(Str,'By Files Only');
+	Id=Define.Label(s#aa,TopRow,XCol2+DeviceIconChars,Str(0),Str);
+	call Set.Object.Mouse.Access(Id,0);	/*	no Mouse access allowed	*/
+	call PID(SortMenuLabels,Id);			/*	id of label					*/
+
+	call PID(SortMenuButtons+1,Define.Device.Icon(s#aa,TopRow+1,XCol2,Compute.SortFormat(SORT$Category,FILTER$None),A.B));
+	Str(0)=0; call Append.To.Str(Str,'By Cats/Files');
+	Id=Define.Label(s#aa,TopRow+1,XCol2+DeviceIconChars,Str(0),Str);
+	call Set.Object.Mouse.Access(Id,0);	/*	no Mouse access allowed	*/
+	call PID(SortMenuLabels+1,Id);		/*	id of label					*/
+
+	call PID(SortMenuButtons+2,Define.Device.Icon(s#aa,TopRow+2,XCol2,Compute.SortFormat(SORT$Category,FILTER$Filename),A.C));
+	Str(0)=0; call Append.To.Str(Str,'By Cats Only');
+	Id=Define.Label(s#aa,TopRow+2,XCol2+DeviceIconChars,Str(0),Str);
+	call Set.Object.Mouse.Access(Id,0);	/*	no Mouse access allowed	*/
+	call PID(SortMenuLabels+2,Id);		/*	id of label					*/
+
+	call PID(NumSortMenuButtons,3);		/*	save number of buttons	*/
+
+	Id=Group.Objects(GRP$Sort,FirstId,Id,Get#Screen.Event);
+	call PID(SortGrp,Id);
+
+	call Activate.Group.Objects(GID(SortGrp));
+	call Update.Group.Objects	(GID(SortGrp));
+
+end Open.Sort.Menu;
+
+Close.Sort.Menu: proc swapable;
+
+	call Turn.Off.Selected.Boxes(SortMenuButtons,NumSortMenuButtons);
+	call Erase.Group.Objects	(GID(SortGrp));
+	call Undefine.Group.Objects(GID(SortGrp));
+	call Ungroup.Objects			(GID(SortGrp));
+
+	call PID(SortGrp,-1);		/*	no longer defined	*/
+end Close.Sort.Menu;
+
+Open.Function.Menu: proc (TopRow) swapable;
+	dcl TopRow		fixed;
+	dcl Id			fixed;
+	dcl FirstId		fixed;
+	dcl Str	(4)	fixed;
+	dcl XCol1		lit '28';			//	same as Sort Menu
+	dcl XCol2		lit '(XCol1+6)';	//	same as Sort Menu
+
+	if GID(FullScreenMode)<>0 then do;	/*	save FUNC values rather than FUNC button ids	*/
+		call PID(FuncMenuButtons,INFO$Audition);
+		call PID(NumFuncMenuButtons,1);
+		return;
+	end;
+
+	call Set.Auto.Allocation.Id(OBJ$Function);	/*	reset id #	*/
+
+	FirstId=Define.Label(s#aa,TopRow+3,XCol1,5,'FUNC:');	//	Might also be labeled 'MODE:' or 'MISC:'
+	call Set.Object.Mouse.Access(FirstId,0);	/*	no Mouse access allowed	*/
+
+	call PID(FuncMenuButtons,Define.Device.Icon(s#aa,TopRow+3,XCol2,INFO$Audition,A.J));
+	Str(0)=0; call Append.To.Str(Str,'Audition');
+	Id=Define.Label(s#aa,TopRow+3,XCol2+DeviceIconChars,Str(0),Str);
+	call Set.Object.Mouse.Access(Id,0);	/*	no Mouse access allowed	*/
+
+	call PID(NumFuncMenuButtons,1);		/*	save number of buttons	*/
+
+	Id=Group.Objects(GRP$Function,FirstId,Id,Get#Screen.Event);
+	call PID(FunctionGrp,Id);
+
+	call Activate.Group.Objects(GID(FunctionGrp));
+	call Update.Group.Objects	(GID(FunctionGrp));
+
+end Open.Function.Menu;
+
+Close.Function.Menu: proc swapable;
+
+	call Turn.Off.Selected.Boxes(FuncMenuButtons,NumFuncMenuButtons);
+	call Erase.Group.Objects	(GID(FunctionGrp));
+	call Undefine.Group.Objects(GID(FunctionGrp));
+	call Ungroup.Objects			(GID(FunctionGrp));
+
+	call PID(FunctionGrp,-1);	/*	no longer defined	*/
+end Close.Function.Menu;
+
+/*	$SUBTITLE	*/
+
+Open.Info.Menu: proc (TopRow) swapable;
+	dcl TopRow			fixed;	/*	row of top of table	*/
+	dcl Id				fixed;
+	dcl FirstId			fixed;
+	dcl Num_Buttons	fixed;
+	dcl Str	(10)		fixed;
+	dcl XCol1			lit '51';
+   dcl XCol2			lit '(XCol1+6 )';
+   dcl XCol3			lit '(XCol2+10)';
+
+	if GID(FullScreenMode)<>0 then do;	/*	save INFO values rather than INFO button ids	*/
+		call PID(InfoMenuButtons,	INFO$Caption);
+		call PID(InfoMenuButtons+1,INFO$Second);
+		call PID(InfoMenuButtons+2,INFO$Mbyte);
+		call PID(InfoMenuButtons+3,INFO$Sector);
+		call PID(InfoMenuButtons+4,INFO$Loops);
+      call PID(InfoMenuButtons+5,INFO$Bin);
+      call PID(InfoMenuButtons+6,INFO$Names);
+		call PID(NumInfoMenuButtons,7);
+		return;
+	end;
+
+	call Set.Auto.Allocation.Id(OBJ$Info);		/*	reset id #	*/
+
+	FirstId=Define.Label(s#aa,TopRow,XCol1,5,'SHOW:');
+	call Set.Object.Mouse.Access(FirstId,0);	/*	no Mouse access allowed	*/
+
+	call PID(InfoMenuButtons,Define.Device.Icon(s#aa,TopRow,XCol2,INFO$Caption,A.D));
+	Str(0)=0; call Append.To.Str(Str,'Caption');
+	Id=Define.Label(s#aa,TopRow,XCol2+DeviceIconChars,Str(0),Str);
+	call Set.Object.Mouse.Access(Id,0);			/*	no Mouse access allowed	*/
+
+	call PID(InfoMenuButtons+1,Define.Device.Icon(s#aa,TopRow+1,XCol2,INFO$Second,A.E));
+	Str(0)=0; call Append.To.Str(Str,'Length in SECONDS');
+	Id=Define.Label(s#aa,TopRow+1,XCol2+DeviceIconChars,Str(0),Str);
+	call Set.Object.Mouse.Access(Id,0);			/*	no Mouse access allowed	*/
+
+	call PID(InfoMenuButtons+2,Define.Device.Icon(s#aa,TopRow+2,XCol2,INFO$MByte,A.F));
+	Str(0)=0; call Append.To.Str(Str,'Length in MEGABYTES');
+	Id=Define.Label(s#aa,TopRow+2,XCol2+DeviceIconChars,Str(0),Str);
+	call Set.Object.Mouse.Access(Id,0);			/*	no Mouse access allowed	*/
+
+	call PID(InfoMenuButtons+3,Define.Device.Icon(s#aa,TopRow+3,XCol2,INFO$Sector,A.G));
+	Str(0)=0; call Append.To.Str(Str,'Length in SECTORS');
+	Id=Define.Label(s#aa,TopRow+3,XCol2+DeviceIconChars,Str(0),Str);
+	call Set.Object.Mouse.Access(Id,0);			/*	no Mouse access allowed	*/
+
+	call PID(InfoMenuButtons+4,Define.Device.Icon(s#aa,TopRow+4,XCol2,INFO$Loops,A.H));
+	Str(0)=0; call Append.To.Str(Str,'Loops');
+	Id=Define.Label(s#aa,TopRow+4,XCol2+DeviceIconChars,Str(0),Str);
+	call Set.Object.Mouse.Access(Id,0);			/*	no Mouse access allowed	*/
+
+   call PID(InfoMenuButtons+5,Define.Device.Icon(s#aa,TopRow+4,XCol3,INFO$Bin,A.I));
+   Str(0)=0; call Append.To.Str(Str,'Poly Bin');
+   Id=Define.Label(s#aa,TopRow+4,XCol3+DeviceIconChars,Str(0),Str);
+   call Set.Object.Mouse.Access(Id,0);		/*	no Mouse access allowed	*/
+
+   call PID(InfoMenuButtons+6,Define.Device.Icon(s#aa,TopRow+5,XCol2,INFO$Names,A.L));
+   Str(0)=0; call Append.To.Str(Str,'Long Filenames');
+   Id=Define.Label(s#aa,TopRow+5,XCol2+DeviceIconChars,Str(0),Str);
+   call Set.Object.Mouse.Access(Id,0);		/*	no Mouse access allowed	*/
+
+   Num_Buttons = 7;
+
+	call PID(NumInfoMenuButtons,Num_Buttons);	/*	save number of buttons	*/
+
+	Id=Group.Objects(GRP$Info,FirstId,Id,Get#Screen.Event);
+	call PID(InfoGrp,Id);
+
+	call Activate.Group.Objects(GID(InfoGrp));
+	call Update.Group.Objects	(GID(InfoGrp));
+
+end Open.Info.Menu;
+
+Close.Info.Menu: proc swapable;
+
+	call Turn.Off.Selected.Boxes(InfoMenuButtons,NumInfoMenuButtons);
+	call Erase.Group.Objects	(GID(InfoGrp));
+	call Undefine.Group.Objects(GID(InfoGrp));
+	call Ungroup.Objects			(GID(InfoGrp));
+
+	call PID(InfoGrp,-1);		/*	no longer defined	*/
+end Close.Info.Menu;
+
+/*	$SUBTITLE	*/
+
+Restore.Mem.Boxes: proc (OldDevice,NewDevice) swapable;
+	dcl OldDevice	fixed;	/*	the previous device: -1= no previous device	*/
+	dcl NewDevice	fixed;
+	dcl OldBase		fixed;
+	dcl NewBase		fixed;
+	dcl i				fixed;
+
+	/*	Proc restores the status of the mem box graphics icons:	*/
+	/*	Lights or unhighlights each according to previous vs.		*/
+	/*	current values	*/
+
+	if OldDevice <> -1 then do;
+		OldBase = sfr#MemBase + (sfr#NumMems*sfr#MemLen*(OldDevice-1));
+	end;
+
+	NewBase = sfr#MemBase + (sfr#NumMems*sfr#MemLen*(NewDevice-1));
+
+	do i = 0 to GID(NumMemoryBoxes)-1;
+
+		/*	highlight boxes that contain values	*/
+		if GID(NewBase+(i*sfr#MemLen))<>-1 then do;
+
+			/*	determine if the box was not previously highlighted	*/
+			if (OldDevice = -1) or (GID(OldBase+(i*sfr#MemLen)) = -1)
+			then do;
+				call Locate.Object(GID(MemoryBox+i));
+				call Toggle.Box.HighLight(Object.Ptr,1);
+			end;
+		end;
+		else do;	/*	unhighlight boxes that do not contain values	*/
+
+			/*	determine if the box was previously highlighted		*/
+			if (OldDevice <> -1) then do;
+				if (GID(OldBase+(i*sfr#MemLen)) <> -1) then do;
+					call Locate.Object(GID(MemoryBox+i));
+					call Toggle.Box.HighLight(Object.Ptr,0);
+				end;
+			end;
+
+		end;
+	end;
+
+end Restore.Mem.Boxes;
+
+dcl Toggle.Clear.Memory.Highlight proc recursive;
+
+/*	$SUBTITLE	*/
+
+Save.Mem.Boxes: proc (Device) swapable;
+	dcl Device	fixed;
+	dcl i			fixed;
+	dcl Base		fixed;
+
+	/*	Actually mem blocks need not be 'saved' or 'restored'	*/
+	/*	since they are read from and written to directly		*/
+
+	if Clear.Mem.On <> 0 then
+		call Toggle.Clear.Memory.Highlight;	/*	turn off clear button	*/
+
+	Base = sfr#MemBase + (sfr#NumMems*sfr#MemLen*(Device-1));
+
+	/*	unhighlight boxes that contain values	*/
+	do i = 0 to GID(NumMemoryBoxes)-1;
+		if GID(Base+(i*sfr#MemLen))<>-1 then do;
+			call Locate.Object(GID(MemoryBox+i));
+			call Toggle.Box.HighLight(Object.Ptr,0);
+		end;
+	end;
+
+end Save.Mem.Boxes;
+
+/*	$SUBTITLE	*/
+
+dcl SET.W1.EJECT.BUTTON proc recursive;
+
+Open.Mem.Boxes: proc (Row,Col) swapable;
+	dcl Row			fixed;
+	dcl Col			fixed;
+
+	dcl Id			fixed;
+	dcl FirstId		fixed;
+	dcl Str	(16)	fixed;
+	dcl i				fixed;
+
+	call Set.Auto.Allocation.Id(OBJ$Mem);	/*	reset id #	*/
+
+	FirstId = Define.Device.Icon(s#aa,Row,Col,0,A.X);
+	call Set.Object.Action(FirstId,O#ACT.Prev.Obj,true);
+	call PID(MemoryBox,FirstId);		/*	id of label	*/
+
+	Id = Define.Device.Icon(s#aa,Row,Col+3,0,A.Y);
+	call Set.Object.Action(Id,O#ACT.Prev.Obj,true);
+	call PID(MemoryBox+1,Id);			/*	id of label	*/
+
+	Id = Define.Label(s#aa,Row,Col+6,0,'Clear');
+	call Set.Object.Action(Id,O#ACT.Prev.Obj,true);
+	call PID(ClearMemoryId,Id);
+	Clear.Mem.On = 0;
+
+	call PID(NumMemoryBoxes,2);		/*	save number of buttons	*/
+
+	/*	Define the 'eject w1' or 'mount w1' button	*/
+
+	Id = Define.Label(s#aa, Row, Col+15, 8, '');
+	call Set.Object.Action(Id, O#ACT.Prev.Obj, true);
+	call PID(EjectW1Button,Id);
+
+	SET.W1.EJECT.BUTTON();
+
+	//	Define Update button
+	Id = Define.Label(s#aa, Row, Col+27, 6, 'Update');
+	call Set.Object.Action(Id, O#ACT.Prev.Obj, true);
+	call PID(UpdateButton,Id);
+
+	Id=Group.Objects(GRP$Mem,FirstId,Id,Get#Screen.Event);
+	call PID(MemGrp,Id);
+
+	call Activate.Group.Objects(GID(MemGrp));
+	call Update.Group.Objects	(GID(MemGrp));
+
+	call Restore.Mem.Boxes(-1,DirDevice);
+
+end Open.Mem.Boxes;
+
+/*	$SUBTITLE	*/
+
+Close.Mem.Boxes: proc swapable;
+	dcl i	fixed;
+
+	call Turn.Off.Selected.Boxes(MemoryBox,NumMemoryBoxes);
+
+	call Erase.Group.Objects	(GID(MemGrp));
+	call Undefine.Group.Objects(GID(MemGrp));
+	call Ungroup.Objects			(GID(MemGrp));
+
+	call PID(MemGrp,-1);		/*	no longer defined	*/
+end Close.Mem.Boxes;
+
+Close.Menu:proc swapable;
+
+	call Close.Device.Menu;
+	call Close.Sort.Menu;
+	call Close.Function.Menu;
+	call Close.Info.Menu;
+
+	call Erase.Object				(GID(MenuBox));
+	call Undefine.Object			(GID(MenuBox));
+	call PID(MenuBox,-1);
+
+end Close.Menu;
+
+Open.DirScreen.Items: proc swapable;
+	dcl Id			fixed;
+	dcl FirstId		fixed;
+	dcl GrpId		fixed;
+	dcl Str	(16)	fixed;
+
+	call Copy.String('SOUND FILE DIRECTORY',Str);
+
+	/*	puts title in box on TOP LEFT of menu	*/
+
+	call Set.Auto.Allocation.Id(OBJ$DirMisc);		/*	reset id #	*/
+
+	Id = Define.Graphics.Label(s#aa,-32,50,Str);	/*	screen title	*/
+	FirstId = Id;
+	call PID(ScreenTitleId,Id);
+	call Set.Object.Mouse.Access(GID(ScreenTitleId),0);
+
+	Id = Define.Graphics.Box(s#aa,gpos.x(-25),gpos.y(-95),
+											gpos.x(2225),gpos.y(-10),0);
+	call PID(ScreenTitleBox,Id);
+	call Set.Object.Mouse.Access(GID(ScreenTitleBox),0);
+
+	Id = Define.Device.Icon(s#aa,0,75,-1,A.M);	/*	menu toggle button	*/
+	call Set.Object.Action(Id,O#ACT.Prev.Obj,false);
+	call PID(MenuBarId,Id);
+
+	GrpId = Group.Objects(GRP$DirMisc,FirstId,Id,Get#Screen.Event);
+	call PID(DirMiscGrp,GrpId);
+
+	call Activate.Group.Objects(GID(DirMiscGrp));
+	call Update.Group.Objects	(GID(DirMiscGrp));
+
+end Open.DirScreen.Items;
+
+Open.Menu: proc (TopRow,NumLines) swapable;
+	dcl TopRow		fixed;
+	dcl NumLines	fixed;
+	dcl Id			fixed;
+
+	if GID(FullScreenMode)=0 then do;
+		/*	draw frame around menu area	*/
+		Id = Define.Graphics.Box(OBJ$Device-1,
+										 gpos.x(-25) ,gpos.y((TopRow-1			)*100),
+										 gpos.x(8000),gpos.y((TopRow-1+NumLines)*100),0);
+		call PID(MenuBox,Id);
+		call Enable.Object(GID(MenuBox));
+		call Update.Object(GID(MenuBox));
+	end;
+
+	if GID(DeviceGrp)		=(-1) then call Open.Device.Menu(TopRow,NumLines);	/*	open device list stuff		*/
+	if GID(SortGrp)		=(-1) then call Open.Sort.Menu  (TopRow);				/*	open sort list stuff			*/
+	if GID(FunctionGrp)	=(-1) then call Open.Function.Menu(TopRow);			/*	open function list stuff	*/
+	if GID(InfoGrp)		=(-1) then call Open.Info.Menu  (TopRow);				/*	open info list stuff			*/
+
+end Open.Menu;
+
+/*	$SUBTITLE	*/
+
+Display.Current.Menu.Settings: proc swapable;
+	dcl (Id,I,J)	fixed;
+	dcl NewState	fixed;
+	dcl CurState	fixed;
+
+	/*	Show sort field in low intensity if not on laser dev	*/
+	/*	light appropriate box actually in use						*/
+
+	if		  mg600 then call Mouse.Switch(0);	/*	turn off mouse cursor for a second	*/
+	else if vt640 then call Save.Cursor;		/*	save current cursor state	*/
+
+	if GID(DeviceGrp) <> -1 then do;
+		do i=0 to GID(NumDevMenuButtons)-1;		/*	display current device	*/
+			Id=GID(DevMenuButtons+i);
+
+			if Id<>0 then do;	/*	this button actually exists	*/
+				if Locate.Object(Id) then do;
+					J=Read.Object(Object.Ptr+O#UserData);
+					CurState=((shr(J,8)&1)<>0);
+					NewState=((J&255)=DirDevice);
+					if NewState<>CurState then do;
+						write(md)=(J&255)|shl(NewState,8);
+						call Toggle.Box.HighLight(Object.Ptr,NewState);
+					end;
+				end;
+			end;
+		end;
+	end;
+
+	if GID(SortGrp) <> -1 then do;
+		do i=0 to GID(NumSortMenuButtons)-1;	/*	display current sort order	*/
+			Id=GID(SortMenuButtons+i);
+
+			if Id<>0 then do;	/*	this button actually exists	*/
+				if Locate.Object(Id) then do;
+					J=Read.Object(Object.Ptr+O#UserData);
+					CurState=((shr(J,8)&1)<>0);
+					NewState=((J&255)=Compute.SortFormat(SortInfo,ItemFilter));
+					if NewState<>CurState then do;
+						write(md)=(J&255)|shl(NewState,8);
+						call Toggle.Box.HighLight(Object.Ptr,NewState);
+					end;
+				end;
+			end;
+
+			Id=GID(SortMenuLabels+i);
+
+			if Id<>0 then do;	/*	this button actually exists	*/
+				if Dirdevice <> LaserDev then do;	/*	not showing laser	*/
+					call Set.Object.Attr(id,0,ATTR#Normal|ATTR#AltIntensity);
+					call Set.Object.Attr(id,1,ATTR#Normal|ATTR#AltIntensity);
+				end;
+				else do;										/*	showing laser		*/
+					call Set.Object.Attr(id,0,ATTR#Normal);
+					call Set.Object.Attr(id,1,ATTR#Normal);
+				end;
+			end;
+		end;
+	end;
+
+	if (GID(FunctionGrp) != -1) {
+		do i = 0 to GID(NumFuncMenuButtons)-1;
+			Id = GID(FuncMenuButtons+i);
+
+			if (Id != 0) {		//	this button actually exists
+				if Locate.Object(Id) then {
+					J = Read.Object(Object.Ptr+O#UserData);
+					CurState = ((shr(J,8)&1) != 0);
+					NewState = (((J&255)&FunctionInfo) != 0);
+					if (NewState != CurState) {
+						write(md) = (J&255)|shl(NewState,8);
+						Toggle.Box.HighLight(Object.Ptr,NewState);
+					}
+				}
+			}
+		end;
+	}
+
+	if GID(InfoGrp) <> -1 then do;
+		do i=0 to GID(NumInfoMenuButtons)-1;	/*	display current info to show	*/
+			Id=GID(InfoMenuButtons+i);
+
+			if Id<>0 then do;	/*	this button actually exists	*/
+				if Locate.Object(Id) then do;
+					J=Read.Object(Object.Ptr+O#UserData);
+					CurState=((shr(J,8)&1)<>0);
+					NewState=(((J&255)&ShowInfo)<>0);
+					if NewState<>CurState then do;
+						write(md)=(J&255)|shl(NewState,8);
+						call Toggle.Box.HighLight(Object.Ptr,NewState);
+					end;
+				end;
+			end;
+		end;
+	end;
+
+	if		  mg600 then call Mouse.Switch(1);	/*	turn mouse cursor back on		*/
+	else if vt640 then call Restore.Cursor;	/*	restore previous cursor state	*/
+
+end Display.Current.Menu.Settings;
+
+/*	$SUBTITLE	*/
+
+Get.Next.MenuToggle.Event: proc swapable;
+	dcl (I,Dev)	fixed;
+
+	do while Exit.My.Screen=0;			/*	wait for exit condition	*/
+
+		if Screen.Event.Group<>GID(DirMiscGrp) then return;
+
+		if Screen.Event.Code=Get.Screen.Event then do;
+
+			if (Screen.Event.Info=S#MouseSelect)
+			or (Screen.Event.Info=S#MouseActivate)
+			then do;
+				call PID(FullScreenMode,(GID(FullScreenMode) xor 1));
+				Exit.My.Screen = 1;					/*	exit this screen	*/
+				Goto.This.Screen = s.recall.snd;	/*	then re-enter		*/
+			end;
+		end;
+
+		call Get.Next.Optical.Event;	/*	get the next event to handle	*/
+	end;
+
+end Get.Next.MenuToggle.Event;
+
+/*	$SUBTITLE	*/
+
+Change.Device: proc (Dev) swapable;
+	dcl Dev			fixed;
+	dcl Title (40)	fixed;
+	dcl OldDevice	fixed;
+
+	OldDevice = DirDevice;
+	call Select.New.Window.Device(0,Dev);
+	call Display.Current.Menu.Settings;
+
+	call Restore.Mem.Boxes(OldDevice,DirDevice);
+
+	/*	Change title if not using title line to display info headings	*/
+	if ShowInfo == INFO$Filename then do;
+		call Get.Window.Title(DirDevice,Title);
+	end;
+	/*	Will re-display info headings if they change (eg: no poly bin on a disk)	*/
+	else do;
+		call Build.Window.Title(ShowInfo,Title);
+		//	On the B-page, if the title exceeds MaxLen-7, it will plot over the buttons
+		write("313") = GID(DirTableCols)-7;
+		if (Title(0) igt read("313")) Title(0) = read("313");
+	end;
+
+	Disable.Deposits=true;
+		call Deposit.Label(GID(DirTableTitle),Title);
+	Disable.Deposits=false;
+
+end Change.Device;
+
+/*	$SUBTITLE	*/
+
+Get.Next.Device.Event: proc swapable;	/*	process device event & get next one	*/
+	dcl (I,Dev)	fixed;
+
+	do while Exit.My.Screen=0;				/*	wait for exit condition	*/
+
+		if Screen.Event.Group<>GID(DeviceGrp) then return;
+
+		if Screen.Event.Code=Get.Screen.Event then do;
+
+			if (Screen.Event.Info=S#MouseSelect)
+			or (Screen.Event.Info=S#MouseActivate)
+			then do;
+				Dev=Fetch.Object.Info(Screen.Event.Id,O#UserData)&255;
+				call Change.Device(Dev);
+			end;
+		end;
+
+		else if Screen.Event.Code=Get.Poly.Contents then do;	/*	memory has changed in poly	*/
+			if (Screen.Event.Info & 1) <> 0 then do;
+				if DirDevice=PolyMemDev then call Change.Device(DirDevice);
+			end;
+			else if (Screen.Event.Info & (4\8)) <> 0 then do;
+				if DirDevice=LaserDev then call Change.Device(DirDevice);
+			end;
+		end;
+
+		else if Screen.Event.Code=Get.In.Char then do;
+			Screen.Event.Info=UCase(Screen.Event.Info);	/*	uppercase the char	*/
+
+			if (Screen.Event.Info>=ASC.1)
+			or (Screen.Event.Info<=ASC.9) then do;
+				I=GID(DevMenuButtons+Screen.Event.Info-ASC.1);
+				Dev=Fetch.Object.Info(I,O#UserData)&255;	/*	set info bits	*/
+				call Change.Device(Dev);
+			end;
+		end;
+
+		call Get.Next.Optical.Event;		/*	get the next event to handle	*/
+	end;
+
+end Get.Next.Device.Event;
+
+dcl Handle.Memory.Box proc (fixed) recursive;
+
+/*	$SUBTITLE	*/
+
+Change.UserSort: proc (Info) swapable;
+	dcl Info			fixed;	/*	the new SortInfo	*/
+	dcl (Col,Row)	fixed;	/*	the new position of the old selected file/cat	*/
+
+	if DirDevice <> LaserDev then return;	/*	only update if on laser	*/
+
+	/*	clear mem blocks ??	*/
+	Clear.Mem.On = 1;
+	call Handle.Memory.Box(0);
+	Clear.Mem.On = 1;
+	call Handle.Memory.Box(1);
+	Clear.Mem.On = 0;
+
+	if Info=Compute.SortFormat(SORT$Filename,FILTER$None) then
+		call Change.Window.Sort.Format(ActiveWindowId,SORT$Filename,FILTER$None);
+
+	else if Info=Compute.SortFormat(SORT$Category,FILTER$None) then
+		call Change.Window.Sort.Format(ActiveWindowId,SORT$Category,FILTER$None);
+
+	else if Info=Compute.SortFormat(SORT$Category,FILTER$Filename) then
+		call Change.Window.Sort.Format(ActiveWindowId,SORT$Category,FILTER$Filename);
+
+	call Display.Current.Menu.Settings;
+
+	call Fetch.Table.Cur.Cell(GID(DirTable),loc(addr(Col)));
+	call Set.DirTable.Position(Row,Col);	/*	rehighlight previously highlighted entry	*/
+
+end Change.UserSort;
+
+/*	$SUBTITLE	*/
+
+Get.Next.Sort.Event: proc swapable;	/*	process device event & get next one	*/
+	dcl (I,Info)	fixed;
+
+	do while Exit.My.Screen=0;			/*	wait for exit condition	*/
+
+		if Screen.Event.Group<>GID(SortGrp) then return;
+
+		if Screen.Event.Code=Get.Screen.Event then do;
+
+			if (Screen.Event.Info=S#MouseSelect)
+			or (Screen.Event.Info=S#MouseActivate)
+			then do;
+				Info=Fetch.Object.Info(Screen.Event.Id,O#UserData)&255;
+				call Change.UserSort(Info);
+			end;
+		end;
+
+		else if Screen.Event.Code=Get.In.Char then do;
+			Screen.Event.Info=UCase(Screen.Event.Info);	/*	uppercase the char	*/
+
+			if (Screen.Event.Info>=A.A)
+			or (Screen.Event.Info<=A.C) then do;
+				I=GID(SortMenuButtons+Screen.Event.Info-A.A);
+				Info=Fetch.Object.Info(I,O#UserData)&255;	/*	set info bits	*/
+				call Change.UserSort(Info);
+			end;
+		end;
+
+		call Get.Next.Optical.Event;	/*	get the next event to handle	*/
+	end;
+
+end Get.Next.Sort.Event;
+
+/*	$SUBTITLE	*/
+
+Get.Next.Function.Event: proc swapable;	/*	process function event & get next one	*/
+	dcl (I,Info)	fixed;
+
+	while (Exit.My.Screen == 0) {				/*	wait for exit condition	*/
+
+		if (Screen.Event.Group != GID(FunctionGrp)) return;
+
+		if (Screen.Event.Code == Get.Screen.Event) {
+			if ((Screen.Event.Info == S#MouseSelect) || (Screen.Event.Info == S#MouseActivate)) {
+				Info = FunctionInfo xor (Fetch.Object.Info(Screen.Event.Id,O#UserData)&255);	/*	toggle info bits	*/
+				Change.Window.Function.Format(0,Info);	//	Note: this calls Set.Display.Format()
+				Display.Current.Menu.Settings();
+			}
+		}
+		else if (Screen.Event.Code == Get.In.Char) {
+			Screen.Event.Info = UCase(Screen.Event.Info);
+			if (Screen.Event.Info == A.J) {
+				I = GID(FuncMenuButtons	/*	+Screen.Event.Info-A.J		*/	);
+				Info = FunctionInfo xor (Fetch.Object.Info(I,O#UserData)&255);	/*	toggle info bits	*/
+				Change.Window.Function.Format(0,Info);	//	Note: this calls Set.Display.Format()
+				Display.Current.Menu.Settings();
+			}
+		}
+		call Get.Next.Optical.Event;			/*	get the next event to handle	*/
+	}
+end Get.Next.Function.Event;
+
+Change.ShowInfo: proc (Info) swapable;
+	dcl Info			fixed;
+	dcl Title (40)	fixed;
+
+	if ((ShowInfo xor Info) & (INFO$Caption|INFO$Second|INFO$Mbyte|INFO$Sector|INFO$Loops|INFO$Bin|INFO$Names))<>0
+	then do;									/*	only redraw if change affects display	*/
+
+		if (Info&(INFO$Caption|INFO$Second|INFO$MByte|INFO$Sector|INFO$Loops|INFO$Bin|INFO$Names))=0
+		then call Get.Window.Title(DirDevice,Title);
+		else do;
+			call Build.Window.Title(Info,Title);
+			//	On the B-page, if the title exceeds MaxLen-7, it will plot over the buttons
+			write("313") = GID(DirTableCols)-7;
+			if (Title(0) igt read("313")) Title(0) = read("313");
+		end;
+
+		Disable.Deposits=true;
+			call Deposit.Label(GID(DirTableTitle),Title);
+		Disable.Deposits=false;
+
+	end;
+
+	/*	redraw window (will change scroll position only if changing formats)	*/
+	call Change.Window.Info.Format(0,Info);	//	Note: this calls Set.Display.Format()
+
+	call Display.Current.Menu.Settings;
+
+end Change.ShowInfo;
+
+/*	$SUBTITLE	*/
+
+Get.Next.Info.Event: proc swapable;	/*	process info event & get next one	*/
+	dcl (I,Info)	fixed;
+
+	do while Exit.My.Screen=0;			/*	wait for exit condition	*/
+
+		if Screen.Event.Group<>GID(InfoGrp) then return;
+
+		if Screen.Event.Code=Get.Screen.Event then do;
+			if (Screen.Event.Info=S#MouseSelect)
+			or (Screen.Event.Info=S#MouseActivate)
+			then do;
+				Info=ShowInfo xor (Fetch.Object.Info(Screen.Event.Id,O#UserData)&255);	/*	toggle info bits	*/
+				call Change.ShowInfo(Info);
+			end;
+		end;
+
+		else if Screen.Event.Code=Get.In.Char then do;
+			Screen.Event.Info=UCase(Screen.Event.Info);	/*	uppercase the char	*/
+			if  (Screen.Event.Info ige A.D)
+			and (Screen.Event.Info ile A.I) then do;
+				I=GID(InfoMenuButtons+Screen.Event.Info-A.D);
+				Info=ShowInfo xor (Fetch.Object.Info(I,O#UserData)&255);	/*	toggle info bits	*/
+				call Change.ShowInfo(Info);
+			end;
+		end;
+
+		call Get.Next.Optical.Event;	/*	get the next event to handle	*/
+	end;
+
+end Get.Next.Info.Event;
+
+/*	$SUBTITLE	*/
+
+TOGGLE.CLEAR.MEMORY.HIGHLIGHT: proc swapable;
+
+	Clear.Mem.On = Clear.Mem.On xor 1;
+
+	if Clear.Mem.On <> 0 then do;		/*	clear function is now active	*/
+		call Set.Object.Attr(GID(ClearMemoryId),0,ATTR#Normal\ATTR#Blink\ATTR#Reverse\ATTR#AltIntensity);
+		call Set.Object.Attr(GID(ClearMemoryId),1,ATTR#Normal\ATTR#Blink\ATTR#Reverse\ATTR#AltIntensity);
+	end;
+	else do;
+		call Set.Object.Attr(GID(ClearMemoryId),0,ATTR#Normal);
+		call Set.Object.Attr(GID(ClearMemoryId),1,ATTR#Normal);
+	end;
+
+	call Update.Object(GID(ClearMemoryId));
+end TOGGLE.CLEAR.MEMORY.HIGHLIGHT;
+
+
+/*	set eject button state.  called when screen is first drawn,	*/
+/*	and after a successful mount...										*/
+
+SET.W1.EJECT.BUTTON: proc swapable;
+
+	if ((core(loc.monbits) & m#w1_ej) == 0)	/*	leave label blank if drive is not removable	*/
+		return;
+
+	if (Read_Catalog('',7) != 0)					/*	if can read it, assume we it is mounted		*/
+	{
+		DEPOSIT.LABEL (GID(EjectW1Button), 'Eject W1');
+		W1.State = 0;
+	}
+
+	else													/*	else assume it needs to be mounted				*/
+	{
+		DEPOSIT.LABEL (GID(EjectW1Button), 'Mount W1');
+		W1.State = 1;
+	}
+
+	call Update.Object(GID(EjectW1Button));
+end SET.W1.EJECT.BUTTON;
+
+
+/*	Handle pressing of the mount button.	*/
+
+DO.SOUND.FILE.CACHE.REBUILD: proc swapable;
+	DCL SETUP.CACHE proc(fixed) EXTERNAL;		/*	set up a cache of all sound files on winchester disk	*/
+
+	DRAW.MESSAGE('Rebuilding sound file list...');
+
+	SETUP.CACHE(false);
+
+	ERASE.MESSAGE();
+END DO.SOUND.FILE.CACHE.REBUILD;
+
+DO.W1.EJECT.BUTTON: proc swapable;
+	dcl i	fixed;
+
+	dcl EJECT_CODE	lit '0';
+	dcl MOUNT_CODE	lit '1';
+
+	Eject_Disk: proc(code) returns(fixed);
+		dcl code			fixed;
+		dcl ptr			fixed;
+		dcl win_type	fixed;
+		dcl i				fixed;
+
+		ptr = find_device(7);						/*	point to first W1 device entry					*/
+
+		if (ptr == 0) then return(false);		/*	big oops!!!												*/
+
+		if (code == EJECT_CODE)						/*	ejecting...												*/
+		{
+			if (shr(core(loc.csec+1), 8) == 7)	/*	toss current file if it is on w1					*/
+			{
+				core(loc.cfn ) = 0;
+				core(loc.ftyp) = 0;
+				core(loc.svd ) = 0;
+				core(loc.strd) = 0;
+				core(loc.strn) = 0;
+				core(loc.cmed) = 0;
+				core(loc.csec) = 0;
+				core(loc.csln) = 0;
+				core(loc.clen) = 0;
+			}
+
+			if (shr(udev, 8) == 7)					/*	disallow eject if ccat is on w1:					*/
+			{
+				SET.ERROR(err.opt, 'ENTER W0: before ejecting W1.');
+				return (false);
+			}
+
+			if (shr(pdev, 8) == 7)					/*	also disallow eject if path is on w1			*/
+			{
+				SET.ERROR(err.opt, 'set PATH to W0:.SYSTEM before ejecting W1.');
+				return (false);
+			}
+
+			if (interp_check_media_use(0, 7) != 0)
+			{
+				SET.ERROR(err.opt, 'W1 is being used by InterChange and cannot be ejected right now');
+				return (false);
+			}
+		}
+
+
+		/*	Loop over all drives and issue command.  Here we allow media removal and then issue			*/
+		/*	an EJECT command (or startup, in the case of a mount).  If all goes well with the			*/
+		/*	ejects, we loop a second time to zero out the config area.  This will keep anyone from		*/
+		/*	using the drive until it is actually mounted again...													*/
+
+		win_type   = core(ptr + s#devtyp) & 0xFF;					/*	get W0 vs W1 indication					*/
+		S$SenseKey = S$Good;												/*	init to good status						*/
+		c#status   = 0;													/*	clean up any cat error status			*/
+
+		while ((core(ptr + s#devtyp) & 0xFF) == win_type)		/*	loop until device type changes (not W0 or W1 anymore)	*/
+		{
+			if (code == EJECT_CODE)										/*	ejecting: do so!							*/
+			{
+				S$SenseKey = PreventAllow(core(ptr + s#devadr), 0);		/*	allow media removal now		*/
+
+				if (S$SenseKey != S$Good)											/*	quit if no go					*/
+				{
+					handle.scsi.cat.error();
+					return (false);
+				}
+
+				S$SenseKey = StartStopUnit(core(ptr + s#devadr), 2, 1);	/*	now eject						*/
+
+				if (S$SenseKey != S$Good)											/*	quit if no go here as well	*/
+				{
+					handle.scsi.cat.error();
+					return (false);
+				}
+
+				/*	mark cache as invalid if we successfully ejected one drive:	*/
+
+				call extset(core(loc.emarea), em.polycache, 1, 0);
+			}
+
+			else																/*	else handle remount						*/
+			{
+				S$SenseKey = StartStopUnit(core(ptr + s#devadr), 1, 0);	/*	spin up							*/
+
+				if (S$SenseKey != S$Good)								/*	see if we can spin up					*/
+				{
+					handle.scsi.cat.error();
+					return (false);
+				}
+
+				do i = 0 to 200;											/*	wait to make sure is ready				*/
+					write(3) = 0;
+				end;
+
+				S$SenseKey = TestUnitReady(core(ptr + s#devadr));			/*	test ready						*/
+
+				if (S$SenseKey != S$Good)								/*	if not ready, disallow mount			*/
+				{
+					handle.scsi.cat.error();
+					return (false);
+				}
+			}
+
+			ptr = ptr + s#blklen;										/*	point to next device in list			*/
+		}
+
+
+		/*	OK: we have done our dirty deed.  If mounting, we have spun up each drive and they have	*/
+		/*	all reported being ready.  Set the size of the SCSI chain now.										*/
+
+		if (code == MOUNT_CODE)
+		{
+			S$SenseKey = Set_Win_Chain_Size(7);						/*	set size of chain							*/
+
+			if (S$SenseKey != S$Good)									/*	if can't, doomed....						*/
+			{
+				handle.scsi.cat.error();
+				return (false);
+			}
+
+			if (Read_Catalog('',7) == 0)								/*	had better be able to read catalog	*/
+			{																	/*	now!!!										*/
+				handle.scsi.cat.error();
+				return (false);
+			}
+
+			call extset(core(loc.emarea), em.polycache, 1, 0);	/*	rebuild poly cache						*/
+		}
+
+
+		/*	else if ejecting, and we have ejected all the media successfully (at least according to	*/
+		/*	the status!) zero out the config to keep the drive from being used by anybody					*/
+
+		else
+		{
+			ptr = find_device(7);										/*	reset pointer to first device entry	*/
+
+			if (ptr == 0) then return(false);						/*	big big oops!!!							*/
+
+			while ((core(ptr + s#devtyp) & 0xFF) == win_type)	/*	loop till poop								*/
+			{
+				core(ptr + s#seccyl) = 0;					/*	zero out capacity to force a remount before	*/
+				core(ptr + s#totcyl) = 0;					/*	drive is ever used again...						*/
+
+				ptr = ptr + s#blklen;
+			}
+		}
+
+
+		//	Now rebuild the poly cache
+		DO.SOUND.FILE.CACHE.REBUILD();
+
+		return (true);
+	end Eject_Disk;
+
+
+	/*	main code to load/eject w1 from rtp:	*/
+
+	if ((core(loc.monbits) & m#w1_ej) == 0)		/*	do nothing if device is not removable	*/
+		return (false);
+
+	if (W1.State == 0)									/*	is mounted; eject...							*/
+	{
+		if (Eject_Disk(EJECT_CODE) == false)		/*	could not eject...							*/
+			return(false);
+
+		/*	Change button to mount:	*/
+		DEPOSIT.LABEL (GID(EjectW1Button), 'Mount W1');
+		W1.State = 1;
+		call Update.Object(GID(EjectW1Button));
+	}
+
+	else														/*	is ejected; mount it							*/
+	{
+		if (Eject_Disk(MOUNT_CODE) == false)		/*	could not mount								*/
+			return (false);
+
+		SET.W1.EJECT.BUTTON();							/*	set button to eject if we mounted ok	*/
+	}
+
+	return (true);											/*	YUP; we did it!								*/
+end DO.W1.EJECT.BUTTON;
+
+/*	$SUBTITLE	*/
+
+Handle.Memory.Box: proc (WhichBox) swapable;
+	dcl WhichBox	fixed;
+
+	dcl MemBlock							fixed;
+	dcl (Index,Offset)					fixed;
+	dcl (TopIndex,TopOffset)			fixed;
+	dcl (CursorIndex,CursorOffset)	fixed;
+	dcl (Col,Row)							fixed;
+
+	MemBlock = sfr#MemBase + (sfr#NumMems*sfr#MemLen*(DirDevice-1))
+								  + (WhichBox*sfr#MemLen);
+
+	if (Clear.Mem.On <>0) then do;			/*	clear out memory block		*/
+		if GID(MemBlock)<>-1 then do;			/*	something is indeed in it	*/
+			call PID(MemBlock,-1);
+			write(mdi) = -1; write(mdi) = -1; write(md) = -1;
+			call Locate.Object(GID(MemoryBox+WhichBox));
+			call Toggle.Box.HighLight(Object.Ptr,(GID(MemBlock)<>-1));
+		end;
+		call Toggle.Clear.Memory.Highlight;	/*	turn off clear button	*/
+	end;
+
+	else do;
+		if GID(MemBlock) = -1 then do;		/*	this mem block has been cleared	*/
+			/*	store current DC info in block	*/
+			call SaveDisplayPos(DirDevice,0);
+			call Fetch.DC.Top.Pointers(loc(addr(Index)),DirDevice,Compute.SortFormat(SortInfo,ItemFilter));
+			call PID(MemBlock,Index);
+			call PID(MemBlock+1,Offset);
+
+			call Fetch.DC.Cursor.Pointers(loc(addr(Index)),DirDevice,Compute.SortFormat(SortInfo,ItemFilter));
+			call PID(MemBlock+2,Index);
+			call PID(MemBlock+3,Offset);
+
+			call Locate.Object(GID(MemoryBox+WhichBox));
+			call Toggle.Box.HighLight(Object.Ptr,(GID(MemBlock)<>-1));
+		end;
+
+		else do;	/*	something in mem block - recall DC info and reset screen	*/
+			TopIndex		 = GID(MemBlock);
+			TopOffset	 = GID(MemBlock+1);
+			CursorIndex	 = GID(MemBlock+2);
+			CursorOffset = GID(MemBlock+3);
+			call Store.DC.Top.Pointers(loc(addr(TopIndex)),DirDevice,Compute.SortFormat(SortInfo,ItemFilter));
+			call Store.DC.Cursor.Pointers(loc(addr(CursorIndex)),DirDevice,Compute.SortFormat(SortInfo,ItemFilter));
+			call RestoreDisplayPos(false);
+
+			/*	double check ptrs to see if they were altered by RestoreDisplayPos	*/
+			/*	if so, update Top ptrs in mem block	*/
+			call GetListPos(0);
+			call Get.Index.and.Offset(loc(addr(TopIndex)));
+			if (TopIndex <> GID(MemBlock)) or (TopOffset <> GID(MemBlock+1))
+			then do;
+				call PID(MemBlock,TopIndex);
+				call PID(MemBlock+1,TopOffset);
+			end;
+
+			/*	if so, update Cursor ptrs in mem block	*/
+			call Find.Entry.At.Cursor.Position(loc(addr(CursorIndex)));
+			if (CursorIndex <> GID(MemBlock+2)) or (CursorOffset <> GID(MemBlock+3))
+			then do;
+				call PID(MemBlock+2,CursorIndex);
+				call PID(MemBlock+3,CursorOffset);
+			end;
+		end;
+	end;
+
+end Handle.Memory.Box;
+
+/*	$SUBTITLE	*/
+
+Get.Next.Memory.Event: proc swapable;		/*	process device event & get next one	*/
+	dcl Chosen.Switch	fixed;
+
+	do while Exit.My.Screen=0;					/*	wait for exit condition	*/
+
+		if (Screen.Event.Group<>GID(MemGrp))
+		then return;
+
+		if Screen.Event.Code=Get.Screen.Event then do;
+
+			if (Screen.Event.Id >= GID(MemoryBox))
+			and (Screen.Event.Id < (GID(MemoryBox)+GID(NumMemoryBoxes)))
+			then do;
+				if (Screen.Event.Info=S#MouseSelect)
+				or (Screen.Event.Info=S#MouseActivate)
+				then do;
+					call Handle.Memory.Box(Screen.Event.Id - GID(MemoryBox));
+				end;
+			end;
+
+			else if (Screen.Event.Id=GID(ClearMemoryId))
+			then do;
+				if (Screen.Event.Info=S#MouseSelect)
+				or (Screen.Event.Info=S#MouseActivate)
+				then do;
+					call Toggle.Clear.Memory.Highlight;
+				end;
+			end;
+
+			else if (Screen.Event.Id=GID(EjectW1Button))
+			then do;
+				if (Screen.Event.Info=S#MouseSelect)
+				or (Screen.Event.Info=S#MouseActivate)
+				then do;
+
+					if (DO.W1.EJECT.BUTTON() != 0)		/*	if process went ok...		*/
+					{
+						/*	update the display if we are showing W1 and it is mounted	*/
+						if ((W1.State == 0) && (DirDevice == 7))
+							Change.Device(DirDevice);
+
+						/*	else clear the display if we are showing W1 and it is			*/
+						/*	not mounted:																*/
+						else if ((W1.State == 1) && (DirDevice == 7))
+						{
+							force_empty_display = true;	/*	update display, but do		*/
+							Change.Device(DirDevice);		/*	not present any error		*/
+							force_empty_display = false;	/*	message							*/
+						}
+
+						/*	refresh the display if showing poly memory in call cases		*/
+						else if (DirDevice == PolyCacheDev)
+							Change.Device(DirDevice);
+					}
+
+				end;
+			end;
+
+			else if (Screen.Event.Id=GID(UpdateButton))
+			then do;
+				if (Screen.Event.Info=S#MouseSelect)
+				or (Screen.Event.Info=S#MouseActivate)
+				then do;
+
+					call extset(core(loc.emarea), em.polycache, 1, 0);
+
+					DO.SOUND.FILE.CACHE.REBUILD();
+
+					/*	update the display if we are showing W0 and it is mounted		*/
+					if (DirDevice == 6)
+						Change.Device(DirDevice);
+
+					/*	update the display if we are showing W1 and it is mounted		*/
+					else if ((W1.State == 0) && (DirDevice == 7))
+						Change.Device(DirDevice);
+
+					/*	else clear the display if we are showing W1 and it is				*/
+					/*	not mounted:																	*/
+					else if ((W1.State == 1) && (DirDevice == 7))
+					{
+						force_empty_display = true;	/*	update display, but do			*/
+						Change.Device(DirDevice);		/*	not present any error			*/
+						force_empty_display = false;	/*	message								*/
+					}
+
+					/*	refresh the display if showing poly memory in call cases			*/
+					else if (DirDevice == PolyCacheDev)
+						Change.Device(DirDevice);
+
+				end;
+			end;
+		end;
+
+		call Get.Next.Optical.Event;					/*	get the next event to handle	*/
+	end;
+
+end Get.Next.Memory.Event;

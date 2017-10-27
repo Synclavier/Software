@@ -1,0 +1,700 @@
+/* BOUNCE $SUBTITLE  ROUTINE TO PERFORM BOUNCE AND REPLICATING BOUNCE
+
+   Modified:
+   01/30/91 - MWH - Report which tracks have had new notes
+   08/24/89 - PF  - Added restore of THD.MIDI.PATH in INIT.TRK.HEAD.INFO
+   10/20/88 - cj  - check for empty source track in fast.copy
+   09/12/88 - CJ  - SET BITS TO UPDATE DTD ON SWITCH.TRACKS
+   03/15/88 - cj  - Send over info to dtd after changing track volume
+   02/25/88 - eeg - added fast.copy routine
+   02/24/88 - eeg - moved some useful procedures outside of main bounce code
+   12/21/87 - MWH - Merge poly updates with N-Final plus AEE sources
+   09/09/87 - MWH - ADDED PREFERED POLY BIN TO TRACK HEADER
+   
+*/
+
+GET.TRK.HEAD: PROC (TRK) FIXED SWAPABLE;   /* ALLOCATE TRK HEAD; RETURNS ABS PTR TO IT */
+   DCL TRK FIXED;
+
+   IF ALLOCATE.TRK.HEADER(TRK)=0  /* TRY TO CREATE THE THD     */
+   THEN DO;                       /* NONE AVAILABLE            */
+      CALL DISPLAY.ERR(0);        /* DISPLAY 'NOT ENOUGH ROOM TO BOUNCE'   */
+      EDIT.ERROR = E#NOROOM;      /* SET GLOBAL ERROR FLAG     */
+      RETURN 0;                   /* NO MEMORY - BOMB OUT      */
+   END;
+
+   WRITE(MAM)=TRK.HEAD;           /* GET ABS PTR TO NEW THD    */
+   WRITE(MAL)=TRK;
+   RETURN READ(MD);               /* RETURN ABS PTR TO NEW THD */
+
+END GET.TRK.HEAD;                 /* OF ALLOCATE NEW TRK HEAD  */
+
+
+/* $PAGE */
+
+
+SWITCH.TRACKS: PROC (OLD,NEW,NEWPTR) SWAPABLE;   /* DELETE OLD TRK, SWITCH NEW TO HAVE OLD TRK # */
+   DCL (OLD,NEW)  FIXED;
+   DCL (NEWPTR,I) FIXED;
+	DCL (J       ) FIXED;
+
+   CALL ERASE.TRACK(OLD);               /* FREE UP OLD TRK   */
+
+   // Here we take the complete track head and assign it to the new track.
+   // This has the effect of 'copying' the timbre to the new track.
+   // That is, the track head we are reassigning indicates which timbre is used.
+
+   WRITE(MAM)=NEWPTR;                   /* POINT AT NEW THD  */
+   I=READ(MDI);                         /* SAVE THD.FOR      */
+   WRITE("324")=READ(MDI);              /* SKIP OVER THD.REV */
+   WRITE(MD)=OLD;                       /* RESET THD.TRK     */
+
+   DO WHILE I<>0;                       /* LOOP WHILE MORE   */
+      WRITE(MAM)=NAH.PTR+I;             /* POINT AT SOU NLS  */
+      I=READ(MDI);                      /* SAVE NLS.FOR      */
+      WRITE("324")=READ(MDI);           /* SKIP OVER NLS.REV */
+      WRITE(MD)=OLD;                    /* RESET NLS.TRK     */
+   END;
+
+	/* Update back pointers in any group lists */
+	
+	DO I = 0 TO THD.NUMGRPAUX-1;			 /* FOR EACH POSSIBLE GROUP/AUX DATA LIST */
+		WRITE(MAM) = NEWPTR;					 /* ACCESS NEW TRACK HEAD						*/
+		WRITE(MAL) = THD.GROUPLIST + I;	 /* INDEX TO THIS LIST							*/
+		J = READ(MD);							 /* GET RELATIVE BLOCK POINTER				*/
+		
+		WHILE (J != 0)							 /* ITERATE DOWN LIST							*/
+		{
+			WRITE(MAM) = NAH.PTR + J;		 /* ACCESS BLOCK DIRECTLY						*/
+			J          = READ(MD);			 /* GET NEXT POINTER								*/
+			WRITE(MAL) = GRPAUX.TRK;
+			WRITE(MD ) = (READ(MD) & 0xFF00) + OLD;
+		}
+	}	
+	
+   WRITE(MAM)=TRK.HEAD;                 /* FIX UP TRK.HEAD ARRAY */
+   WRITE(MAL)=OLD;                      /* DES NOW POINTS AT     */
+   WRITE(MD )=NEWPTR;                   /* ORIGINAL SOU THD      */
+   WRITE(MAL)=NEW;                      /* AND SOURCE IS NOW     */
+   WRITE(MD )=0;                        /* EMPTY                 */
+
+   WRITE(MAM)=NAH.PTR;                  /* FIX UP NAH.PTR ARRAY  */
+   WRITE(MAL)=OLD;                      /* OLD NOW POINTS AT     */
+   WRITE(MD )=NEWPTR-NAH.PTR;           /* ORIGINAL THD          */
+   WRITE(MAL)=NEW;                      /* AND ORIGINAL TRK IS   */
+   WRITE(MD )=0;                        /* NOW EMPTY             */
+
+   NEW.MOTION             = 1;   /* SEND NEW CUE TRACK CONSTANTS       */
+   NEW.CUE.TRACK.SETTINGS = 1;   /* OVER AFTER SWITCHING TRACKS        */
+
+END SWITCH.TRACKS;
+
+
+/* $PAGE */
+
+
+INIT.TRK.HEAD.INFO:  PROC (SPTR,DPTR) SWAPABLE; /* COPIES SELECT INFO FROM SPTR TO DPTR */
+   DCL (SPTR,DPTR) FIXED;    /* SOURCE AND DEST THD */
+
+   WRITE(MAM)=SPTR;          /* READ INFO FROM SOURCE THD */
+   CALL COPY.IN(ADDR(MISC.BUF(0)),256); /* READ IN THD INFO */
+
+   WRITE(MAM)=DPTR;          /* POINT AT DEST TRK HEAD */
+   WRITE(MAL)=THD.POLY;      WRITE(MD)=MISC.BUF(THD.POLY); /* COPY OVER INFO */
+   WRITE(MAL)=THD.MIDI;      WRITE(MD)=MISC.BUF(THD.MIDI);
+   WRITE(MAL)=THD.TVOL;      WRITE(MD)=MISC.BUF(THD.TVOL);
+   WRITE(MAL)=THD.TROU;      WRITE(MD)=MISC.BUF(THD.TROU);
+   WRITE(MAL)=THD.TPAN;      WRITE(MD)=MISC.BUF(THD.TPAN);
+   WRITE(MAL)=THD.CUE.OUT;   WRITE(MD)=MISC.BUF(THD.CUE.OUT);
+   WRITE(MAL)=THD.ORATIO;    WRITE(MD)=MISC.BUF(THD.ORATIO);
+   WRITE(MAL)=THD.SXPOS;     WRITE(MD)=MISC.BUF(THD.SXPOS);
+   WRITE(MAL)=THD.STIMB;     WRITE(MD)=MISC.BUF(THD.STIMB);
+   WRITE(MAL)=THD.SLPITCH;   WRITE(MD)=MISC.BUF(THD.SLPITCH);
+   WRITE(MAL)=THD.SCALE;     CALL COPY.OUT(ADDR(MISC.BUF(THD.SCALE)),12);
+   WRITE(MAL)=THD.USAGE;     CALL COPY.OUT(ADDR(MISC.BUF(THD.USAGE)),THD.USAGE.LEN);
+   WRITE(MAL)=THD.SYN.CROUT; CALL COPY.OUT(ADDR(MISC.BUF(THD.SYN.CROUT)),16);
+   WRITE(MAL)=THD.ILPCTR;    WRITE(MD)=MISC.BUF(THD.ILPCTR);
+   WRITE(MAL)=THD.ACTIVE.MIDI.RTES; WRITE(MD)=MISC.BUF(THD.ACTIVE.MIDI.RTES);
+   WRITE(MAL)=THD.CUE.TRACK; WRITE(MD)=MISC.BUF(THD.CUE.TRACK);
+   WRITE(MAL)=THD.MIDI.PATH; WRITE(MD)=MISC.BUF(THD.MIDI.PATH);
+	WRITE(MAL)=THD.XPOSBASE;  WRITE(MD)=MISC.BUF(THD.XPOSBASE);
+   WRITE(MAL)=THD.MIDX;      WRITE(MD)=MISC.BUF(THD.MIDX);
+
+   NEW.MOTION             = 1;   /* SEND NEW CUE TRACK CONSTANTS       */
+   NEW.CUE.TRACK.SETTINGS = 1;   /* OVER AFTER TRACK HEAD ALLOCATE     */
+
+END INIT.TRK.HEAD.INFO;
+
+BOUNCE.ILP:  PROC (SOU,DES) SWAPABLE; /* COPIES ILP FROM SOU TRK TO DEST TRK */
+   DCL (SOU,DES) FIXED;
+
+   #W1=TRK.HEAD.LOOKUP(SOU,THD.COUNTIN.MSB);
+   #W2=TRK.HEAD.LOOKUP(SOU,THD.COUNTIN.LSB);
+   #W3=TRK.HEAD.LOOKUP(SOU,THD.LOOPLEN.MSB);
+   #W4=TRK.HEAD.LOOKUP(SOU,THD.LOOPLEN.LSB);
+   #W3=#W1+#W3;                     /* COMPUTE TIME AT END OF ILP */
+   #W4=#W2+#W4;
+   IF #W4 ILT #W2 THEN #W3=#W3+1;
+
+   CALL CREATE.ILP.ON.TRACK(DES,#W1,#W2,#W3,#W4); /* PUT ILP ON DES TRK */
+
+END BOUNCE.ILP;
+
+// Returns 1 on success, 0 on failure.
+BOUNCE.DOWN: PROC (XSOU,XDES,QUICK.FLAG,REPLICATE.BOUNCE) FIXED PUBLIC SWAPABLE; /* SPECIFY SOURCE TRACK, DESTINATION TRACK */
+   DCL (XSOU,XDES)        FIXED;        /* ABS TRK # FOR SOURCE AND DESTINATION TRACKS */
+   DCL (QUICK.FLAG)       FIXED;        /* SET TO 1 TO SKIP SLOW CLEANUP AT END OF ROUTINE */
+   DCL (REPLICATE.BOUNCE) FIXED;        /* 1 TO MAKE COPY OF TRK, 0 TO ERASE SOURCE AFTER BOUNCE */
+   DCL (SOU,DES)          FIXED STATIC; /* ABS TRK # FOR SOURCE AND DESTINATION TRACKS */
+   DCL (SPTR,DPTR)        FIXED STATIC; /* ABS PTRS TO TRK HEADS FOR RESPECTIVE TRACKS */
+   DCL (SINFO) (7)        FIXED;        /* 8 WORD ARRAY TO HOLD SOURCE TRK INFO */
+   DCL (DINFO) (7)        FIXED;        /* 8 WORD ARRAY TO HOLD DEST   TRK INFO */
+
+   /* SINF0 AND DINFO WORDS:
+      0 - 1  ==>  SEC AND WRD TRACK PTR
+      2 - 3  ==>  MSB AND LSB OF TRACK TIME
+      4 - 7  ==>  WORDS OF NOTE RECORD */
+
+   UNLINK.NLS.FROM.TRACK: PROC (SEC); /* REMOVES NLS FROM TRACK AND PUTS ONTO FREE LIST */
+      DCL SEC     FIXED;             /* RELATIVE PTR TO NLS TO FREE UP */
+      DCL (FP,RP) FIXED;
+      DCL TRK     FIXED;
+
+      WRITE(MAM)=NAH.PTR+SEC;        /* POINT AT NLS TO FREE UP */
+      FP=READ(MDI);                  /* GET ITS NLS.FOR PTR     */
+      RP=READ(MDI);                  /* AND ITS NLS.REV PTR     */
+      TRK=READ(MD );                 /* AND ITS NLS.TRK #       */
+
+      CALL DEALLOCATE.NAH.BLOCK(SEC); /* PUT NLS ONTO FREE LIST */
+
+      WRITE(MAM)=NAH.PTR+RP;         /* BACK UP TO NLS.REV - MAY POINT TO TRACK HEAD */
+      WRITE(MD )=FP;                 /* NEW FP (MAY BE 0)   (MAY BE STORING IN THD HERE) */
+
+      IF FP<>0 THEN DO;              /* UPDATE BACK POINTER */
+         WRITE(MAM)=NAH.PTR+FP;
+         WRITE(MAL)=NLS.REV;
+         WRITE(MD )=RP;              /* RP MAY  POINT TO THD        */
+      END;
+
+      WRITE(MAM)=TRK.HEAD;           /* POINT AT OUR TRK HEAD       */
+      WRITE(MAL)=TRK;
+      WRITE(MAM)=READ(MD);
+      WRITE(MAL)=THD.NUM.NLS;        /* AND DECREMENT THE NUMBER OF */
+      WRITE(MD )=READ(MD)-1;         /* NOTE SEGMENTS ON OUR TRK    */
+
+   END UNLINK.NLS.FROM.TRACK;
+
+   ADVANCE.TO.NEXT.NOTE:  PROC (INFO,COPY.FLAG);
+      DCL INFO       ARRAY; /* 8 WORDS OF TRK INFO */
+      DCL COPY.FLAG  FIXED; /* PASS 0 TO DELETE NOTE SEGMENTS WHEN DONE */
+      DCL I          FIXED;
+
+      /* INF0 WORDS:
+         0 - 1  ==>  SEC AND WRD TRACK PTR
+         2 - 3  ==>  MSB AND LSB OF TRACK TIME
+         4 - 7  ==>  WORDS OF NOTE RECORD */
+
+      WRITE(MAM)=NAH.PTR+INFO(0);        /* POINT TO CURRENT LOC  */
+      WRITE(MAL)=INFO(1);
+
+      IF READ(MD)<>NLS.EOS               /* NOT AT END OF NLS  */
+      THEN DO;                           /* STEP TO NEXT NOTE  */
+         IF READ(MD)                     /* ADVANCE PTR        */
+         THEN WRITE(MAL)=READ(MAL)+4;    /* OVER 4-WD NOTE     */
+         ELSE WRITE(MAL)=READ(MAL)+2;    /* OVER 2-WD NOTE     */
+         INFO(1)=READ(MAL);
+      END;
+
+      DO WHILE (READ(MD)=NLS.EOS);       /* HAVE HIT END OF NLS   */
+
+         WRITE(MAL)=NLS.FOR;             /* LOOK UP FORWARD PTR   */
+         I=READ(MD);                     /* SAVE NLS.FOR IN TEMP  */
+
+         IF COPY.FLAG=0                  /* OK TO DELETE NLS      */
+         THEN CALL UNLINK.NLS.FROM.TRACK(INFO(0)); /* FREE UP CURRENT NLS   */
+
+         INFO(0)=I;                      /* NOW POINT TO NEXT NLS */
+
+         IF I=0 THEN RETURN;             /* ALL DONE WITH TRACK   */
+
+         WRITE(MAM)=NAH.PTR+I;           /* POINT TO NEXT NLS     */
+         WRITE(MAL)=NLS.FP;              /* GET PTR TO FIRST WORD */
+         INFO(1)=READ(MD);               /* SET PTR TO START OF NEW NLS */
+         WRITE(MAL)=READ(MD);
+
+      END;
+
+      WRITE("313")=ADDR(INFO(4));        /* DO IN REGISTER FOR SPEED */
+      WRITE("300")=READ(MD );            /* SAVE IN REG           */
+      WRITE("373")=READ(MDI);            /* SET INFO(4)           */
+      WRITE("373")=READ(MDI);            /* SET INFO(5)           */
+      IF READ("300") THEN DO;            /* 4-WORD NOTE RECORD    */
+         WRITE("373")=READ(MDI);         /* SET INFO(6)           */
+         WRITE("353")=READ(MDI);         /* SET INFO(7)           */
+      END;
+
+      I=SHR(INFO(4),1)&1023;             /* EXTRACT DELTA         */
+      INFO(3)=INFO(3)+I;
+      IF INFO(3) ILT I THEN INFO(2)=INFO(2)+1;
+
+   END ADVANCE.TO.NEXT.NOTE;
+
+   GET.NEXT.NOTE.TO.BOUNCE:  PROC (INFO,COPY.FLAG); /* FINDS NEXT NOTE TO BOUNCE ON TRK */
+      DCL INFO       ARRAY; /* 8 WORDS OF TRK INFO */
+      DCL COPY.FLAG FIXED;  /* PASS 0 TO DELETE NOTE SEGMENTS WHEN DONE */
+
+      /* INF0 WORDS:
+         0 - 1  ==>  SEC AND WRD TRACK PTR
+         2 - 3  ==>  MSB AND LSB OF TRACK TIME
+         4 - 7  ==>  WORDS OF NOTE RECORD */
+
+      DO WHILE (INFO(0)<>0)         /* LOOP WHILE NOT AT TRK END */
+         AND   ((INFO(4)<0)         /* AND NOTE IS ALT. FORMAT   */
+         OR     (((INFO(4)&1)=0)    /* OR NOTE IS A 2-WORD REST  */
+         AND     ((INFO(5)&"77")=REST.NOTE)));
+
+         /* JUST SKIP OVER NOTE - DON'T BOUNCE IT */
+
+         IF (INFO(4)&"174001")="100001" /* NOTE IS LONG REST */
+         THEN DO;                       /* ADD IN ITS DELTA  */
+            INFO(2)=INFO(2)+INFO(5);
+            INFO(3)=INFO(3)+INFO(6);
+            IF INFO(3) ILT INFO(6)
+            THEN INFO(2)=INFO(2)+1;
+         END;
+
+         CALL ADVANCE.TO.NEXT.NOTE(INFO,COPY.FLAG); /* GET NEXT NOTE, ACCOUNT FOR START DELTA */
+
+      END;
+
+   END GET.NEXT.NOTE.TO.BOUNCE;
+
+   BOUNCE.NOTE:  PROC (INFO);     /* BOUNCE NOTE TO END OF BOUNCE TRK */
+      DCL INFO ARRAY;             /* 8 WORDS OF TRK INFO */
+
+      WRITE("313")=ADDR(INFO(4)); /* LOAD NOTE INFO INTO #W1-#W4 */
+      WRITE("353")=READ("353")&"174001"; /* MASK OFF DELTA FROM INFO(4) */
+      WRITE("300")=ADDR(#W1);
+      WRITE("360")=READ("373"); WRITE("360")=READ("373");
+      WRITE("360")=READ("373"); WRITE("360")=READ("373");
+
+      CALL APPEND.NOTE.DURING.PLAY(INFO(2),INFO(3));
+
+      IF INFO(4)                  /* ADVANCE PAST NOTE JUST APPENDED */
+      THEN #WRD=#WRD+4;
+      ELSE #WRD=#WRD+2;
+
+      #LMSB=#NMSB; #LLSB=#NLSB;   /* LAST TIME = TIME OF APPENDED NOTE */
+      #ANYF=0; #ANYR=1;           /* NOW AT END OF TRK                 */
+
+   END BOUNCE.NOTE;
+
+   INIT.INFO.FOR.BOUNCE:  PROC (PTR,INFO,COPY.FLAG);
+      DCL PTR        FIXED; /* ABS PTR TO TRK HEAD */
+      DCL INFO       ARRAY; /* 8 WORDS OF TRK INFO */
+      DCL COPY.FLAG FIXED;  /* PASS 0 TO DELETE NOTE SEGMENTS WHEN DONE */
+
+      /* INF0 WORDS:
+         0 - 1  ==>  SEC AND WRD TRACK PTR
+         2 - 3  ==>  MSB AND LSB OF TRACK TIME
+         4 - 7  ==>  WORDS OF NOTE RECORD */
+
+      INFO(2)=0; INFO(3)=0;              /* INIT TIME VARS FOR SOU TRK */
+      WRITE(MAM)=PTR;                    /* FIND FIRST NLS             */
+      INFO(0)=READ(MD);                  /* INIT PTR TO TRK            */
+
+      IF READ(MD)<>0 THEN DO;            /* HAVE AN NLS            */
+
+         WRITE(MAM)=NAH.PTR+READ(MD);    /* POINT TO FIRST NLS     */
+         WRITE(MAL)=NLS.FP;              /* GET PTR TO FIRST WRD   */
+         INFO(1)=READ(MD);               /* INIT PTR TO FIRST NOTE */
+         WRITE(MAL)=READ(MD);
+
+         IF READ(MD)=NLS.EOS             /* AT END OF THIS NLS     */
+         THEN CALL ADVANCE.TO.NEXT.NOTE(INFO,COPY.FLAG);
+         ELSE DO;
+
+            WRITE("313")=ADDR(INFO(3));  /* SET UP REG FOR SPEED   */
+            WRITE("373")=SHR(READ(MD),1)&1023; /* INIT TRK TIME    */
+            WRITE("300")=READ(MD );      /* SAVE IN REG            */
+            WRITE("373")=READ(MDI);      /* READ NOTE RECORD WORDS */
+            WRITE("373")=READ(MDI);
+            IF READ("300") THEN DO;      /* HAVE A 4-WD RECORD     */
+               WRITE("373")=READ(MDI);
+               WRITE("353")=READ(MDI);
+            END;
+
+         END;
+
+      END;
+
+   END INIT.INFO.FOR.BOUNCE;
+
+   ENOUGH.MEMORY.FOR.BOUNCE:  PROC (REPLICATE.BOUNCE) FIXED; /* SEES IF ROOM TO DO BOUNCE */
+      DCL REPLICATE.BOUNCE FIXED;
+      DCL (I,J)            FIXED;
+
+      /* 'I' WILL CONTAIN THE NUMBER OF SECTORS WE NEED  */
+      /* TO COMPLETE THE BOUNCE OPERATION. 'J' WILL HOLD */
+      /* THE TOTAL SECTORS AVAILABLE.                    */
+
+      I=5;       /* MAKE SURE WE HAVE AT LEAST 5 SECTORS LEFT IN ANY CASE */
+
+      IF REPLICATE.BOUNCE<>0            /* WE ARE MAKING A COPY OF THE SOURCE TRK */
+      THEN I=I+TRK.HEAD.LOOKUP(SOU,THD.NUM.NLS); /* ADD IN NUMBER OF SECTORS REQUIRED FOR SOURCE TRK */
+
+      J=NAH.#FREE+((BNK.PTR+BNK.LEN)-(NAH.PTR+NAH.LEN)); /* NUMBER OF EASILY OBTAINED SECTORS LEFT */
+
+      IF I IGT J                        /* NOT ENOUGH MEMORY RIGHT NOW  */
+      THEN DO;                          /* DO SHUFFLE TO COLLECT MEMORY */
+
+         CALL MAXIMIZE.MEMORY.FOR.RECORD; /* HEAVY DUTY GARBAGE COLLECT */
+
+         J=NAH.#FREE+((BNK.PTR+BNK.LEN)-(NAH.PTR+NAH.LEN)); /* TOTAL SECTORS AVAILABLE */
+
+         IF I IGT J THEN RETURN 0;      /* STILL NOT ENOUGH MEMORY - QUIT */
+
+         WRITE(MAM)=TRK.HEAD;           /* GET PTRS TO SOU & DES THD AGAIN */
+         WRITE(MAL)=SOU; SPTR=READ(MD); /* SINCE SHUFFLE MIGHT HAVE MOVED  */
+         WRITE(MAL)=DES; DPTR=READ(MD); /* THEM ELSEWHERE                  */
+      END;
+
+      RETURN 1;                         /* BOUNCE WILL SUCCEED */
+
+   END ENOUGH.MEMORY.FOR.BOUNCE;
+
+
+   SOU = XSOU;   /* TRANSFER THESE VALUES TO LOCAL STATICS */
+   DES = XDES;
+
+   /* When bouncing tracks,  both the note contents and the timbre */
+   /* name of the track may change:                                */
+
+	interp_seq_dirtyness(1);
+
+   NEW.SEQ.INFO = NEW.SEQ.INFO \ 6;/* NEW SEQ NAMES; NEW NOTES ON TRACK */
+   WRITE(MAM) = D115D.NOTE.CHANGE.TRACKS;
+   WRITE(MAL) = DES;               /* REMEMBER TRACK # ON NEW.SEQ.INFO */
+   WRITE(MD) = "177777";           /*   "NEW NOTES" OR "NEW TIMBRE"    */
+
+   IF RECD<>0 THEN RETURN 0;       /* CAN'T BOUNCE DURING RECORD   */
+
+   IF  (REPLICATE.BOUNCE=0)        /* NOT DOING A REPLICATE BOUNCE */
+   AND (SOU=DES)                   /* AND TRACKS ARE THE SAME      */
+   THEN RETURN 1;                  /* NOTHING TO DO - ALL DONE     */
+
+   WRITE(MAM)=TRK.HEAD;            /* GET PTR TO SOURCE TRACK      */
+   WRITE(MAL)=SOU;
+   SPTR=READ(MD);                  /* SAVE PTR TO SOURCE TRK HEAD  */
+
+   WRITE(MAL)=DES;
+   DPTR=READ(MD);                  /* SAVE PTR TO DEST TRK HEAD */
+
+   // If no track head, then indicates bounce of empty track.
+   // We do nothing.
+   IF (SPTR == 0)
+      RETURN 1;
+
+   // Handle simple case. If not replicating and destination
+   // track is empty (or at least has no notes) just switcheroo the tracks
+
+   IF REPLICATE.BOUNCE=0 THEN DO;                  /* NOT A COPY/REPLICATE TYPE BOUNCE */
+
+      IF ((DPTR == 0)                              /* NO DEST TRK HEAD  */
+      OR  ((TRK.HEAD.LOOKUP(DES,THD.ILP)   =0)     /* NO ILP ON DES TRK */
+      AND  (TRK.HEAD.LOOKUP(DES,THD.NN.MSB)=0)     /* AND NO NOTES ON   */
+      AND  (TRK.HEAD.LOOKUP(DES,THD.NN.LSB)=0)))   /* THE DES TRK       */
+      THEN DO;                                     /* JUST CHANGE TRK # */
+
+         /* GET RID OF THE ORIGINAL DEST TRACK     */
+         /* AND FIX THE TRK #'S IN THE NLS.TRK AND */
+         /* THD.TRK FIELDS OF THE SOU TRK  TO BE   */
+         /* EQUAL TO THE DES TRK #                 */
+
+         CALL SWITCH.TRACKS(DES,SOU,SPTR);
+
+         GOTO DONE.WITH.BOUNCE;                    /* DONE - WE SWITCHED THE NOTES (IF ANY) TO THE DESTINATION TRACK */
+
+      END;
+   END;                              /* OF DOING NON-REPLICATE BOUNCE WITH EMPTY DEST TRK */
+
+   // OK - EITHER WE ARE REPLICATING THE TRACK, OR THE DESTINATION TRACK HAS SOME NOTES ON IT
+   // SEE IF IT HAS A TRACK NUMBER AND A TIMBRE ASSIGNED - IF SO THEY MUST MATCH
+
+   IF DPTR<>0 THEN DO;             /* DESTINATION TRK HAS A TRK HEAD */
+
+      /* SEE IF TIMBRES ON SOURCE AND */
+      /* DESTINATION TRACKS MATCH     */
+
+      IF  ((TRK.HEAD.LOOKUP(DES,THD.CTIMB )<>0)) /* HAVE A TIMBRE ON DES TRK  */
+      AND ((TRK.HEAD.LOOKUP(SOU,THD.CTIMB )<>0)) /* AND A TIMBRE ON SOU TRK   */
+      AND ((TRK.HEAD.LOOKUP(DES,THD.NN.MSB)<>0)  /* AND DES TRK HAS SOME      */
+      OR   (TRK.HEAD.LOOKUP(DES,THD.NN.LSB)<>0)) /* NOTES ON IT               */
+      AND (OK.TO.COPY.TIMBRE(SOU,DES)=0)         /* BUT TIMBRE DOES NOT MATCH */
+      THEN DO;
+         CALL DISPLAY.ERR(9);      /* DISPLAY 'TIMBRES MUST MATCH' */
+         EDIT.ERROR = E#TIMBNOMATCH; /* SET ERROR STATUS FLAG */
+         RETURN 0;                 /* BOMB OUT */
+      END;
+
+   END;
+
+
+   /* NOW TRY TO GUESS IF THERE IS ENOUGH ROOM TO     */
+   /* PERFORM THE BOUNCE FUNCTION. SHUFFLE MEMORY IF  */
+   /* REQUIRED.                                       */
+
+   IF ENOUGH.MEMORY.FOR.BOUNCE(REPLICATE.BOUNCE)=0  /* NOT ENOUGH MEMORY FOR BOUNCE OPERATION */
+   THEN DO;
+      CALL DISPLAY.ERR(0);        /* DISPLAY 'NOT ENOUGH ROOM TO BOUNCE'   */
+      EDIT.ERROR = E#NOROOM;      /* SET GLOBAL ERROR FLAG     */
+      RETURN 0;                   /* BOMB OUT                */
+   END;
+
+   // NOW HANDLE CASE OF REPLICATING A TRACK ONTO AN EMPTY TRACK
+   IF  ((REPLICATE.BOUNCE != 0)
+   AND  (DPTR             == 0))
+   THEN DO;
+
+      #TRK=DES;                      /* WILL DO BOUNCE ONTO DES TRK */
+      #PTR=GET.TRK.HEAD(DES);        /* ALLOCATE TRK HEAD FOR IT    */
+      IF #PTR=0 THEN RETURN 0;       /* RAN OUT OF MEMORY - QUIT    */
+
+      CALL INIT.TRK.HEAD.INFO(SPTR,#PTR); /* SET UP INFO FOR DES TRK USING SOU THD */
+      CALL ALLOC.TIMBRE.USES(DES);   /* ACCOUNT FOR TIMBRE USES */
+      CALL COMPUTE.ARLIST;           /* SET UP THD.CUE.TRACK, RIBBON CUE, ETC */
+
+      WRITE(MAM)=#PTR;               /* POINT AT TRK HEAD        */
+      CALL LOAD.#.INFO(THD.NMSB);    /* SET UP # VARS            */
+
+      CALL INIT.INFO.FOR.BOUNCE(SPTR,SINFO,1); /* SET UP FOR 1ST NOTE ON SOU TRK */
+
+      DO WHILE SINFO(0)<>0;          /* LOOP WHILE MORE NOTES TO BOUNCE */
+
+         CALL GET.NEXT.NOTE.TO.BOUNCE(SINFO,1);
+
+         IF SINFO(0)<>0 THEN DO;     /* HAVE A NOTE TO BOUNCE */
+
+            CALL BOUNCE.NOTE(SINFO); /* BOUNCE NOTE ONTO DES TRK */
+            CALL ADVANCE.TO.NEXT.NOTE(SINFO,1);
+
+         END;
+
+      END;  /* OF LOOP WHILE MORE NOTES TO BOUNCE */
+
+
+      IF TRK.HEAD.LOOKUP(SOU,THD.ILP)<>0 /* SOU TRK HAS ILP      */
+      THEN CALL BOUNCE.ILP(SOU,DES);     /* BOUNCE IT TO DES TRK */
+
+
+      GOTO DONE.WITH.BOUNCE;
+
+   END;                  /* OF DOING REPLICATE BOUNCE TO NULL DES TRK */
+
+
+   /* $SUBTITLE MIX TWO TRACKS TOGETHER ONTO A THIRD TRACK */
+
+
+   /* DO BOUNCE BY COPYING BOTH TRACKS TO A NEW TRK    */
+   /* COPY NOTES FROM BOTH TRACKS ONTO NEW TRACK.      */
+   /* AS YOU COPY, FREE UP NOTE SEGMENTS FROM ORIGINAL */
+   /* SOURCE AND DEST TRACKS IF NOT NEEDED ANYMORE.    */
+
+   /* SET UP THE CORRECT INFO FOR THE 3RD TRACK        */
+
+   #TRK=BOUNCE.TRK;               /* WILL DO BOUNCE ONTO TEMP TRK */
+   #PTR=GET.TRK.HEAD(BOUNCE.TRK); /* ALLOCATE TRK HEAD FOR IT     */
+   IF #PTR=0 THEN RETURN 0;       /* RAN OUT OF MEMORY - QUIT     */
+
+   CALL INIT.TRK.HEAD.INFO(DPTR,#PTR); /* SET UP INFO FOR BOUNCE TRK USING DES THD */
+   CALL ALLOC.TIMBRE.USES(BOUNCE.TRK); /* ACCOUNT FOR TIMBRE USES */
+
+   WRITE(MAM)=#PTR;            /* POINT AT TRK HEAD        */
+   CALL LOAD.#.INFO(THD.NMSB); /* SET UP # VARS            */
+
+
+   CALL INIT.INFO.FOR.BOUNCE(SPTR,SINFO,REPLICATE.BOUNCE); /* SET UP FOR 1ST NOTE ON SOU TRK */
+   CALL INIT.INFO.FOR.BOUNCE(DPTR,DINFO,0); /* SET UP FOR 1ST NOTE ON DES TRK */
+
+
+   DO WHILE (SINFO(0)\DINFO(0))<>0;    /* LOOP WHILE MORE NOTES TO BOUNCE */
+
+      CALL GET.NEXT.NOTE.TO.BOUNCE(SINFO,REPLICATE.BOUNCE);
+      CALL GET.NEXT.NOTE.TO.BOUNCE(DINFO,               0);
+
+      IF  ((SINFO(0)<>0)               /* BOTH TRACKS HAVE NOTE      */
+      AND  (DINFO(0)<>0)               /* TO BOUNCE                  */
+      AND (((SINFO(2) ILT DINFO(2)))   /* AND NOTE ON SOURCE TRACK   */
+      OR   ((SINFO(2)  =  DINFO(2))    /* OCCURS AT OR BEFORE        */
+      AND   (SINFO(3) ILE DINFO(3))))) /* NEXT REAL NOTE ON DES TRK  */
+      OR  ((SINFO(0)<>0)               /* OR NOTE ON SOURCE TRK      */
+      AND  (DINFO(0)=0))               /* BUT NONE ON DEST TRK       */
+      THEN DO;                         /* BOUNCE SOURCE TRK NOTE     */
+
+         CALL BOUNCE.NOTE(SINFO);      /* BOUNCE NOTE ONTO BOUNCE TRK */
+         CALL ADVANCE.TO.NEXT.NOTE(SINFO,REPLICATE.BOUNCE);
+
+      END;
+
+      ELSE IF DINFO(0)<>0 THEN DO;     /* NEXT REAL NOTE COMES FROM DEST TRK */
+
+         CALL BOUNCE.NOTE(DINFO);      /* BOUNCE NOTE ONTO BOUNCE TRK */
+         CALL ADVANCE.TO.NEXT.NOTE(DINFO,0);
+
+      END;
+
+   END;  /* OF LOOP WHILE MORE NOTES TO BOUNCE */
+
+
+   IF TRK.HEAD.LOOKUP(DES,THD.ILP)<>0    /* DES TRK HAS ILP       */
+   THEN CALL BOUNCE.ILP(DES,BOUNCE.TRK); /* BOUNCE IT TO TEMP TRK */
+
+   /* NOW GET RID OF THE ORIGINAL DEST TRACK AND SET THE TRK #'S IN THE */
+   /* NLS.TRK AND THD.TRK FIELDS OF BOUNCE TRK TO EQUAL THE DES TRK #   */
+
+   CALL SWITCH.TRACKS(DES,BOUNCE.TRK,#PTR); /* GET RID OF DES, MAKE BOUNCE TRK NEW DES */
+
+   DONE.WITH.BOUNCE:
+
+   IF REPLICATE.BOUNCE=0               /* NOT MAKING COPY OF SOU TRK */
+   THEN CALL ERASE.TRACK(SOU);         /* ERASE WHATEVER IS LEFT     */
+
+   CALL COMPUTE.ACTIVE.TRKS;           /* MAKE SURE THD.ACTIVE SET CORRECTLY */
+
+   IF (QUICK.EDITS\QUICK.FLAG)=0 THEN DO;
+      CALL CHECK.MEMORY.FOR.RECORD;    /* MAXIMIZE MEMORY FOR RECORDING */
+      CALL PLAY.INITIALIZE;            /* RESET TRK INFO                */
+   END;
+   ELSE CALL QUICK.PLAY.INIT(GET.THD.PTR(DES)); /* KEEP TRK HEAD SAFE */
+
+   CALL COMPUTE.NUMB.LEFT;             /* SHOW NOTES LEFT */
+   CALL DISPLAY.NUMB.LEFT;
+
+   RETURN 1;                           /* BOUNCE WAS SUCCESSFUL */
+END BOUNCE.DOWN;
+
+/* FAST routine to copy a track to a work/scratch track  */
+FAST.COPY: PROC (SOU,DES) FIXED PUBLIC SWAPABLE; /* SPECIFY SOURCE TRACK, DESTINATION TRACK */
+   DCL (SOU,DES)          FIXED;         /* ABS TRK # FOR SOURCE AND DESTINATION TRACKS */
+   DCL (SPTR,DPTR)        FIXED;         /* ABS PTRS TO TRK HEADS FOR RESPECTIVE TRACKS */
+   DCL (SOU.ILS.SEC)      FIXED;         /* REL POINTER TO ILS SECTOR */
+   DCL (SOU.ILE.SEC)      FIXED;         /* REL POINTER TO ILE SECTOR */
+
+   WRITE(MAM) = TRK.HEAD;            /* GET ABSOLUTE PTR TO SOURCE TRACK      */
+   WRITE(MAL) = SOU;
+   SPTR = READ(MD);                  /* SAVE ABSOLUTE PTR TO SOURCE TRK HEAD  */
+
+   WRITE(MAM) = TRK.HEAD; 
+   WRITE(MAL) = DES;
+   DPTR = READ(MD);                  
+
+   IF DPTR<>0                      /* DESTINATION TRK HAS A TRK HEAD */
+   THEN CALL ERASE.TRACK(DES);     /* WANT TO GET RID OF IT          */
+
+   IF SPTR = 0 THEN RETURN 1;      /* WE ARE DONE IF WE ACTUALLY HAD */
+                                   /* AN EMPTY TRACK TO COPY         */
+
+   /* LOOK UP SOURCE POINTER STUFF AGAIN   */
+   /* IN CASE IT MOVED DURING ERASE TRACK: */
+
+   WRITE(MAM) = TRK.HEAD;            /* GET ABSOLUTE PTR TO SOURCE TRACK      */
+   WRITE(MAL) = SOU;
+   SPTR = READ(MD);                  /* SAVE ABSOLUTE PTR TO SOURCE TRK HEAD  */
+   WRITE(MAM) = SPTR;                /* POINT TO SOURCE TRK HEAD    */
+   WRITE(MAL) = THD.ILS.SEC;         /* NEED TO KNOW THIS */
+   SOU.ILS.SEC = READ(MD);
+   WRITE(MAL) = THD.ILE.SEC;         /* NEED TO KNOW THIS */
+   SOU.ILE.SEC = READ(MD);
+
+   #TRK = DES;                      /* WILL DO BOUNCE ONTO TEMP TRK */
+   #PTR = GET.TRK.HEAD(DES);        /* ALLOCATE TRK HEAD FOR IT     */
+   IF #PTR = 0 THEN RETURN 0;       /* RAN OUT OF MEMORY - QUIT     */
+   DPTR = #PTR;                   /* ABSOLUTE POINTER TO NEW DEST TRACK HEAD */
+
+   CALL INIT.TRK.HEAD.INFO(SPTR,DPTR); /* SET UP INFO FOR DEST TRK USING SOU THD */
+
+   /* NOW COPY ADDITIONAL FIELDS NOT INCLUDED IN INIT.TRK.HEAD.INFO */
+   /* NOTE: THIS ASSUMES THAT MAM AND MISC.BUF ARE SET UP IN INIT.TRK.HEAD.INF0 */
+   WRITE(MAL) = THD.NN.MSB;       WRITE(MD) = MISC.BUF(THD.NN.MSB);
+   WRITE(MAL) = THD.NN.LSB;       WRITE(MD) = MISC.BUF(THD.NN.LSB);
+   WRITE(MAL) = THD.ILP;          WRITE(MD) = MISC.BUF(THD.ILP);
+   WRITE(MAL) = THD.COUNTIN.MSB;  WRITE(MD) = MISC.BUF(THD.COUNTIN.MSB);
+   WRITE(MAL) = THD.COUNTIN.LSB;  WRITE(MD) = MISC.BUF(THD.COUNTIN.LSB);
+   WRITE(MAL) = THD.LOOPLEN.MSB;  WRITE(MD) = MISC.BUF(THD.LOOPLEN.MSB);
+   WRITE(MAL) = THD.LOOPLEN.LSB;  WRITE(MD) = MISC.BUF(THD.LOOPLEN.LSB);
+   WRITE(MAL) = THD.ILS.WRD;      WRITE(MD) = MISC.BUF(THD.ILS.WRD);
+   WRITE(MAL) = THD.ILE.WRD;      WRITE(MD) = MISC.BUF(THD.ILE.WRD);
+   WRITE(MAL) = THD.NUM.NLS;      WRITE(MD) = MISC.BUF(THD.NUM.NLS);
+
+   CALL ALLOC.TIMBRE.USES(DES);        /* ACCOUNT FOR TIMBRE USES */
+   CALL COMPUTE.ARLIST;                /* SET UP THD.CUE.TRACK, RIBBON CUE, ETC */
+
+   WRITE(MAM) = DPTR;                    /* POINT AT TRK HEAD        */
+   CALL LOAD.#.INFO(THD.NMSB);         /* SET UP # VARS            */
+
+   IF (ALLOCATE.FIRST.NLS = 0)         /* ALLOCATE FIRST DEST NLS */
+   THEN DO;
+      CALL ERASE.TRACK(DES);           /* BOMB OUT, WANT TO GET RID OF IT          */
+      RETURN 0; 
+   END;
+
+   /* GET POINTER TO FIRST DEST NLS */
+   WRITE(MAM) = DPTR; 
+   WRITE(MAL) = THD.FOR;
+   DPTR = READ(MD);          /**** NOTE: DPTR IS NOW *RELATIVE* TO NAH.PTR */
+
+   /* GET POINTER TO FIRST SOURCE NLS */
+   WRITE(MAM) = SPTR;
+   WRITE(MAL) = THD.FOR;
+   SPTR = READ(MD);          /**** NOTE: SPTR IS NOW *RELATIVE* TO NAH.PTR */
+
+   DO WHILE (SPTR <> 0);                    /* LOOP UNTIL END OF SOURCE TRACK */
+
+      WRITE(MAM) = SPTR + NAH.PTR;          /* READ INFO FROM SOURCE NLS */
+      WRITE(MAL) = NLS.FP;     
+      CALL COPY.IN(ADDR(MISC.BUF(0)), 253); /* READ IN NLS INFO (EXCEPT FOR THD.FOR,REV,TRK) */
+
+      WRITE(MAM) = DPTR + NAH.PTR;          /* POINT AT DEST NLS */
+      WRITE(MAL) = NLS.FP;     
+      CALL COPY.OUT(ADDR(MISC.BUF(0)), 253);
+
+      IF (SPTR = SOU.ILS.SEC) THEN DO;      /* NEED TO SET DEST TRK HEADER TO POINT TO THIS SECTOR */
+         WRITE(MAM) = TRK.HEAD;
+         WRITE(MAL) = DES;
+         WRITE(MAM) = READ(MD);
+         WRITE(MAL) = THD.ILS.SEC;
+         WRITE(MD ) = DPTR;
+      END;
+
+      IF (SPTR = SOU.ILE.SEC) THEN DO;      
+         WRITE(MAM) = TRK.HEAD;
+         WRITE(MAL) = DES;
+         WRITE(MAM) = READ(MD);
+         WRITE(MAL) = THD.ILE.SEC;
+         WRITE(MD ) = DPTR;
+      END;
+
+      /* ADVANCE TO NEXT SOURCE NLS */
+      WRITE(MAM) = SPTR + NAH.PTR;
+      WRITE(MAL) = NLS.FOR;
+      SPTR = READ(MD);
+
+      IF (SPTR <> 0) THEN DO;       /* ADVANCE TO NEXT DEST NLS */
+         #SEC = DPTR;
+         #TRK = DES;
+         IF (ALLOCATE.NEXT.NLS(0) <> 0) THEN DO;
+            WRITE(MAM) = DPTR + NAH.PTR;
+            WRITE(MAL) = NLS.FOR;
+            DPTR = READ(MD);
+         END;
+         ELSE DO;
+            CALL ERASE.TRACK(DES);
+            RETURN 0;                  /* OUT OF SPACE */
+         END;
+      END;
+   END;
+
+   CALL QUICK.PLAY.INIT(GET.THD.PTR(DES)); /* KEEP TRK HEAD SAFE */
+
+   RETURN 1;
+end FAST.COPY;

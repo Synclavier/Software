@@ -1,0 +1,978 @@
+/*	:SYNRSOU:10-INT:144-TIM2  $TITLE  REAL TIME CLOCK INTERRUPT, TIMING & SMPTE VARIABLES	*/
+
+/*
+Modified:
+2000/08/04 - CJ  - Added diagnostic prints
+1999/04/12 - TY  - Removed some debug code from compilation
+					  - Made modifications to account for the independence of CLICK.DISP.MODE from CLICK.TRACK.MODE.
+1998/07/02 - TY  - Restructured a portion of TIME.BASE.SCAN.QUE.AND.SCAN.INPUTS to assure that when
+						 a click track is used, the audible click will occur at the proper time, but more
+						 importantly to assure that NEXT.CLICK will be updated when PLAY.TIME = NEXT.CLICK.
+						 This hasn't been happening since release 2.7, which caused COMPUTE.NEAREST.BEAT.TIME
+						 to produce ludicrous results.
+1998/06/24 - TY  - Made modifications to account for the independence of CLICK.TRACK.MODE from CLICKON.
+1990/11/05 - CJ  - Improved accuracy of "play to"
+1990/07/16 - PF  - Support MIDI and Beat Sync with Tempo/Meter Maps
+1990/07/10 - PF  - Begin using REAL.TIME.OF.NEXT.CLICK and ACTUALLY.EMIT.CLICK
+						 in support of Tempo/Meter Maps
+1990/06/15 - cj  - changed current time message to be sent more often whil
+						 fast forwarding and rewinding.  Also moved the time
+						 checking outside the procedure call.
+1990/06/08 - cj  - fixed bug with sampled.move.speed
+1990/05/31 - cj  - modified current time message to look at sampled
+						 global variables to fix editview problems.
+1990/05/08 - MWH - Don't time out D115 chan if there are unprocessed packets
+1990/04/05 - TSS - FIX STUCK MIDI NOTE/EXTRA NOTE OFF BUGS
+1990/01/25 - MWH - Fix "300 msec delay starting cues" bug (from EditView)
+1989/11/15 - MWH - Send move speed along with current time protocol msg
+1989/09/29 - MWH - Send current time IMMEDIATELY when new motion status
+1989/09/28 - MWH - Clean up a protocol name for consistency with the MAC
+1989/09/22 - cj  - deleted setting of "new.sequencer.forward.motion" during
+						 smpte lock-up to fix "phasing" bug
+1989/09/20 - PF  - Added MIDINET.TIMEOUT
+1989/09/07 - PF  - (MWH) Merged in Paul's MIDI changes
+1989/08/28 - MWH - Reduce protocol timeout time from 30 seconds to 3
+1989/08/14 - MWH - Rework the protocol for release 2.2
+1989/07/28 - cj  - send out both SEQ time and CUR DTD time in
+						 "HERE IS" message once per second
+1989/07/05 - MWH - Be sure subtracting ZERO.TIME doesn't go below zero!
+1989/06/26 - MWH - Moved D115 "hi" code to D3 interrupt @ every 20msec
+1989/06/26 - PF  - Removed references to inc.new.midi
+1989/06/26 - PF  - Changed MIDI Clock logic to take advantage of MIDI Bulk message
+1989/06/16 - MWH - Remove ZERO.TIME offset from times sent over the protocol
+1989/06/01 - MWH - Set flag so we can print when a D115 device disconnects
+1989/05/18 - TSS - Added code to use Node Ids when sending MIDI Clock info
+1989/05/11 - TSS - Took save of R13,MAM & MAL back out of this file
+1989/05/03 - MWH - Support for multiple D115 boards & channels; timeouts
+1989/03/10-TSS,PF- Moved save of R13 & MAM,MAL here from 144-TIM3
+1989/03/10 - MWH - MOVE D115 MESSAGE TO END OF D03 INTERRUPT
+1989/01/19 - MWH - SEND PERIODIC "I'M HERE" MESSAGES OVER THE D115
+1989/01/13 - PF  - Monster MIDI code
+1988/10/03 - CJ  - CHANGED USE OF TRIGGER.CLICK TO PROVIDE FOR EXTENDED
+						 CLICK TRACK AT END OF LIVE CLICK TRACK
+1988/07/18 - CJ  - CHANGED USE OF SMPTE.RATE.ACCUM
+1987/01/09 - CJ  - CHANGED WHEN D16 TO CORRECT FOR LONG INTERRUPT DISABLING
+1987/01/05 - CJ  - MOVED WITHIN.SCAN DEF
+1986/12/04 -CJ,TS- ADDED MIDI SONG POINTER OUT SYNC-UP
+1986/08/07 - CJ  - TIME.BASE.MODE TO 7 FOR LOD STARTUP
+1986/07/13 - CJ  - IMPROVED NEXT.CLICK OPERATION WITH RECORDED CLICK TRACK
+1986/07/10 -CJ,TS- ADDED MIDI SYNC OUTPUT
+1986/07/10 - CJ  - ADDED 50 HZ SYNC INPUT
+1986/07/09 - CJ  - ADDED EXTERNAL CLOCK OUTPUT SIGNAL
+1986/05/15 - "official" creation of release-M modules
+*/
+
+DCL LAST.TIME.MESSAGE	FIXED PUBLIC;
+DCL FORCE.TIME.MESSAGE	FIXED PUBLIC;
+
+SEND.D115.TIME.MESSAGE: PROC;
+	DCL BUF  (8)	FIXED;
+	DCL TIME (1)	FIXED;
+	DCL SIGN			FIXED;
+	DCL I				FIXED;
+
+	DCL STIME(1)	FIXED;	/*	WILL HOLD CURRENT SEQUENCER TIME	*/
+	DCL DTIME(1)	FIXED;	/*	WILL HOLD CURRENT DTD		 TIME	*/
+/*	DCL ATIME(1)	FIXED;	*/	/*	WILL HOLD CURRENT DTD		 TIME	*/
+									/*	IN AUDITION-STYLE TIME FORMAT		*/
+
+	/*	SEND TIME MESSAGE ONCE PER SECOND:										*/
+
+	/*	Note: see careful logic below where last.time.message is set!	*/
+
+	DO;
+
+		IF DELAY.NOTE.AND.CUE.STARTS = 0 THEN DO;	/*	NOT DOING SILENT PRE-ROLL*/
+			STIME(0) = SAMPLED.ACTUAL.PLAY.TIME.MSB;
+			STIME(1) = SAMPLED.ACTUAL.PLAY.TIME.LSB;
+		END;
+		ELSE DO;		/*	PRETEND WE'RE HOLDING AT THE POINT WHERE AUDIO STARTS	*/
+			STIME(0) = DELAY.NOTE.AND.CUE.TIME(LW#MSB);
+			STIME(1) = DELAY.NOTE.AND.CUE.TIME(LW#LSB);
+		END;
+
+		DTIME(0) = CUR.DTD.MS.MSB;					/*	SAMPLE CURRENT DTD		*/
+		DTIME(1) = CUR.DTD.MS.LSB;					/*	TIME (MAP TO CUR PROJ)	*/
+	/*	CALL ADD32(DTIME, Cue.Time.Display.Offset, DTIME);	*/
+
+	/*	ATIME(0) = CUR.DTD.MS.MSB;						*/	/*	SAMPLE CURRENT DTD			*/
+	/*	ATIME(1) = CUR.DTD.MS.LSB;						*/	/*	TIME								*/
+	/*	CALL SUB32(ATIME, Cue.In.Time,	ATIME);	*/	/*	GET DISTANCE FROM CUE IN	*/
+	/*	CALL ADD32(ATIME, Cue.Trig.Time,	ATIME);	*/	/*	GET IN SEQUENCE TIME			*/
+
+		CALL Remove.Zero.Time.Offset(STIME);
+		CALL Remove.Zero.Time.Offset(DTIME);
+	/*	CALL Remove.Zero.Time.Offset(ATIME);	*/
+
+		DO I=0 TO (SHL(NUM.D115D.BDS,1) - 1);	/*	FOR EACH CHANNEL PRESENT	*/
+
+			IF D115D.CHANS(I) <> 0 THEN DO;				/*	CHECK FOR ACTIVE CHANNELS	*/
+
+				/*	CHECK FOR TIMEOUT - EACH DEVICE SHOULD TALK TO US EVERY	*/
+				/*	SECOND.  IF WE DON'T HEAR FOR 3 SEC, WE WILL GIVE UP		*/
+				/*	AS LONG AS THERE ARE NO MESSAGES WAITING FOR PROCESSING	*/
+				/*	(EG: DON'T TIME OUT DURING LONG SOUND FILE LOADING)		*/
+
+				IF PROTOCOL.PACKET.THERE = 0
+				AND (REAL.MILLISECONDS - D115D.TIMERS(I)) IGT 3000 THEN DO;
+					IF D115D.CHANS(I) = NN#MIDI THEN MIDINET.TIMEOUT = 1;
+					D115D.TIMEOUT = D115D.CHANS(I) | SHL(I,8);
+					D115D.CHANS(I) = 0;	/*	TIMEOUT: MARK CHANNEL INACTIVE	*/
+					BUF(0) = 4 + 2;		/*	LENGTH (NO DATA)	*/
+					BUF(1) = I & 1;		/*	CHANNEL NUMBER		*/
+					BUF(2) = SHL(P#LOCAL,8);	/*	SEND SPECIAL MESSAGE TO RESET D115D CHANNEL	*/	//	e.g. T#D115_Chan_Active
+					CALL FAST.SEND.PROTOCOL.PACKET(ADDR(BUF(0)),SHR(I,1));
+				END;
+
+				ELSE DO;						/*	NO TIMEOUT, SEND OUR "HI" MESSAGE	*/
+					BUF(0) = L#CURRENT_TIME;
+					BUF(1) = I & 1;				/*	CHANNEL NUMBER	*/
+					BUF(2) = T#CURRENT_TIME;
+
+					/*	HANDLE MOST COMMON CASE QUICKLY: DEVICE IS ASKING FOR	*/
+					/*	CURRENT SEQUENCER TIME AT LEAST:								*/
+
+					BUF(3) = STIME(0);	/*	SAVE SEQUENCE TIME IN BUFFER		*/
+					BUF(4) = STIME(1);
+
+					/*	IF DEVICE NEEDS DIRECT-TO-DISK TIME, LOOK UP WHICH	*/
+					/*	FORMAT HE WANTS IT IN:											*/
+
+					IF (1)					/*	DO ALWAYS NOW							*/
+					OR (D115D.FORMAT(I) & PFORM#SendDTD) <> 0
+					THEN DO;
+
+						/*	SEND OVER PLAIN DIRECT-TO-DISK TIME, OR				*/
+						/*	SEQUENCE-RELATED DIRECT-TO-DISK TIME:					*/
+
+						/*	IF (D115D.FORMAT(I) & PFORM#DTDSEQ) = 0				*/
+						/*	THEN DO;															*/
+						/*	ALWAYS GIVE THE VANILLA DTD TIME FOR NOW				*/
+							BUF(5) = DTIME(0);	/*	GET PLAIN VANILLA DTD		*/
+							BUF(6) = DTIME(1);	/*	TIME								*/
+						/*	END;																*/
+
+						/*	ELSE DO;					*/
+						/*		BUF(5) = ATIME(0);	*/	/*	GET SEQUENCE RELATED	*/
+						/*		BUF(6) = ATIME(1);	*/	/*	DTD TIME					*/
+						/*	END;						*/
+
+						/*	IF DEVICE ONLY WANTS DTD TIME, THEN DO SO; ELSE		*/
+						/*	SEND BOTH TIMES												*/
+
+						IF  (0										)	/*	NEVER NOW	*/
+						AND (D115D.FORMAT(I) & PFORM#SendSEQ) = 0
+						THEN DO;
+							BUF(3) = BUF(5);		/*	IF ONLY WANTS 1 TIME, GIVE	*/
+							BUF(4) = BUF(6);		/*	IT THE DTD TIME				*/
+							BUF(0) = BUF(0) - 4;	/*	MEANS SHORTER MESSAGE		*/
+						END;
+
+					END;
+
+					/*	SEND THE ESTIMATED MOVE DISTANCE FOR THE NEXT SECOND	*/
+
+					BUF(7) = 0;									/*	ASSUME WE'RE NOT MOVING	*/
+					BUF(8) = 0;
+
+					IF (TIME.BASE.MODE <> 0) THEN DO;	/*	PLAYING	*/
+						IF DELAY.NOTE.AND.CUE.STARTS <> 0
+						THEN	/*	LEAVE SPEED AT ZERO	*/;	/*	DOING SILENT PRE-ROLL*/
+						ELSE IF SMPTE.ONOFF = 0				/*	NO SMPTE	*/
+						THEN BUF(8) = SAMP.SPEED;			/*	1000 MEANS NORMAL SPEED OF 1.000	*/
+						ELSE DO;									/*	SMPTE IS ON	*/
+							IF SLOCKED = 0						/*	BUT WE'RE NOT LOCKED	*/
+							THEN BUF(8) = 0;					/*	SO WE'RE NOT MOVING	*/
+							ELSE DO;								/*	LOCKED TO SMPTE	*/
+								LOAD SAMP.SPEED;				/*	CALULATE THE RATE	*/
+								MUL  SMPTE.TRACK.RATE;
+								MWAIT;
+								DIV  SMPTE.MODE.RATE;
+								BUF(8) = RES;
+							END;
+						END;			/*	OF SMPTE IS ON	*/
+					END;				/*	OF PLAYING	*/
+
+					ELSE IF (SAMPLED.MOVE <> 0)			/*	WAS MOVING LAST TIME THROUGH MAIN LOOP	*/
+					AND	  (MOVE			 <> 0)			/*	HAS NOT STOPPED YET.							*/
+					THEN DO;
+						IF SAMP.SPEED <= 1000				/*	DON'T SCALE IF PLAY SPEED NORMAL TO SLOW	*/
+						THEN DO;
+							BUF(8) = SAMPLED.MOVE.SPEED;	/*	NEG=REWIND, POS=FAST FORWARD	*/
+							IF SAMPLED.MOVE.SPEED < 0
+							THEN BUF(7) = "177777";			/*	SIGN EXTEND IF NEGATIVE	*/
+						END;
+						ELSE DO;									/*	SCALE SPEED BY PLAY SPEED IF FASTER THAN 1000	*/
+							IF SAMPLED.MOVE.SPEED < 0 THEN DO;	/*	D4567 DOES UNSIGNED MATH	*/
+								SAMPLED.MOVE.SPEED = -(SAMPLED.MOVE.SPEED);
+								SIGN = 1;						/*	REMEMBER RESULT MUST BE NEGATED	*/
+							END;
+							ELSE SIGN = 0;
+							LOAD SAMPLED.MOVE.SPEED;		/*	2000, 8000 OR 32000	*/
+							DIV 1000;							/*	REMOVE EXTRA FACTOR OF 1000	*/
+							MWAIT;
+							ULOAD 0;								/*	REMAINDER SHOULD BE ZERO, BUT BE SURE	*/
+							MUL SAMP.SPEED;					/*	FACTOR IN PLAYING SPEED	*/
+							BUF(7) = URES;
+							BUF(8) = RES;
+							IF SIGN <> 0
+							THEN DO;
+								CALL NEG32(LOC(ADDR(BUF(7))));
+								SAMPLED.MOVE.SPEED = -(SAMPLED.MOVE.SPEED);
+							END;
+						END;
+					END;
+
+					CALL FAST.SEND.PROTOCOL.PACKET(ADDR(BUF(0)),SHR(I,1));
+
+				END;	/*	OF SEND OUR "HI" MESSAGE	*/
+			END;		/*	OF ACTIVE CHANNEL	*/
+		END;			/*	OF LOOP OVER D115D CHANNELS	*/
+
+		/*	SEND OUT CURRENT TIME MESSAGE EVERY 50 MILLISECONDS WHILE	*/
+		/*	MOVING FAST FORWARD OR REWINDING.  OTHERWISE SEND OUT			*/
+		/*	ONCE EVERY SECOND.														*/
+
+		IF SAMPLED.MOVE <> 0
+		THEN LAST.TIME.MESSAGE = REAL.MILLISECONDS-950;
+		ELSE LAST.TIME.MESSAGE = REAL.MILLISECONDS;
+
+	END;				/*	OF TIME TO SEND NEXT MESSAGE	*/
+
+END SEND.D115.TIME.MESSAGE;
+
+DCL (D16THERE)	FIXED PUBLIC;			/*	WRITTEN TO D16 TO GENERATE 1 MSEC INTERRUPTS	*/
+DCL (D16TIM)	FIXED PUBLIC;			/*	D16 INCREMENT - D16 TICKS IN 1 MS.	*/
+DCL (D16PHASE)	FIXED;					/*	PHASE OF D16 - 1 - D16TIM			*/
+DCL (D16HALF)	FIXED;					/*	1/2 OF D16TIM - DONE FOR SPEED	*/
+
+DCL (TIME.BASE.SCAN.QUE.AND.SCAN.INPUTS) PROCEDURE (FIXED);
+
+MEASURE.D16:PROC PUBLIC;				/*	PUT IN SUBROUTINE FOR BETTER COMPILER OPTIMIZATION	*/
+	DCL (I,J)	FIXED;
+
+	if (interp_is_running != 0)		//	If interpreter is running, don't try to actually measure the D16.
+	{											//	Instead, just set up some constants that describe the way
+		D16TIM	= 500;					//	the interpreter models it
+		D16THERE	= 499;
+		D16HALF	= SHR(D16TIM,1);
+		D16PHASE	= D16HALF;
+		return;
+	}
+
+	I=0; J=0;								/*	GET SPEED OF IT		*/
+	WRITE(3)=0; WRITE(3)=0;				/*	SYNC TO D3 FOR A MOM	*/
+	I=READ(D16);WRITE(3)=0;				/*	MEASURE D16 5MS INCR	*/
+	J=READ(D16);
+	D16TIM	=J-I;							/*	GET D16 TIME DELTA THAT OCCURS IN 5 MS.	*/
+	IF D16TIM=499	THEN D16TIM=500;
+	IF D16TIM=501	THEN D16TIM=500;
+	IF D16TIM=4999	THEN D16TIM=5000;
+	IF D16TIM=5001	THEN D16TIM=5000;
+	LOAD D16TIM; DIV 5; D16TIM=RES;	/*	D16 COUNTS PER MS		*/
+	D16THERE	=D16TIM-1;					/*	ONE LESS					*/
+	D16HALF	=SHR(D16TIM,1);			/*	FOR D03INT ROUTINE	*/
+	D16PHASE	=D16HALF;					/*	START MID-PHASE		*/
+END MEASURE.D16;
+
+DCL INITIALIZE.COMPLETED	FIXED PUBLIC;
+
+WHEN D16INT THEN BEGIN;						/*	HANDLE D16 INTERRUPT	*/
+
+   IF (0)                              // ANALYZE RESPONSE
+	{
+		DCL (A,B) FIXED STATIC;
+		A = A+1;
+		IF (A == 1000)
+		{
+			SEND 'D16INT ', KBD.MILLISECONDS - B;
+			A = 0;
+			B = KBD.MILLISECONDS;
+		}
+	}
+
+	IF D16THERE<>0 THEN DO;					/*	USE D16 IF IT IS THERE		*/
+
+      if (interp_is_running != 0) {											//	if interpreting, read how many milliseconds have
+			CALL TIME.BASE.SCAN.QUE.AND.SCAN.INPUTS(read(D17) + 1);	//	gone by and advance time bases that much.  Note we read D16 once in the interrupt service routine
+         
+         /*	CALL FROM HERE TO ENSURE THAT MIDI NOTES ARE SENT ONCE PER MSEC	*/
+         IF MIDI.BUF(0) > 3 THEN DO;		/*	INDICATES NON-EMPTY (3 WORDS OF HEADER)	*/
+            CALL EMPTY.MIDI.BUF;				/*	SEND THE CONTENTS OF THE BUFFER TO THE MIDI BOX	*/
+         END;
+         
+         IF WITHIN.SCAN<>0 THEN RETURN;	/*	RE-ENTERED  - RETURN NOW	*/
+
+         // If we are on the timer thread, we will block the timer task if
+         // there are no D16 counts pending. If we were on the deferred
+         // thread then we would just come back here
+         while (interp_is_at_timer_level(0))
+            interp_exit_real_time_thread();                       // exit timer thread if no D16 counts pending (and we are on the timer thread)
+         
+         // Here we will either be off the timer thread or have more counts to process
+         dcl more_msecs fixed;
+         
+         more_msecs = (read(D17));        // More?
+         
+         while (more_msecs != 0) {
+            CALL TIME.BASE.SCAN.QUE.AND.SCAN.INPUTS(more_msecs);
+            
+            /*	CALL FROM HERE TO ENSURE THAT MIDI NOTES ARE SENT ONCE PER MSEC	*/
+            IF MIDI.BUF(0) > 3 THEN DO;		/*	INDICATES NON-EMPTY (3 WORDS OF HEADER)	*/
+               CALL EMPTY.MIDI.BUF;				/*	SEND THE CONTENTS OF THE BUFFER TO THE MIDI BOX	*/
+            END;
+            
+            while (interp_is_at_timer_level(0))
+               interp_exit_real_time_thread();                    // exit timer thread if no D16 counts pending (and we are on the timer thread)
+            
+            more_msecs = (read(D17));        // More?
+         }
+      }
+
+		else
+		{
+			WRITE(D16)=D16THERE-READ(D16);	/*	GET NEW TIME TO LOAD - CORRECT FOR BEING LATE.	*/
+			IF READ(D16)>=0 THEN DO;			/*	DETECT INTERRUPTS DISABLED FOR > 1 MSEC	*/
+				LOAD READ(D16);					/*	SEE HOW LATE WE ARE	*/
+				DIV D16THERE;						/*	GET # OF MSECS APPROX	*/
+				WRITE(D16)=D16THERE;				/*	RESYNC HERE				*/
+				CALL TIME.BASE.SCAN.QUE.AND.SCAN.INPUTS(RES+1);
+			END;
+			ELSE CALL TIME.BASE.SCAN.QUE.AND.SCAN.INPUTS(1);
+         
+         /*	CALL FROM HERE TO ENSURE THAT MIDI NOTES ARE SENT ONCE PER MSEC	*/
+         IF MIDI.BUF(0) > 3 THEN DO;		/*	INDICATES NON-EMPTY (3 WORDS OF HEADER)	*/
+            CALL EMPTY.MIDI.BUF;				/*	SEND THE CONTENTS OF THE BUFFER TO THE MIDI BOX	*/
+         END;
+		}
+	END;
+
+	ELSE IF ((INC.POLY)\(MODC<>0))
+	AND	  (INITIALIZE.COMPLETED)
+	THEN DO;										/*	SWITCH TO MSEC TIMING IF MODEL C	*/
+		CALL MEASURE.D16;						/*	MAKES INTERRUPT ROUTINE USE FEWER REGISTERS	*/
+		if (interp_is_running == 0)
+			WRITE(D16)=D16THERE;				/*	GENERATE FIRST INTERRUPT IN 1 MSEC	*/
+	END;
+
+END;	/*	OF D16INT	*/
+
+WHEN D03INT THEN BEGIN;						/*	D03 INTERRUPT ROUTINE	*/
+	DCL (I			 )	FIXED;
+	DCL (SCANNING	 )	FIXED;
+
+	IF (0)										// ANALYZE RESPONSE
+	{
+		DCL (A,B) FIXED STATIC;
+		A = A+1;
+		IF (A == 1000)
+		{
+			SEND 'D03INT ', KBD.MILLISECONDS - B;
+			A = 0;
+			B = KBD.MILLISECONDS;
+		}
+	}
+
+	REAL.MILLISECONDS=KBD.MILLISECONDS;
+
+	IF  (D16THERE=0) THEN DO;				/*	if no d16 found yet, do some house keeping here	*/
+		IF (INITIALIZE.COMPLETED<>0)
+		THEN CALL TIME.BASE.SCAN.QUE.AND.SCAN.INPUTS(5);
+
+		/*	CALL FROM HERE TO ENSURE THAT MIDI NOTES ARE SENT ONCE PER MSEC	*/
+		IF MIDI.BUF(0) > 3 THEN DO;		/*	INDICATES NON-EMPTY (3 WORDS OF HEADER)	*/
+			CALL EMPTY.MIDI.BUF;				/*	SEND THE CONTENTS OF THE BUFFER TO THE MIDI BOX	*/
+		END;
+	END;
+
+	ELSE if (interp_is_running = 0)	/*	LOCK D16 INTO PHASE if interpreter is not running	*/
+	{
+		I=D16PHASE+READ(D16);				/*	GET CURRENT PHASE ERROR	*/
+		IF ABS(I)<D16HALF THEN DO;			/*	SMALL PHASE EROR - MUST BE CLOSE	*/
+			WRITE(D16)=D16PHASE;				/*	PRESET TO PHASE			*/
+		END;
+		ELSE DO;									/*	LARGE PHASE ERROR - MUST HAVE WRAPPED	*/
+			IF D16PHASE<D16HALF
+			THEN DO;								/*	WE WANT INTERRUPT SOON	*/
+				WRITE(D16)=D16PHASE+D16TIM;	/*	MEANS WE MUST HAVE DONE AN EXTRA ONE	*/
+				REAL.MILLISECONDS=REAL.MILLISECONDS-1;
+			END;
+			ELSE DO;
+				WRITE(D16)=D16PHASE;			/*	MEANS WE MISSED ONE		*/
+				CALL TIME.BASE.SCAN.QUE.AND.SCAN.INPUTS(1);
+				REAL.MILLISECONDS=REAL.MILLISECONDS+1;
+			END;
+		END;
+	}
+
+	SMPTE.SCAN.PHASE=SMPTE.SCAN.PHASE+1;
+	IF SMPTE.SCAN.PHASE=4 THEN DO;		/*	EVERY 20 MSEC				*/
+		SMPTE.SCAN.PHASE=0;
+		IF SMPTE.ONOFF<>0						/*	SCAN SMPTE IF ACTIVATED	*/
+		THEN CALL SMPTE.SCAN;				/*	SCAN FOR SMPTE INFO		*/
+		IF  (INC.MOUSE)
+		AND (MOUSE.COMMAND<>M$HALT)		/*	SCAN FOR MOUSE IF			*/
+		THEN CALL MOUSE.SCAN.AND.POLL;	/*	ACTIVATED					*/
+	END;
+
+	IF CREATE.50HZ.CLOCK<>0 THEN DO;		/*	50 HZ CLOCK DESIRED		*/
+		EXT.CLOCK.TOGGLE=EXT.CLOCK.TOGGLE XOR 1;
+		IF EXT.CLOCK.TOGGLE<>0 THEN DO;
+			IF INC.FM THEN WRITE("163")=1;	/*	GENERATE EXT CLOCK 50 HZ.	*/
+			EXT.CLOCK.OUT=EXT.CLOCK.OUT XOR 1;
+		END;
+	END;
+
+	IF SCANNING=0 THEN DO;					/*	DO NOT RE-ENTER			*/
+		SCANNING=1;
+		ENABLE;									/*	ALLOW OTHER INTERRUPTS	*/
+		IF (NUM.D115D.BDS <> 0)				/*	IF WE HAVE ANY D115D BOARDS	*/
+		AND ((REAL.MILLISECONDS-LAST.TIME.MESSAGE) IGT 1000)
+		THEN CALL SEND.D115.TIME.MESSAGE;
+		IF INC.AXE<>0							/*	DO GUITAR SCAN				*/
+		THEN CALL REAL.TIME.GUITAR.SCAN;
+		DISABLE;
+		SCANNING=0;
+	END;
+
+END;	/*	OF D03INT	*/
+
+
+DCL (ANY.INDEX.QUES)				FIXED PUBLIC;	/*	TRUE TO SCAN INDEX QUES	*/
+DCL (MIDI.CLOCK.RATE)			FIXED PUBLIC;	/*	EST.RATE OR SAMPLED.CLICK	*/
+DCL (MISSED.BEAT.CLOCKS)		FIXED PUBLIC;	/*	IN CLOCKS TO PROCESS ONCE EST.RATE IS KNOWN FOR SURE	*/
+DCL (ANY.OMS.MIDI.SYNC.BYTES) FIXED PUBLIC;	// Nonzero if any OMS MIDI Sync bytes are available
+DCL (ANY.OMS.MIDI.BULK.BYTES) FIXED PUBLIC;	// Nonzero if any OMS MIDI Bulk bytes are available
+
+TIME.BASE.SCAN.QUE.AND.SCAN.INPUTS:PROC(NUMC);
+	DCL (NUMC)					FIXED;	/*	PASS # OF COUNTS	*/
+	DCL (ADVANCES)				FIXED;
+	DCL (OUR.MILLISECONDS)	FIXED;	/*	SAMPLED TIME BASE FOR KEYBOARD DELAYS	*/
+	DCL (FREE.R0)				LIT ' IF 0 THEN WRITE("300")=READ("300") ';
+	DCL (MIDI.SPEED.ACCUM)	FIXED;	/*	FOR IDLE MIDI OUTPUT CLOCK GENERATOR	*/
+	DCL (MIDI.CLOCK.ACCUM)	FIXED;
+	DCL TEMP(4)					FIXED;	/*	TEMP BUFFER FOR PROTOCOL OUTPUT	*/
+	DCL BOARD					FIXED;	/*	D115D board number	*/
+
+	// Could test response time
+	IF (0)									// ANALYZE RESPONSE
+	{
+		DCL (A,B) FIXED STATIC;
+      
+      // Every 1000 times we get here see what real time has done.
+      // There should be 1000 millisecond advances for every 1000 times we get here.
+      // If not then sometimes milliseconds are advancing but we are not being called...
+		A = A+1;
+		IF (A == 5000)
+		{
+			SEND 'TIME.BASE.SCAN.QUE.AND.SCAN.INPUTS ', KBD.MILLISECONDS - B;
+			A = 0;
+			B = KBD.MILLISECONDS;
+		}
+	}
+	
+	PROCESS.MISSED.BEAT.CLOCKS:PROC;
+		DO WHILE MISSED.BEAT.CLOCKS<>0;				/*	PROCESS MISSED BEAT SYNC/MIDI SYNC IN CLOCKS NOW THAT THE NEW EST.RATE IS KNOWN	*/
+			LOAD CLOCK.LIMIT.REM+MIDI.CLOCK.RATE;	/*	NOW COMPUTE THE NEXT CLOCK LIMIT						*/
+			DIV SAMP.EXT.DIV;								/*	ADVANCE CLOCK.LIMIT BY CLICK.RATE/CRM				*/
+			CLOCK.LIMIT.LSB=CLOCK.LIMIT.LSB+RES;
+			CLOCK.LIMIT.REM=REM;							/*	SAVE REMAINDER TO ACCUMULATE CORRECT TOTAL TIME	*/
+
+			IF CLOCK.LIMIT.REM<>0 THEN DO;			/*	ROUND LIMIT UP IF REMAINDER	*/
+				CLOCK.LIMIT.LSB=CLOCK.LIMIT.LSB+1;
+				CLOCK.LIMIT.REM=CLOCK.LIMIT.REM-SAMP.EXT.DIV;
+			END;
+			MISSED.BEAT.CLOCKS=MISSED.BEAT.CLOCKS-1;
+		END;
+	END PROCESS.MISSED.BEAT.CLOCKS;
+
+	KBD.MILLISECONDS=KBD.MILLISECONDS+NUMC;		/*	COUNT REAL TIME			*/
+
+	IF CREATE.BEAT.CLOCK<>0 THEN DO;					/*	CREATE BEAT SYNC			*/
+		LOAD NUMC; MUL SAMP.SPEED;						/*	REAL TIME * SPEED			*/
+		LOAD EXT.SPEED.ACCUM+RES; DIV 1000;			/*	MODULO 1000;				*/
+		EXT.SPEED.ACCUM=REM;								/*	SAVE REMAINDER				*/
+		LOAD RES; MUL SAMP.CRM;							/*	GET RESULT * CRM			*/
+		EXT.CLOCK.ACCUM=EXT.CLOCK.ACCUM+RES;		/*	ACCUMULATE THAT			*/
+		IF EXT.CLOCK.ACCUM >=SAMP.CLICK.RATE		/*	SEE IF TIME FOR CLICK	*/
+		THEN DO;
+			EXT.CLOCK.ACCUM=EXT.CLOCK.ACCUM-SAMP.CLICK.RATE;
+			IF INC.FM THEN WRITE("163")=1;			/*	TOGGLE EXT CLOCK			*/
+			EXT.CLOCK.OUT=EXT.CLOCK.OUT XOR 1;		/*	KEEP TRACK OF STATE		*/
+			EXT.BEAT.TRIGGER=5;							/*	SET TIMER FOR RELEASE	*/
+		END;
+		ELSE IF EXT.BEAT.TRIGGER<>0 THEN DO;		/*	CHECK FOR RELEASE			*/
+			EXT.BEAT.TRIGGER=EXT.BEAT.TRIGGER-1;	/*	COUNT							*/
+			IF EXT.BEAT.TRIGGER=0						/*	RELEASE TIME				*/
+			THEN DO;
+				IF INC.FM THEN WRITE("163")=1;
+				EXT.CLOCK.OUT=EXT.CLOCK.OUT XOR 1;
+			END;
+		END;
+	END;	/*	OF BEAT SYNC CASE	*/
+
+	DO CASE (TIME.BASE.MODE);
+
+		ADVANCES=0;						/*	0 - SEQUENCER NOT RUNNING	*/
+
+		DO;								/*	1 - INTERNAL SYNC				*/
+			ADVANCES=ADVANCES+NUMC;
+		END;
+
+		BEGIN;							/*	2 - WAITING FOR SMPTE LOCK	*/
+			DCL (I)	FIXED;
+			IF ((SMPTE.ACCUM+SMPTE.BRATE)+SMPTE.BRATE)>=SMPTE.BIT.TARG
+			THEN DO;						/*	SEE IF TARGET WILL LIKELY BE REACHED IN NEXT 20 MSEC	*/
+				I=SMPTE.BIT.TARG-(SMPTE.ACCUM+SMPTE.BRATE);
+				IF I<0 THEN DO;		/*	MEANS WE ARE STARTING LATE	*/
+					SMPTE.TIME.TARG=SMPTE.TIME;
+				END;
+				ELSE DO;					/*	PROJECT PRECISE TIME TO START	*/
+					LOAD I; MUL 20; MWAIT; DIV SMPTE.BRATE; I=RES;
+					IF SHL(REM,1)>=SMPTE.BRATE THEN I=I+1;
+					SMPTE.TIME.TARG=SMPTE.TIME+I;
+				END;
+				TIME.BASE.MODE=3;
+				interpret_set_timebase_mode(TIME.BASE.MODE);
+			END;
+		END;
+
+		DO;								/*	3 - WAITING FOR SMPTE TIME	*/
+			IF KBD.MILLISECONDS>=SMPTE.TIME.TARG THEN DO;
+				LOAD KBD.MILLISECONDS-SMPTE.TIME.TARG;
+				TIME.BASE.MODE=4;		/*	FOR NOW							*/
+				NEW.MOTION=1;			/*	TELL LOD ABOUT IT				*/
+				interpret_set_timebase_mode(TIME.BASE.MODE);
+				GOTO ACCUM.SMPTE;		/*	START IT							*/
+			END;
+		END;
+
+		DO;								/*	4 - SMPTE LOCKED				*/
+			LOAD NUMC;					/*	GET REAL TIME					*/
+			ACCUM.SMPTE:;
+			ULOAD SMPTE.RATE.ACCUM;			/*	GET REMAINDER					*/
+			MUL SMPTE.TRACK.RATE;			/*	REAL.TIME * TRACK.RATE		*/
+			MWAIT; DIV SMPTE.MODE.RATE;	/*	DIVIDE BY MODE.RATE			*/
+			ADVANCES = ADVANCES + RES;		/*	GET ADVANCES, REMAINDER		*/
+			SMPTE.ADVANCES = SMPTE.ADVANCES + RES;	/*	SAVE FOR SYNC CODE	*/
+			SMPTE.RATE.ACCUM = REM;
+		END;
+
+		DO;								/*	5: 50 HZ SYNC					*/
+			IF CLOCK.ADVANCES<>0		/*	SEE IF ANY CLOCK ADVANCES	*/
+			THEN DO;						/*	HAVE BEEN RECEIVED			*/
+				IF CLOCK.ADVANCES>20	/*	SEE IF SPEED UP REQUIRED	*/
+				THEN DO;
+					ADVANCES=ADVANCES+NUMC+(CLOCK.ADVANCES-20);
+					CLOCK.ADVANCES=20-NUMC;
+				END;
+				ELSE IF CLOCK.ADVANCES>=NUMC
+				THEN DO;
+					ADVANCES=ADVANCES+NUMC;
+					CLOCK.ADVANCES=CLOCK.ADVANCES-NUMC;
+				END;
+				ELSE DO;
+					ADVANCES=ADVANCES+CLOCK.ADVANCES;
+					CLOCK.ADVANCES=0;
+				END;
+			END;
+		END;
+
+		DO;								/*	6: BEAT SYNC						*/
+			ADVANCES=ADVANCES+NUMC;	/*	CHECK FOR CLOCK.LIMIT BELOW	*/
+		END;
+
+		ADVANCES=0;						/*	7: WAITING FOR LOD SYNC-UP		*/
+
+		DO;								/*	8: ADJUST TO LOD					*/
+			ADVANCES = ADVANCES		/*	ADVANCE AT NORMAL RATE, PLUS	*/
+						+ NUMC			/*	LOD CORRECTION						*/
+						+ SYNCLAV.TIME.BASE.ADJUST;
+			IF ADVANCES < 0			/*	IF STILL TO FAR AHEAD			*/
+			THEN DO;						/*	THEN WAIT HERE						*/
+				SYNCLAV.TIME.BASE.ADJUST = ADVANCES;
+				ADVANCES						 = 0;
+			END;
+			ELSE DO;						/*	ELSE RETURN TO INTERNAL SYNC	*/
+				SYNCLAV.TIME.BASE.ADJUST = 0;
+				TIME.BASE.MODE = 1;
+				interpret_set_timebase_mode(TIME.BASE.MODE);
+			END;
+		END;
+
+	END;
+
+	IF WITHIN.SCAN<>0 THEN RETURN;	/*	RE-ENTERED  - RETURN NOW	*/
+
+	LOAD ADVANCES;							/*	STORE IN MUL/DIV FOR SPEED	*/
+	ADVANCES=0;
+
+	OUR.MILLISECONDS=KBD.MILLISECONDS;	/*	SAMPLE MILLISECONDS FOR KEYBOARD DELAY	*/
+
+	WITHIN.SCAN=1;								/*	SET FLAG	*/
+
+	ENABLE;
+
+   interp_do_interrupts();                   // Digest the D3 interrupt here
+
+	IF RES<>0 THEN DO;								/*	ADVANCE TIME BASE			*/
+
+		ULOAD PLAY.TIME.ACU;							/*	SAMP.SPEED*OUR.ADVANCES + PLAY.TIME.ACU	*/
+		MUL SAMP.SPEED; MWAIT; DIV 1000;
+
+		PLAY.TIME.ACU=URES;							/*	SAVE REMAINDER				*/
+
+		PLAY.TIME.LSB=PLAY.TIME.LSB+RES;			/*	ADVANCE PLAY.TIME.LSB	*/
+		IF PLAY.TIME.LSB ILT RES					/*	CHECK FOR CARRY			*/
+		THEN PLAY.TIME.MSB=PLAY.TIME.MSB+1;
+
+		IF	 (PLAY.SEQ.TO.A.TIME <> 0)						/*	IF PERFORMING PLAY	*/
+		&	 ((PLAY.TIME.MSB IGT SEQ.PLAY.TO.MSB)		/*	TO, THEN STOP TIME	*/
+		\	  ((PLAY.TIME.MSB = SEQ.PLAY.TO.MSB)		/*	BASE AT DESIRED		*/
+		&		(PLAY.TIME.LSB IGE SEQ.PLAY.TO.LSB)))	/*	POINT.					*/
+		THEN DO;
+			PLAY.TIME.MSB = SEQ.PLAY.TO.MSB;
+			PLAY.TIME.LSB = SEQ.PLAY.TO.LSB;
+			PLAY.TIME.ACU = 0;
+		END;
+
+		IF  (TIME.BASE.MODE=6)						/*	MUST HANDLE BEAT SYNC/MIDI IN SYNC HERE	*/
+		AND (DISABLE.RECEIVED.CLOCKS=0)			/*	RECEIVE OF CLOCKS NOT DISABLED FOR MAIN LOOP COMPUTATION	*/
+		THEN DO;
+
+			IF  (CLOCK.RECEIVED<>0)							/*	NEW PULSE RECEIVED	*/
+			AND (OUR.MILLISECONDS>=CLOCK.DELAY.TIME)	/*	AFTER SYNC DELAY		*/
+			THEN DO;
+
+				PLAY.TIME.MSB=REAL.TIME.OF.CLOCK.LIMIT.MSB;	/*	JUMP TIME BASE TO CLOCK.LIMIT WHEN PULSE IS RECEIVED	*/
+				PLAY.TIME.LSB=REAL.TIME.OF.CLOCK.LIMIT.LSB;
+				PLAY.TIME.ACU=0;										/*	RESET TIME.ACU FOR EACH BEAT	*/
+
+				CLOCK.RECEIVED=0;										/*	ACKNOWLEDGE CLOCK RECEIVED		*/
+				NUM.RECEIVED.CLOCKS=NUM.RECEIVED.CLOCKS+1;	/*	INCREMENT INTERRUPT COUNTER	*/
+
+				/*	CHECK FOR NEW TEMPO	*/
+				IF   (PLAY.TIME.MSB IGT REAL.TIME.OF.NEXT.TEMPO.MSB)
+				OR  ((PLAY.TIME.MSB	=	REAL.TIME.OF.NEXT.TEMPO.MSB)
+				AND  (PLAY.TIME.LSB IGE REAL.TIME.OF.NEXT.TEMPO.LSB))
+				THEN REAL.CLOCK.RATE=NEXT.CLOCK.RATE;
+
+				/*	NOW COMPUTE REAL TIME OF NEXT CLOCK LIMIT.  THIS VALUE IS USED	*/
+				/*	TEMPORARILY UNTIL THE MAIN LOOP HAS HAD A CHANCE TO ACCURATELY	*/
+				/*	COMPUTE THE TIME.  SEE 311-SAMP.											*/
+
+				REAL.TIME.OF.CLOCK.LIMIT.LSB=REAL.TIME.OF.CLOCK.LIMIT.LSB+REAL.CLOCK.RATE;
+				IF REAL.TIME.OF.CLOCK.LIMIT.LSB ILT REAL.CLOCK.RATE
+				THEN REAL.TIME.OF.CLOCK.LIMIT.MSB=REAL.TIME.OF.CLOCK.LIMIT.MSB+1;
+			END;
+			ELSE DO;																/*	NO PULSE RECEIVED - ADVANCE AT NORMAL SPEED UNTIL JUST BEFORE LIMIT	*/
+				IF PLAY.TIME.LSB >= REAL.TIME.OF.CLOCK.LIMIT.LSB	/*	STOP JUST BEFORE LIMIT	*/
+				THEN DO;
+					IF PLAY.TIME.LSB ILT (REAL.TIME.OF.CLOCK.LIMIT.LSB-1)
+					THEN PLAY.TIME.MSB=REAL.TIME.OF.CLOCK.LIMIT.MSB-1;
+					ELSE PLAY.TIME.MSB=REAL.TIME.OF.CLOCK.LIMIT.MSB;
+					PLAY.TIME.LSB=REAL.TIME.OF.CLOCK.LIMIT.LSB-1;
+				END;
+			END;
+		END;
+
+		IF (OVERALL.LOOP<>0) THEN DO;				/*	LOOP EXISTS	*/
+
+			IF  ((PLAY.TIME.MSB IGT	GOBACK.PLAY.TIME.MSB))	/*	MSB	*/
+			OR  ((PLAY.TIME.MSB	=	GOBACK.PLAY.TIME.MSB)
+			AND  (PLAY.TIME.LSB IGE	GOBACK.PLAY.TIME.LSB))
+			AND ((SMPTE.ONOFF		=	0						))
+			THEN DO;
+
+				CALL LOOP.TIME.BASE;	/*	RESET PLAY TIME, BEAT NUMBER, NEXT.CLICK, LAST.CLICK	*/
+
+			END;							/*	OF ACTUAL LOOP	*/
+
+		END;								/*	OF LOOP EXISTS	*/
+
+		// Wake up main loop
+		if (PLAY.TIME.LSB >= NEXT.SEQ.EVENT)
+		{
+			IF  (PTRS.LOOPED=LOOP.RESTART)
+			{
+            // Inform interpreter we have a new key to process
+				if (newkey == 0) interp_newkey_pending(true);
+				newkey = 1;
+				NEXT.SEQ.EVENT = NEXT.SEQ.EVENT + 5000;
+			}
+		}
+		
+		IF (ACTUALLY.EMIT.CLICK <> 0)
+		THEN DO;
+
+			IF CLICK.TRACK.MODE igt 3					/*	LIVE CLICK	*/
+			THEN DO;
+				IF (PLAY.TIME.LSB >= NEXT.CLICK)
+				THEN DO;
+					ACTUALLY.EMIT.CLICK = false;		/*	RESET CLICK FLAG FOR MAIN LOOP	*/
+					MIDI.CLOCK.RATE=EST.RATE;			/*	GET NEW EST.RATE		*/
+					IF (MIDI.CLOCK.RATE=0) OR (MIDI.CLOCK.RATE IGT 10000)	/*	KEEP NEXT.CLICK	*/
+					THEN MIDI.CLOCK.RATE=500;
+					IF  (TRIGGER.CLICK<>0)				/*	IF NOTE SCANNED		*/
+					THEN DO;									/*	THEN EMIT CLICK		*/
+						NEW.BEAT.NUMBER=TRUE;			/*	NEW BEAT #				*/
+						DO CASE (TRIGGER.CLICK);		/*	CHECK STATUS			*/
+							;									/*	CASE 0: WON'T HAPPEN				*/
+							TRIGGER.CLICK = 0;			/*	CASE 1: EMIT 1 CLICK; WAIT		*/
+							TRIGGER.CLICK = 3;			/*	CASE 2: LAST CLICK ON TRACK	*/
+							DO;								/*	CASE 3: PAST END OF TRACK		*/
+								LAST.CLICK = NEXT.CLICK;
+								BEAT.NUMBER=BEAT.NUMBER+1;
+							END;
+						END;
+						IF CLICKON<>FALSE							/*	AND CLICK IS ON	*/
+						THEN IF INC.FM THEN WRITE("163")=0;	/*	GENERATE CLICK		*/
+						IF SMPTE.ONOFF=0 THEN DO;
+							MIDI.LIMIT.LSB=NEXT.CLICK;	/*	RIGHT NOW	*/
+							MIDI.LIMIT.REM=0;				/*	START THERE	*/
+						END;
+						IF MISSED.BEAT.CLOCKS<>0		/*	ADVANCE INTO THIS BEAT AT CORRECT EST.RATE NOW THAT NOTE HAS BEEN SCANNED	*/
+						THEN CALL PROCESS.MISSED.BEAT.CLOCKS;
+					END;
+					ELSE DO;									/*	CLICK NOTE HAS NOT BEEN SCANNED - STOP MIDI OUTPUT CLOCKS	*/
+						IF SMPTE.ONOFF=0 THEN DO;
+							MIDI.LIMIT.LSB=NEXT.CLICK+MIDI.CLOCK.RATE+1000;
+						END;
+					END;
+					NEXT.CLICK=NEXT.CLICK+MIDI.CLOCK.RATE;
+				END;	/*	of IF (PLAY.TIME.LSB >= NEXT.CLICK)	*/
+			END;		/*	of LIVE CLICK	*/
+
+			ELSE DO;	/*	INTERNAL OR EXTERNAL CLICK	*/
+				IF (PLAY.TIME.LSB >= REAL.TIME.OF.NEXT.CLICK.LSB)
+				THEN DO;
+					ACTUALLY.EMIT.CLICK = false;				/*	RESET CLICK FLAG FOR MAIN LOOP	*/
+
+					IF (CLICK.TRACK.MODE == 0) THEN DO;		/*	BASIC INTERNAL CLICK	*/
+						MIDI.CLOCK.RATE=SAMP.CLICK.RATE;
+						IF CLICKON<>FALSE							/*	IF NOT SUPPRESSED		*/
+						THEN DO;
+							IF INC.FM THEN WRITE("163")=0;	/*	GENERATE CLICK			*/
+
+							/*	FOR DBUG ONLY !!!!!!!!!!!!	*/
+							#if (false)
+							BEGIN;
+								DCL SEQDBUG	ARRAY EXTERNAL;
+								IF SEQDBUG(1)<>0 THEN DO;
+									DISABLE;
+									CALL MIDI.NOTE.ON(16,0,36,100);	/*	SIMULATE A CLICK	*/
+									/*	ABOVE ROUTINE ENABLES INTERRUPTS	*/
+								END;
+							END;
+							#endif
+
+						END;
+						IF MISSED.BEAT.CLOCKS<>0
+						THEN CALL PROCESS.MISSED.BEAT.CLOCKS;
+					END;
+
+					ELSE DO;	/*	EXTERNAL CLICK - JUST KEEP MIDI IN AND OUT UP TO DATE AT SAMP.CLICK.RATE	*/
+						MIDI.CLOCK.RATE=SAMP.CLICK.RATE;
+						IF MISSED.BEAT.CLOCKS<>0
+						THEN CALL PROCESS.MISSED.BEAT.CLOCKS;
+					END;
+
+					NEXT.CLICK=NEXT.CLICK+MIDI.CLOCK.RATE;
+				END;	/*	of IF (PLAY.TIME.LSB >= REAL.TIME.OF.NEXT.CLICK.LSB)	*/
+			END;		/*	of INTERNAL OR EXTERNAL CLICK	*/
+
+		END;			/*	of IF (ACTUALLY.EMIT.CLICK <> 0)	*/
+
+		IF ((DISABLE.MIDI.CLOCKS=0)								/*	WE ARE NOT INTERRUPTING MAIN LOOP COMPUTATION	*/
+		&&  (PLAY.TIME.LSB>=REAL.TIME.OF.MIDI.LIMIT.LSB))	/*	TIME TO EMIT NEXT MIDI CLOCK	*/
+		{
+			IF MIDI.SYNC.OUT<>0 THEN DO;						/*	GENERATE MIDI OUTPUT CLOCKS	*/
+				IF (MIDI.SYNC.IS.TC != 0)						/*	GENERATE MIDI QF MESSAGE		*/
+				THEN BEGIN;
+					DCL THE_BYTE	FIXED;
+
+					DO CASE (MIDI.TC.NEXT.CODE);
+						DO;
+							THE_BYTE = SHL(0,4) | (MIDI.TC.VAL(3) & 0xF);
+							MIDI.TC.NEXT.CODE = 1;
+						END;
+						DO;
+							THE_BYTE = SHL(1,4) | (SHR(MIDI.TC.VAL(3), 4));
+							MIDI.TC.NEXT.CODE = 2;
+						END;
+						DO;
+							THE_BYTE = SHL(2,4) | (MIDI.TC.VAL(2) & 0xF);
+							MIDI.TC.NEXT.CODE = 3;
+						END;
+						DO;
+							THE_BYTE = SHL(3,4) | (SHR(MIDI.TC.VAL(2), 4));
+							MIDI.TC.NEXT.CODE = 4;
+						END;
+						DO;
+							THE_BYTE = SHL(4,4) | (MIDI.TC.VAL(1) & 0xF);
+							MIDI.TC.NEXT.CODE = 5;
+						END;
+						DO;
+							THE_BYTE = SHL(5,4) | (SHR(MIDI.TC.VAL(1), 4));
+							MIDI.TC.NEXT.CODE = 6;
+						END;
+						DO;
+							THE_BYTE = SHL(6,4) | (MIDI.TC.VAL(0) & 0xF);
+							MIDI.TC.NEXT.CODE = 7;
+						END;
+						DO;
+							THE_BYTE = SHL(7,4) | (SHR(MIDI.TC.VAL(0) | MIDI.FULL.MODE.CODE(SM.MODE), 4));
+							MIDI.TC.NEXT.CODE = 0;
+
+							/*	compute next time code value at this time:	*/
+
+							MIDI.TC.VAL(3) = MIDI.TC.VAL(3) + 2;	/*	ADVANCE by 2FRAMES	*/
+
+							IF (MIDI.TC.VAL(3) >= FRAMES.PER.SECOND(SM.MODE))
+							{
+								MIDI.TC.VAL(3) = MIDI.TC.VAL(3) - FRAMES.PER.SECOND(SM.MODE);
+								MIDI.TC.VAL(2) = MIDI.TC.VAL(2) + 1;
+
+								IF (MIDI.TC.VAL(2) >= 60)
+								{
+									MIDI.TC.VAL(2) = MIDI.TC.VAL(2) - 60;
+									MIDI.TC.VAL(1) = MIDI.TC.VAL(1) + 1;
+
+									IF (MIDI.TC.VAL(1) >= 60)		/*	IF MINUTES WRAPPED TO 60	*/
+									{
+										MIDI.TC.VAL(1) = MIDI.TC.VAL(1) - 60;
+										MIDI.TC.VAL(0) = MIDI.TC.VAL(0) + 1;
+
+										IF (MIDI.TC.VAL(0) >= 24)
+											MIDI.TC.VAL(0) = MIDI.TC.VAL(0) - 24;
+									}
+
+									/*	CHECK FOR DROPPED FRAME	*/
+
+									IF ((SM.MODE == 0)				/*	IF DROP FRAME				*/
+									&&  (MIDI.TC.VAL(3) = 0)		/*	AND FRAME COUNT IS 0		*/
+									&&  (MIDI.TC.VAL(2) = 0))		/*	AND SECND COUNT IS 0		*/
+									{
+										LOAD MIDI.TC.VAL(1);			/*	GET MINUTES					*/
+										DIV  10;							/*	OVER 10						*/
+										IF (REM != 0)					/*	NOT MINUTE 0,10,20...50	*/
+											MIDI.TC.VAL(3) = 2;		/*	THEN DROP 2 FRAMES		*/
+									}
+								}
+							}
+
+							NEW.MTC.VAL = 1;
+						END;
+					END;
+
+					if (MIDI.SYNC.OUT < 0)						// Send mtc qf message
+						interp_send_oms_mtc_qf("HF1", THE_BYTE);
+						
+					IF (MIDI.SYNC.OUT&"377")<>0 THEN DO;	/*	TALK TO OLD HARDWARE	*/
+						DISABLE;
+						WRITE(SYSSEL)=MIDI.SUBSYS+SHR((MIDI.SYNC.OUT&"377")-1,2);	/*	SELECT MIDI SUBSYSTEM	*/
+						WRITE(MCHA  )=((MIDI.SYNC.OUT&"377")-1)&3;	/*	AND OUTPUT TO SEND SYNC INFO	*/
+						WRITE(MDAT  )="HF1";						/*	SEND TIMING CLOCK BYTE	*/
+						WRITE(MDAT  )=THE_BYTE;
+						ENABLE;
+					END;
+
+					/*	ADVANCE REAL TIME OF NEXT BYTE	*/
+
+					LOAD	MIDI.TC.NUM;							/*	START WITH NUM OF (MSECS/QF)/1000)	*/
+					ULOAD	REAL.TIME.OF.MIDI.LIMIT.ACU;		/*	PRELOAD PRIOR REMAINDER					*/
+					MUL	SAMP.SPEED; MWAIT;					/*	MUL BY SPEED								*/
+					DIV	MIDI.TC.DEN;							/*	DIVIDE BY DENOM							*/
+																		/*	YIELDS PLAY TIME MSECS TO ADVANCE	*/
+					REAL.TIME.OF.MIDI.LIMIT.ACU = REM;
+					REAL.TIME.OF.MIDI.LIMIT.LSB = REAL.TIME.OF.MIDI.LIMIT.LSB + RES;
+					IF (REAL.TIME.OF.MIDI.LIMIT.LSB ILT RES)
+						REAL.TIME.OF.MIDI.LIMIT.MSB = REAL.TIME.OF.MIDI.LIMIT.MSB + 1;
+				END;
+
+				ELSE DO;												/*	ELSE EMIT MIDI CLOCKS			*/
+					if (MIDI.SYNC.OUT < 0)
+						interp_send_oms_clk_byte("HF8");
+						
+					IF (MIDI.SYNC.OUT & 0x7f00) <> 0			/*	MIDI SYNC WANTS TO GO TO MIDINET	*/
+					THEN DO;
+						DISABLE;
+						IF (MIDI.BUF(0) + 1) >					/*	IF ADDING THE LENGTH OF THIS MESSAGE TO THE MIDI BUFFER	*/
+						(MAX_PACKET_LENGTH / 2)					/*	WOULD EXCEED THE NUMBER OF WORDS ALLOWED	*/
+						THEN DO;
+							CALL EMPTY.MIDI.BUF;					/*	SEND THE CONTENTS OF THE BUFFER OUT	*/
+						END;
+
+						/*	NOW WRITE THE EVENT INTO THE MIDI BUFFER	*/
+						MIDI.BUF(MIDI.BUF(0)) = SHL(T#MIDI_TIMING_CLOCK,8) | 2;	/*	EVENT ID IN UPPER, BYTE LENGTH OF DATA IN LOWER	*/
+						MIDI.BUF(0) = MIDI.BUF(0) + 1;									/*	UPDATE WORD SIZE OF MIDI BUFFER	*/
+						ENABLE;
+					END;
+					IF (MIDI.SYNC.OUT&"377")<>0 THEN DO;	/*	TALK TO OLD HARDWARE	*/
+						DISABLE;
+						WRITE(SYSSEL)=MIDI.SUBSYS+SHR((MIDI.SYNC.OUT&"377")-1,2);	/*	SELECT MIDI SUBSYSTEM	*/
+						WRITE(MCHA	)=((MIDI.SYNC.OUT&"377")-1)&3;	/*	AND OUTPUT TO SEND SYNC INFO	*/
+						WRITE(MDAT	)="HF8";						/*	SEND TIMING CLOCK BYTE	*/
+						ENABLE;
+					END;
+
+					NUM.MIDI.CLOCKS=NUM.MIDI.CLOCKS+1;		/*	INCREMENT INTERRUPT COUNTER	*/
+
+					/*	CHECK FOR NEW TEMPO	*/
+					IF  ( PLAY.TIME.MSB IGT	REAL.TIME.OF.NEXT.TEMPO.MSB )
+					OR  ((PLAY.TIME.MSB	=	REAL.TIME.OF.NEXT.TEMPO.MSB)
+					AND  (PLAY.TIME.LSB IGE	REAL.TIME.OF.NEXT.TEMPO.LSB))
+					THEN REAL.MIDI.CLOCK.RATE=NEXT.MIDI.CLOCK.RATE;
+
+					/*	NOW COMPUTE ESTIMATED REAL TIME OF NEXT MIDI LIMIT.	*/
+					/*	311-SAMP WILL COMPUTE A PRECISE VALUE SHORTLY.			*/
+
+					REAL.TIME.OF.MIDI.LIMIT.LSB = REAL.TIME.OF.MIDI.LIMIT.LSB + REAL.MIDI.CLOCK.RATE;
+				END;
+			END;
+			ELSE REAL.TIME.OF.MIDI.LIMIT.LSB=PLAY.TIME.LSB+20000;
+		}
+
+	END;	/*	OF ADVANCE TIME BASE	*/
+
+	ELSE IF MIDI.SYNC.OUT<>0 THEN DO;	/*	NO ADVANCES - MIDI SYNC OUT HAPPENING THOUGH	*/
+		IF (TIME.BASE.MODE  == 0)			/*	NOT PLAYING - SEND OUT TIMING CLOCKS			*/
+		&& (MIDI.SYNC.IS.TC == 0)
+		THEN DO;
+			LOAD NUMC; MUL SAMP.SPEED;						/*	REAL TIME * SPEED			*/
+			LOAD MIDI.SPEED.ACCUM+RES; DIV 1000;		/*	MODULO 1000;				*/
+			MIDI.SPEED.ACCUM=REM;							/*	SAVE REMAINDER				*/
+			LOAD RES; MUL 24;									/*	GET RESULT * 24			*/
+			MIDI.CLOCK.ACCUM=MIDI.CLOCK.ACCUM+RES;		/*	ACCUMULATE THAT			*/
+			IF MIDI.CLOCK.ACCUM >=SAMP.CLICK.RATE		/*	SEE IF TIME FOR CLICK	*/
+			THEN DO;
+				MIDI.CLOCK.ACCUM=MIDI.CLOCK.ACCUM-SAMP.CLICK.RATE;
+
+				if (MIDI.SYNC.OUT < 0)
+					interp_send_oms_clk_byte("HF8");
+					
+				IF (MIDI.SYNC.OUT & 0x7f00) <> 0			/*	MIDI SYNC WANTS TO GO TO MIDINET	*/
+				THEN DO;
+					DISABLE;
+					IF (MIDI.BUF(0) + 1) >					/*	IF ADDING THE LENGTH OF THIS MESSAGE TO THE MIDI BUFFER	*/
+					(MAX_PACKET_LENGTH / 2)					/*	WOULD EXCEED THE NUMBER OF WORDS ALLOWED	*/
+					THEN DO;
+						CALL EMPTY.MIDI.BUF;					/*	SEND THE CONTENTS OF THE BUFFER OUT	*/
+					END;
+
+					/*	NOW WRITE THE EVENT INTO THE MIDI BUFFER	*/
+					MIDI.BUF(MIDI.BUF(0)) = SHL(T#MIDI_TIMING_CLOCK,8) | 2;	/*	EVENT ID IN UPPER, BYTE LENGTH OF DATA IN LOWER	*/
+					MIDI.BUF(0) = MIDI.BUF(0) + 1;									/*	UPDATE WORD SIZE OF MIDI BUFFER	*/
+					ENABLE;
+				END;
+				IF (MIDI.SYNC.OUT&"377")<>0 THEN DO;	/*	TALK TO OLD HARDWARE	*/
+					DISABLE;
+					WRITE(SYSSEL)=MIDI.SUBSYS+SHR((MIDI.SYNC.OUT&"377")-1,2);	/*	SELECT MIDI SUBSYSTEM	*/
+					WRITE(MCHA  )=((MIDI.SYNC.OUT&"377")-1)&3;	/*	AND OUTPUT TO SEND SYNC INFO	*/
+					WRITE(MDAT  )="HF8";						/*	SEND TIMING CLOCK BYTE	*/
+					ENABLE;
+				END;
+			END;
+		END;
+	END;	/*	OF MIDI SYNC OUT	*/
+

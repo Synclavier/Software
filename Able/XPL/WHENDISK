@@ -1,0 +1,48 @@
+/* Special WHEN DISKERROR Routine */
+
+/* To use:
+
+		call disk.io.setup   before call to readdata/writedata
+		call disk.io.cleanup after the call
+		if return value != 0 then fatal unrecoverable disk error occurred  */
+
+/* Note: 03/20/97 - CJ - Only implemented for SCSI errors at this time */
+/* until RTP is (found!) and changed...																 */
+
+module when_disk_stuff;
+
+	dcl (enable.return, disk.status, error.count) fixed;
+	dcl (saved_0) fixed;
+	
+	disk.io.setup:procedure public;
+		enable.return = 1;	/* activate special feature					*/
+		disk.status   = 0;	/* initialize status word 					*/
+		error.count   = 0;	/* and initialize error count				*/
+		
+		if (saved_0 == 0)		/* we are tidy people!!!						*/
+			saved_0 = core(0);
+	end disk.io.setup;
+	
+	disk.io.cleanup:procedure returns (fixed) public;
+		enable.return = 0;	/* deactivate return								*/
+	
+		if (saved_0 != 0)		/* we are tidy people!!!						*/
+			core(0) = saved_0;
+		else
+			core(0) = 0;
+
+		return (disk.status);
+	end disk.io.cleanup;
+	
+	when diskerror then begin; /* here we are */
+		
+		if (enable.return == 0)
+			return;
+		
+		error.count = error.count + 1;
+		disk.status = 1;
+		core(0)     = (-3);	/* inform ScsiIo of our intentions	*/
+	
+	end; /* of diskerror */
+
+end when_disk_stuff;

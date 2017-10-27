@@ -1,0 +1,140 @@
+/* Statistics Program 
+
+   The following program will compute the average, 
+   standard deviation and median of a list of
+   floating point numbers. 
+   
+   Vector data structure:
+   list(O) = n = number of elements in array
+   list(1) ... list(n) = vector values
+*/ 
+
+dcl program_date data ('1 May 1987');     /* date of this program version  */ 
+
+dcl forever lit 'while (true)';           /* loop control                  */ 
+
+dcl vector_length lit '200';              /* number of vector elements     */ 
+
+/* LEN returns the length of the vector, which is stored in the first
+   word of the vector (list (0)). */ 
+
+len: proc (list) returns (fixed);         /* compute length of vector      */
+   dcl list floating array;               /* array to process              */ 
+
+   return int (list (0));                 /* return length of vector       */
+end len; 
+
+/* AVERAGE adds all the vector elements and then finds the average
+   value of the vector. */ 
+
+average: proc (list) returns (floating);  /* compute average of array      */
+   dcl list floating array;               /* array to process              */
+   dcl sum  floating;                     /* local variables               */ 
+   dcl i    fixed; 
+
+   sum = 0;                               /* initialize sum                */ 
+   
+   do i = 1 to len (list);                /* do for all values in vector   */ 
+      sum = sum + list (i);               /* sum values */
+   end; 
+
+   return (sum/len (list));               /* return average to main program */
+end average; 
+
+/*  STANDARD_DEVIATION computes the standard deviation of the vector. */ 
+
+standard_deviation: proc (list) returns (floating);   /* computes standard deviation */ 
+   dcl list floating array;               /* array to process           */
+   dcl sum  floating;                     /* sum of array elements      */
+   dcl ave  floating;                     /* average of array elements  */
+   dcl i    fixed; 
+
+   if len (list) < 2 then do;             /* error -print message and stop */
+      print 'Error in standard deviation-less than two vector elements';
+      call exit (0);                      /* exit the program  */
+   end;
+
+   sum = 0;                               /* initialize sum    */
+   ave = average (list);                  /* get the average   */
+
+   do i = 1 to len (list);                /*do for all vector values*/
+      sum = sum+ (list (i) - ave)*(list (i) - ave);
+   end; 
+  
+   return (sqr (sum/(len (list) - 1)));
+end standard_deviation; 
+
+/* $page */ 
+
+/* MEDIAN sorts the list, and returns the middle value. Not the 
+   fastest algorithm but it works. This algorithm no faster than
+   O(n log n) but known algorithms can do it in O(n) time. */ 
+
+median: proc (list) returns (floating);   /* find median of vector   */ 
+   dcl list floating array;               /* array to process        */ 
+ 
+   /* This SORT procedure uses a selection sort -replace it with 
+   a faster algorithm later if needed. */ 
+ 
+   sort: proc (list);                  /* sort a vector                          */ 
+      dcl list      floating array;    /* array to process                       */ 
+      dcl smallest  fixed;             /* index of current smallest element      */ 
+      dcl temp      floating;          /* temporary storage value                */ 
+      dcl (i, j, n) fixed; 
+   
+      n = len (list);                  /* number of elements to sort             */ 
+   
+      do i = 1 to n -1;                /* do one pass from each array location   */ 
+         smallest = i;                 /* assume first is smallest               */ 
+   
+         do j = i + 1 to n;            /* check the rest of the elements         */ 
+            if list (j) < list (smallest) then smallest = j; /* if it's smaller, save it */
+         end; 
+    
+         /* place smallest in position */
+         temp = list (i); list (i) = list (smallest); list (smallest) = temp;
+      end; 
+   end sort; 
+   
+   call sort (list);                   /* sort the vector           */ 
+   return (list ((len (list) + 1)/2)); /* return the middle element */
+   
+end median; 
+
+/* USER_INPUT gets all the vector values from the user. */ 
+
+user_input: proc (list);         /* get the vector values from the terminal */
+   dcl list   floating array;    /* array to process */ 
+   dcl (n, i) fixed; 
+   
+   print; print 'Enter the length of the data list',; 
+   input n;                      /* get the length */ 
+    
+   if n > 0 then do;             /* do only if there is something to input */ 
+      print 'Please enter data elements when prompted.'; 
+   
+      do i = 1 to n;             /* get all the values */ 
+         print 'Value',; 
+         input list (i);         /* put the value in the array */ 
+      end; 
+      list (0) = n;              /* save length of vector in first slot */ 
+      print;                     /* print a blank line */ 
+   end; 
+   else call exit (0); /* exit the program if no length specified */ 
+end user_input; 
+
+
+/** MAIN PROGRAM **/ 
+
+dcl vector (vector_length) floating; /* vector to process */ 
+
+print 'Standard Deviation Program - ', string (program_date);
+
+do forever;                   /* infinite loop */ 
+   call user_input (vector);  /* input vector values */
+   print 'Average            = ', average (vector); /* print the average */ 
+   print 'Median             = ', median (vector); /* print the median */ 
+   
+   if len (vector) >= 2 /* must have at least two elements to do this */ 
+   then print 'Standard deviation = ', standard_deviation (vector);
+end; 

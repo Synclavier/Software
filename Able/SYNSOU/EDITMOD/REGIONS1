@@ -1,0 +1,1946 @@
+/*	:SYNSOU:EDITMOD:REGIONS1 - $TITLE - INIT, OPEN and CLOSE routines for each dialog
+
+Modified:
+2001/09/07 - TY  - Created.  (Rewrote routines that used to be in :SYNSOU:EDITMOD:REGIONS and :SYNSOU:EDITMOD:REGIONS2)
+*/
+
+/*
+NOTES:
+	Because the static GID/PID area is zeroed out when the RTP starts up, any INIT.XXX.DIALOG() procedure
+	that only initializes its sav.xxx dialog variables to zero is not needed.
+
+TO BE DONE:	Make all dialogs consistent with the convention that inert labels are plotted with alt intensity
+*/
+
+/////////////////////////////	procedures for BOUNCE dialog
+/////////////////////////////	status:	COMPLETED
+
+INIT.BOUNCE.DIALOG: proc swapable;
+	pid							(sav.bounce.sw.pos,	1);	//	default switch position	= 'COPY track'
+	write(mdi) = 1;	//	pid(sav.bounce.source,	1);	//	default source track		= 1
+	write(mdi) = 2;	//	pid(sav.bounce.dest,		2);	//	default dest track		= 2
+end INIT.BOUNCE.DIALOG;
+
+OPEN.BOUNCE.DIALOG: proc public swapable;
+	dcl id_first	fixed;
+	dcl id_obj	fixed;
+
+	disable.deposits	= true;
+
+	//	set up bounce.switch
+	id_first	= Define.Switch(S#AA, dialog.top+2, dialog.col, 10, 0, 'MOVE track|COPY track');
+	Deposit.Switch(id_first, gid(sav.bounce.sw.pos));
+	pid(bounce.switch, id_first);
+
+	//	set up bounce.source
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+2, dialog.col+11, 3, 0, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	reverse.field(id_obj);
+	Deposit.Fixed.Point(id_obj, gid(sav.bounce.source));
+	Select.New.Cur.Obj(id_obj, 0, 0);	//	the object to be selected when we're done
+	pid(bounce.source, id_obj);
+
+	//	yoked label
+	Set.Object.Mouse.Access(Define.Label(S#AA, dialog.top+2, dialog.col+15, 0, 'to track'), 0);
+
+	//	set up bounce.dest
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+2, dialog.col+24, 3, 0, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	reverse.field(id_obj);
+	Deposit.Fixed.Point(id_obj, gid(sav.bounce.dest));
+	pid(bounce.dest, id_obj);
+
+	fill.ok(0, 'BOUNCE', 'CANCEL');
+
+	Set.Object.Arrow.Links(gid(bounce.source), ARR#Auto, ARR#Auto, ARR#Auto, id_obj);
+	Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, gid(bounce.source), ARR#Auto);
+
+	current.dialog.grp = Group.Objects(S#AA, id_first, gid(cancel.button), Get#Screen.Event);
+	Activate.Group.Objects(current.dialog.grp);
+
+	current.dialog = D#Bounce;
+	pid(sav.cur.dialog, D#Bounce);	//	save dialog state
+
+	disable.deposits	= false;
+
+end OPEN.BOUNCE.DIALOG;
+
+CLOSE.BOUNCE.DIALOG: proc swapable;
+	pid(sav.bounce.sw.pos,	Fetch.Switch(gid(bounce.switch)));
+	pid(sav.bounce.source,	Fetch.Fixed.Point(gid(bounce.source)));
+	pid(sav.bounce.dest,		Fetch.Fixed.Point(gid(bounce.dest)));
+end CLOSE.BOUNCE.DIALOG;
+
+
+/////////////////////////////	procedures for CHANGE DURATION dialog
+/////////////////////////////	status:	COMPLETED
+
+INIT.CHANGE.DUR.DIALOG: proc swapable;
+	pid								(sav.dur.sw.pos,		0);	//	default switch position			= 'Set durations to'
+	write(mdi)	=	1000;	//	pid(sav.dur.percent,	1000);	//	default scaling percentage		= 100.0
+	write(mdi)	=		0;	//	pid(sav.dur.set.ms,		0);	//	msw: default set duration to	= 0.060 Sec
+	write(mdi)	=	  60;	//	pid(sav.dur.set.ls,	  60);	//	lsw:
+	write(mdi)	=		0;	//	pid(sav.dur.add.ms,		0);	//	msw: default add to duration	= 0
+	write(mdi)	=		0;	//	pid(sav.dur.add.ls,		0);	//	lsw:
+	write(mdi)	=		0;	//	pid(sav.dur.min.ms,		0);	//	msw: default minimum duration	= 0
+	write(mdi)	=		0;	//	pid(sav.dur.min.ls,		0);	//	lsw: 
+	write(mdi)	=		3;	//	pid(sav.dur.max.ms,		3);	//	msw: default maximum duration	= 3<<16 | 65472 = 262.080 Sec
+	write(mdi)	= 65472;	//	pid(sav.dur.max.ls, 65472);	//	lsw:
+	write(mdi)	=		0;	//	pid(sav.dur.from.ms,		0);	//	msw: default slope from duration	= 0.060 Sec
+	write(mdi)	=	  60;	//	pid(sav.dur.from.ls,	  60);	//	lsw: 
+	write(mdi)	=		0;	//	pid(sav.dur.to.ms,		0);	//	msw: default slope to duration	= 0.240 Sec
+	write(mdi)	=	 240;	//	pid(sav.dur.to.ls,	 240);	//	lsw:
+end INIT.CHANGE.DUR.DIALOG;
+
+OPEN.CHANGE.DUR.DIALOG: proc public swapable;
+	dcl id_first	fixed;
+	dcl id_obj		fixed;
+	dcl mode			fixed;
+	dcl dur32 (1)	fixed;
+	dcl time32(1)	fixed;
+
+	//	NOTE:	Don't disable deposits until after the following deposit to "dur.switch".  This will force a call to
+	//	GET.CHANGE.DUR.DIALOG.EVENT() in :SYNSOU:EDITMOD:DIALOGS which will redraw the dialog based on the setting of "dur.switch".
+
+	//	set up dur.switch
+	id_first	= Define.Switch(S#AA, dialog.top+1, dialog.col, 20, 0, 'Set durations to|Scale durations by|                Add|              Slope');
+	Deposit.Switch(id_first, gid(sav.dur.sw.pos));
+	pid(dur.switch, id_first);
+
+	//	the following switch (dur.switch+1) will be yoked to dur.switch in the forced call to GET.CHANGE.DUR.DIALOG.EVENT()
+	id_obj	= Define.Switch(S#AA, dialog.top+1, dialog.col+36, 25, 0, '|percent of current value.|to current value.|');
+	Set.Object.Mouse.Access(id_obj, 0);	//	don't let the user toggle this switch directly
+
+	Enable.Object.Range(id_first, id_obj);
+
+	disable.deposits	= true;
+
+	//	set up dur.percent
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+1, dialog.col+25, 5, 1, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.dur.percent));
+	pid(dur.percent, id_obj);
+
+	Fetch.32Bit.Msec(gid(time1), time32);							//	this will be needed to deposit durations
+	mode	= time.map(Fetch.Switch(gid(time.mode.switch)));	//	get display format
+
+	//	set up dur.set
+	id_obj	= Define.32Bit.Msec(S#AA, dialog.top+1, dialog.col+21, 14, mode, cf#dur, cf#default, cf#default);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	gid32(sav.dur.set.ms, dur32);
+	Deposit.32Bit.Msec(id_obj, time32, dur32);
+	pid(dur.set, id_obj);
+
+	//	<<<<<<<<<<<<<<	what about negative entry for BEATS, MEAS:BEATS and SMPTE?
+	//	set up dur.add
+	id_obj	= Define.32Bit.Msec(S#AA, dialog.top+1, dialog.col+21, 14, mode|O#MSEC.Allow.Minus, cf#dur, cf#default, cf#default);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	gid32(sav.dur.add.ms, dur32);
+	Deposit.32Bit.Msec(id_obj, time32, dur32);
+	pid(dur.add, id_obj);
+
+	//	inert label - will be filled in by GET.CHANGE.DUR.DIALOG.EVENT()
+	id_obj	= Define.Label(S#AA, dialog.top+2, dialog.col, 20, '');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up dur.min
+	id_obj	= Define.32Bit.Msec(S#AA, dialog.top+2, dialog.col+21, 14, mode, cf#dur, cf#default, cf#default);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	gid32(sav.dur.min.ms, dur32);
+	Deposit.32Bit.Msec(id_obj, time32, dur32);
+	pid(dur.min, id_obj);
+
+	//	inert label	- will be filled in by GET.CHANGE.DUR.DIALOG.EVENT()
+	id_obj	= Define.Label(S#AA, dialog.top+3, dialog.col, 20, '');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up dur.max
+	id_obj	= Define.32Bit.Msec(S#AA, dialog.top+3, dialog.col+21, 14, mode, cf#dur, cf#default, cf#default);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	gid32(sav.dur.max.ms, dur32);
+	Deposit.32Bit.Msec(id_obj, time32, dur32);
+	pid(dur.max, id_obj);
+
+	//	set up dur.from
+	id_obj	= Define.32Bit.Msec(S#AA, dialog.top+2, dialog.col+21, 14, mode, cf#dur, cf#default, cf#default);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	gid32(sav.dur.from.ms, dur32);
+	Deposit.32Bit.Msec(id_obj, time32, dur32);
+	pid(dur.from, id_obj);
+
+	//	set up dur.to
+	id_obj	= Define.32Bit.Msec(S#AA, dialog.top+3, dialog.col+21, 14, mode, cf#dur, cf#default, cf#default);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	gid32(sav.dur.to.ms, dur32);
+	Deposit.32Bit.Msec(id_obj, time32, dur32);
+	pid(dur.to, id_obj);
+
+	//	set up filter on/off switch
+	Define.Labeled.Switch(dialog.bot, 33, 'Filter:', 3, 'OFF|ON', filter.sw);
+	Deposit.Switch(gid(filter.sw), apply.filter);
+
+	fill.ok(0, 'CHANGE DUR.', 'CANCEL');
+
+	id_obj	= gid(cancel.button);
+	Enable.Object.Range(gid(filter.sw)-1, id_obj);
+	current.dialog.grp = Group.Objects(S#AA, id_first, id_obj, Get#Screen.Event);
+
+	current.dialog = D#Change.Dur;
+	pid(sav.cur.dialog, D#Change.Dur);	//	save dialog state
+
+	disable.deposits	= false;
+
+end OPEN.CHANGE.DUR.DIALOG;
+
+CLOSE.CHANGE.DUR.DIALOG: proc swapable;
+	dcl dur32 (1)	fixed;
+
+	//	save dur.switch position
+	pid(sav.dur.sw.pos, Fetch.Switch(gid(dur.switch)));
+
+	//	save dur.percent
+	pid(sav.dur.percent, Fetch.Fixed.Point(gid(dur.percent)));
+
+	//	save dur.set
+	Fetch.32Bit.Msec(gid(dur.set), dur32);
+	pid32(sav.dur.set.ms, dur32);
+
+	//	save dur.add
+	Fetch.32Bit.Msec(gid(dur.add), dur32);
+	pid32(sav.dur.add.ms, dur32);
+
+	//	save dur.min
+	Fetch.32Bit.Msec(gid(dur.min), dur32);
+	pid32(sav.dur.min.ms, dur32);
+
+	//	save dur.max
+	Fetch.32Bit.Msec(gid(dur.max), dur32);
+	pid32(sav.dur.max.ms, dur32);
+
+	//	save dur.from
+	Fetch.32Bit.Msec(gid(dur.from), dur32);
+	pid32(sav.dur.from.ms, dur32);
+
+	//	save dur.to
+	Fetch.32Bit.Msec(gid(dur.to), dur32);
+	pid32(sav.dur.to.ms, dur32);
+
+end CLOSE.CHANGE.DUR.DIALOG;
+
+
+/////////////////////////////	procedures for CHANGE RTE dialog
+/////////////////////////////	status:	COMPLETED
+
+INIT.CHANGE.RTE.DIALOG: proc swapable;
+	pid								(sav.rte.type.sw.pos,		 0);	//	default RTE type			= 'Pedal 1'
+	write(mdi) =		1;	//	pid(sav.rte.mode.sw.pos,		 1);	//	default switch position	= 'Scale RTE by'
+	write(mdi) =		0;	//	pid(sav.rte.midi.cntrl,			 0);	//	default MIDI controller	= 0	(MIDI VOLUME?)
+	write(mdi) =  15000;	//	pid(sav.rte.percent,			15000);	//	scale RTE or MIDI values by 150.00 %
+
+	write(mdi) =  10000;	//	pid(sav.rte.monopolar.set,	10000);	//	set monopolar RTE values to 100.00 %
+	write(mdi) =		0;	//	pid(sav.rte.monopolar.add,		 0);	//	add 0 to monopolar RTE values
+	write(mdi) =		0;	//	pid(sav.rte.monopolar.min,		 0);	//	full RTE value range		= 0 to 100.00 %
+	write(mdi) =  10000;	//	pid(sav.rte.monopolar.max,	10000);
+	write(mdi) =		0;	//	pid(sav.rte.monopolar.from,	 0);	//	slope from/to				= 0 to 100.00 %
+	write(mdi) =  10000;	//	pid(sav.rte.monopolar.to,	10000);
+
+	write(mdi) =		0;	//	pid(sav.rte.ptchw.set,			 0);	//	set pitch wheel values to 0
+	write(mdi) =		0;	//	pid(sav.rte.ptchw.add,			 0);	//	add 0 to pitch wheel values
+	write(mdi) = -24000;	//	pid(sav.rte.ptchw.min,	  -24000);	//	full ptchw value range	= -240.00 to +240.00 semitones
+	write(mdi) =  24000;	//	pid(sav.rte.ptchw.max,		24000);
+	write(mdi) =		0;	//	pid(sav.rte.ptchw.from,			 0);	//	slope ptchw from/to		= 0.0 to +2.00 semitones
+	write(mdi) =	 200;	//	pid(sav.rte.ptchw.to,		  200);
+
+	write(mdi) =		0;	//	pid(sav.rte.ribbon.set,			 0);	//	set ribbon values to 0
+	write(mdi) =		0;	//	pid(sav.rte.ribbon.add,			 0);	//	add 0 to ribbon values
+	write(mdi) = -10000;	//	pid(sav.rte.ribbon.min,	  -10000);	//	full ribbon value range	= -100.00 to +100.00 %
+	write(mdi) =  10000;	//	pid(sav.rte.ribbon.max,		10000);
+	write(mdi) =		0;	//	pid(sav.rte.ribbon.from,		 0);	//	slope ribbon from/to		= 0.00 to +100.00 %
+	write(mdi) =  10000;	//	pid(sav.rte.ribbon.to,		10000);
+
+	write(mdi) =	 127;	//	pid(sav.rte.midi.set,		  127);	//	set MIDI values to 127 for specified controller
+	write(mdi) =		0;	//	pid(sav.rte.midi.add,			 0);	//	add 0 to MIDI values for specified controller
+	write(mdi) =		0;	//	pid(sav.rte.midi.min,			 0);	//	full MIDI value range 	= 0 to 127
+	write(mdi) =	 127;	//	pid(sav.rte.midi.max,		  127);
+	write(mdi) =		0;	//	pid(sav.rte.midi.from,			 0);	//	slope midi from/to		= 0 to 127
+	write(mdi) =	 127;	//	pid(sav.rte.midi.to,			  127);
+end INIT.CHANGE.RTE.DIALOG;
+
+OPEN.CHANGE.RTE.DIALOG: proc public swapable;
+	dcl id_first	fixed;
+	dcl id_obj		fixed;
+
+	//	NOTE:	Don't disable deposits until after the following deposits to "rte.type.switch" and "rte.mode.switch".
+	//	This will force calls to HANDLE.RTE.TYPE.SWITCH() and HANDLE.RTE.MODE.SWITCH() in :SYNSOU:EDITMOD:DIALOGS
+	// which will redraw the dialog based on the settings of these switches.
+	//
+	//	NOTE:	HANDLE.RTE.TYPE.SWITCH() assumes that only the TYPE has changed and that any fields NOT pertaining
+	//	to the current MODE are already disabled.  Likewise HANDLE.RTE.MODE.SWITCH() assumes that only the MODE
+	//	has changed and that any fields NOT pertaining to the current TYPE are already disabled.
+	//	Consequently, all fields should be left DISABLED by this procedure except for those that will not be enabled by
+	//	HANDLE.RTE.TYPE.SWITCH() and HANDLE.RTE.MODE.SWITCH(). 
+
+	//	inert label
+	id_first	= Define.Label(S#AA, dialog.top, dialog.col, 0, 'RTE to change:');
+	Set.Object.Attr(id_first, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_first, 0);
+
+	//	set up rte.type.switch
+	id_obj	= Define.Switch(S#AA, dialog.top, dialog.col+15, 10, 0, 'Pedal 1|Pedal 2|Mod Wheel|Breath|Pitch Bend|Ribbon|Pressure|MIDI Cntrl');
+	Deposit.Switch(id_obj, gid(sav.rte.type.sw.pos));
+	pid(rte.type.switch, id_obj);
+
+	//	set up rte.mode.switch
+	id_obj	= Define.Switch(S#AA, dialog.top+1, dialog.col, 20, 0, 'Set RTE to|Scale RTE by|                Add|              Slope');
+	Deposit.Switch(id_obj, gid(sav.rte.mode.sw.pos));
+	pid(rte.mode.switch, id_obj);
+
+	//	the following switch (rte.mode.switch+1) will be yoked to rte.mode.switch in the forced call to HANDLE.RTE.MODE.SWITCH()
+	id_obj	= Define.Switch(S#AA, dialog.top+1, dialog.col+29, 25, 0, '|percent of current value.|to current value.|');
+	Set.Object.Mouse.Access(id_obj, 0);	//	don't let the user toggle this switch directly
+	
+	Enable.Object.Range(id_first, id_obj);
+
+	disable.deposits	= true;
+
+	//	set up rte.midi.cntrl
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top, dialog.col+26, 3, 0, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.midi.cntrl));
+	pid(rte.midi.cntrl, id_obj);
+
+	//	set up rte.percent
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+1, dialog.col+21, 7, 2, cf#right|cf#signed|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.percent));
+	pid(rte.percent, id_obj);
+
+	//	set up rte.monopolar.set
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+1, dialog.col+22, 6, 2, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.monopolar.set));
+	pid(rte.monopolar.set, id_obj);
+
+	//	set up rte.monopolar.add
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+1, dialog.col+21, 7, 2, cf#right|cf#signed|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.monopolar.add));
+	pid(rte.monopolar.add, id_obj);
+
+	//	set up rte.ptchw.set
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+1, dialog.col+21, 7, 2, cf#right|cf#signed|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.ptchw.set));
+	pid(rte.ptchw.set, id_obj);
+
+	//	set up rte.ptchw.add
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+1, dialog.col+21, 7, 2, cf#right|cf#signed|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.ptchw.add));
+	pid(rte.ptchw.add, id_obj);
+
+	//	set up rte.ribbon.set
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+1, dialog.col+21, 7, 2, cf#right|cf#signed|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.ribbon.set));
+	pid(rte.ribbon.set, id_obj);
+
+	//	set up rte.ribbon.add
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+1, dialog.col+21, 7, 2, cf#right|cf#signed|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.ribbon.add));
+	pid(rte.ribbon.add, id_obj);
+
+	//	set up rte.midi.set
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+1, dialog.col+25, 3, 0, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.midi.set));
+	pid(rte.midi.set, id_obj);
+
+	//	set up rte.midi.add
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+1, dialog.col+24, 4, 0, cf#right|cf#signed|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.midi.add));
+	pid(rte.midi.add, id_obj);
+
+	//	inert label - will be filled in by HANDLE.RTE.MODE.SWITCH()
+	id_obj	= Define.Label(S#AA, dialog.top+2, dialog.col, 20, '');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up rte.monopolar.min
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+2, dialog.col+22, 6, 2, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.monopolar.min));
+	pid(rte.monopolar.min, id_obj);
+
+	//	inert label - will be filled in by HANDLE.RTE.MODE.SWITCH()
+	id_obj	= Define.Label(S#AA, dialog.top+3, dialog.col, 20, '');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up rte.monopolar.max
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+3, dialog.col+22, 6, 2, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.monopolar.max));
+	pid(rte.monopolar.max, id_obj);
+
+	//	set up rte.monopolar.from
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+2, dialog.col+22, 6, 2, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.monopolar.from));
+	pid(rte.monopolar.from, id_obj);
+
+	//	set up rte.monopolar.to
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+3, dialog.col+22, 6, 2, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.monopolar.to));
+	pid(rte.monopolar.to, id_obj);
+
+	//	set up rte.ptchw.min
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+2, dialog.col+21, 7, 2, cf#right|cf#signed|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.ptchw.min));
+	pid(rte.ptchw.min, id_obj);
+
+	//	set up rte.ptchw.max
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+3, dialog.col+21, 7, 2, cf#right|cf#signed|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.ptchw.max));
+	pid(rte.ptchw.max, id_obj);
+
+	//	set up rte.ptchw.from
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+2, dialog.col+21, 7, 2, cf#right|cf#signed|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.ptchw.from));
+	pid(rte.ptchw.from, id_obj);
+
+	//	set up rte.ptchw.to
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+3, dialog.col+21, 7, 2, cf#right|cf#signed|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.ptchw.to));
+	pid(rte.ptchw.to, id_obj);
+
+	//	set up rte.ribbon.min
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+2, dialog.col+21, 7, 2, cf#right|cf#signed|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.ribbon.min));
+	pid(rte.ribbon.min, id_obj);
+
+	//	set up rte.ribbon.max
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+3, dialog.col+21, 7, 2, cf#right|cf#signed|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.ribbon.max));
+	pid(rte.ribbon.max, id_obj);
+
+	//	set up rte.ribbon.from
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+2, dialog.col+21, 7, 2, cf#right|cf#signed|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.ribbon.from));
+	pid(rte.ribbon.from, id_obj);
+
+	//	set up rte.ribbon.to
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+3, dialog.col+21, 7, 2, cf#right|cf#signed|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.ribbon.to));
+	pid(rte.ribbon.to, id_obj);
+
+	//	set up rte.midi.min
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+2, dialog.col+25, 3, 0, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.midi.min));
+	pid(rte.midi.min, id_obj);
+
+	//	set up rte.midi.max
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+3, dialog.col+25, 3, 0, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.midi.max));
+	pid(rte.midi.max, id_obj);
+
+	//	set up rte.midi.from
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+2, dialog.col+25, 3, 0, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.midi.from));
+	pid(rte.midi.from, id_obj);
+
+	//	set up rte.midi.to
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+3, dialog.col+25, 3, 0, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.rte.midi.to));
+	pid(rte.midi.to, id_obj);
+
+	//	set up filter on/off switch
+	Define.Labeled.Switch(dialog.bot, 33, 'Filter:', 3, 'OFF|ON', filter.sw);
+	Deposit.Switch(gid(filter.sw), apply.filter);
+
+	fill.ok(0, 'CHANGE RTE', 'CANCEL');
+
+	id_obj	= gid(cancel.button);
+	Enable.Object.Range(gid(filter.sw)-1, id_obj);
+	current.dialog.grp = Group.Objects(S#AA, id_first, id_obj, Get#Screen.Event);
+
+	current.dialog = D#Change.RTE;
+	pid(sav.cur.dialog, D#Change.RTE);	//	save dialog state
+
+	disable.deposits	= false;
+
+end OPEN.CHANGE.RTE.DIALOG;
+
+CLOSE.CHANGE.RTE.DIALOG: proc swapable;
+	pid(sav.rte.type.sw.pos,	Fetch.Switch	  (gid(rte.type.switch)));
+	pid(sav.rte.mode.sw.pos,	Fetch.Switch	  (gid(rte.mode.switch)));
+	pid(sav.rte.midi.cntrl,		Fetch.Fixed.Point(gid(rte.midi.cntrl)));
+	pid(sav.rte.percent,			Fetch.Fixed.Point(gid(rte.percent)));
+
+	pid(sav.rte.monopolar.set,	Fetch.Fixed.Point(gid(rte.monopolar.set)));
+	pid(sav.rte.monopolar.add,	Fetch.Fixed.Point(gid(rte.monopolar.add)));
+	pid(sav.rte.monopolar.min,	Fetch.Fixed.Point(gid(rte.monopolar.min)));
+	pid(sav.rte.monopolar.max,	Fetch.Fixed.Point(gid(rte.monopolar.max)));
+	pid(sav.rte.monopolar.from,Fetch.Fixed.Point(gid(rte.monopolar.from)));
+	pid(sav.rte.monopolar.to,	Fetch.Fixed.Point(gid(rte.monopolar.to)));
+
+	pid(sav.rte.ptchw.set,		Fetch.Fixed.Point(gid(rte.ptchw.set)));
+	pid(sav.rte.ptchw.add,		Fetch.Fixed.Point(gid(rte.ptchw.add)));
+	pid(sav.rte.ptchw.min,		Fetch.Fixed.Point(gid(rte.ptchw.min)));
+	pid(sav.rte.ptchw.max,		Fetch.Fixed.Point(gid(rte.ptchw.max)));
+	pid(sav.rte.ptchw.from,		Fetch.Fixed.Point(gid(rte.ptchw.from)));
+	pid(sav.rte.ptchw.to,		Fetch.Fixed.Point(gid(rte.ptchw.to)));
+
+	pid(sav.rte.ribbon.set,		Fetch.Fixed.Point(gid(rte.ribbon.set)));
+	pid(sav.rte.ribbon.add,		Fetch.Fixed.Point(gid(rte.ribbon.add)));
+	pid(sav.rte.ribbon.min,		Fetch.Fixed.Point(gid(rte.ribbon.min)));
+	pid(sav.rte.ribbon.max,		Fetch.Fixed.Point(gid(rte.ribbon.max)));
+	pid(sav.rte.ribbon.from,	Fetch.Fixed.Point(gid(rte.ribbon.from)));
+	pid(sav.rte.ribbon.to,		Fetch.Fixed.Point(gid(rte.ribbon.to)));
+
+	pid(sav.rte.midi.set,		Fetch.Fixed.Point(gid(rte.midi.set)));
+	pid(sav.rte.midi.add,		Fetch.Fixed.Point(gid(rte.midi.add)));
+	pid(sav.rte.midi.min,		Fetch.Fixed.Point(gid(rte.midi.min)));
+	pid(sav.rte.midi.max,		Fetch.Fixed.Point(gid(rte.midi.max)));
+	pid(sav.rte.midi.from,		Fetch.Fixed.Point(gid(rte.midi.from)));
+	pid(sav.rte.midi.to,			Fetch.Fixed.Point(gid(rte.midi.to)));
+end CLOSE.CHANGE.RTE.DIALOG;
+
+
+/////////////////////////////	procedures for CHANGE VELOCITY dialog
+/////////////////////////////	status:	COMPLETED
+
+INIT.CHANGE.VEL.DIALOG: proc swapable;
+	pid								(sav.vel.sw.pos,		1);	// default switch position	= 'Scale velocities by'
+	write(mdi)	= 	1500;	//	pid(sav.vel.percent,	1500);	//	scale velocities by 150.0 %
+	write(mdi)	= 	1000;	//	pid(sav.vel.set,		1000);	//	set velocities to 100.0 %
+	write(mdi)	=	  80;	//	pid(sav.vel.add,		  80);	//	add 8.0 to velocities
+	write(mdi)	=		0;	//	pid(sav.vel.min,			0);	//	full velocity range		= 0 to 100.0 %
+	write(mdi)	= 	1000;	//	pid(sav.vel.max,		1000);
+	write(mdi)	=	  40;	//	pid(sav.vel.from,		  40);	//	slope velocity from/to	= 4.0 to 100.0 %
+	write(mdi)	=	1000;	//	pid(sav.vel.to,		1000);
+end INIT.CHANGE.VEL.DIALOG;
+
+OPEN.CHANGE.VEL.DIALOG: proc public swapable;
+	dcl id_first	fixed;
+	dcl id_obj		fixed;
+
+	//	NOTE:	Don't disable deposits until after the following deposit to "vel.switch".  This will force a call to
+	//	GET.CHANGE.VEL.DIALOG.EVENT() in :SYNSOU:EDITMOD:DIALOGS which will redraw the dialog based on the setting of "vel.switch".
+
+	//	set up vel.switch
+	id_first	= Define.Switch(S#AA, dialog.top+1, dialog.col, 20, 0, 'Set velocities to|Scale velocities by|                Add|              Slope');
+	Deposit.Switch(id_first, gid(sav.vel.sw.pos));
+	pid(vel.switch, id_first);
+
+	//	the following switch (vel.switch+1) will be yoked to vel.switch in the forced call to GET.CHANGE.VEL.DIALOG.EVENT()
+	id_obj	= Define.Switch(S#AA, dialog.top+1, dialog.col+27, 25, 0, '|percent of current value.|to current value.|');
+	Set.Object.Mouse.Access(id_obj, 0);	//	don't let the user toggle this switch directly
+
+	Enable.Object.Range(id_first, id_obj);
+
+	disable.deposits	= true;
+
+	//	set up vel.percent
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+1, dialog.col+20, 6, 1, cf#right|cf#signed|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.vel.percent));
+	pid(vel.percent, id_obj);
+
+	//	set up vel.set
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+1, dialog.col+21, 5, 1, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.vel.set));
+	pid(vel.set, id_obj);
+
+	//	set up vel.add
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+1, dialog.col+20, 6, 1, cf#right|cf#signed|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.vel.add));
+	pid(vel.add, id_obj);
+
+	//	inert label - will be filled in by GET.CHANGE.VEL.DIALOG.EVENT()
+	id_obj	= Define.Label(S#AA, dialog.top+2, dialog.col, 20, '');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up vel.min
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+2, dialog.col+21, 5, 1, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.vel.min));
+	pid(vel.min, id_obj);
+
+	//	inert label - will be filled in by GET.CHANGE.VEL.DIALOG.EVENT()
+	id_obj	= Define.Label(S#AA, dialog.top+3, dialog.col, 20, '');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up vel.max
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+3, dialog.col+21, 5, 1, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.vel.max));
+	pid(vel.max, id_obj);
+
+	//	set up vel.from
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+2, dialog.col+21, 5, 1, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.vel.from));
+	pid(vel.from, id_obj);
+
+	//	set up vel.to
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+3, dialog.col+21, 5, 1, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.vel.to));
+	pid(vel.to, id_obj);
+
+	//	set up filter on/off switch
+	Define.Labeled.Switch(dialog.bot, 33, 'Filter:', 3, 'OFF|ON', filter.sw);
+	Deposit.Switch(gid(filter.sw), apply.filter);
+
+	fill.ok(0, 'CHANGE VEL.', 'CANCEL');
+
+	id_obj	= gid(cancel.button);
+	Enable.Object.Range(gid(filter.sw)-1, id_obj);
+	current.dialog.grp = Group.Objects(S#AA, id_first, gid(cancel.button), Get#Screen.Event);
+
+	current.dialog = D#Change.Vel;
+	pid(sav.cur.dialog, D#Change.Vel);	//	save dialog state
+
+	disable.deposits	= false;
+
+end OPEN.CHANGE.VEL.DIALOG;
+
+CLOSE.CHANGE.VEL.DIALOG: proc swapable;
+	pid(sav.vel.sw.pos,	Fetch.Switch     (gid(vel.switch)));
+	pid(sav.vel.percent,	Fetch.Fixed.Point(gid(vel.percent)));
+	pid(sav.vel.set,		Fetch.Fixed.Point(gid(vel.set)));
+	pid(sav.vel.add,		Fetch.Fixed.Point(gid(vel.add)));
+	pid(sav.vel.min,		Fetch.Fixed.Point(gid(vel.min)));
+	pid(sav.vel.max,		Fetch.Fixed.Point(gid(vel.max)));
+	pid(sav.vel.from,		Fetch.Fixed.Point(gid(vel.from)));
+	pid(sav.vel.to,		Fetch.Fixed.Point(gid(vel.to)));
+end CLOSE.CHANGE.VEL.DIALOG;
+
+
+/////////////////////////////	procedures for EDIT FILTER dialog
+/////////////////////////////	status:	COMPLETED
+
+OPEN.FILTER.DIALOG: proc public swapable;
+	dcl id_first		fixed;
+	dcl id_fr			fixed;
+	dcl id_to			fixed;
+	dcl mode				fixed;
+	dcl time32(1)		fixed;
+	dcl pitch(2)		fixed;	//	string for pitches
+	dcl ctrl.swdata	data		('|Ped1|Ped2|ModW|Brth|Ptch|Ribf|Pres|Midi');
+	dcl ctrl.fw			lit		'4';
+	dcl id_obj			lit		'id_to';
+
+	disable.deposits	= true;
+
+	//	set up pitch.sw
+	id_first	= Define.Switch(S#AA, dialog.top, dialog.col, 17, 0, 'All Pitches|Pitches      from|Pitches    Except|No Pitches');
+	pid(pitch.sw, id_first);
+
+	//	the following switch (pitch.sw+1) will be yoked to pitch.sw in the forced call to GET.FILTER.DIALOG.EVENT()
+	//	don't let the user toggle this switch directly
+	Set.Object.Mouse.Access(Define.Switch(S#AA, dialog.top, dialog.col+24, 2, 0, '|to|to|'), 0);
+
+	id_fr		= Define.String(S#AA, dialog.top, dialog.col+20, 3, O#STR.Pitch);
+	conv.key#.to.str(pitch.lo, pitch);
+	Deposit.String(id_fr, pitch);
+	pid(pitch.lo.id, id_fr);
+
+	id_to		= Define.String(S#AA, dialog.top, dialog.col+27, 3, O#STR.Pitch);
+	conv.key#.to.str(pitch.hi, pitch);
+	Deposit.String(id_to, pitch);
+	pid(pitch.hi.id, id_to);
+
+	//	the links for this object are never changed by Compute.Filter.Dialog.Arrow.Links()
+	Set.Object.Arrow.Links(id_fr, ARR#Auto, ARR#Auto, ARR#Auto, id_to);
+
+	//	set up vel.sw
+	pid(vel.sw, Define.Switch(S#AA, dialog.top+1, dialog.col, 17, 0, 'All Velocities|Velocities   from|Velocities Except'));
+
+	//	the following switch (vel.sw+1) will be yoked to vel.sw in the forced call to GET.FILTER.DIALOG.EVENT()
+	//	don't let the user toggle this switch directly
+	Set.Object.Mouse.Access(Define.Switch(S#AA, dialog.top+1, dialog.col+24, 2, 0, '|to|to'), 0);
+
+	id_fr		= Define.Fixed.Point(S#AA, dialog.top+1, dialog.col+18, 5, 1, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_fr, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_fr, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_fr, SCALE.RTE.TO.PERCENT(vel.lo));
+	pid(vel.lo.id, id_fr);
+
+	id_to		= Define.Fixed.Point(S#AA, dialog.top+1, dialog.col+27, 5, 1, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_to, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_to, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_to, SCALE.RTE.TO.PERCENT(vel.hi));
+	pid(vel.hi.id, id_to);
+
+	//	the links for this object are never changed by Compute.Filter.Dialog.Arrow.Links()
+	Set.Object.Arrow.Links(id_fr, ARR#Auto, ARR#Auto, ARR#Auto, id_to);
+
+	//	set up dur.sw
+	pid(dur.sw, Define.Switch(S#AA, dialog.top+2, dialog.col, 17, 0, 'All Durations|Durations    from|Durations  Except'));
+
+	//	the following switch (dur.sw+1) will be yoked to dur.sw in the forced call to GET.FILTER.DIALOG.EVENT()
+	//	don't let the user toggle this switch directly
+	Set.Object.Mouse.Access(Define.Switch(S#AA, dialog.top+3, dialog.col+15, 2, 0, '|to|to'), 0);
+
+	//	get time and time display format for durations
+	mode	= time.map(Fetch.Switch(gid(time.mode.switch)));
+	Fetch.32Bit.Msec(gid(time1), time32);
+
+	id_fr		= Define.32Bit.Msec(S#AA, dialog.top+2, dialog.col+18, 14, mode, cf#dur, cf#default, cf#default);
+	Set.Object.Mouse.Access(id_fr, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_fr, O#ACT.Animate.Disabled, true);
+	Deposit.32Bit.Msec(id_fr, time32, dur.lo);
+	pid(dur.lo.id, id_fr);
+
+	id_to		= Define.32Bit.Msec(S#AA, dialog.top+3, dialog.col+18, 14, mode, cf#dur, cf#default, cf#default);
+	Set.Object.Mouse.Access(id_to, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_to, O#ACT.Animate.Disabled, true);
+	Deposit.32Bit.Msec(id_to, time32, dur.hi);
+	pid(dur.hi.id, id_to);
+
+	//	set up ctrl.sw
+	pid(ctrl.sw, Define.Switch(S#AA, dialog.top+0, dialog.col+33, 16, 0, 'All Controllers|Only Controllers|All Ctrls Except|No Controllers'));
+
+	id_obj	= Define.Switch(S#AA, dialog.top+0, dialog.col+50+(0*(ctrl.fw+1)), ctrl.fw, 0, ctrl.swdata);
+	reverse.field(id_obj);
+	Deposit.Switch(id_obj, ctrl1+1);	//	map controller -1 through 7 to switch position 0 through 8	(-1 means no controller)
+
+	id_obj	= Define.Switch(S#AA, dialog.top+0, dialog.col+50+(1*(ctrl.fw+1)), ctrl.fw, 0, ctrl.swdata);
+	reverse.field(id_obj);
+	Deposit.Switch(id_obj, ctrl2+1);	//	map controller -1 through 7 to switch position 0 through 8	(-1 means no controller)
+
+	id_obj	= Define.Switch(S#AA, dialog.top+0, dialog.col+50+(2*(ctrl.fw+1)), ctrl.fw, 0, ctrl.swdata);
+	reverse.field(id_obj);
+	Deposit.Switch(id_obj, ctrl3+1);	//	map controller -1 through 7 to switch position 0 through 8	(-1 means no controller)
+
+	//	midi controller number fields
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+1, dialog.col+51+(0*(ctrl.fw+1)), 3, 0, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, midi.ctrl1);
+
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+1, dialog.col+51+(1*(ctrl.fw+1)), 3, 0, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, midi.ctrl2);
+
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+1, dialog.col+51+(2*(ctrl.fw+1)), 3, 0, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, midi.ctrl3);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+2, dialog.col+33, 0, 'Controller Values:');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+	Enable.Object(id_obj);
+
+	//	set up monopolar.sw
+	pid(monopolar.sw, Define.Switch(S#AA, dialog.top+3, dialog.col+33, 16, 0, 'All Monopolar|Monopolar   from|Monopolar Except'));
+
+	//	the following switch (monopolar.sw+1) will be yoked to monopolar.sw in the forced call to GET.FILTER.DIALOG.EVENT()
+	//	don't let the user toggle this switch directly
+	Set.Object.Mouse.Access(Define.Switch(S#AA, dialog.top+3, dialog.col+56, 2, 0, '|to|to'), 0);
+
+	id_fr	= Define.Fixed.Point(S#AA, dialog.top+3, dialog.col+50, 5, 1, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_fr, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_fr, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_fr, SCALE.RTE.TO.PERCENT(monopolar.lo));
+	pid(monopolar.lo.id, id_fr);
+
+	id_to	= Define.Fixed.Point(S#AA, dialog.top+3, dialog.col+59, 5, 1, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_to, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_to, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_to, SCALE.RTE.TO.PERCENT(monopolar.hi));
+	pid(monopolar.hi.id, id_to);
+
+	//	set up bipolar.sw
+	pid(bipolar.sw, Define.Switch(S#AA, dialog.top+4, dialog.col+33, 16, 0, 'All Ptch/Ribf|Ptch/Ribf   from|Ptch/Ribf Except'));
+
+	//	the following switch (bipolar.sw+1) will be yoked to bipolar.sw in the forced call to GET.FILTER.DIALOG.EVENT()
+	//	don't let the user toggle this switch directly
+	Set.Object.Mouse.Access(Define.Switch(S#AA, dialog.top+4, dialog.col+56, 2, 0, '|to|to'), 0);
+
+	id_fr	= Define.Fixed.Point(S#AA, dialog.top+4, dialog.col+51, 4, 0, cf#right|cf#signed|cf#spfill);
+	Set.Object.Mouse.Access(id_fr, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_fr, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_fr, bipolar.lo);
+	pid(bipolar.lo.id, id_fr);
+
+	id_to	= Define.Fixed.Point(S#AA, dialog.top+4, dialog.col+60, 4, 0, cf#right|cf#signed|cf#spfill);
+	Set.Object.Mouse.Access(id_to, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_to, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_to, bipolar.hi);
+	pid(bipolar.hi.id, id_to);
+
+	//	set up midi.sw
+	pid(midi.sw, Define.Switch(S#AA, dialog.top+5, dialog.col+33, 16, 0, 'All MIDI|MIDI        from|MIDI      Except'));
+
+	//	the following switch (midi.sw+1) will be yoked to midi.sw in the forced call to GET.FILTER.DIALOG.EVENT()
+	//	don't let the user toggle this switch directly
+	Set.Object.Mouse.Access(Define.Switch(S#AA, dialog.top+5, dialog.col+56, 2, 0, '|to|to'), 0);
+
+	id_fr	= Define.Fixed.Point(S#AA, dialog.top+5, dialog.col+52, 3, 0, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_fr, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_fr, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_fr, midi.lo);
+	pid(midi.lo.id, id_fr);
+
+	id_to	= Define.Fixed.Point(S#AA, dialog.top+5, dialog.col+61, 3, 0, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_to, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_to, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_to, midi.hi);
+	pid(midi.hi.id, id_to);
+
+	fill.ok(0, 'DONE', 'RESET FILTER');
+
+	id_obj	= gid(cancel.button);
+	Enable.Object.Range(gid(ok.button), id_obj);
+	current.dialog.grp = Group.Objects(S#AA, id_first, id_obj, Get#Screen.Event);
+
+	current.dialog = D#EditFilter;
+	pid(sav.cur.dialog, D#EditFilter);	//	save dialog state
+
+	disable.deposits	= false;
+
+	//	deposit all switch settings with deposits enabled to force the calls to GET.FILTER.DIALOG.EVENT()
+	//	needed to enable all dependent objects
+	id_obj	= gid(pitch.sw);		Deposit.Switch(id_obj, check.pitches);			Enable.Object.Range	(id_obj, id_obj+1);	//	include yoked switch
+	id_obj	= gid(vel.sw);			Deposit.Switch(id_obj, check.vel);				Enable.Object.Range	(id_obj, id_obj+1);	//	include yoked switch
+	id_obj	= gid(dur.sw);			Deposit.Switch(id_obj, check.dur);				Enable.Object.Range	(id_obj, id_obj+1);	//	include yoked switch
+	id_obj	= gid(ctrl.sw);		Deposit.Switch(id_obj, check.ctrl);				Enable.Object			(id_obj);
+	id_obj	= gid(monopolar.sw);	Deposit.Switch(id_obj, check.monopolar.val);	Enable.Object.Range	(id_obj, id_obj+1);	//	include yoked switch
+	id_obj	= gid(bipolar.sw);	Deposit.Switch(id_obj, check.bipolar.val);	Enable.Object.Range	(id_obj, id_obj+1);	//	include yoked switch
+	id_obj	= gid(midi.sw);		Deposit.Switch(id_obj, check.midi.val);		Enable.Object.Range	(id_obj, id_obj+1);	//	include yoked switch
+
+end OPEN.FILTER.DIALOG;
+
+
+/////////////////////////////	procedures for FIT TO TIME dialog
+/////////////////////////////	status:	COMPLETED
+
+INIT.FIT.TIME.DIALOG: proc swapable;
+	pid							(sav.fit.pct,		1000);	//	init to scale by 100.0 %
+	write(mdi)	=	0;	//	pid(sav.fit.cutoff,		0);	//	stay at new speed	= NO
+	write(mdi)	=	1;	//	pid(sav.fit.dur.switch, 1);	//	scale durations	= YES
+	write(mdi)	=	0;	//	pid(sav.fit.method,		0);	//	Fit Instantly
+end INIT.FIT.TIME.DIALOG;
+
+OPEN.FIT.TIME.DIALOG: proc public swapable;
+	dcl id_first	fixed;
+	dcl id_obj		fixed;
+	dcl mode			fixed;
+
+	mode	= time.map(Fetch.Switch(gid(time.mode.switch)));	/*	get display format	*/
+
+	//	NOTE:	Don't disable deposits until after the deposit to "fit.pct".  This will force a call to
+	//	GET.FIT.TIME.DIALOG.EVENT() in :SYNSOU:EDITMOD:DIALOGS which will compute and deposit the following objects...
+	//	(fit.time, fit.length, fit.pct)
+
+	//	inert label
+	id_first	= Define.Label(S#AA, dialog.top, dialog.col, 0, 'Enter new End Time for selected region:');
+	Set.Object.Attr(id_first, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_first, 0);
+
+	//	set up fit.time
+	id_obj	= Define.32Bit.Msec(S#AA, dialog.top, dialog.col+43, 14, mode, cf#time, cf#default, cf#default);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Select.New.Cur.Obj(id_obj, 0, 0);	//	the object to be selected when we're done
+	pid(fit.time, id_obj);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+1, dialog.col, 0, 'or, enter a new Length for the region :');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up fit.length
+	id_obj	= Define.32Bit.Msec(S#AA, dialog.top+1, dialog.col+43, 14, mode, cf#dur, cf#default, cf#default);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	pid(fit.length, id_obj);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+2, dialog.col, 0, 'or, enter a percentage to scale region:');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up fit.pct
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+2, dialog.col+45, 5, 1, cf#unsigned|cf#right|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Deposit.Fixed.Point(id_obj, gid(sav.fit.pct));
+	pid(fit.pct, id_obj);
+
+	Set.Object.Arrow.Links(gid(fit.time), ARR#Auto, gid(fit.length), ARR#Auto, ARR#Auto);
+	Set.Object.Arrow.Links(gid(fit.length), gid(fit.time), id_obj, ARR#Auto, ARR#Auto);
+	Set.Object.Arrow.Links(id_obj, gid(fit.length), ARR#Auto, ARR#Auto, ARR#Auto);
+
+	disable.deposits	= true;
+
+	//	set up "stay at new speed" switch
+	Define.Labeled.Switch(dialog.top+3, dialog.col, 'Stay at new speed:', 3, 'NO|YES', fit.cutoff);
+	Deposit.Switch(gid(fit.cutoff), gid(sav.fit.cutoff));
+
+	//	set up fit.dur.switch
+	Define.Labeled.Switch(dialog.top+3, dialog.col+23, 'Scale Durations:', 3, 'NO|YES', fit.dur.switch);
+	Deposit.Switch(gid(fit.dur.switch), gid(sav.fit.dur.switch));
+
+	//	set up fit.method switch
+	id_obj	= Define.Switch(S#AA, dialog.top+3, dialog.col+45, 13, 0, 'Fit Instantly|Fit Gradually');
+	Deposit.Switch(id_obj, gid(sav.fit.method));
+	pid(fit.method, id_obj);
+
+	fill.ok(0, 'FIT TO TIME', 'CANCEL');
+
+	current.dialog.grp = Group.Objects(S#AA, id_first, gid(cancel.button), Get#Screen.Event);
+	Activate.Group.Objects(current.dialog.grp);
+
+	current.dialog = D#Fit.Time;
+	pid(sav.cur.dialog, D#Fit.Time);	//	save dialog state
+
+	disable.deposits	= false;
+
+end OPEN.FIT.TIME.DIALOG;
+
+CLOSE.FIT.TIME.DIALOG: proc swapable;
+	pid(sav.fit.pct,			Fetch.Fixed.Point(gid(fit.pct)));
+	pid(sav.fit.cutoff,		Fetch.Switch(		gid(fit.cutoff)));		/*	save switch pos	*/
+	pid(sav.fit.dur.switch,	Fetch.Switch(		gid(fit.dur.switch)));	/*	save switch pos	*/
+	pid(sav.fit.method,		Fetch.Switch(		gid(fit.method)));		/*	save switch pos	*/
+end CLOSE.FIT.TIME.DIALOG;
+
+
+/////////////////////////////	procedures for JUSTIFY dialog
+/////////////////////////////	status:	COMPLETED
+
+INIT.JUSTIFY.DIALOG: proc swapable;
+	pid								(sav.just.pct,		 100);	//	Percent to Justify  :   100
+	write(mdi)	=	 100;	//	pid(sav.just.range,	 100);	//	Effective Range (%) :   100
+	write(mdi)	=		0;	//	pid(sav.just.offset,		0);	//	Grid Offset (ms)    :     0
+end INIT.JUSTIFY.DIALOG;
+
+OPEN.JUSTIFY.DIALOG: proc public swapable;
+	dcl id_first	fixed;
+	dcl id_obj		fixed;
+
+	disable.deposits	= true;
+
+	//	note: arrow links are automatically set up by the calls to Define.Labeled.Fixed.Point() 
+
+	//	set up just.crm
+	id_first	= Define.Labeled.Fixed.Point(dialog.top, dialog.col, 'Click Multiplier    :', 5, 0, cf#unsigned|cf#right|cf#spfill, just.crm);
+	Deposit.Fixed.Point(gid(just.crm), samp.crm);
+
+	//	set up just.pct
+	Define.Labeled.Fixed.Point(dialog.top+1, dialog.col, 'Percent to Justify  :', 5, 0, cf#unsigned|cf#right|cf#spfill, just.pct);
+	id_obj	= gid(just.pct);
+	Deposit.Fixed.Point(id_obj, gid(sav.just.pct));
+	Select.New.Cur.Obj(id_obj, 0, 0);	//	the object to be selected when we're done
+
+	//	set up just.range
+	Define.Labeled.Fixed.Point(dialog.top+2, dialog.col, 'Effective Range (%) :', 5, 0, cf#signed|cf#right|cf#spfill, just.range);
+	Deposit.Fixed.Point(gid(just.range) , gid(sav.just.range));
+
+	//	set up just.offset
+	Define.Labeled.Fixed.Point(dialog.top+3, dialog.col, 'Grid Offset (ms)    :', 5, 0, cf#signed|cf#right|cf#spfill, just.offset);
+	Deposit.Fixed.Point(gid(just.offset), gid(sav.just.offset));
+
+	Define.Labeled.Switch(dialog.bot, 33, 'Filter:', 3, 'OFF|ON', filter.sw);
+	Deposit.Switch(gid(filter.sw), apply.filter);
+
+	fill.ok(0, 'JUSTIFY', 'CANCEL');
+
+	current.dialog.grp = Group.Objects(S#AA, id_first, gid(cancel.button), Get#Screen.Event);
+	Activate.Group.Objects(current.dialog.grp);
+
+	current.dialog = D#Justify;
+	pid(sav.cur.dialog, D#Justify);		//	save dialog state
+
+	disable.deposits	= false;
+
+end OPEN.JUSTIFY.DIALOG;
+
+CLOSE.JUSTIFY.DIALOG: proc swapable;
+	pid(sav.just.pct,		Fetch.Fixed.Point(gid(just.pct)));
+	pid(sav.just.range,	Fetch.Fixed.Point(gid(just.range)));
+	pid(sav.just.offset,	Fetch.Fixed.Point(gid(just.offset)));
+end CLOSE.JUSTIFY.DIALOG;
+
+
+/////////////////////////////	procedures for MIDI MAPPING dialog
+/////////////////////////////	status:	COMPLETED
+
+FILL.MIDI.IN.TABLE: proc public swapable;
+	dcl i					fixed;
+	dcl strng(2)		fixed;	//	holds four characters
+	dcl id_obj			fixed;
+	dcl save_deposits	fixed;
+
+	save_deposits		= disable.deposits;
+	disable.deposits	= true;
+
+	do i = 0 to 7;
+		//	tracks 1-8
+		if MAX.MIDINET.CHAN <> 0				 COPY.STRING(' N/A', strng);
+		else if (midi.mapping(i+(2+0)) == 1) COPY.STRING(' Off', strng);
+		else if (midi.mapping(i+(2+0)) == 0) COPY.STRING(' Kbd', strng);
+		else CONV.FIXED.TO.STR(midi.mapping(i+(2+0))-1, 0, 4, cf#right|cf#unsigned, strng);
+
+		id_obj	= gid(track.table1);
+		Fetch.Table   (id_obj, i, 0);
+		Deposit.String(gid(tracks1), strng);
+		Deposit.Table (id_obj, i, 0);
+
+		//	tracks 9-16
+		if MAX.MIDINET.CHAN <> 0				 COPY.STRING(' N/A', strng);
+		else if (midi.mapping(i+(2+8)) == 1) COPY.STRING(' Off', strng);
+		else if (midi.mapping(i+(2+8)) == 0) COPY.STRING(' Kbd', strng);
+		else CONV.FIXED.TO.STR(midi.mapping(i+(2+8))-1, 0, 4, cf#right|cf#unsigned, strng);
+
+		id_obj	= gid(track.table2);
+		Fetch.Table   (id_obj, i, 0);
+		Deposit.String(gid(tracks2), strng);
+		Deposit.Table (id_obj, i, 0);
+	end;
+
+	disable.deposits	= save_deposits;
+
+end FILL.MIDI.IN.TABLE;
+
+OPEN.MIDI.DIALOG: proc returns(fixed) public swapable;
+	dcl id_first	fixed;
+	dcl id_obj		fixed;
+
+	//	inert labels
+	id_first	= Define.Label(S#AA, dialog.top+1, dialog.col, 0, 'Channel:   1   2   3   4   5   6   7   8');
+	Set.Object.Attr(id_first, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_first, 0);
+
+	id_obj	= Define.Label(S#AA, dialog.top+2, dialog.col, 0, 'Track:');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up string object "tracks1" for track.table1
+	id_obj	= Define.String(S#AA, dialog.top+2, dialog.col+8, 4, O#STR.General);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Middle.Press|O#ACT.Left.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	pid(tracks1, id_obj);
+
+	//	set up track.table1
+	id_obj	= Define.Table(S#AA, 8, 1, id_obj);
+	Select.New.Cur.Obj(id_obj, 0, 0);	//	the object to be selected when we're done (row 0, column 0)
+	pid(track.table1, id_obj);
+
+	//	inert labels
+	id_obj	= Define.Label(S#AA, dialog.top+4, dialog.col, 0, 'Channel:   9  10  11  12  13  14  15  16');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	id_obj	= Define.Label(S#AA, dialog.top+5, dialog.col, 0, 'Track:');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up string object "tracks2" for track.table2
+	id_obj	= Define.String(S#AA, dialog.top+5, dialog.col+8, 4, O#STR.General);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Middle.Press|O#ACT.Left.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	pid(tracks2, id_obj);
+
+	//	set up track.table2
+	id_obj	= Define.Table(S#AA, 8, 1, id_obj);
+	pid(track.table2, id_obj);
+
+	/*	now deposit table values	*/
+	Fill.Midi.In.Table();
+
+	disable.deposits	= true;
+
+	//	inert labels
+	id_obj	= Define.Label(S#AA, dialog.top+1, dialog.col+45, 0, 'MIDI Mapped To:');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up poly.timbre.switch
+	if (MAX.MIDINET.CHAN == 0)	//	using old (non-midinet) midi system
+	{
+		id_obj	= Define.Switch(S#AA, dialog.top+2, dialog.col+45, 8, 0, 'Keyboard|Recorder');
+		Deposit.Switch(id_obj, poly.timbre.midi.control);
+	}
+	else
+	{
+		id_obj	= Define.Label (S#AA, dialog.top+2, dialog.col+45, 0, 'Recorder');
+	}
+	pid(poly.timbre.switch, id_obj);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+3, dialog.col+45, 0, 'MIDI Input:');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up input.switch
+	id_obj	= Define.Switch(S#AA, dialog.top+3, dialog.col+57, 3, 0, 'Off|All| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|16');
+	Deposit.Switch(id_obj, midi.input.chan+2);
+	pid(input.switch, id_obj);
+
+	Fill.Midi.Buttons('READY TRACKS', 'ALL SAFE');
+
+	Set.Object.Arrow.Links(gid(track.table1), ARR#Auto, gid(track.table2), ARR#Auto, gid(cur.play.time));
+	Set.Object.Arrow.Links(gid(track.table2), gid(track.table1), gid(time1), ARR#Auto, ARR#Auto);
+
+	current.dialog.grp = Group.Objects(S#AA, id_first, gid(clr.enables.button), Get#Screen.Event);
+	Activate.Group.Objects(current.dialog.grp);
+
+	if (poly.timbre.midi.control != false)	//	midi mapped to recorder, so erase/disable undefine input.switch and its label
+	{
+		id_obj	= gid(input.switch);	Erase.Object(id_obj);	Disable.Object(id_obj);
+		id_obj	= id_obj-1;				Erase.Object(id_obj);	Disable.Object(id_obj);
+	}
+
+	current.dialog = D#Midi;
+	pid(sav.cur.dialog, D#Midi);				//	save dialog state
+
+	disable.deposits	= false;
+
+end OPEN.MIDI.DIALOG;
+
+CLOSE.MIDI.DIALOG: proc swapable;
+
+	if set.enables<>0 then do;
+		set.enables=0;
+		Highlight.Object(gid(set.enables.button), ATTR#Normal);
+		update.trk.mgr(true, false);
+	end;
+
+end CLOSE.MIDI.DIALOG;
+
+
+/////////////////////////////	procedures for SEQUENCE FILES dialog
+/////////////////////////////	status:	COMPLETED
+
+/*
+INIT.SEQ.STORAGE.DIALOG: proc swapable;
+	pid(sav.seq.sw.pos, 0);	//	default to switch position "Save Sequence"
+end INIT.SEQ.STORAGE.DIALOG;
+*/
+
+OPEN.SEQ.STORAGE.DIALOG: proc public swapable;
+	dcl id_first	fixed;
+	dcl id_obj		fixed;
+	dcl i				fixed;
+
+	//	NOTE:	Don't disable deposits until after the deposit to "seq.sw.pos".
+	//	This will force a call to GET.SEQ.STORE.DIALOG.EVENT() in :SYNSOU:EDITMOD:DIALOG2
+	// which will redraw the OK button based on the setting of this switch.
+
+	//	inert label
+	id_first	= Define.Label(S#AA, dialog.top, dialog.col+10, 0, 'Sequence #');
+	Set.Object.Attr(id_first, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_first, 0);
+	pid(seq.numbers, id_first);
+
+	Define.Button.Icon(S#AA, (dialog.col+23)*100, dialog.top*100, 0, '1', 0);
+	Define.Button.Icon(S#AA, (dialog.col+27)*100, dialog.top*100, 0, '2', 0);
+	Define.Button.Icon(S#AA, (dialog.col+31)*100, dialog.top*100, 0, '3', 0);
+	Define.Button.Icon(S#AA, (dialog.col+35)*100, dialog.top*100, 0, '4', 0);
+	Define.Button.Icon(S#AA, (dialog.col+39)*100, dialog.top*100, 0, '5', 0);
+	Define.Button.Icon(S#AA, (dialog.col+43)*100, dialog.top*100, 0, '6', 0);
+	Define.Button.Icon(S#AA, (dialog.col+47)*100, dialog.top*100, 0, '7', 0);
+	Define.Button.Icon(S#AA, (dialog.col+51)*100, dialog.top*100, 0, '8', 0);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+2, dialog.col, 0, 'Press button for desired option:');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	pid(seq.save.button,   Define.Button.Icon(S#AA, (dialog.col+34)*100, (dialog.top+2)*100, 6, 'SAVE', 0));
+	pid(seq.recall.button, Define.Button.Icon(S#AA, (dialog.col+42)*100, (dialog.top+2)*100, 0, 'RECALL', 0));
+	pid(seq.unsave.button, Define.Button.Icon(S#AA, (dialog.col+50)*100, (dialog.top+2)*100, 0, 'UNSAVE', 0));
+
+	//	set up seq.sw.pos
+	id_obj	= Define.Switch(S#AA, dialog.top+3, dialog.col, 16, 0, 'Save Sequence:|Recall Sequence:|Unsave Sequence:');
+	Deposit.Switch(id_obj, gid(sav.seq.sw.pos));
+	pid(seq.sw.pos, id_obj);
+
+	disable.deposits	= true;
+
+	//	set up seq.treename
+	id_obj	= Define.String(S#AA, dialog.top+3, dialog.col+17, 46, O#STR.Treename);
+	Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+	reverse.field(id_obj);
+	do i = 0 to shr(gid(sav.seq.treename)+1, 1);
+		misc.buf(i) = read(mdi);			//	note: gid(sav.seq.treename) leaves xmem pointed to sav.seq.treename
+	end;
+	Deposit.String(id_obj, misc.buf);
+	Select.New.Cur.Obj(id_obj, 0, 0);	//	the object to be selected when we're done
+	pid(seq.treename, id_obj);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+4, dialog.col, 0, 'Current Catalog:');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);	//	NOTE: could we make this a link to the D-page?
+
+	id_obj	= Define.String(S#AA, dialog.top+4, dialog.col+17, 11, O#STR.Treename);
+	Set.Object.Mouse.Access(id_obj, 0);	//	NOTE: could we make this a link to the D-page?
+	Get.Device.Name(1, misc.buf);			//	look up current catalog
+	Deposit.String(id_obj, misc.buf);
+
+	fill.ok(16, NulStr, 'CANCEL');								//	16 place holder characters are needed to lock in the position of the cancel button
+	Deposit.Object.Info(gid(ok.button), O#UserData, 0);	//	0 indicates normal button state:			i.e., SAVE SEQUENCE
+																			//	1 indicates confirmation button state: i.e., REPLACE SEQUENCE
+
+	current.dialog.grp = Group.Objects(S#AA, id_first, gid(cancel.button), Get#Screen.Event);
+	Activate.Group.Objects(current.dialog.grp);
+
+	current.dialog = D#Seq.Store;
+	pid(sav.cur.dialog, D#Seq.Store);	//	save dialog state
+
+	disable.deposits	= false;
+
+end OPEN.SEQ.STORAGE.DIALOG;
+
+CLOSE.SEQ.STORAGE.DIALOG: proc swapable;
+	dcl i	fixed;
+
+	pid(sav.seq.sw.pos, Fetch.Switch(gid(seq.sw.pos)));	/*	save switch pos	*/
+
+	Fetch.String(gid(seq.treename), misc.buf);				/*	save treename		*/
+	pid(sav.seq.treename, misc.buf(0));
+	do i = 1 to shr(misc.buf(0)+1, 1);
+		write(mdi) = misc.buf(i);	//	note: pid(sav.seq.treename) leaves xmem pointed ONE WORD AFTER sav.seq.treename
+	end;
+
+end CLOSE.SEQ.STORAGE.DIALOG;
+
+
+/////////////////////////////	procedures for joint SMT/SKT dialog
+/////////////////////////////	status:	COMPLETED
+
+INIT.SMT.SKT.DIALOG: proc swapable;
+	dcl (track, bank, entry)	fixed;
+
+	if (recd.trk != 0)	track	= recd.trk - num.kbd.tracks + 1;	//	this is the number of the most recently soloed track
+	else						track	= 1;
+	bank	= our.bank + 1;	//	this is the current timbre bank number
+	entry	= our.timbre + 1;	//	this is the current timbre entry number
+
+	//	initialize as smt	(i.e., copy keyboard to track)
+	pid								(sav.smt.skt.src.sw.pos, 0);	//	default source switch position = 'KEYBOARD'
+	write(mdi)	= 1;		//	pid(sav.smt.skt.dst.sw.pos, 1);	//	default source switch position = 'TRACK:'
+	write(mdi)	= track;	//	pid(sav.smt.skt.src.track,	track);	
+	write(mdi)	= bank;	//	pid(sav.smt.skt.src.bank,	bank);
+	write(mdi)	= entry;	//	pid(sav.smt.skt.src.entry,	entry);
+	write(mdi)	= track;	//	pid(sav.smt.skt.dst.track,	track);
+//	write(mdi)	= bank;	//	pid(sav.smt.skt.dst.bank,	bank);
+//	write(mdi)	= entry;	//	pid(sav.smt.skt.dst.entry, entry);
+end INIT.SMT.SKT.DIALOG;
+
+OPEN.SMT.SKT.DIALOG: proc public swapable;
+	dcl id_first	fixed;
+	dcl id_obj		fixed;
+
+	//	NOTE:	Don't disable deposits until after the following deposits to "smt.skt.src.switch" and "smt.skt.dst.switch".
+	//	This will force a call to GET.SMT.SKT.DIALOG.EVENT() in :SYNSOU:EDITMOD:DIALOG2 which will redraw the dialog
+	//	based on the settings of these switches.
+
+	//	inert labels
+	id_first	= Define.Label(S#AA, dialog.top+1, dialog.col, 0, 'COPY TIMBRE:');
+	Set.Object.Attr(id_first, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_first, 0);
+
+	id_obj	= Define.Label(S#AA, dialog.top+2, dialog.col+11, 0, 'From:');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up smt.skt.src.switch
+	id_obj	= Define.Switch(S#AA, dialog.top+2, dialog.col+17, 12, 0, 'KEYBOARD|TRACK:|BANK, ENTRY:|NULL TIMBRE');
+	Deposit.Switch(id_obj, gid(sav.smt.skt.src.sw.pos));
+	pid(smt.skt.src.switch, id_obj);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+3, dialog.col+11, 0, 'To  :');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up smt.skt.dst.switch
+//	id_obj	= Define.Switch(S#AA, dialog.top+3, dialog.col+17, 12, 0, 'KEYBOARD|TRACK:|BANK, ENTRY:');
+	id_obj	= Define.Switch(S#AA, dialog.top+3, dialog.col+17, 12, 0, 'KEYBOARD|TRACK:');
+	Deposit.Switch(id_obj, gid(sav.smt.skt.dst.sw.pos));
+	pid(smt.skt.dst.switch, id_obj);
+
+	Enable.Object.Range(id_first, id_obj);
+
+	disable.deposits	= true;
+
+	//	set up smt.skt.src.track
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+2, dialog.col+30, 3, 0, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	reverse.field(id_obj);
+	Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+	Deposit.Fixed.Point(id_obj, gid(sav.smt.skt.src.track));
+	pid(smt.skt.src.track, id_obj);
+
+	//	set up smt.skt.src.bank
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+2, dialog.col+30, 3, 0, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	reverse.field(id_obj);
+	Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+	Deposit.Fixed.Point(id_obj, gid(sav.smt.skt.src.bank));
+	pid(smt.skt.src.bank, id_obj);
+
+	//	set up smt.skt.src.entry
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+2, dialog.col+35, 3, 0, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	reverse.field(id_obj);
+	Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+	Deposit.Fixed.Point(id_obj, gid(sav.smt.skt.src.entry));
+	pid(smt.skt.src.entry, id_obj);
+
+	//	set up smt.skt.dst.track
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+3, dialog.col+30, 3, 0, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	reverse.field(id_obj);
+	Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+	Deposit.Fixed.Point(id_obj, gid(sav.smt.skt.dst.track));
+	pid(smt.skt.dst.track, id_obj);
+
+	//	set up smt.skt.dst.bank
+//	id_obj	= Define.Fixed.Point(S#AA, dialog.top+3, dialog.col+30, 3, 0, cf#right|cf#unsigned|cf#spfill);
+//	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+//	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+//	reverse.field(id_obj);
+//	Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+//	Deposit.Fixed.Point(id_obj, gid(sav.smt.skt.dst.bank));
+//	pid(smt.skt.dst.bank, id_obj);
+
+	//	set up smt.skt.dst.entry
+//	id_obj	= Define.Fixed.Point(S#AA, dialog.top+3, dialog.col+35, 3, 0, cf#right|cf#unsigned|cf#spfill);
+//	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+//	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+//	reverse.field(id_obj);
+//	Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+//	Deposit.Fixed.Point(id_obj, gid(sav.smt.skt.dst.entry));
+//	pid(smt.skt.dst.entry, id_obj);
+
+	pid(smt.skt.exch.button, Define.Button.Icon(S#AA, dialog.col*100, (((dialog.top*2)+5)*50)-10, 0, 'EXCHANGE', 0));
+
+	fill.ok(0, 'COPY TIMBRE', 'CANCEL');
+
+	id_obj	= gid(cancel.button);
+	Enable.Object.Range(gid(ok.button), id_obj);
+	current.dialog.grp = Group.Objects(S#AA, id_first, id_obj, Get#Screen.Event);
+
+	current.dialog = D#SMT_SKT;
+	pid(sav.cur.dialog, D#SMT_SKT);			//	save dialog state
+
+	disable.deposits	= false;
+
+end OPEN.SMT.SKT.DIALOG;
+
+CLOSE.SMT.SKT.DIALOG: proc swapable;
+	pid(sav.smt.skt.src.sw.pos,	Fetch.Switch		(gid(smt.skt.src.switch)));
+	pid(sav.smt.skt.dst.sw.pos,	Fetch.Switch		(gid(smt.skt.dst.switch)));
+	pid(sav.smt.skt.src.track,		Fetch.Fixed.Point	(gid(smt.skt.src.track)));
+	pid(sav.smt.skt.src.bank,		Fetch.Fixed.Point	(gid(smt.skt.src.bank)));
+	pid(sav.smt.skt.src.entry,		Fetch.Fixed.Point	(gid(smt.skt.src.entry)));
+	pid(sav.smt.skt.dst.track,		Fetch.Fixed.Point	(gid(smt.skt.dst.track)));
+//	pid(sav.smt.skt.dst.bank,		Fetch.Fixed.Point	(gid(smt.skt.dst.bank)));
+//	pid(sav.smt.skt.dst.entry,		Fetch.Fixed.Point	(gid(smt.skt.dst.entry)));
+end CLOSE.SMT.SKT.DIALOG;
+
+
+/////////////////////////////	procedures for TRACK SOLOS dialog
+/////////////////////////////	status:	COMPLETED
+
+/*
+INIT.TRK.SOLOS.DIALOG: proc swapable;
+	pid(sav.trk.solos.sw.pos, 0);	//	default switch position = 'Solo all non-blank tracks'
+end INIT.TRK.SOLOS.DIALOG;
+*/
+
+OPEN.TRK.SOLOS.DIALOG: proc public swapable;
+	dcl id_first	fixed;
+	dcl id_obj		fixed;
+
+	disable.deposits	= true;
+
+	//	inert label
+	id_first	= Define.Label(S#AA, dialog.top+1, dialog.col, 0, 'Action:');
+	Set.Object.Attr(id_first, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_first, 0);
+
+	//	set up trk.solos.switch
+	id_obj	= Define.Switch(S#AA, dialog.top+1, dialog.col+8, 35, 0,
+		'Solo all non-blank tracks|Solo all tracks with events|Solo all tracks with sounding notes|Toggle all Solos|Clear all Solos');
+	Deposit.Switch(id_obj, gid(sav.trk.solos.sw.pos));
+	pid(trk.solos.switch, id_obj);
+
+	fill.ok(0, 'SET SOLOS', 'CANCEL');
+
+	current.dialog.grp = Group.Objects(S#AA, id_first, gid(cancel.button), Get#Screen.Event);
+	Activate.Group.Objects(current.dialog.grp);
+
+	//	since there is no selectable object in this dialog, we'll use cur.play.time as the cursor's home
+	Select.New.Cur.Obj(gid(cur.play.time), 0, 0);
+
+	current.dialog = D#Trk.Solos;
+	pid(sav.cur.dialog, D#Trk.Solos);	//	save dialog state
+
+	disable.deposits	= false;
+
+end OPEN.TRK.SOLOS.DIALOG;
+
+CLOSE.TRK.SOLOS.DIALOG: proc swapable;
+	pid(sav.trk.solos.sw.pos, Fetch.Switch(gid(trk.solos.switch)));
+end CLOSE.TRK.SOLOS.DIALOG;
+
+
+/////////////////////////////	procedures for TRACK VOLUME dialog
+/////////////////////////////	status:	COMPLETED
+
+INIT.TRK.VOL.DIALOG: proc swapable;
+	pid								(sav.trk.vol.sw.pos,		1);	//	default switch position = 'SCALE Track Volume(s) by'
+	write(mdi)	=	1000;	//	pid(sav.trk.vol.percent,1000);	//	default to 100.0 %
+end INIT.TRK.VOL.DIALOG;
+
+OPEN.TRK.VOL.DIALOG: proc public swapable;
+	dcl id_first	fixed;
+	dcl id_obj		fixed;
+
+	//	NOTE:	Don't disable deposits until after the following deposit to "trk.vol.switch".  This will force a call to
+	//	GET.TRK.VOL.DIALOG.EVENT() in :SYNSOU:EDITMOD:DIALOG2 which will redraw the dialog based on the setting of "trk.vol.switch".
+
+	//	inert labels
+	id_first	= Define.Label(S#AA, dialog.top, dialog.col, 0, 'Enter track volume as an absolute amount or as a percentage');
+	Set.Object.Attr(id_first, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_first, 0);
+
+	id_obj	= Define.Label(S#AA, dialog.top+1, dialog.col, 0, 'of current values by switching between "SET" and "SCALE".');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up trk.vol.switch
+	id_obj	= Define.Switch(S#AA, dialog.top+3, dialog.col, 24, 0, 'SET Track Volume(s) to|SCALE Track Volume(s) by');
+	Deposit.Switch(id_obj, gid(sav.trk.vol.sw.pos));
+	pid(trk.vol.switch, id_obj);
+
+	disable.deposits	= true;
+
+	//	set up trk.vol.percent
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+3, dialog.col+25, 5, 1, cf#right|cf#unsigned|cf#spfill);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+	Deposit.Fixed.Point(id_obj, gid(sav.trk.vol.percent));
+	Select.New.Cur.Obj(id_obj, 0, 0);	//	the object to be selected when we're done
+	pid(trk.vol.percent, id_obj);
+
+	//	yoked label
+	Set.Object.Mouse.Access(Define.Label(S#AA, dialog.top+3, dialog.col+31, 0, 'percent.'), 0);
+
+	fill.ok(12, NulStr, 'CANCEL');
+
+	current.dialog.grp = Group.Objects(S#AA, id_first, gid(cancel.button), Get#Screen.Event);
+	Activate.Group.Objects(current.dialog.grp);
+
+	current.dialog = D#Trk.Vol;
+	pid(sav.cur.dialog, D#Trk.Vol);		//	save dialog state
+
+	disable.deposits	= false;
+
+end OPEN.TRK.VOL.DIALOG;
+
+CLOSE.TRK.VOL.DIALOG: proc swapable;
+	pid(sav.trk.vol.sw.pos,		Fetch.Switch		(gid(trk.vol.switch)));
+	pid(sav.trk.vol.percent,	Fetch.Fixed.Point	(gid(trk.vol.percent)));
+end CLOSE.TRK.VOL.DIALOG;
+
+
+/////////////////////////////	procedures for CHANGE PITCH dialog
+/////////////////////////////	status:	UNDER DEVELOPMENT
+
+/*
+0.........1.........2.........3.........4.........5.........6.........7.........
+01234567890123456789012345678901234567890123456789012345678901234567890123456789
+Action: TRANSPOSE                                               |
+                                                                |
+Transpose such that XXX becomes XXX                             |
+Transpose by -12 semitones                                      |
+                                                                |
+                                 Filter: OFF                    |
+   Edit Start  :     1.000        Click: OFF Just: OFF   BEATS   Bounce
+0.........1.........2.........3.........4.........5.........6.........7.........
+01234567890123456789012345678901234567890123456789012345678901234567890123456789
+Action: INVERT                                                  |
+                                                                |
+   Invert such that XXX becomes XXX                             |
+                                                                |
+                                                                |
+                                 Filter: OFF                    |
+   Edit Start  :     1.000        Click: OFF Just: OFF   BEATS   Bounce
+0.........1.........2.........3.........4.........5.........6.........7.........
+01234567890123456789012345678901234567890123456789012345678901234567890123456789
+Action: SCALE                   |                               |
+                                |Relative to F#3:               |
+Scale such that XXX to XXX      |Transpose by  -XXXX.0 semitones|
+        becomes XXX to XXX      |Then Scale by -XXXX.0 percent  |
+                                |                               |
+                                |Filter: OFF                    |
+   Edit Start  :     1.000        Click: OFF Just: OFF   BEATS   Bounce
+*/
+
+INIT.CHANGE.PITCH.DIALOG: proc swapable;
+	//				octave
+	//	 0 - 11		0	
+	//	12 - 23		1	
+	//	24 - 35		2	
+	//	36 - 47		3	
+	//	48 - 59		4	
+	//	60 - 61		5	
+	//	62 - 83		6	
+	//	84
+
+	pid											(sav.pitch.mode.sw.pos,				 0);	//	initialize switch position to "Transpose"
+	write(mdi)	= 36;					//	pid(sav.pitch.xpos.from,				36);	//	default "transpose from" pitch = C3
+	write(mdi)	=	0;					//	pid(sav.pitch.xpos.semitones,			 0);	//	default "transpose to  " pitch = C3
+	write(mdi)	= 42;					//	pid(sav.pitch.inv.from,					42);	//	default "invert from" pitch = F#3
+	write(mdi)	= 42;					//	pid(sav.pitch.inv.to,					42);	//	default "invert to  " pitch = F#3
+	write(mdi)	=	0;					//	pid(sav.pitch.scale.xa,					 0);	//	default to "Scale such that C0  to C7
+	write(mdi)	= max.key# * 390; //	pid(sav.pitch.scale.xb,	max.key# * 390);	//	                    becomes C0  to C7"
+	write(mdi)	=	0; 				//	pid(sav.pitch.scale.ya,					 0);
+	write(mdi)	= max.key# * 390; //	pid(sav.pitch.scale.yb,	max.key# * 390);
+	write(mdi)	= 36;					//	pid(sav.pitch.scale.anchor,			36);	//	default to "Relative to C3"
+end INIT.CHANGE.PITCH.DIALOG;
+
+OPEN.CHANGE.PITCH.DIALOG: proc public swapable;
+	dcl id_first	fixed;
+	dcl id_left		fixed;
+	dcl id_obj		fixed;
+	dcl pitch(2)	fixed;
+
+	//	NOTE:	Don't disable deposits until after the following deposit to "pitch.mode.switch".
+	//	This will force a call to GET.CHANGE.PITCH.DIALOG.EVENT() in :SYNSOU:EDITMOD:DIALOG2
+	//	which will redraw the dialog based on the setting of "pitch.mode.switch".
+
+	//	inert label
+	id_first	= Define.Label(S#AA, dialog.top, dialog.col, 0, 'Action:');
+	Set.Object.Attr(id_first, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_first, 0);
+
+	//	set up pitch.mode.switch
+	id_obj	= Define.Switch(S#AA, dialog.top, dialog.col+8, 17, 0, 'TRANSPOSE PITCHES|INVERT PITCHES|SCALE PITCHES');
+	Deposit.Switch(id_obj, gid(sav.pitch.mode.sw.pos));
+	pid(trk.solos.switch, id_obj);
+
+	Enable.Object.Range(id_first, id_obj);
+
+	disable.deposits	= true;
+
+	/////////////////////////////////////////////////////////////////////////////
+	//	TRANSPOSE objects
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+2, dialog.col, 0, 'Transpose such that');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up pitch.xpos.from
+	id_obj	= Define.String(S#AA, dialog.top+2, dialog.col+20, 3, O#STR.Pitch);
+	reverse.field(id_obj);
+	conv.key#.to.str(gid(sav.pitch.xpos.from), pitch);
+	Deposit.String(id_obj, pitch);
+	pid(pitch.xpos.from, id_obj);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+2, dialog.col+24, 0, 'becomes');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up pitch.xpos.to
+	id_obj	= Define.String(S#AA, dialog.top+2, dialog.col+32, 3, O#STR.Pitch);
+	reverse.field(id_obj);
+	conv.key#.to.str(gid(sav.pitch.xpos.from)+gid(sav.pitch.xpos.semitones), pitch);
+	Deposit.String(id_obj, pitch);
+	pid(pitch.xpos.to, id_obj);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+3, dialog.col, 0, 'Transpose by');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up pitch.xpos.semitones
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+3, dialog.col+13, 3, 0, cf#right|cf#signed|cf#spfill);
+	reverse.field(id_obj);
+	Deposit.Fixed.Point(id_obj, gid(sav.pitch.xpos.semitones));
+	pid(pitch.xpos.semitones, id_obj);
+
+	//															up				down			left			right
+	Set.Object.Arrow.Links(gid(pitch.xpos.from),	ARR#Auto,	id_obj,		ARR#Auto,	ARR#Auto);
+	Set.Object.Arrow.Links(gid(pitch.xpos.to),	ARR#Auto,	id_obj,		ARR#Auto,	ARR#Auto);
+	Set.Object.Arrow.Links(id_obj,					ARR#Auto,	ARR#Auto,	ARR#Auto,	ARR#Auto);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+3, dialog.col+17, 0, 'semitones');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	/////////////////////////////////////////////////////////////////////////////
+	//	INVERT objects
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+2, dialog.col+3, 0, 'Invert such that');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up pitch.inv.from
+	id_obj	= Define.String(S#AA, dialog.top+2, dialog.col+20, 3, O#STR.Pitch);
+	reverse.field(id_obj);
+	Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+	conv.key#.to.str(gid(sav.pitch.inv.from), pitch);
+	Deposit.String(id_obj, pitch);
+	pid(pitch.inv.from, id_obj);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+2, dialog.col+24, 0, 'becomes');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up pitch.inv.to
+	id_obj	= Define.String(S#AA, dialog.top+2, dialog.col+32, 3, O#STR.Pitch);
+	reverse.field(id_obj);
+	Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+	conv.key#.to.str(gid(sav.pitch.inv.to), pitch);
+	Deposit.String(id_obj, pitch);
+	pid(pitch.inv.to, id_obj);
+
+	/////////////////////////////////////////////////////////////////////////////
+	//	SCALE objects
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+2, dialog.col, 0, 'Scale such that');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up pitch.scale.xa	(save this id in id_left for later arrow links)
+	id_left	= Define.String(S#AA, dialog.top+2, dialog.col+16, 3, O#STR.Pitch);
+	Set.Object.Arrow.Links(id_left, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+	write(5)	= gid(sav.pitch.scale.xa);
+	write(7)	= 390;
+	conv.key#.to.str(read(5) + (read(4) ige (390/2)), pitch);
+	Deposit.String(id_left, pitch);
+	pid(pitch.scale.xa, id_left);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+2, dialog.col+20, 0, 'to');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up pitch.scale.xb
+	id_obj	= Define.String(S#AA, dialog.top+2, dialog.col+23, 3, O#STR.Pitch);
+	Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+	write(5)	= gid(sav.pitch.scale.xb);
+	write(7)	= 390;
+	conv.key#.to.str(read(5) + (read(4) ige (390/2)), pitch);
+	Deposit.String(id_obj, pitch);
+	pid(pitch.scale.xb, id_obj);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+3, dialog.col+8, 0, 'becomes');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up pitch.scale.ya
+	id_obj	= Define.String(S#AA, dialog.top+3, dialog.col+16, 3, O#STR.Pitch);
+	Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+	write(5)	= gid(sav.pitch.scale.ya);
+	write(7)	= 390;
+	conv.key#.to.str(read(5) + (read(4) ige (390/2)), pitch);
+	Deposit.String(id_obj, pitch);
+	pid(pitch.scale.ya, id_obj);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+3, dialog.col+20, 0, 'to');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up pitch.scale.yb
+	id_obj	= Define.String(S#AA, dialog.top+3, dialog.col+23, 3, O#STR.Pitch);
+	Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+	write(5)	= gid(sav.pitch.scale.yb);
+	write(7)	= 390;
+	conv.key#.to.str(read(5) + (read(4) ige (390/2)), pitch);
+	Deposit.String(id_obj, pitch);
+	pid(pitch.scale.yb, id_obj);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+1, dialog.col+33, 0, 'Relative to');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up pitch.scale.anchor
+	id_obj	= Define.String(S#AA, dialog.top+1, dialog.col+45, 3, O#STR.Pitch);
+	Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, id_left, ARR#Auto);
+	conv.key#.to.str(gid(sav.pitch.scale.anchor), pitch);
+	Deposit.String(id_obj, pitch);
+	pid(pitch.scale.anchor, id_obj);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+1, dialog.col+48, 0, ':');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+2, dialog.col+33, 0, 'Transpose by');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up pitch.scale.semitones
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+2, dialog.col+47, 7, 1, cf#right|cf#signed|cf#spfill);
+//	Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, id_left, ARR#Auto);
+	Set.Object.Mouse.Access(id_obj, 0);	//	TEMPORARILY DISABLE THIS FIELD
+	pid(pitch.scale.semitones, id_obj);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+2, dialog.col+55, 0, 'semitones');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+3, dialog.col+33, 0, 'Then Scale by');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	//	set up pitch.scale.percent
+	id_obj	= Define.Fixed.Point(S#AA, dialog.top+3, dialog.col+47, 7, 1, cf#right|cf#signed|cf#spfill);
+//	Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, id_left, ARR#Auto);
+	Set.Object.Mouse.Access(id_obj, 0);	//	TEMPORARILY DISABLE THIS FIELD
+	pid(pitch.scale.percent, id_obj);
+
+	//	inert label
+	id_obj	= Define.Label(S#AA, dialog.top+3, dialog.col+55, 0, 'percent');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	/////////////////////////////////////////////////////////////////////////////
+	//	COMMON objects
+
+	Define.Labeled.Switch(dialog.bot, 33, 'Filter:', 3, 'OFF|ON', filter.sw);
+	Deposit.Switch(gid(filter.sw), apply.filter);
+
+	fill.ok(9, '', 'CANCEL');
+
+	id_obj	= gid(cancel.button);
+	Enable.Object.Range(gid(filter.sw)-1, id_obj);
+	current.dialog.grp = Group.Objects(S#AA, id_first, id_obj, Get#Screen.Event);
+
+	current.dialog = D#Change.Pitch;
+	pid(sav.cur.dialog, D#Change.Pitch);	//	save dialog state
+
+	disable.deposits	= false;
+
+end OPEN.CHANGE.PITCH.DIALOG;
+
+CLOSE.CHANGE.PITCH.DIALOG: proc swapable;
+	dcl pitch(2)	fixed;
+
+	pid(sav.pitch.mode.sw.pos,		Fetch.Switch		(gid(pitch.mode.switch)));
+
+	Fetch.String(gid(pitch.xpos.from),		pitch);	pid(sav.pitch.xpos.from,		conv.str.to.key#(pitch));
+	pid(sav.pitch.xpos.semitones,	Fetch.Fixed.Point	(gid(pitch.xpos.semitones)));
+
+	Fetch.String(gid(pitch.inv.from),		pitch);	pid(sav.pitch.inv.from,			conv.str.to.key#(pitch));
+	Fetch.String(gid(pitch.inv.to	 ),		pitch);	pid(sav.pitch.inv.to,			conv.str.to.key#(pitch));
+
+	Fetch.String(gid(pitch.scale.anchor),	pitch);	pid(sav.pitch.scale.anchor,	conv.str.to.key#(pitch));
+end CLOSE.CHANGE.PITCH.DIALOG;
+
+
+/////////////////////////////	procedures for UNWRAP LOOPS dialog
+/////////////////////////////	status:	COMPLETED
+
+OPEN.UNWRAP.DIALOG: proc public swapable;
+	dcl id_first	fixed;
+	dcl id_obj		fixed;
+	dcl time32(1)	fixed;
+
+	//	inert labels
+	id_first	= Define.Label(S#AA, dialog.top, dialog.col, 0, 'UNWRAP removes all loops from the selected tracks by repeating');
+	Set.Object.Attr(id_first, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_first, 0);
+	
+	id_obj	= Define.Label(S#AA, dialog.top+1, dialog.col, 0, 'the notes that were looped until the End Time entered below');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+	
+	id_obj	= Define.Label(S#AA, dialog.top+2, dialog.col, 0, 'is reached.  This operation will alter the Sequence.');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	id_obj	= Define.Label(S#AA, dialog.top+4, dialog.col, 0, 'Enter desired End Time:');
+	Set.Object.Attr(id_obj, 0, ATTR#AltIntensity);
+	Set.Object.Mouse.Access(id_obj, 0);
+
+	disable.deposits	= true;
+
+	//	set up unwrap.time
+	id_obj	= Define.32Bit.Msec(S#AA, dialog.top+4, dialog.col+24, 14, time.map(Fetch.Switch(gid(time.mode.switch))), cf#time, cf#default, cf#default);
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+	Set.Object.Arrow.Links(id_obj, ARR#Auto, ARR#Auto, ARR#Auto, ARR#Auto);
+	reverse.field(id_obj);
+	gid32(sav.unwrap.time.ms, time32);
+	Deposit.32Bit.Msec(id_obj, time32, Zero.Zero);
+	Select.New.Cur.Obj(id_obj, 0, 0);	//	the object to be selected when we're done
+	pid(unwrap.time, id_obj);
+
+	fill.ok(0, 'UNWRAP', 'CANCEL');
+
+	current.dialog.grp = Group.Objects(S#AA, id_first, gid(cancel.button), Get#Screen.Event);
+	Activate.Group.Objects(current.dialog.grp);
+
+	current.dialog = D#Unwrap;
+	pid(sav.cur.dialog, D#Unwrap);		//	save dialog state
+
+	disable.deposits	= false;
+
+end OPEN.UNWRAP.DIALOG;
+
+CLOSE.UNWRAP.DIALOG: proc swapable;
+	dcl time32(1)	fixed;
+	Fetch.32Bit.Msec(gid(unwrap.time), time32);	/*	save unwrap time	*/
+	pid32(sav.unwrap.time.ms, time32);
+end CLOSE.UNWRAP.DIALOG;
+
+
+/*	…D…E…B…U…G………S…C…R…A…P…S…
+dcl flags fixed;																										///////////	DEBUG
+flags	= Fetch.Object.Info(id_obj, O#Action);																	///////////	DEBUG
+send	'before Set.Object.Mouse.Access:';								interp_flush_char_output();	///////////	DEBUG
+send	' O#ACT.Left.Press     =', flags & O#ACT.Left.Press;		interp_flush_char_output();	///////////	DEBUG
+send	' O#ACT.Middle.Press   =', flags & O#ACT.Middle.Press;	interp_flush_char_output();	///////////	DEBUG
+send	' O#ACT.Right.Press    =', flags & O#ACT.Right.Press;		interp_flush_char_output();	///////////	DEBUG
+send	' O#ACT.Left.Release   =', flags & O#ACT.Left.Release;	interp_flush_char_output();	///////////	DEBUG
+send	' O#ACT.Middle.Release =', flags & O#ACT.Middle.Release;	interp_flush_char_output();	///////////	DEBUG
+send	' O#ACT.Right.Release  =', flags & O#ACT.Right.Release;	interp_flush_char_output();	///////////	DEBUG
+
+	Set.Object.Mouse.Access(id_obj, O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+
+flags	= Fetch.Object.Info(id_obj, O#Action);
+send	'after Set.Object.Mouse.Access:';								interp_flush_char_output();	///////////	DEBUG
+send	' O#ACT.Left.Press     =', flags & O#ACT.Left.Press;		interp_flush_char_output();	///////////	DEBUG
+send	' O#ACT.Middle.Press   =', flags & O#ACT.Middle.Press;	interp_flush_char_output();	///////////	DEBUG
+send	' O#ACT.Right.Press    =', flags & O#ACT.Right.Press;		interp_flush_char_output();	///////////	DEBUG
+send	' O#ACT.Left.Release   =', flags & O#ACT.Left.Release;	interp_flush_char_output();	///////////	DEBUG
+send	' O#ACT.Middle.Release =', flags & O#ACT.Middle.Release;	interp_flush_char_output();	///////////	DEBUG
+send	' O#ACT.Right.Release  =', flags & O#ACT.Right.Release;	interp_flush_char_output();	///////////	DEBUG
+
+
+//	flags	= Fetch.Object.Info(id_obj, O#Action);																					///////////	DEBUG
+send	'before Set.Object.Action:';															interp_flush_char_output();	///////////	DEBUG
+send	' O#ACT.Prev.Obj              =', flags & O#ACT.Prev.Obj;					interp_flush_char_output();	//	After selecting, return to previous object
+send	' O#ACT.Update.On.Dep         =', flags & O#ACT.Update.On.Dep;				interp_flush_char_output();	//	Re-draw screen right away on change
+send	' O#ACT.Drag.Enabled          =', flags & O#ACT.Drag.Enabled;				interp_flush_char_output();	//	Object may be dragged
+send	' O#ACT.Drag.Type.Check       =', flags & O#ACT.Drag.Type.Check;			interp_flush_char_output();	//	Check type on doing drag/deposit
+send	' O#ACT.Animate.Disabled      =', flags & O#ACT.Animate.Disabled;			interp_flush_char_output();	//	Animate the object
+send	' O#ACT.Deposit.Rept.Disabled =', flags & O#ACT.Deposit.Rept.Disabled;	interp_flush_char_output();	//	Disable reporting deposit events
+send	' O#ACT.RealTime.Object       =', flags & O#ACT.RealTime.Object;			interp_flush_char_output();	//	Set to do RUN.SYN.LOOPs during updates
+send	' O#ACT.Get.Disabled          =', flags & O#ACT.Get.Disabled;				interp_flush_char_output();	//	Set to disable ALL gets
+send	' O#ACT.Jog.Enabled           =', flags & O#ACT.Jog.Enabled;				interp_flush_char_output();	//	Allow jogging value with left/right mouse buttons
+send	' O#ACT.POAct.Changed         =', flags & O#ACT.POAct.Changed;				interp_flush_char_output();	//	Manipulation for tables of switches
+
+	Set.Object.Action(id_obj, O#ACT.Animate.Disabled, true);
+
+flags	= Fetch.Object.Info(id_obj, O#Action);																						///////////	DEBUG
+send	'after Set.Object.Action:';															interp_flush_char_output();	///////////	DEBUG
+send	' O#ACT.Prev.Obj              =', flags & O#ACT.Prev.Obj;					interp_flush_char_output();	//	After selecting, return to previous object
+send	' O#ACT.Update.On.Dep         =', flags & O#ACT.Update.On.Dep;				interp_flush_char_output();	//	Re-draw screen right away on change
+send	' O#ACT.Drag.Enabled          =', flags & O#ACT.Drag.Enabled;				interp_flush_char_output();	//	Object may be dragged
+send	' O#ACT.Drag.Type.Check       =', flags & O#ACT.Drag.Type.Check;			interp_flush_char_output();	//	Check type on doing drag/deposit
+send	' O#ACT.Animate.Disabled      =', flags & O#ACT.Animate.Disabled;			interp_flush_char_output();	//	Animate the object
+send	' O#ACT.Deposit.Rept.Disabled =', flags & O#ACT.Deposit.Rept.Disabled;	interp_flush_char_output();	//	Disable reporting deposit events
+send	' O#ACT.RealTime.Object       =', flags & O#ACT.RealTime.Object;			interp_flush_char_output();	//	Set to do RUN.SYN.LOOPs during updates
+send	' O#ACT.Get.Disabled          =', flags & O#ACT.Get.Disabled;				interp_flush_char_output();	//	Set to disable ALL gets
+send	' O#ACT.Jog.Enabled           =', flags & O#ACT.Jog.Enabled;				interp_flush_char_output();	//	Allow jogging value with left/right mouse buttons
+send	' O#ACT.POAct.Changed         =', flags & O#ACT.POAct.Changed;				interp_flush_char_output();	//	Manipulation for tables of switches
+
+
+send 'gid(filter.sw) =', gid(filter.sw), ', gid(cancel.button) =', id_obj;	interp_flush_char_output();	///////////	DEBUG
+dcl id fixed;																								///////////	DEBUG
+do id = id_first to id_obj;																			///////////	DEBUG
+	send id,;																								///////////	DEBUG
+	if ((Fetch.Object.Info(id, O#Status) & O#STAT.Enable) == 0)	send ', disabled';	///////////	DEBUG
+	else																			send ', enabled';		///////////	DEBUG																							send ', enabled';		///////////	DEBUG
+	interp_flush_char_output();																		///////////	DEBUG
+end;																											///////////	DEBUG
+
+*/
+

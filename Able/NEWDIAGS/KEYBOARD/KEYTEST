@@ -1,0 +1,367 @@
+/* KEYBTEST  $TITLE  V/P keyboard test program */
+/* written 24 July 84    Jeff Risberg          */
+/* modified April 1986   Bill Leathers         */
+
+configuration modelC, noMULDIV, memory 32*1024;
+insert ':newdiags:datelit';
+
+insert ':newdiags:KEYBOARD:maxvio';
+insert ':-xpl:asciidef';
+insert ':-xpl:termutil';
+insert ':-xpl:intrprtr';
+/*******************************************************************/
+dcl test.max lit '9';
+
+dcl #.tests        lit '10';
+dcl test.code      data (144,145,152,153,2,3,4,5,6,7); /* button numbers */
+
+dcl test.mode      fixed; /* 0..9:  test number  */
+dcl key.active     fixed; /* (-1)=none, 0-75=key */
+dcl display.marker fixed; /* current state in display test */
+dcl light.marker   fixed; /* current state in lights  test */
+dcl autostep       fixed;
+dcl step           fixed;
+dcl str(5)         fixed;
+dcl (i,j,k,ticks)  fixed;
+dcl old.test       fixed;
+dcl new.test       fixed;
+
+dcl chr fixed;
+dcl d130 lit '((core(core(1)+17) & "40000") <> 0)';
+
+/*******************************************************************/
+instruct: proc;
+  dcl p lit 'pstringr';
+  dcl chr fixed;
+
+  clear_screen;
+  pos(1,25);  pstring('Keyboard Test  - '); display_release_date;
+
+  pos(3,0);
+  p('Display test  -Select <A> or press partial timbre select 1. Watch for display');
+  p('               errors.');
+  crlf;
+  p('Lights test   -Select <B> or press partial timbre select 2.  Buttons will');
+  p('               turn on, change to blinking, and then turn off in order.');
+  crlf;
+  p('Keys/buttons  -Select <C> or press partial timbre select 3.  Press any key.');
+  p('test           Display will show key number, velocity, and pressure.  Press'); 
+  p('               any button other than partial timbre select or real-time effect');
+  p('               input buttons. Button numbers should be shown on the display.');
+  crlf;
+  p('Foot-switch   -Select <D> or press partial timbre select 4.  Display will show'); 
+  p('test           the code for each of the foot-switches which are depressed.');
+  p('               The codes are PCH, POR, REP, ARP, MUT, PHR, HLD, & SUS.');
+  crlf;
+  p('Analog inputs -Select <E> - <J> or press expression input buttons.  Display'); 
+  p('test           will show current value. For "mod wheel", display will show '); 
+  p('               both wheel values. For "Keyboard C.V.", display will show'); 
+  p('               keyboard knob value.');
+  pos(23,10); pstring('Press <RETURN> to continue ... ');
+  chr = rchar;
+end instruct;
+
+/***********************************************************************/
+test.init: proc;
+  call clear.display;
+  do j=0 to 159; call clear.light(j); end;       /* clear whole panel  */
+  display.marker=0; light.marker=0;              /* reset test markers */
+  if test.mode=0 then call emit.string(16,'DISPLAY TEST');
+  if test.mode=1 then call emit.string(16,'LIGHTS TEST');
+  if test.mode=2 then call emit.string(16,'KEY/BUTTON TEST');
+end test.init;
+
+/*******************************************************************/
+select: proc(old.test,new.test);       /* select menu test         */
+  dcl (old.test,new.test) fixed;       /* old & current test #'s   */
+  dcl (i,j) fixed;                     /* counters                 */
+  dcl p lit 'pstring';
+  dcl arrow lit 'if i then p(''     ''); else p(''==>  '')';
+
+  do i = 1 to 2;                       /* i = 1: deselect old test */
+                                       /* i = 2: select new test   */
+    if i then j = old.test;            /* if deselecting then...   */
+    else do;                           /* if selecting then...     */
+      reverse(true);                   /* set reverse video        */
+      j = new.test;                    /* select new test number   */
+    end;
+
+    do case j;
+      do;  pos(6,22);  arrow;   p('A.  Display test          '); end;
+      do;  pos(7,22);  arrow;   p('B.  Lights test           '); end;
+      do;  pos(8,22);  arrow;   p('C.  Keys/buttons test     '); end;
+      do;  pos(9,22);  arrow;   p('D.  Foot-switch test      '); end;
+      do;  pos(10,22); arrow;   p('E.  Pedal 1 test          '); end;
+      do;  pos(11,22); arrow;   p('F.  Pedal 2 test          '); end;
+      do;  pos(12,22); arrow;   p('G.  Mod/Pitch wheels test '); end;
+      do;  pos(13,22); arrow;   p('H.  Ribbon controller test'); end;
+      do;  pos(14,22); arrow;   p('I.  Keyboard knob test    '); end;
+      do;  pos(15,22); arrow;   p('J.  Breath controller test'); end;
+      do;  pos(16,22); arrow;   p('K.  Instructions          '); end;
+    end; /* case */   
+  end;
+  reverse(false);                      /* turn off reverse video   */
+end select;
+/*******************************************************************/
+menu: proc;                            /* display command menu     */
+  dcl p lit 'pstring';
+
+  clear_screen;
+  pos(3,25);     p('Keyboard Test  '); display_release_date;
+  pos(4,25);     p('-------------------------');
+  pos(6,27);     p('A.  Display test');
+  pos(7,27);     p('B.  Lights test');
+  pos(8,27);     p('C.  Keys/buttons test');
+  pos(9,27);     p('D.  Foot-switch test');
+  pos(10,27);    p('E.  Pedal 1 test');
+  pos(11,27);    p('F.  Pedal 2 test');
+  pos(12,27);    p('G.  Mod/Pitch wheels test');
+  pos(13,27);    p('H.  Ribbon controller test');
+  pos(14,27);    p('I.  Keyboard knob test');
+  pos(15,27);    p('J.  Breath controller test');
+  pos(16,27);    p('K.  Instructions');
+  pos(20,27);    p('Press <BREAK> to exit.');
+  pos(23,6);
+  p('Select test using arrow keys and press <RETURN> to begin execution.');
+
+  call select(old.test,new.test);
+end menu;
+
+/*******************************************************************/
+check.terminal: proc;
+
+  chr = peek;                                /* check type-ahead buffer    */
+  if chr <> -1 then do;                      /* if there's a character then*/
+    chr = rchar;                             /* put character in ch        */
+    if chr = 0 then do;                      /* if <BREAK> then do         */
+      test.mode = test.max + 1;              /* test mode null (no test)   */
+      call test.init;                        /* clear buttons/display      */
+      clear_screen; flush_term;
+      interp_activate_real_time(false);      // Set interpret_at_interrupt_prior == false
+      interpret_set_timebase_mode(0);        // Set rtp_is_playing == false; set interpret_at_defrd_prior == false
+      tty.no.host = false;
+      call exit(0);
+    end;
+
+    if (chr = cur.up) or (chr = vt) then     /* character = cursor up      */
+      if new.test > 0 then do;               /* if not on command <A> then */
+         old.test = new.test;                /* current test becomes old   */
+         new.test = new.test - 1;            /* test = next one up on menu */
+         call select(old.test,new.test);     /* select new, deselect old   */
+         test.mode = test.max + 1;           /* null test mode (no test)   */
+         call test.init;                     /* test initializations       */
+      end;
+
+    if (chr = cur.down) or (chr = lf) then   /* character = cursor down    */
+      if new.test < test.max + 1 then do;    /* if not last test on menu   */
+        old.test = new.test;                 /* current test becomes old   */
+        new.test = new.test + 1;             /* tst = next one down on menu*/
+        call select(old.test,new.test);      /* select new, de-select old  */
+        test.mode = test.max + 1;            /* null test mode (no test)   */
+        call test.init;                      /* test initializations       */
+      end;
+
+    if chr = cr then do;                     /* character = <RETURN>       */
+       if new.test = test.max + 1 then do;   /* if " <K> - Instructions"   */
+          call test.init;                    /* clear buttons/display      */
+          call instruct;                     /* display instructions       */
+          call menu;                         /* when done, display menu    */
+        end;
+        else do;                             /* a test is selected         */
+          test.mode = new.test;              /* set valid test mode        */
+          call test.init;                    /* initialize for test        */
+        end;
+    end;
+
+    if ((chr >= lower.a) & (chr <= (lower.a + test.max + 1))) then chr = chr - "40"; /* force upper case */
+
+    if chr = "101" + test.max + 1 then do;   /* character = <K>            */
+       new.test = test.max + 1;              /* instructions (no test)     */
+       old.test = new.test;                  /* instructions (no test)     */
+       test.mode = new.test;                 /* null test mode             */
+       call test.init;                       /* clear buttons/display      */
+       call instruct;                        /* display instructions       */
+       call menu;                            /* display menu               */
+    end;
+
+    if ((chr >= asc.a) & (chr <= (asc.a + test.max))) then do;
+      old.test = new.test;                   /* current test becomes old   */
+      new.test = chr - "101";                /* test corresponding to chr  */
+      call select(old.test,new.test);        /* select new, de-select old  */
+      test.mode = new.test;                  /* set test mode              */
+      call test.init;                        /* initialize for test        */
+    end;
+  end;
+end check.terminal;
+/***************************************************************************/
+/*************************     Main Program     ****************************/
+/***************************************************************************/
+
+if ((interp_is_running != 0)
+&&  (interp_hardware_avail(0) == 0)) {
+   pstring('No hardware to test.');
+   flush_term;
+   exit(0);
+}
+
+if not d130 then do;                         /* keyboard not configured   */
+   clear_screen; pos(5,0);
+   pstring('This system is not configured for the Velocity/Pressure keyboard.');
+   flush_term;
+   exit(0);
+end;
+
+WRITE("131")="105";                          /* SET UP ADDR WITH READ BIT  */
+IF READ("130") = 1 THEN DO;                  /* WRONG KEYBOARD CONNECTED   */
+   clear_screen; pos(5,0);
+   pstring('This program checks the Velocity/Pressure keyboard only.  Test aborted.');
+   flush_term;
+   exit(0);
+END;
+
+old.test = 0;                                /* old test = top one on menu */
+new.test = 0;                                /* new test = top one on menu */
+call menu;                                   /* display command menu       */
+
+call clear.display;                          /* clear keyboard display     */
+key.active=(-1);                             /* set no key active          */
+autostep=0;                                  /* no test autostep           */
+test.mode = -1;                              /* no default test mode       */
+call emit.string(1,'PRESS PT1 FOR');         /* put prompt on keyboard     */
+call emit.string(17,'DISPLAY TEST');
+
+// Elevate to timer task
+interp_activate_real_time(true);             // Set interpret_at_interrupt_prior == true
+interpret_set_timebase_mode(0);              // Set rtp_is_playing == true; set interpret_at_defrd_prior == true
+tty.no.host = true;
+
+do forever;                                  /* main loop                  */
+   call check.terminal;                      /* check terminal; process chr*/
+   call scan.new.buttons;                    /* poll buttons               */
+   call scan.new.notes;                      /* poll keyboard for keys     */
+   call scan.analog.inputs;                  /* poll analog inputs         */
+
+   if new.button.list(0)>0 then autostep=0;  /* clear step if button pushed*/
+   if autostep and (ticks mod 2000)=0 then do; /* automaticaly enter test by faking button pushes */
+      new.button.list(0)=1; new.button.list(1)=test.code(step);
+      step=(step+1) mod #.tests;
+   end;
+
+   if new.button.list(0)=1 /* got a new button */
+   then do i=0 to #.tests-1; /* look it up */
+      if new.button.list(1)=test.code(i) then do; /* found test in list */
+         test.mode=i;
+         old.test = new.test;
+         new.test = i;
+         call select(old.test,new.test);
+         call test.init;
+      end;
+   end; /* got new button */
+
+   do case test.mode; /* branch to correct test section */
+      if (ticks&127)=0 then do; /* 0:  display test */
+         if      display.marker<32 then call set.dec.point  (display.marker);
+         else if display.marker<64 then call clear.dec.point(display.marker-32);
+         else if display.marker<96 then call emit.string(display.marker-64,'*'); /* write single char */
+         else if display.marker<160 then do; /* show block of chars */
+            str(0)=1; str(1)=display.marker-32; /* set up 1 char string */
+            do i=0 to 31; call emit.string(i,str); end;
+         end;
+         else if display.marker<192 then call emit.string(display.marker-160,' '); /* clear char */
+
+         display.marker=display.marker+1; /* bump */
+         if display.marker>192 then display.marker=0; /* reset */
+      end; /* of display test */
+
+      if (ticks&63)=0 then do; /* 1:  lights test */
+         if      light.marker<=159 then call set.light  (light.marker    );
+         else if light.marker<=319 then call blink.light(light.marker-160);
+         else                           call clear.light(light.marker-320);
+         light.marker=light.marker+1;
+         if light.marker>=480 then light.marker=0;
+      end;
+
+      do; /* 2:  buttons and keys test */
+         if new.button.list(0)>0 then do;
+            call clear.upper;
+            call emit.string(0,'Button');
+            call emit.number(7,new.button.list(1),0); /* show number */
+         end;
+         if new.note.list(0)>0 then do;
+            if new.note.list(1)=1 then do; /* note going down */
+               key.active=new.note.key#(1);
+               call clear.display;
+               call emit.string(0,'Key   ');
+               call emit.number(4,key.active,0); /* show number */
+               call emit.number(18,new.note.vel(1),0);
+               call emit.string(16,'Vel');
+            end;
+            else key.active=(-1);
+         end;
+         if key.active>=0 then do;
+            i=scan.pressure(key.active); /* read pressure for active key */
+            call emit.number(26,i,0);
+            call emit.string(24,'Prs'); 
+         end;
+      end; /* buttons and keys */
+
+      do; /* 3:  foot switches test */
+         call clear.display;
+         if switchdata(0) then call emit.string( 0,'HLD ');
+         if switchdata(1) then call emit.string( 4,'REP ');
+         if switchdata(2) then call emit.string( 8,'POR ');
+         if switchdata(3) then call emit.string(12,'SUS ');
+         if switchdata(4) then call emit.string(16,'ARP ');
+         if switchdata(5) then call emit.string(20,'PCH ');
+         if switchdata(6) then call emit.string(24,'PHR ');
+         if switchdata(7) then call emit.string(28,'MUT ');
+      end; /* foot switches */
+
+      do; /* 4:  pedal 1 */
+         call emit.string(0,'Pedal1  ');
+         call emit.number(7,pedal1.pos,0);
+      end;
+
+      do; /* 5:  pedal 2 */
+         call emit.string(0,'Pedal2  ');
+         call emit.number(7,pedal2.pos,0);
+      end;
+
+      do; /* 6:  wheels */
+         call emit.string(0, 'P wheel   ');
+         call emit.number(8,pwheel.pos,0);
+         call emit.string(16,'M wheel   ');
+         call emit.number(24,mwheel.pos,0);
+      end;
+
+      do; /* 7:  ribbon */
+         call emit.string(0,'Ribbon    ');
+         call emit.number(7,ribbon.pos,0);
+      end;
+
+      do; /* 8:  knob */
+         call emit.string(0,'Knob    ');
+         call emit.number(7,knob.pos,0);
+      end;
+
+      do; /* 9:  breath controller */
+         call emit.string(0,'Breath   ');
+         call emit.number(7,breath.pos,0);
+      end;
+   end; /* of do case */
+
+   if (interp_is_running != 0) {
+      interp_do_interrupts();          // Gobble interrupts here
+      interp_run_host();               // Exit from timer task. Here we want to return at timer task.
+      
+      // Exit from deferred task. We want timer task for this program.
+      while (interp_current_level(0) != 1)
+         interp_run_host();
+   }
+
+   else do j = 1 to 1000;              /* busy wait so interrupts can occur */
+      k = k;
+   end;
+
+   ticks=ticks+1;
+end; /* of main loop */

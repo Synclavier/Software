@@ -1,0 +1,686 @@
+/*	:SYNSOU:AUDMOD:AUD-CUE5  $TITLE  Cue Event Handling routines
+
+Modified:
+2001/02/19 - TY  - Make modifications needed for 24 hour wrap.
+1989/05/31 - SGS - Diddled an error message
+1989/05/20 - cj  - accept entry of fade in & out times from cue trim panel
+1989/05/17 - SGS - Fixed lots of bugs for alpha release
+1989/05/05 - cj  - removed unused 'shuttle.cue.place.mode.button'
+1988/10/16 - cj  - avoid infinite loop bugs by resetting new seq info
+						 after saving audition cue
+1988/08/16 - CJ  - check for negative numbers from take.system.sequence.time
+1988/08/01 - cj  - called take.system.sequence.time for blocking, sync button
+1988/06/01 - TSS - Moved more code from AUD-CUEB to shrink size of Cue Module
+1988/05/25 - TSS - Moved code here from AUD-CUEB to shrink size of Cue Module
+*/
+
+/*	$SUBTITLE  Routines to Open and Close Cue/Shuttle Edit Panel	*/
+
+dcl Cue.Screen.Space	fixed;
+
+OPEN.CUE.PANEL: proc public swapable;
+	dcl (sid,row,size)	fixed;	/*** Declare in Order **	*/
+
+	if Cue.Group <> 0 then return;
+
+	if Allocate.Screen.Space(5,5,loc(addr(sid))) then do;	//	this places 5,5 into row,size
+		call Set.Panel.Menu.Highlight(2,1);
+		call Set.AEE.Panel.Info(2,row,size);
+		call Define.Cue.Panel(row+1);
+		Cue.Screen.Space = sid;
+		Cue.Row	= row+1;
+		Cue.Size	= size-1;
+		call Display.Cue.And.Shuttle.Displays;	/*	set display & audition cue	*/
+	end;
+	else call Display.Notice(NT#NoMoreRoomOnScreen,ATTR#Normal,NulStr,0,0,0);
+end OPEN.CUE.PANEL;
+
+CLOSE.CUE.PANEL: proc public swapable;
+	if Cue.Group <> 0 then do;						/*	Group is defined		*/
+		call Set.Panel.Menu.Highlight(2,0);
+		if Shuttle.Group = 0 then call ERASE.CUE.AUDITION.TRACK;
+		call Set.AEE.Panel.Info(2,0,0);			/*	mark entry as unused	*/
+		Cue.Screen.Space = Erase.Screen.Space(Cue.Screen.Space);
+		Cue.Group = Ungroup.Objects(Cue.Group);
+		call Undefine.Object.Range(Cue.Alloc,Cue.Alloc+999);
+		call Select.New.Cur.Obj(Corner.Label,-1,-1);
+	end;
+end CLOSE.CUE.PANEL;
+
+/*	$page - sub procedures from get.next.cue.event	*/
+
+Handle.Cue.Name.Id:proc (tmp) swapable;
+	dcl tmp	array;
+	dcl (i)	fixed;
+
+	if (Screen.Event.Info = S#MouseSelect)
+	or (Screen.Event.Info = S#MouseActivate) then do;
+		call Fetch.String(Cue.Name.Id,tmp);
+		i = Locate.DTD.Cue(tmp);
+		if i <> 0 then do;				/*	Cue exists	*/
+			call Drag.Cue.To.Sequencer(i,GID(Cue.Drag.Mode));	/*	drag in Replace/Resync mode	*/
+		end;
+		/*	else cue is not saved; cannot be placed	*/
+	end;
+	else if Screen.Event.Info = S#Deposit then do;
+		call Handle.New.Cue.Name(Cue.Group);
+	end;
+end Handle.Cue.Name.Id;
+
+Handle.Cue.In.Time: proc swapable;
+	if Screen.Event.Info = S#Deposit then do;
+		call Handle.New.Cue.In.Time(Cue.In.Time.Id);
+		call Update.Object(Cue.In.Time.Id);
+		call Set.Anchor.Time(Cue.In.Time,1);
+	end;
+
+	else if Screen.Event.Info = S#ObjectDrag then do;
+		call Perform.AEE.Drag.Function(Screen.Event.Id,Screen.Event.Obj.Info);
+		call Select.New.Cur.Obj(Corner.Label,-1,-1);
+	end;
+
+	else if  (Screen.Event.Info = S#MouseActivate)	/*	double click	*/
+	then do;
+		call Set.Anchor.Time(Cue.In.Time,1);
+	end;
+end Handle.Cue.In.Time;
+
+Handle.Cue.Out.Time:proc swapable;
+	if Screen.Event.Info = S#Deposit then do;
+		call Handle.New.Cue.Out.Time(Cue.Out.Time.Id,Cue.Out.Switch);
+		call Update.Object(Cue.Out.Time.Id);
+		call Set.Anchor.Time(Cue.Out.Time,1);
+	end;
+	else if Screen.Event.Info = S#ObjectDrag then do;
+		call Perform.AEE.Drag.Function(Screen.Event.Id,Screen.Event.Obj.Info);
+		call Select.New.Cur.Obj(Corner.Label,-1,-1);
+	end;
+	else if  (Screen.Event.Info = S#MouseActivate)	/*	double click	*/
+	then do;
+		call Set.Anchor.Time(Cue.Out.Time,1);
+	end;
+end Handle.Cue.Out.Time;
+
+/*	$page - handle cue editor blocking function	*/
+
+/*	this routine is only called while the cue is playing.	*/
+/*	it creates the blocked cue and saves it					*/
+
+Save.Cue.Edit.Block.Cue: proc (group) swapable;
+	dcl group			fixed;
+	dcl tmp	(1)		fixed;
+	dcl name	(17-1)	fixed;
+	dcl old	(1)		fixed;
+
+	/*	begin by establishing new out time	*/
+	/*	quickly										*/
+
+	/*	see if cue trigger blocking:			*/
+
+	if (Most.Recent.AEE.Activity = 0)			/*	if we just triggered		*/
+	or (Current.Cue.Audition	  = 0)			/*	or not audit mode			*/
+	then do;
+
+		call Take.Current.Shuttle.Time(tmp);	/*	abs disk address			*/
+
+		if COM32(tmp,Cue.In.Time) <= lw#ieq		/*	before in time?			*/
+		then do;											/*	could happen if trig is from shuttle, then block	*/
+			call Display.Notice(NT#BlockError,ATTR#Reverse,NulStr,0,0,0);
+			return;
+		end;
+
+	end;
+
+	else do;	/*	then block to seq times	*/
+
+		call TAKE.SYSTEM.REAL.TIME(tmp);			/*	get sequencer or smpte time	*/
+		if (tmp(0) < 0)
+		or (com16(zero.time,tmp) = lw#igt)
+		then call STR32(0, zero.time, tmp);
+
+		if COM32(tmp,Cue.Trig.Time) <= lw#ieq	/*	new time is earlier		*/
+		then return;									/*	or = ==> empty				*/
+
+		call SUB32(tmp,Cue.Trig.Time,tmp);		/*	get distance into cue	*/
+		call ADD32(tmp,Cue.In.Time,tmp);			/*	get new cue end			*/
+
+		if COM32(tmp,Cue.Out.Time) >= lw#ieq	/*	can not sequencer block	*/
+		then return;									/*	cue past end				*/
+
+	end;
+
+	/*	set our cue end time to be the block point	*/
+
+	call COPY32(Cue.Out.Time, old);		/*	save original end time			*/
+
+	call COPY32(tmp,Cue.Out.Time);		/*	stash new out time				*/
+
+	call Compute.Cue.Trigger.Time;		/*	get correct sync point for safe in case sync time is locked and we are in post???	*/
+
+	write(mam) = Current.Cue.Ptr;
+	write(mal) = CUE.NAME;
+	call COPY.IN(addr(name(0)), 17);
+
+	if (Name(0) = 0)							/*	null name?	*/
+	then do;
+		call Increment.Cue.Name;			/*	get take		*/
+		write(mam) = Current.Cue.Ptr;
+		write(mal) = CUE.NAME;
+		call COPY.IN(addr(name(0)), 17);
+	end;
+
+	if (AEE.Cue.Blocking.Going.On = 0)	/*	if this is first blocking		*/
+	then do;										/*	then make sure new name			*/
+		if  (Locate.DTD.Cue(name) <> 0)
+		then do;
+			call Increment.Cue.Name;
+			write(mam) = Current.Cue.Ptr;
+			write(mal) = CUE.NAME;
+			call COPY.IN(addr(name(0)), 17);
+		end;
+	end;											/*	cue			*/
+
+	if Current.Cue.Protect <> 0			/*	would happen if protected cue had been deleted	*/
+	then do;
+		Current.Cue.Protect = 0;
+		call Display.Current.Cue.Protect;
+	end;
+
+	call Check.Next.Event;					/*	keep mouse going					*/
+
+	call UPDATE.CURRENT.CUE.RECORD;		/*	write out new in/out times		*/
+
+	call Check.Next.Event;					/*	keep mouse going					*/
+
+	call Save.Current.Cue(group);			/*	save/replace it					*/
+
+	call Check.Next.Event;					/*	keep mouse going					*/
+
+	call Increment.Cue.Name;				/*	get next name						*/
+
+	call Check.Next.Event;					/*	keep mouse going					*/
+
+	call COPY32(old,Cue.Out.Time);		/*	get original out time			*/
+	call Handle.Any.New.Cue.In.Time(tmp, 2, 1);
+
+	call Check.Next.Event;					/*	keep mouse going					*/
+
+	if COM32(Cue.In.Time,Cue.Out.Time) <> lw#ieq	/*	if cue tag is there	*/
+	then call Save.Current.Cue(group);	/*	then save it now					*/
+
+	AEE.Cue.Blocking.Going.On = 1;		/*	but re-use it on next block	*/
+
+end Save.Cue.Edit.Block.Cue;
+
+
+/*	$page	*/
+
+Handle.Block.Button:proc (group) swapable;
+	dcl group			fixed;
+	dcl cname(17-1)	fixed;
+	dcl tmp(1)			fixed;
+
+	/*	detect use of wrong block button - R. Head, 1987	*/
+
+	if  (Record.Group				  <> 0)	/*	if record group is active		*/
+	and (GID(Recording.Going.On) <> 0)	/*	and recording going on			*/
+	then do;										/*	tell richard he pressed the wrong button	*/
+		call DISPLAY.NOTICE (NT#WrongBlockButton,ATTR#Reverse,NulStr,0,0,0);
+		return;
+	end;
+
+	/*	if not playing, then advance name and	*/
+	/*	start playing from top						*/
+
+	/*	check for trigger blocking (internal	*/
+	/*	sync) or sequencer blocking (audition	*/
+	/*	mode with sequencer running)				*/
+
+	if  (DTD.Play.State			= 0)		/*	if not playing						*/
+	and (Current.Cue.Audition <> 0)		/*	but are auditioning				*/
+	and (Time.Base.Mode		  <> 0)		/*	and sequencer going				*/
+	then do;										/*	then block to seq times			*/
+
+		Most.Recent.AEE.Activity = 1;		/*	indicate sequencer blocking	*/
+
+		/*	handle sequencer blocking:		*/
+
+		call TAKE.SYSTEM.REAL.TIME(tmp);	/*	get sequencer or smpte time	*/
+
+		if (tmp(0) < 0)
+		or (com16(zero.time,tmp) = lw#igt)
+		then call STR32(0, zero.time, tmp);
+
+		if (COM32(tmp, Cue.Trig.Time) != lw#igt)
+		then do;									/*	wait for trigger	*/
+			write(mam) = Current.Cue.Ptr;
+			write(mal) = CUE.NAME;
+			call COPY.IN(addr(cname(0)), 17);
+
+			if (Locate.DTD.Cue(cname) <> 0)
+			or (Cname(0)					= 0)
+			then do;								/*	if saved, incr it	*/
+				call Increment.Cue.Name;
+			end;
+
+			call DISPLAY.NOTICE (NT#WaitingForBlock,ATTR#Normal,NulStr,0,0,0);
+
+		end;
+		else do;
+			call Save.Cue.Edit.Block.Cue(group);	/*	and block this cue	*/
+		end;
+
+		return;
+
+	end;
+
+	/*	handle internal trigger blocking	*/
+
+	Most.Recent.AEE.Activity = 0;	/*	indicate cue trigger blocking		*/
+
+	if (DTD.Play.State = 0)			/*	if not triggering, start output	*/
+	then do;
+
+		write(mam) = Current.Cue.Ptr;
+		write(mal) = CUE.NAME;
+		call COPY.IN(addr(cname(0)), 17);
+
+		if (Locate.DTD.Cue(cname) <> 0)
+		or (Cname(0)					= 0)
+		then do;							/*	if saved, incr it	*/
+			call Increment.Cue.Name;
+		end;
+
+		call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+		call Play.Current.Cue(1,0,0,Current.Cue.Drive.Bits,1);	/*	play cue area only	*/
+
+		return;
+
+	end;
+
+	/*	else block current cue	*/
+
+	call Save.Cue.Edit.Block.Cue(group);
+
+end Handle.Block.Button;
+
+/*	$page - handle entry of ramp in & out times	*/
+
+Handle.Fade.Time: proc(Id, CUE.LOC) swapable;
+	dcl Id		fixed;	/*	pass id of fixed point object	*/
+	dcl CUE.LOC	fixed;	/*	loc in cue to store value		*/
+	dcl i			fixed;
+
+	if Screen.Event.Info = S#Deposit then do;
+
+		i = Fetch.Fixed.Point(Id);			/*	get newly entered value	*/
+
+		if i<0 then i = 0;					/*	disallow minus #'s for	*/
+
+		disable.deposits = 1;				/*	restore possible new		*/
+		call Deposit.Fixed.Point(Id, i);	/*	positive value				*/
+		disable.deposits = 0;
+
+		call Update.Object(Id);				/*	provide speedy update	*/
+
+		write(mam) = Current.Cue.Ptr;		/*	store in cue record		*/
+		write(mal) = CUE.LOC;
+		write(md ) = i;
+
+		call Set.Cue.Modified;				/*	has been changed			*/
+
+		call UPDATE.CURRENT.CUE.RECORD;	/*	create new audition		*/
+													/*	cue if needed				*/
+	end;
+
+end Handle.Fade.Time;
+
+/*	$page - get cue event	*/
+
+GET.CUE.EVENT: proc (event) returns (fixed) public swapable;
+	dcl event	fixed;
+	dcl tmp(32)	fixed;	/*	Must be big enough for caption (63 characters)	*/
+
+	clear.statuses:proc;
+		call DISPLAY.NOTICE (NT#EraseNotice,ATTR#Normal,NulStr,0,0,0);
+		call REMOVE.ERR;
+	end clear.statuses;
+
+	do while 1;
+
+		if event <> Get.Null.Event then do;
+
+			if Screen.Event.Group <> Cue.Group then return event;
+
+			if Screen.Event.Code = Get.Screen.Event then do;
+
+				if Screen.Event.Info = S#Deposit then do;
+					call clear.statuses;	/*	clear status on any deposit	*/
+				end;
+
+				/*	top row:	*/
+
+				if Screen.Event.Id = Cue.Switch.Button then do;
+					call clear.statuses;	/*	clear status on any deposit	*/
+					if Screen.Event.Info = S#MouseSelect
+					then call Switch.Current.Cue(Cue.Group);
+				end;
+
+				else if Screen.Event.Id = Cue.Name.Incr.Button then do;
+					call clear.statuses;	/*	clear status on any deposit	*/
+					if Screen.Event.Info = S#MouseSelect
+					then call Increment.Cue.Name;
+				end;
+
+				else if Screen.Event.Id = Cue.Name.Id then do;
+					call Handle.Cue.Name.Id(tmp);
+				end;
+
+				else if Screen.Event.Id = Cue.Comment.Id then do;
+					if Screen.Event.Info = S#Deposit
+					then do;
+						call Fetch.String(Cue.Comment.Id,tmp);
+						call STORE.NEW.CUE.CAPTION(tmp);
+						call Set.Cue.Modified;
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Protect.Indicator then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call clear.statuses;
+						call Toggle.Current.Cue.Protect;
+					end;
+				end;
+
+				/*	second row:	*/
+
+				else if Screen.Event.Id = Cue.Play.Button then do;
+					if Screen.Event.Info = S#MouseSelect
+					then do;
+						call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+						call Play.Current.Cue(1,0,0,Current.Cue.Drive.Bits,1);	/*	play entire cue	*/
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Take.In.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call Handle.Cue.Take.In.Button;
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Exchange.In.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call clear.statuses;
+						call EXCHANGE.IN.TIME;
+						call Update.Object(Cue.In.Time.Id);
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.In.Time.Id
+				then do;
+					call Handle.Cue.In.Time;
+				end;
+
+				else if Screen.Event.Id = Cue.Fade.In.Time.Id
+				then do;
+					call Handle.Fade.Time(Cue.Fade.In.Time.Id, CUE.FIN);
+				end;
+
+				else if Screen.Event.Id = Cue.Take.Sync.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call TAKE.SYSTEM.REAL.TIME(tmp);		/*	get sequencer or smpte time	*/
+						if (tmp(0) < 0) wrap_24_hours(tmp);
+						if (com16(zero.time,tmp) == lw#igt) STR32(0, zero.time, tmp);	//	THIS SHOULD NEVER HAPPEN
+						call Deposit.32Bit.MSEC(Cue.Sync.Time.Id,tmp,Zero.Zero);
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Sync.Time.Id
+				then do;
+					if Screen.Event.Info = S#Deposit then do;
+						call Handle.New.Cue.Sync.Time(Cue.Sync.Time.Id);
+						call Update.Object(Cue.Sync.Time.Id);
+					end;
+					else if Screen.Event.Info = S#ObjectDrag then do;
+						call Perform.AEE.Drag.Function(Screen.Event.Id,Screen.Event.Obj.Info);
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Sync.Lock.Id then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call clear.statuses;
+						call Handle.Sync.Lock.Button(Cue.Sync.Time.Id);
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Source.Table.Id then do;
+					if (Screen.Event.Info = S#MouseSelect)
+					then do;
+						call Handle.Source.Table.Id;
+					end;
+				end;
+
+				/*	third row:	*/
+
+				else if Screen.Event.Id = Cue.Pause.Button then do;
+					if Screen.Event.Info = S#MouseSelect
+					then do;
+						if DTD.Play.State <> 0
+						then call Stop.DTD.Playback;		/*	stop		*/
+						else do;									/*	continue	*/
+							call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+							call Play.Current.Cue(0,0,0,Current.Cue.Drive.Bits,1);	/*	continue in cue area only	*/
+						end;
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Take.Out.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call Handle.Cue.Take.Out.Button;
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Exchange.Out.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call clear.statuses;
+						call EXCHANGE.OUT.TIME;
+						call Update.Object(Cue.Out.Time.Id);
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Out.Switch then do;
+					if Screen.Event.Info = S#Deposit then do;
+						call Handle.Cue.Out.Switch;
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Out.Time.Id
+				then do;
+					call Handle.Cue.Out.Time;
+				end;
+
+				else if Screen.Event.Id = Cue.Fade.Out.Time.Id
+				then do;
+					call Handle.Fade.Time(Cue.Fade.Out.Time.Id, CUE.FOUT);
+				end;
+
+				else if Screen.Event.Id = Cue.Take.Offs.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call Handle.Cue.Take.Offs.Button;
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Offset.Switch then do;
+					if Screen.Event.Info = S#Deposit then do;
+						call CHANGE.CUE.SYNC.MODE(Fetch.Switch(Cue.Offset.Switch));
+						if Current.Cue.Sync.Mode=1
+						then call Update.Object(Cue.Offset.Time.Id);	/*	make it snappy	*/
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Offset.Time.Id
+				then do;
+					if Screen.Event.Info = S#Deposit then do;
+						call HANDLE.NEW.CUE.OFFS.TIME (Cue.Offset.Time.Id, Cue.Out.Switch);
+						call Update.Object(Cue.Offset.Time.Id);
+						call Set.Anchor.Time(Cue.Offs.Time,1);
+					end;
+					else if Screen.Event.Info = S#ObjectDrag then do;
+						call Perform.AEE.Drag.Function(Screen.Event.Id,Screen.Event.Obj.Info);
+					end;
+					else if  (Screen.Event.Info = S#MouseActivate)	/*	double click	*/
+					then do;
+						call Set.Anchor.Time(Cue.Offs.Time,1);
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Offset.Play.Id then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call clear.statuses;
+						call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+						call Play.Current.Cue(5,0,4,Current.Cue.Drive.Bits,1);		/*	start at offset point; play with smart limit		*/
+						call Set.Group.Get(Cue.Group,Get.Mouse.Button,true);
+					end;
+				end;
+
+				/*	fourth row	*/
+
+				else if Screen.Event.Id = Cue.Backup.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call clear.statuses;
+						call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+						call Play.Current.Cue(0,1,0,Current.Cue.Drive.Bits,1);		/*	current position, back up, play to end of cue	*/
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Slow.Play.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call clear.statuses;
+						Current.Cue.Rate = Current.Cue.Rate - 1;
+						if DTD.Play.State=0 then do;	/*	if not playing, continue	*/
+							call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+							call Play.Current.Cue(0,0,0,Current.Cue.Drive.Bits,1);	/*	current position, no backup, play to end of cue	*/
+						end;
+						else do;	/*	else just change rate	*/
+							call SET.DTD.TRIG.RATE(Current.Cue.Rate);
+						end;
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Fast.Play.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call clear.statuses;
+						Current.Cue.Rate = Current.Cue.Rate + 1;
+						if DTD.Play.State=0 then do;	/*	if not playing, continue	*/
+							call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+							call Play.Current.Cue(0,0,0,Current.Cue.Drive.Bits,1);	/*	current position, no backup, play to end of cue	*/
+						end;
+						else do;	/*	else just change rate	*/
+							call SET.DTD.TRIG.RATE(Current.Cue.Rate);
+						end;
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Block.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call clear.statuses;
+						call Handle.Block.Button(Cue.Group);
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Save.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call clear.statuses;
+						call Save.Current.Cue(Cue.Group);
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Audition.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call clear.statuses;
+						call ASSIGN.NEW.DTD.AUDITION(Current.Cue.Audition xor 1);
+						call DEPOSIT.AUDITION.BUTTON.DISPLAY;	/*	provide snappy response	*/
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Place.Inc.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call clear.statuses;
+						call Handle.Place.Track.Change;
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Place.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call clear.statuses;
+						call Handle.AEE.cue.place(Recalled.Event.Spointer, 0);
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Place.Mode.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call clear.statuses;
+						call Get.Cue.Dialog(Cue.Group,10);
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Place.Track.Field then do;
+					if Screen.Event.Info = S#Deposit then do;
+						call SET.PLACE.TRACK(Fetch.Fixed.Point(Cue.Place.Track.Field)+1);
+					end;
+					else if (Screen.Event.Info = S#MouseSelect)
+					or      (Screen.Event.Info = S#MouseActivate) then do;
+						if abs(Mouse(Button.Result)) = 1
+						then call Increment.Place.Track;
+						else if abs(Mouse(Button.Result)) = 3
+						then call Decrement.Place.Track;
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Recall.Button then do;
+					if Screen.Event.Info = S#MouseSelect
+					then do;
+						call clear.statuses;
+						call Recall.Current.Cue(Cue.Group);
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Delete.Button then do;
+					if Screen.Event.Info = S#MouseSelect
+					then do;
+						call clear.statuses;
+						call Delete.Current.Cue(Cue.Group);
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.Rename.Button then do;
+					if Screen.Event.Info = S#MouseSelect
+					then do;
+						call clear.statuses;
+						call Rename.Current.Cue(Cue.Group);
+					end;
+				end;
+
+				else if Screen.Event.Id = Cue.STM.Button then do;
+					if Screen.Event.Info = S#MouseSelect
+					then do;
+						call clear.statuses;
+						call Handle.STM.Transfer(Cue.Group);
+					end;
+				end;
+			end;
+
+			else if event=Get.Mouse.Button then do;	/*	probably a button release from offset play icon	*/
+				call Set.Group.Get(Cue.Group,Get.Mouse.Button,false);
+
+				if  ((Mouse(Release.Time)-Mouse(Press.Time)) IGE 200)
+				and (DTD.Play.State<>0)
+				then call Stop.DTD.Playback;				/*	turn off currently playing cue	*/
+			end;
+
+		end;
+
+		event = Get.Next.Screen.Event;
+	end;
+end GET.CUE.EVENT;
+

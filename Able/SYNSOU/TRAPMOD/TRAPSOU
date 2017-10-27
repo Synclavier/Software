@@ -1,0 +1,1144 @@
+/*	:SYNSOU:TRAPMOD:TRAPSOU  $TITLE  ROUTINES TO PROCESS PROTOCOL PACKETS	*/
+
+/*
+Modified:
+1999/05/31 - CJ  - Added support for timbre file access via InterChangeª
+1999/03/29 - TY  - Updated profiles for "Append.Sequencer.Tempo.Map.Record" and "Append.Sequencer.Meter.Map.Record".
+1989/12/15 - PF  - Add PLAY.TIME.LSB
+1992/02/26 - PF  - Block transfer of tempo/meter maps
+1992/02/15 - pf  - Added external for last.event
+1992/01/12 - PF  - Added trapxfr3 - removed mathdcl
+1992/01/15 - cj  - Removed tformlits to make room
+1991/12/15 - PF  - Removed polydcl
+1991/11/14 - PF  - Added Handle.Data.Transfer to Process.Protocol.Message
+1991/11/04 - PF  - Removed unused inserts
+1991/03/13 - KJC - Added external record trigger variables
+1991/03/27 - MWH - Add arg to Read and Store Locate Stack routines
+1991/03/07 - MWH - Add AEE's 20 saved mark points; fix send.only.tag
+1991/02/20 - MWH - Add text type to MAC->ABLE file transfer
+1991/02/12 - TSS - Added TRAPSEQ1 to insert list after splitting up TRAPSEQ
+1991/01/30 - MWH - Report which tracks have had new notes (moved to TRAPSEQ)
+1990/11/08 - MWH - Reformat DS routines
+1990/10/25 - MWH - Add routine to return a short message which is only a tag
+1990/10/15 - cj  - added optical stuff
+1990/07/11 - cj  - added cur.hrs-cur.fra externals
+1990/07/10 - PF  - Replaced calls to DISPLAY.BEAT.NUMBER with NEW.BEAT.NUMBER flag
+1990/05/24 - MWH - Add Karim's HEX logging routines
+1990/02/21 - MWH - deal with empty track heads (change from PForstman)
+1990/01/25 - MWH - Fix "300 msec delay starting cues" bug (from EditView)
+1990/01/11 - MWH - Update AEE proj/event panels when DTD/MCH routing changes
+1989/12/15 - MWH - Add PLAY.TIME.MSB
+1989/11/17 - MWH - Add public proc
+1989/09/20 - MWH - Do both parts of crash msgs to fix intermittent download
+1989/09/20 - PF  - mods to SYNC.TO.PROTO.STRK & PROTO.TO.SYNC.STRK
+1989/09/07 - PF  - (MWH) Merged in Paul's MIDI changes
+1989/09/01 - MWH - Rework the protocol for release 2.2
+1989/07/18 - cj  - called new routines for DTD editing
+1989/07/13 - TSS - Added HANDLE.CLAVIER to PROCESS.PROTOCOL.PACKET
+1989/05/18 - MWH - Add new protocol messages for MAC event editor window
+1989/04/11 - MWH - Split TRAPMOD into modules because it is too big!
+1989/03/23 - MWH - Remove unused externals so this will compile!
+1989/03/21 - MWH - Wait for AEE to be up to date before doing a slide
+1989/03/16 - MWH - Add looping to PASTE and FILL edits
+1989/03/16 - MWH - Add seqdcl
+1989/03/14 - PF  - inserted CPLITS
+1989/03/13 - MWH - Add set place cue track
+1989/02/08 - MWH - Add Rehearse Mode from the Remote Box
+1989/01/20 - MWH - Add Auto Punch feature
+1988/01/13 - PF  - Monster MIDI code
+1988/12/23 - MWH - Add input/output routing
+1988/12/05 - MWH - Add AEE editing functions
+1988/11/09 - MWH - Clean up messages and update lengths
+1988/10/14 - MWH - Add RS422 driver
+1988/09/21-PF/TSS- Created this source file
+*/
+
+Module TRAPMOD;
+
+insert ':synlits:comlits';				/*	compilation literals			*/
+insert ':synlits:globlits';			/*	global literals				*/
+insert ':synlits:synclits';			/*	general synclavier literals	*/
+insert ':synlits:asciilit';
+insert ':synlits:cplits';
+insert ':synlits:thdlits';
+insert ':synlits:lpnlits';
+insert ':synauxs:dtdlits';
+insert ':synlits:prmlits';
+insert ':synlits:samplits';
+insert ':synauxs:polylits';
+insert ':synauxs:mathlits';
+insert ':synauxs:errlits';
+
+insert ':-xpl:catrout';
+insert ':-xpl:fileswap';
+insert ':-xpl:optrout';
+insert ':-xpl:syslits';
+insert ':-xpl:intrprtr';
+
+begin;										/*	protect us from synclits	*/
+
+insert ':synauxs:traplits';			/*	literals for this module	*/
+insert ':synauxs:audauxs:anotelit';	/*	error message code id's		*/
+
+insert ':synmods:globdcl';
+insert ':synmods:ttydcl';
+insert ':synmods:xmemdcl';
+insert ':synmods:getdcl';
+insert ':synmods:loddcl';
+insert ':synmods:leditdcl';
+insert ':synmods:giddcl';
+insert ':synmods:prodcl';
+insert ':synmods:seqdcl';
+insert ':synmods:indexdcl';
+
+/*	specific external declarations needed in several places:			*/
+
+/*	from polydcl	*/
+
+DCL POLYNUMS		FIXED			EXTERNAL;
+DCL PSFIRSTS		FIXED ARRAY	EXTERNAL;	/*	POINTER TO START OF SOUND FILES IN POLY MEM	*/
+DCL PSLASTS			FIXED ARRAY	EXTERNAL;	/*	POINTER TO START OF FREE SPACE AFTER THE LAST SOUND FILE	*/
+DCL PSMREAD			PROC(ARRAY,FIXED,FIXED)	EXTERNAL;	/*	SET UP FOR POLY SYNTH MEMORY READ	*/
+DCL SET.CUR.BIN	PROC(FIXED)	EXTERNAL;	/*	SET POLY BIN NUMBER	*/
+DCL #CBINCODE		FIXED			EXTERNAL;	/*	WHICH BIN WE ARE ACCESSING	*/
+DCL SFILE.BASE		FIXED ARRAY	EXTERNAL;	/*	RETURNS SECTOR OF POLY/EXT MEM IN GLOBAL VARIABLES	*/
+DCL POLY.IN			PROC(FIXED,FIXED)	EXTERNAL;
+DCL POLYNUMVS		FIXED ARRAY	EXTERNAL;	/*	HOW MANY VOICES IN THIS POLY BIN	*/
+
+dcl INIT.D115			proc	external;
+dcl SM.HRS				fixed	external;
+dcl SM.MODE				fixed	external;
+dcl S$FMODE				fixed	external;
+dcl S$FOFFSET			array	external;
+dcl samp.speed			fixed	external;
+dcl samp.click.rate	fixed	external;
+dcl samp.bpm			fixed	external;
+dcl Take.System.Sequence.Time			proc(array)						external;
+dcl Set.Sequencer.Mark.Start.Point	proc (fixed, fixed, fixed)	external;
+dcl Access.Data.Structure				proc (array, fixed, fixed)	recursive;
+
+dcl Read.In.Entire.AEE.Locate.Stack	proc (fixed)	external;
+dcl Fetch.AEE.Locate.Stack.Entry		proc (fixed, array, array, array)	external;
+dcl Store.AEE.Locate.Stack.Entry		proc (fixed, array, array, array)	external;
+dcl Store.Entire.AEE.Locate.Stack	proc (fixed)	external;
+
+DCL CUR.HRS		FIXED	EXTERNAL;	/*	LAST READ SMPTE TIME			*/
+DCL CUR.MIN		FIXED	EXTERNAL;	/*	STORED AS GLOBAL VARIABLES	*/
+DCL CUR.SEC		FIXED	EXTERNAL;	/*	FOR DISPLAY						*/
+DCL CUR.FRA		FIXED	EXTERNAL;
+
+DCL TRK.HEAD.LOOKUP				PROC (FIXED,FIXED)							EXTERNAL;
+DCL INSERT.TIME.ON.TRK			PROC (FIXED,FIXED,FIXED,FIXED,FIXED)	EXTERNAL;
+DCL DELETE.TIME.FROM.TRK		PROC (FIXED,FIXED,FIXED,FIXED,FIXED)	EXTERNAL;
+DCL STOP.RECD.MOVE.PLAY			PROC												EXTERNAL;
+DCL SEQ.INIT						PROC												EXTERNAL;
+DCL LOOKUP.TRACK.TIMBRE.NAME	PROC (FIXED,ARRAY)							EXTERNAL;
+DCL LOOKUP.TIMBRE.NAME			PROC (FIXED,ARRAY)							EXTERNAL;
+DCL ALLOCATE.TRK.HEADER			PROC (FIXED)		RETURNS(FIXED)			EXTERNAL;
+DCL COPY.TIMBRE					PROC(FIXED,FIXED)	RETURNS(FIXED)			EXTERNAL;
+
+DCL AUTO.PUNCH.ON			FIXED	EXTERNAL;	/*	AUTO PUNCH MODE ON IF NON-ZERO		*/
+DCL PRE.ROLL.MSB			FIXED	EXTERNAL;	/*	SNAPSHOT START TIME FOR AUTO PUNCH	*/
+DCL PRE.ROLL.LSB			FIXED	EXTERNAL;
+DCL AUTO.PUNCH.IN.MSB	FIXED	EXTERNAL;	/*	SNAPSHOT PUNCH IN TIME	*/
+DCL AUTO.PUNCH.IN.LSB	FIXED	EXTERNAL;
+DCL AUTO.PUNCH.OUT.MSB	FIXED	EXTERNAL;	/*	SNAPSHOT PUNCH OUT TIME	*/
+DCL AUTO.PUNCH.OUT.LSB	FIXED	EXTERNAL;
+
+dcl CONTINUE.SEQUENCER						proc				external;
+dcl CONTINUE.SEQ.WITH.PRE.ROLL			proc (fixed)	external;
+dcl START.SEQUENCER							proc				external;
+dcl STOP.SEQUENCER							proc				external;
+dcl REWIND.SEQUENCER							proc				external;
+dcl FAST.FORWARD.SEQUENCER					proc				external;
+dcl CONT											fixed				external;
+dcl MOVE.SPEED									fixed				external;
+dcl SLOCKED										fixed				external;
+dcl DISABLE.SMPTE.START						fixed				external;
+DCL PRESET.PLAY.TIME							proc (fixed)	external;
+DCL PLAY.TIME.MSB								fixed				external;
+DCL PLAY.TIME.LSB								fixed				external;
+dcl DISPLAY.SEQUENCER.STATUS				proc				external;
+dcl STOP.RECD.MOVE.PLAY.XPOS.CONT.ERAS proc				external;
+dcl CLAV.PTR									fixed				external;
+dcl NUM.HELD.KEYS								fixed				external;
+dcl MARK.BUTTON.DISABLED					fixed				external;
+dcl MARK.BUTTON.MSB							fixed				external;
+dcl MARK.BUTTON.LSB							fixed				external;
+dcl PLAY.INITIALIZE							proc				external;
+dcl BEAT.NUMBER								fixed				external;
+dcl NEW.BEAT.NUMBER							fixed				external;
+
+dcl REHEARSE.MODE								fixed				external;
+dcl SEQ.PLAY.TO.MSB							fixed				external;
+dcl SEQ.PLAY.TO.LSB							fixed				external;
+dcl CHECK.SEQUENCER.TIMES					fixed				external;
+dcl PLAY.SEQ.TO.A.TIME						fixed				external;
+dcl EXT.REC.TRIGGER.STATE					fixed				external;
+
+dcl PREROLL_TRIGGER							fixed array		external;
+dcl REC_IN_TRIGGER							fixed array		external;
+dcl REC_OUT_TRIGGER							fixed array		external;
+
+dcl ALL.MIDI.NOTES.OFF						proc				external;
+dcl MAX.MIDI.CHAN								fixed				external;
+dcl MAX.MIDINET.CHAN							fixed				external;
+dcl MIDI.THERE									fixed				external;
+dcl MULTI.THERE								fixed				external;
+dcl MULTI.MAX									fixed				external;
+dcl SEQ.REFRESH								fixed				external;
+dcl TIME.BASE.MODE							fixed					  external;
+
+/*	mostly used by clavier emulation software:	*/
+
+dcl NEW.BUTTON.LIST							array				external;
+dcl NEW.BUTTON									proc				external;
+dcl NEWKEY										fixed				external;
+dcl INFO.MODE									fixed				external;
+dcl LPN.LOOKUP									proc (fixed)	external;
+dcl BSTAT.PTR									fixed				external;
+dcl ACTIVE.PARMS								array				external;
+dcl SELECTED.PARTIALS						fixed				external;
+dcl C.FRAME										array				external;
+dcl NEW.PM										fixed				external;
+dcl AMOUNT										fixed				external;
+dcl MAJOR.UPDATE								proc				external;
+dcl Clavier.Emulation.Knob.Delta			fixed				external;
+
+/*	mostly used by midi software:					*/
+
+dcl TBUT.PTR									fixed	external;
+dcl RECD.TRK									fixed	external;
+dcl MIDI.ECHO.DISABLED						fixed	external;
+dcl SYSEX.WRITE.PTR							fixed	external;
+dcl SYSEX.READ.PTR							fixed	external;
+dcl MIDI.OVERRUN								fixed	external;
+dcl SYSEX.BUF									fixed	external;
+dcl TRK.HEAD									fixed	external;
+dcl POLY.TIMBRE.MIDI.CONTROL				fixed	external;
+dcl MIDI.INPUT.ENABLED						fixed	external;
+dcl MIDI.MAPPING								array	external;
+dcl BAS.PTR										fixed	external;
+dcl MIDI.SYNC.OUT								fixed	external;
+
+/*	Mostly used by TRAPTS:	*/
+
+dcl NUM.ENABLED.TRKS							fixed	external;
+dcl DISPLAY.TRACK.BUTTONS					proc	external;
+dcl COMPUTE.ACTIVE.TRKS						proc	external;
+dcl NUM.OF.SOLOED.TRACKS					fixed	external;
+dcl LOD.RECD.TRACKS							fixed	external;
+dcl SET.TRACK.SOLO.STATE					proc (fixed, fixed, fixed)	external;
+dcl CLEAR.TRACK.SOLO.STATES				proc								external;
+dcl CLEAR.POLY.TIMBRE.NOTES				proc (fixed					 )	external;
+dcl SET.MIDI.OUT.CONTROLLERS				proc (fixed					 )	external;
+dcl CLEAR.MIDI.OUT.CONTROLLERS			proc (fixed					 )	external;
+dcl TRK.HEAD.STORE							proc (fixed, fixed, fixed)	external;
+dcl SELECT.PARAMETER							proc (fixed					 )	external;
+dcl COMPUTE.MISC.INFO						proc								external;
+dcl NEW.MOTION									fixed	external;
+dcl NEW.CUE.TRACK.SETTINGS					fixed	external;
+
+dcl Map.Sequence.Time.To.Real.Time				proc(array, array)			external;
+dcl Map.Sequence.Duration.To.Real.Duration	proc(array, array, array)	external;
+dcl Map.Real.Time.To.Sequence.Time				proc(array, array)			external;
+dcl Map.Real.Duration.To.Sequence.Duration	proc(array, array, array)	external;
+
+dcl Broadcast.AEE.Notice	proc (fixed,fixed,fixed,fixed,fixed)	recursive;
+
+dcl S$SenseKey	fixed	external;	/*	Extended sense key from last SCSI read/write	*/
+
+/*	used by trapret	*/
+
+dcl READ.IN.POLY.HIST	PROC	EXTERNAL;
+dcl POLY.HIST.BUF			FIXED	EXTERNAL;
+
+/*	Literals for data structure routines	*/
+dcl DS_ACCESS_ACTIVATE	lit '0';
+dcl DS_ACCESS_OPEN		lit '1';
+dcl DS_ACCESS_AUDITION	lit '2';
+dcl DS_ACCESS_COPY		lit '3';
+
+dcl RSF#Audition	lit '  1';
+dcl RSF#UseDTD		lit '  2';
+dcl RSF#Partial0	lit '  4';
+dcl RSF#NoIO		lit '  8';
+dcl RSF#NoCheck	lit ' 16';
+dcl RSF#LongName	lit ' 32';
+dcl RSF#EraseTimb	lit ' 64';
+dcl RSF#ErasePrtl	lit '128';
+dcl RSF#UseDest 	lit '256';
+
+/*	some literals for block processing	*/
+dcl s#overwrite	lit ' 1';
+dcl s#too_big		lit ' 2';
+
+dcl Recall.Sound.File proc (array,fixed,array,array,fixed,fixed)	external;
+
+/*	Selected variables from tformdcl:	*/
+dcl cf#append		lit '02';
+dcl cf#right		lit '04';
+dcl COPY.STRING			proc(array,array)  returns(fixed)	external;
+dcl EQSTR					proc (array,array) returns(fixed)	external;
+dcl APPEND.TO.STR			proc(array,array)  returns(fixed)	external;	/*	appends s2 to s1	*/
+dcl CONV.FIXED.TO.STR	proc(fixed,fixed,fixed,fixed,array) returns(fixed)	external;
+
+
+/*	for trapxfr	*/
+dcl (#trk)								fixed	external;
+dcl (#nmsb,#nlsb)						fixed	external;
+dcl (#wrd,#sec)						fixed	external;
+dcl (#ptr)								fixed	external;
+dcl (#w1,#w2,#w3,#w4)				fixed	external;
+dcl nah.ptr								fixed	external;
+dcl advance.to.next.note			proc returns(fixed)	external;
+dcl new.kbd.pre						fixed	external;
+dcl speed.comp							proc	external;
+dcl resync.time.base					proc	external;
+dcl reset.bits							fixed	external;
+dcl init.smpte							proc	external;
+dcl PUNCH.NOTES.FROM.TRK			proc(fixed,fixed,fixed,fixed,fixed,fixed,fixed) returns (fixed)	external;
+dcl FIND.TIMBRE						proc(fixed,fixed)	external;
+dcl PAR.PTR								fixed	external;
+DCL SETUP.FLOPPY.CACHE				PROC	EXTERNAL;							/*	SET UP CACHE FOR FLOPPY DIRECTORY	*/
+DCL (DISPLAY.EBL)						FIXED	EXTERNAL;							/*	SET TO NONZERO AFTER SIGN ON TO ALLOW ALL DISPLAYS	*/
+DCL STOP.RECORD						PROC	EXTERNAL;							/*	PROCEDURE TO STOP RECORDING	*/
+DCL MOVE.TIMBRE.TO					PROC(FIXED,FIXED,FIXED)	EXTERNAL;	/*	SPECIFY MEMORY POINTER (UPPER, LOWER), TIMBRE #	*/
+DCL (NUL.PTR)							FIXED	external;							/*	( 1) XMEM SEC # OF NULL TIMBRE			*/
+DCL (LENGTH.OVERFLOW)				FIXED	EXTERNAL;							/*	SET TRUE IF OUT OF MEMORY IN MOVE.TIMBRE.TO	*/
+DCL FIND.USABLE.DEST					PROC RETURNS(FIXED)		EXTERNAL;	/*	FINDS AN UNUSED TIMBRE SLOT	*/
+DCL EDIT.ERROR							FIXED	EXTERNAL;							/*	GLOBAL ERROR FLAG	*/
+DCL CHECK.FOR.REDUNDANT.TIMBRE	PROC (FIXED,FIXED) RETURNS (FIXED)	EXTERNAL;	/*	ELIMINATES DUPLICATE COPIES OF A TIMBRE	*/
+DCL DEALLOC.TIMBRE.USES				PROC(FIXED)	EXTERNAL;	/*	REMOVE A TRACKS TIMBRE USES FROM USE.PTR TABLE	*/
+DCL ALLOC.TIMBRE.USES				PROC(FIXED)	EXTERNAL;	/*	ACCOUNT FOR A TRACKS TIMBRE USES IN USE.PTR TABLE	*/
+DCL COMPUTE.ARLIST					PROC			EXTERNAL;
+DCL FLOPPY.CACHE.VALID				FIXED			EXTERNAL;	/*	TRUE IF FLOPPY CAT IS CACHED	*/
+DCL FLOPPY.CACHE.NUM					FIXED			EXTERNAL;	/*	CACHE NUMBER FOR FLOPPY	*/
+DCL LAST.EVENT							FIXED			EXTERNAL;	/*	FLAG TO PROCESS CLEAN UP ROUTINES AFTER PLACE OF LAST EVENT IN BLOCK	*/
+dcl Fetch.Sequencer.Tempo.Range			proc (array,array,array)		external;
+dcl Fetch.Sequencer.Tempo.Map.Record	proc(array, array)				external;
+dcl Fetch.Sequencer.Meter.Range			proc (array,array,array)		external;
+dcl Fetch.Sequencer.Meter.Map.Record	proc(array, array)				external;
+dcl Append.Sequencer.Tempo.Map.Record	proc(array) returns (fixed)	external;
+dcl Append.Sequencer.Meter.Map.Record	proc(array) returns (fixed)	external;
+dcl Activate.Sequence.For.New.Map		proc(fixed,fixed)	external;
+DCL TEMPO.MAP.PTR						FIXED	EXTERNAL;		/*	HOLDS ABSOLUTE POINTER		*/
+DCL METER.MAP.PTR						FIXED	EXTERNAL;		/*	TO START OF LINKED BLOCKS	*/
+dcl Allocate.Next.NLS				proc (fixed) returns (fixed)	external;
+dcl Adjust.Sequencer.Ptrs			proc (fixed, fixed)	external;
+dcl Step.To.Time						proc (fixed,fixed)	external;
+
+/*	from getvdcl	*/
+dcl new.ertyp							fixed	external;
+dcl new.poly.contents				fixed	external;
+dcl new.seq.info						fixed	external;
+dcl d115d.note.change.tracks		fixed	external;
+dcl new.able.dtd.info				fixed	external;
+dcl new.dtd.info						fixed	external;
+dcl d115d.event.enable.ptr			fixed	external;
+dcl new.clavier.info					fixed	external;
+dcl new.prm.info						fixed	external;
+
+/*	from mathdcl	*/
+DCL ADD16								proc(fixed,array)	external;
+DCL SUB16								proc(fixed,array)	external;
+DCL COPY32								proc(array,array)	external;
+DCL COM16								proc(fixed,array) returns (fixed)	external;
+DCL STR32								proc(fixed,fixed,array)	external;
+DCL SUB32								proc(array,array,array)	external;
+DCL ADD32								proc(array,array,array)	external;
+DCL COM32								proc(array,array) returns (fixed)	external;
+DCL NEG32								proc(array)	external;
+DCL SBITS.TO.MSEC						proc(array,fixed,fixed,fixed,array)	external;
+DCL SBITS.TO.SMPTE					proc(array,fixed,array)	external;
+DCL SMPTE.TO.SBITS					proc(array,fixed,array)	external;
+DCL FEET.TO.FBITS						proc(array,fixed,array)	external;	/*	converts footage to 80ths of film frames	*/
+DCL FBITS.TO.FEET						proc(array,fixed,array)	external;	/*	converts 80ths of frames to footage			*/
+DCL SMPTE.TO.MSEC						proc(array,fixed,fixed,fixed,array,array)	external;
+DCL MSEC.To.DTD.Sample.#			proc (Array, Fixed, Fixed, Fixed, Array, Array)	external;
+DCL DTD.Sample.#.To.Msecs			proc (Array, Fixed, Fixed, Fixed, Array, Array)	external;
+DCL Signed.DTD.Sample.#.To.Msecs	proc (Array, Fixed, Fixed, Fixed, Array, Array)	external;
+DCL Signed.MSEC.To.DTD.Sample.#	proc (Array, Fixed, Fixed, Fixed, Array, Array)	external;
+dcl Remove.Zero.Time.Offset		proc(array)	external;
+dcl Add.Zero.Time.Offset			proc(array)	external;
+DCL (BITMSB,BITLSB)					FIXED	EXTERNAL;
+DCL ratio_multiply					PROC(FIXED,FIXED)	EXTERNAL;
+DCL UNROUND								PROC	EXTERNAL;
+DCL SHL32								proc(array,fixed)	external;
+DCL SHR32								proc(array,fixed)	external;
+
+dcl clear.grp.sel.bits	proc	external;
+dcl expand.track.group	proc(fixed) returns (fixed)	external;
+dcl recurs.track.group	proc(fixed)	external;
+DCL CLEANUP.MIDI.PRESSURE       PROC(FIXED) EXTERNAL; /* TURNS OFF PRESSURE IN CURRENT MODE */
+
+dcl Zero.Zero	data external;	//	from :SYNMODS:SMGRDCL
+
+/*	$page - main software for trapmod	*/
+
+/*******************************************************************/
+/*	Handy routines to convert between PROTOCOL track numbers and	 */
+/*	SYNCLAVIER track numbers.  -1 is returned if input is not valid */
+/*																						 */
+/*	The Synclavier uses tracks:												 */
+/*					0,1	Keyboard (split)										 */
+/*				 2-201	Sequencer (1-200)										 */
+/*			  202-217	DTD (1-16)												 */
+/*																						 */
+/*	The Protocol uses tracks:													 */
+/*		(strk)	 -2	Keyboard													 */
+/*		(strk)	 -1	Split Keyboard											 */
+/*		(strk) 0-199+	Sequencer (1-200+)									 */
+/*		(dtrk)  0-15+	DTD (1-16+)												 */
+/*******************************************************************/
+
+sync.to.proto.strk: proc(trk);
+	dcl trk	fixed;
+
+	if trk < 0 OR trk > 201 then return(-1);
+	else return(trk-2);
+
+end sync.to.proto.strk;
+
+proto.to.sync.strk: proc(trk);
+	dcl trk	fixed;
+
+	if trk < (-2) OR trk > 199 then return(-1);
+	else return(trk+2);
+
+end proto.to.sync.strk;
+
+sync.to.proto.dtrk: proc(trk);
+	dcl trk	fixed;
+
+	if trk < 202 OR trk > 217 then return(-1);
+	else return(trk-202);
+
+end sync.to.proto.dtrk;
+
+proto.to.sync.dtrk: proc(trk);
+	dcl trk	fixed;
+
+	if trk < 0 OR trk > 15 then return(-1);
+	else return(trk+202);
+
+end proto.to.sync.dtrk;
+
+/*	This routine takes arrays of seq and dtd tracks and returns a bit array	*/
+/*	in Synclavier format.  The result array (fixed, 16 words) must be			*/
+/*	allocated by the caller.																*/
+
+proto.to.sync.bits: proc(strks,dtrks,result) swapable;
+	dcl strks	array;	/*	Bits in protocol format for tracks 1-200	*/
+	dcl dtrks	array;	/*	Bits in protocol format for tracks 1-16	*/
+	dcl result	array;	/*	Output bit array in Synclavier format		*/
+	dcl i			fixed;
+
+	result(0) = shl(strks(0),2);			/*	Sequencer tracks 2 to 15 (& split keyboard in lowest 2 bits)	*/
+
+	do i = 1 to 11;							/*	Sequencer tracks 16 to 191	*/
+		result(i) = shr(strks(i-1),14) | shl(strks(i),2);	/*	Sequencer tracks 192 to 201	*/
+	end;
+
+	result(12) = shr(strks(11),14) | (shl(strks(12),2) & "1774");	/*	Tracks 191 to 200	*/
+
+	result(12) = result(12) | (shl(dtrks(0),10));	/*	DTD tracks 1-6 which are seq tracks 202 to 207	*/
+	result(13) = shr(dtrks(0),6);							/*	DTD tracks 7-16 which are seq tracks 208 to 217, plus zeros for 218 to 223	*/
+
+	do i = 14 to 15;							/*	Sequencer tracks 224 to 255	*/
+		result(i) = 0;							/*	Note: beyond track 200 and DTD 16 don't exist on the Synclavier (yet)	*/
+	end;
+
+end proto.to.sync.bits;
+
+/*	This routine takes an array in Synclavier format and returns separate	*/
+/*	arrays of seq and dtd tracks in protocol format.  The sres and dres		*/
+/*	(result) arrays must be fixed, 16 words and 8 words respectively.			*/
+/*	They must be allocated by the caller.												*/
+
+sync.bits.to.proto: proc(trks,sres,dres) swapable;
+	dcl trks	array;	/*	Input bit array in Synclavier format				*/
+	dcl sres	array;	/*	Output bits in protocol format for tracks 1-200	*/
+	dcl dres	array;	/*	Output bits in protocol format for tracks 1-16	*/
+	dcl i		fixed;
+
+	/*	Note: the strange shifting here is to ignore the first two bits	*/
+	/*	which on the Synclavier are keyboard and split keyboard tracks		*/
+	/*	but on the protocol are NOT included!										*/
+
+	do i = 0 to 11;							/*	Sequencer tracks 1 to 192	*/
+		sres(i) = shr(trks(i),2) | shl(trks(i+1),14);
+	end;
+
+	sres(12) = shr(trks(12),2) & "377";	/*	Tracks 193 to 200	*/
+
+	do i = 13 to 15;							/*	Sequencer tracks 1 to 192	*/
+		sres(i) = 0;							/*	The rest don't exist on the Synclavier (yet)	*/
+	end;
+
+	/*	Note: this code depends on 16 DTD tracks being #202-217 out of 0-255	*/
+	dres(0) = shr(trks(12),10) | shl(trks(13),6);
+
+	do i = 1 to 7;
+		dres(i) = 0;							/*	No more DTD tracks (yet)	*/
+	end;
+
+end sync.bits.to.proto;
+
+/*	Routine to present an error message after a protocol message:	*/
+
+/*	The routine Present.Protocol.Error.Message is called to present	*/
+/*	an error message that occurred during the processing of a			*/
+/*	protocol event.																	*/
+
+/*	If the error occurs while the Audio Event Editor is running,	*/
+/*	Then it is displayed on the Audio Event Editor screen.			*/
+
+/*	An error code is also sent out to the remote box for it's		*/
+/*	display.																			*/
+
+Present.Protocol.Error.Message: proc (id, attr, arg1, arg2, arg3) swapable;
+	dcl id		fixed;	/*	id of error code, from AUD-NOTE			*/
+	dcl attr		fixed;	/*	terminal attribute code						*/
+	dcl arg1		fixed;	/*	assorted											*/
+	dcl arg2		fixed;	/*				useful (??)							*/
+	dcl arg3		fixed;	/*								arguments.			*/
+
+	/*	declared in errsou:	*/
+
+	dcl Protocol.Error.ID	fixed	external;
+	dcl Protocol.Error.Attr	fixed	external;
+	dcl Protocol.Error.Arg0	array	external;
+	dcl Protocol.Error.Arg1	fixed	external;
+	dcl Protocol.Error.Arg2	fixed	external;
+	dcl Protocol.Error.Arg3	fixed	external;
+
+	call Broadcast.AEE.Notice(NN#Rbox,id,arg1,arg2,arg3);	/*	broadcast to RBox	*/
+
+	/*	Set variables for the Audio Event Editor to show	*/
+
+	Protocol.Error.ID		  =	id;	/*	save the id					*/
+	Protocol.Error.Attr	  = attr;	/*	save attributes			*/
+	Protocol.Error.Arg0(0) =	 0;	/*	initialize to null		*/
+	Protocol.Error.Arg1	  = arg1;	/*	save arg1					*/
+	Protocol.Error.Arg2	  = arg2;	/*	save arg2					*/
+	Protocol.Error.Arg3	  = arg3;	/*	save art3					*/
+
+	/*	Create a system event to show this error message	*/
+	/*	on able screens and other devices.						*/
+
+	new.ertyp = new.ertyp \ 2;
+
+end Present.Protocol.Error.Message;
+
+/*	Routine to provide errors from reel edit status:	*/
+
+HANDLE.PROTOCOL.EDIT.ERROR.STATUS: proc swapable;
+
+	if E$Status=E#Good then do;
+		call Present.Protocol.Error.Message(NT#EditComplete,ATTR#Normal,0,0,0);
+	end;
+	else if E$Status=E#TooLong then do;
+		call Present.Protocol.Error.Message(NT#NoRoomForEdit,ATTR#Reverse,0,0,0);
+	end;
+	else if E$Status=E#FillTooShort then do;
+		call Present.Protocol.Error.Message(NT#CueTooShort,ATTR#Reverse,0,0,0);
+	end;
+	else if E$Status=E#CutNotAllowed then do;
+		call Present.Protocol.Error.Message(NT#CutNotAllowed,ATTR#Reverse,0,0,0);
+	end;
+	else if E$Status=E#NoRegionSelected then do;
+		call Present.Protocol.Error.Message(NT#NoEditRegionSelected,ATTR#Reverse,0,0,0);
+	end;
+	else if E$Status=E#SysErr then do;
+		call Present.Protocol.Error.Message(NT#EditTimeError,ATTR#Reverse,0,0,0);
+	end;
+	else if E$Status=E#BadSlideIn then do;
+		call Present.Protocol.Error.Message(NT#BadSlideIn,ATTR#Reverse,0,0,0);
+	end;
+	else if E$Status=E#BadSlideOut then do;
+		call Present.Protocol.Error.Message(NT#BadSlideOut,ATTR#Reverse,0,0,0);
+	end;
+	else call Present.Protocol.Error.Message(NT#SystemError,ATTR#Reverse,0,0,0);
+end HANDLE.PROTOCOL.EDIT.ERROR.STATUS;
+
+/*	$page Routine to return only a tag when we don't have a good reply to a request	*/
+
+Send.Only.Tag: proc(des,tag,message) swapable;
+	dcl des		fixed;
+	dcl tag		fixed;
+	dcl message	fixed;
+	dcl SEND_RETRY_TIME	lit '10000';	/*	Try for up to 10 seconds to send snapshot packets	*/
+
+	write(mam) = misc.ptr;
+	write(mdi) = Able_Packet_Head + 2 + 2;	/*	2 for super/sub, 2 for tag	*/
+	write(mdi) = des;
+	write(mdi) = message;
+	write(md)  = tag;
+	call Send.Protocol.Packet.With.Retry(misc.ptr,1,SEND_RETRY_TIME);
+
+	return;
+
+end Send.Only.Tag;
+
+/*	Convert string from "C" to Able format --				*/
+/*	assumes buffers are declared to be large enough!	*/
+
+C.To.Able.String: proc(dst,src,odd);
+	dcl dst	array;
+	dcl src	array;
+	dcl odd	fixed;	/*	If true, start with "c2" first time through	*/
+	dcl c1	fixed;
+	dcl c2	fixed;
+	dcl i		fixed;
+
+	dst(0) = 0;
+	do i=0 to 250;		/*	We won't go through the loop this many times!	*/
+		c1 = shr(src(i),8);			/*	This will byte-swap the characters	*/
+		c2 = src(i) & "377";
+
+		if (i <> 0 OR odd = 0) then do;
+			if (c1 <> 0) then do;
+				call pbyte(dst,dst(0),c1);
+				dst(0) = dst(0) + 1;
+			end;
+			else return;
+		end;
+
+		if (c2 <> 0) then do;
+			call pbyte(dst,dst(0),c2);
+			dst(0) = dst(0) + 1;
+		end;
+		else return;
+
+	end;
+
+end C.To.Able.String;
+
+/*	$page - insert source files for trapmod:	*/
+
+/*	Variables set by the allocate recording routine that are looked at	*/
+/*	by the real time software:															*/
+
+dcl Armed.for.Protocol.DTD.Recording	fixed	public;
+dcl Protocol.Recording.Drives				fixed	public;
+dcl Protocol.Recording.State				fixed	public;
+dcl Protocol.Recording.Time(1)			fixed	public;
+dcl PROCESS.PROTOCOL.MESSAGE				proc	recursive;
+
+/*	now insert the source files for this trapmod	*/
+
+insert ':synsou:trapmod:emulate';
+insert ':synsou:trapmod:trapnet';
+insert ':synsou:trapmod:trapcr';
+insert ':synsou:trapmod:trapseq';
+insert ':synsou:trapmod:trapseq1';
+insert ':synsou:trapmod:traparch';
+insert ':synsou:trapmod:traptime';
+insert ':synsou:trapmod:trappb';
+insert ':synsou:trapmod:trapsnd';
+insert ':synsou:trapmod:trapret';
+insert ':synsou:trapmod:trapret2';
+insert ':synsou:trapmod:trapret3';
+insert ':synsou:trapmod:traputil';
+insert ':synsou:trapmod:trapts';
+insert ':synsou:trapmod:trapts2';
+insert ':synsou:trapmod:trapevnt';
+insert ':synsou:trapmod:trapmidi';
+insert ':synsou:trapmod:trapclav';
+insert ':synsou:trapmod:trapxfr1';
+insert ':synsou:trapmod:trapxfr2';
+insert ':synsou:trapmod:trapxfr3';
+
+/*	$page - main routine to branch off & process protocol messages	*/
+
+PROCESS.PROTOCOL.MESSAGE: proc public swapable;
+	dcl printed		fixed static;
+	dcl node			fixed;
+	dcl ptr			fixed;
+	dcl super		fixed;
+	dcl type			fixed;
+	dcl i				fixed;
+	dcl status		fixed;	/*	processing status:									*/
+									/*	0 = could not complete processing				*/
+									/*		 message remains in buffer for next time	*/
+									/*	1 = completed processing on this packet		*/
+									/*		 OK to toss it										*/
+
+	if inc.pro=0 then return;		/*	do nothing with protocol	*/
+
+	/*	We now pick up a packet (if there is one pending) and put it			*/
+	/*	at the back of the rotary buffer (if there is room). There is no		*/
+	/*	longer any reason to "toggle" between d50 and rs422 packets since		*/
+	/*	all rs422 packets are read into the buffer in the d115d interrupt.	*/
+
+	DISABLE;
+	if  (NUM.OF.NEW.PACKETS <> 0)				/*	A D50 packet is available	*/
+	and ((Protocol.Packet.There = 0)			/*	buffer is empty				*/
+	or   (Packet.Free.Ptr <> Packet.Ptr))	/*	OR buffer is not full		*/
+	then do;											/*	go get a D50 packet			*/
+
+		/*	allocate a sector in the rotary buffer while we're still disabled	*/
+		ptr = Packet.Free.Ptr;					/*	temp copy of free ptr		*/
+
+		Protocol.Packet.There = 1;				/*	buffer about to be non-empty	*/
+		Packet.Free.Ptr = Packet.Free.Ptr + 1;
+		if Packet.Free.Ptr = Packet.Bas.Ptr + Sizeof.Packet.Buf
+		then Packet.Free.Ptr = Packet.Bas.Ptr;
+
+		if Packet.Free.Ptr = Packet.Ptr		/*	buffer just became full			*/
+		AND num.d115d.bds > 0
+		then do;
+			do i=0 to (num.d115d.bds - 1);			/*	Loop over boards						*/
+				write(cpsel) = cp#sel_group_20 | i;	/*	First group of boards, board "i"	*/
+				write(cpcmd) = cp#disable_rx;			/*	Disable all receive interrupts	*/
+			end;
+
+			d115d.ints.enabled = false;
+		end;
+
+		ENABLE;
+		call Get.Next.D50.Protocol.Packet(ptr);	/*	Read into xmem buf for processing	*/
+	end;
+	ENABLE;
+
+	if Protocol.Packet.There = 0
+	then do;								/*	still no packets in our rotary buffer	*/
+		return;							/*	Nothing to do	*/
+	end;
+
+	/*	PACKET.PTR should be incremented and wrapped (if necessary)		*/
+	/*	after this packet is completely processed.  If for some reason	*/
+	/*	it cannot be processed now, leaving PACKET.PTR alone will		*/
+	/*	cause the system to try to process it again the next time		*/
+	/*	this routine is called.														*/
+
+	/*	After PACKET.PTR is incremented we must check to see if we now	*/
+	/*	have an empty buffer and if so, PROTOCOL.PACKET.THERE must be	*/
+	/*	set to 0 indicating that there are no protocol packets there!	*/
+
+	status = 1;				/*	assume we will completely process this packet	*/
+
+	write(mam) = Packet.Ptr;			/*	point to the packet	*/
+	write(mal) = P#Source;
+	node = read(md);						/*	get source node	*/
+	type = 0;
+
+	write(mal) = P#Type;					/*	packet type word	*/
+	if node = P#RS232_Node				/*	packet is from the MAC	*/
+	then super = read(md);				/*	get super-type	*/
+	else do;
+		super = shr(read(md),8);		/*	from RS422, super-type in high byte	*/
+		type = read(md);
+		if (Allow.Proto.Msgs & "040000") <> 0		/*	If we're logging input messages		*/
+		AND printed = 0 then do;						/*	AND this one hasn't been logged yet	*/
+			call log.input.message(Packet.Ptr);
+			printed = 1;									/*	Now, we have printed it	*/
+		end;
+	end;
+
+	if node > 0												/*	From a known device							*/
+	OR type = T#Net_Here_Is								/*	But don't worry about a "here-is"		*/
+	OR type = T#Net_Crash_Part1						/*	(this is also treated as a "here-is")	*/
+	OR type = T#Net_Crash_Part2						/*	(we need both parts of the crash msg)	*/
+	then do;
+		if (super - P#BASE_TYPE) ilt P#NUM_PACKET_TYPES	/*	message in defined range	*/
+		then do case (super - P#BASE_TYPE);			/*	branch on packet type	*/
+			status = Handle.Network.ID;				/*	P#Network_Level			*/
+			status = Handle.Playback;					/*	P#Playback					*/
+			status = Handle.Creation.Recording;		/*	P#Creation_Recording		*/
+			status = Handle.Sequence.Editing;		/*	P#Sequence_Editing		*/
+			status = Handle.Sound.Editing;			/*	P#Sound_Editing			*/
+			status = Handle.Archival;					/*	P#Archival					*/
+			status = Handle.Retrieval;					/*	P#Retrieval					*/
+			status = Handle.Time.Base;					/*	P#Time_Base					*/
+			status = Handle.Track.Setup;				/*	P#Track_Setup				*/
+			status = Handle.Utility;					/*	P#Utility					*/
+			status = Handle.Events;						/*	P#Events						*/
+			status = Handle.MIDI;						/*	P#MIDI						*/
+			status = Handle.Clavier;					/*	P#Clavier					*/
+			;													/*	P#Mixer						*/
+			;													/*	reserved						*/
+			status = Handle.Data.Transfer;			/*	P#Data_Transfer			*/
+		end;
+		else if super = P#Clavier_Emulate
+		then do;			/*	Special case for the Termulator Clavier Emulation	*/
+			status = Handle.Clavier.Emulation;		/*	P#CLAVIER_EMULATE			*/
+		end;
+	end;		/*	of from a known device	*/
+
+	if (status <> 0) then do;	/*	this message has been completely processed	*/
+
+		DISABLE;
+
+		Packet.Ptr = Packet.Ptr + 1;				/*	increment pointer	*/
+
+		if Packet.Ptr = Packet.Bas.Ptr + Sizeof.Packet.Buf
+		then Packet.Ptr = Packet.Bas.Ptr;		/*	wrap pointer		*/
+
+		if Packet.Ptr = Packet.Free.Ptr			/*	buffer is empty	*/
+		then Protocol.Packet.There = 0;			/*	reset empty flag	*/
+
+		/*	Must enable d115 interrupts since the buffer might	*/
+		/*	have just gone from full to not full.					*/
+
+		do i=0 to (num.d115d.bds - 1);			/*	Loop over boards	*/
+			write(cpsel) = cp#sel_group_20 | i;	/*	First group of boards, board "i"	*/
+			write(cpcmd) = cp#enable_rx_a;		/*	Enable Rx interrupt on condition A (packet present)	*/
+			d115d.ints.enabled = true;
+		end;
+
+		ENABLE;
+
+		printed = 0;									/*	We can print the next packet	*/
+	end;
+
+end PROCESS.PROTOCOL.MESSAGE;
+
+
+// Process.Interpreter.Message
+
+dcl	Synclavier_eject_media				lit ' 1';					// eject media. data is ejected_device_code (readdata code)
+dcl	Synclavier_sound_file_changed		lit ' 2';					// sound file has moved around
+dcl	Synclavier_stop_audition			lit ' 3';					// stop audition in process
+dcl	Synclavier_audition_sound_file	lit ' 4';					// audition a sound file
+dcl	Synclavier_callup_sound_file		lit ' 5';					// call up a sound file
+dcl	Synclavier_callup_sequence			lit ' 6';					// call up a sequence file
+dcl	Synclavier_callup_timbre_file		lit ' 7';					// call up a timbre file
+dcl   Synclavier_callup_workspace      lit ' 8';               // call up a sequence workspace
+dcl   Synclavier_save_sequence         lit ' 9';
+dcl	Synclavier_audition_started		lit '10';					// audition has started
+dcl	Synclavier_audition_stopped		lit '11';					// audition has stopped
+
+
+Process.Interpreter.Message: proc public swapable;
+	dcl code	         fixed;
+	dcl where (2)     fixed;
+	dcl length(2)     fixed;
+	dcl name.buf(128) fixed;      // Sync3 buffers hold name to 255 bytes plus trailing null for 256 storage required
+                                 // But the cstring to able string conversion routines limit to 254 bytes so the
+                                 // able string will also fit in 256 byte including the string length
+                                 // Later on we limit file names to 126 bytes in utf so they fit in a 64 word buffer
+
+	dcl handle.cat.error          proc (fixed) 		   external;
+	dcl file.type.error           proc         		   external;
+	dcl TRY.TO.READ.SEQ           proc (fixed, fixed)  external;
+   dcl FIND.PARTIAL              proc                 external;
+   dcl FIND.FRAME                proc (fixed, fixed)  external;
+   dcl count.timbre.frames			proc (fixed)         external;
+   dcl P.LOOKUP						proc (fixed)         external;
+   dcl NUM.OF.HELD.TRACK.BUTTONS fixed 	   external;
+	dcl OUR.SEQ                   fixed 	   external;
+   dcl patch.screen.active  		fixed 		external;
+   dcl patch.screen.partial 		fixed 		external;
+   dcl patch.screen.frame   		fixed 		external;
+	dcl DESTINATION.PARTIAL.#   	fixed 		external;
+   dcl DESTINATION.FRAME.#     	fixed 		external;
+   dcl DESTINATION.SKEY.#     	fixed 		external;
+   dcl DESTINATION.EKEY.#     	fixed 		external;
+   dcl DESTINATION.XPOS.#     	fixed 		external;
+	dcl new.timbre.info     		fixed 		external;
+	dcl new.entry.writes    		fixed 		external;
+	dcl DISPLAY.SEQUENCER.RECALL.BUTTONS proc external;
+   dcl SAVE.SEQUENCE PROC (ARRAY, FIXED, FIXED) RETURNS(FIXED) EXTERNAL;
+
+	code = interp_get_message(0, addr(name.buf(0)));
+
+	if (code == 0)
+		return;
+	
+	// Handle callups...
+	if (code == Synclavier_callup_sequence)
+	{
+	   CALL STOP.RECD.MOVE.PLAY;              /* Stop any recording or motion */
+
+		if not(LOCATE(interp_seq_file_name,0)) /* see if exists    */
+		then do;
+			call Handle.Cat.Error(1);
+		end;
+		else if F#Type <> T#Sync
+		then do;
+			if (name.buf(0) > 120)
+				name.buf(0) = 120;
+			call copy.string(name.buf, token);
+			call file.type.error;          
+		end;
+		else do;
+			if (TRY.TO.READ.SEQ(f#ms_sector, f#ls_sector) == TRUE)
+			{
+				if (NUM.OF.HELD.TRACK.BUTTONS == 0)							/* global current seq path name if not */
+				{																		/* selective track recall              */
+					call GID(Cur.Seq.Path.Name);								/* update global seq path name on seq recall from button panel */
+					call COPY.OUT(addr(F#NAME(0)), Cur.Seq.Path.Name.Wlen);
+					new.prm.info = new.prm.info \ 256;  					/* update various seq name displays */
+					OUR.SEQ = -1;
+					DISPLAY.SEQUENCER.RECALL.BUTTONS();
+				}
+			}
+		}
+	}
+
+   else if (code == Synclavier_save_sequence)
+   {
+      CALL STOP.RECD.MOVE.PLAY;              /* Stop any recording or motion */
+      
+      if not(LOCATE(interp_seq_file_name,0)) /* see if exists    */
+      then do;
+         call Handle.Cat.Error(1);
+      end;
+      else if F#Type <> T#Sync
+      then do;
+         if (name.buf(0) > 120)
+         name.buf(0) = 120;
+         call copy.string(name.buf, token);
+         call file.type.error;
+      end;
+      else do;
+         call SAVE.SEQUENCE(interp_seq_file_name, 0, 1);
+      end;
+   }
+
+	else if ((code == Synclavier_audition_sound_file) || ((code&0xf) == Synclavier_callup_sound_file))
+	{
+      dcl gotFile fixed;
+      dcl gotRev  fixed;
+
+		interp_audition_started();
+
+      // Old implementation from Interchange - we would look for an able File
+      // gotFile = LOCATE(name.buf, 1);                              // Look for file. From InterChange, will be a path. From Sync3 will be a handle.
+      
+      interp_locate_file(T#Sound, addr(name.buf(0)));                // See if in data base
+      
+      gotFile = interp_located_file(0) & 0x0001;
+      gotRev  = interp_located_file(0) & 0xFFFE;
+      
+      if (gotFile) then do;
+         gotFile = LOCATE(interp_snd_file_name, 0);
+      end;
+
+		if not(gotFile) 											            /* see if exists    */
+		then do;
+			call Handle.Cat.Error(1);
+		end;
+		else if F#Type <> T#Sound
+		then do;
+			if (name.buf(0) > 120)
+				name.buf(0) = 120;
+			call copy.string(name.buf, token);
+			call file.type.error;          
+		end;
+		else do;
+         dcl options fixed;
+      
+         options = 0;
+      
+			where (0) = f#ms_sector;
+			where (1) = f#ls_sector;
+			length(0) = f#ms_length;
+			length(1) = f#ls_length;
+
+			// Handle recall to partial from sync3
+			if ((code&0xfff0) != 0)
+			{
+            dcl doOctave fixed;
+            dcl whichKey fixed;
+            dcl whichPar fixed;
+            dcl doDiaton fixed;
+            
+            dcl eraseTmb fixed;
+            dcl erasePtl fixed;
+            
+            // Look up passed codes
+            doOctave = shr(code, 15) & 0x01;    // 1 means assign octave; 0 means assign key
+            whichKey = shr(code,  8) & 0x7F;    // which Key
+            whichPar = shr(code,  4) & 0x07;    // 1 for timbre, 2 for P1, 3 for P2, 4 for P3, 5 for P4, 6 patch screen line, 7 add to partial
+            doDiaton = shr(code,  7) & 0x01;    // 1 for diatonic.
+            
+            // Handle special cases - Add To Partial. Also intercept Recall to Patch Screen Line if no longer on patch screen
+            if ((whichPar == 7) || ((whichPar == 6) && (patch.screen.active == false))) {
+               dcl numFrames fixed;
+               
+               DESTINATION.PARTIAL.# = FIND.PARTIAL();      // Use selected partial
+               
+               numFrames = count.timbre.frames(DESTINATION.PARTIAL.#);
+               
+               // If prior frame exists, start after its end key
+               if (numFrames > 0) {
+                  dcl k fixed;
+                  
+                  k = find.frame(DESTINATION.PARTIAL.#, numFrames);
+                  
+                  IF  (P.LOOKUP(k  )=MOR)                   /*	AND A FRAME IS THERE	*/
+                  AND (P.LOOKUP(k+1)=PT.TYPE)               /*	OF THIS TYPE	*/
+                  THEN whichKey=P.LOOKUP(k+PT.EKEY)+1;      /*	GET ENDING KEY OF PRIOR FRAME	*/
+               }
+               
+               DESTINATION.FRAME.# = numFrames + 1;
+               
+               eraseTmb = false;
+               erasePtl = false;
+            }
+            
+            // Special case - recall to line of patch screen. whichKey ends up being ignored in this case
+            else if (whichPar == 6) {
+               DESTINATION.PARTIAL.# = patch.screen.partial;
+               DESTINATION.FRAME.#   = patch.screen.frame  ;
+               
+               eraseTmb = false;
+               erasePtl = false;
+            }
+            
+            // Else recall to partial
+            else if (whichPar == 2 || whichPar == 3 || whichPar == 4 || whichPar == 5) {
+               DESTINATION.PARTIAL.# = whichPar-2;
+               DESTINATION.FRAME.#   = 1;
+               
+               eraseTmb = false;
+               erasePtl = true;
+            }
+            
+            // Else must be recall to timbre
+            else {
+               DESTINATION.PARTIAL.# = 0;
+               DESTINATION.FRAME.#   = 1;
+               
+               eraseTmb = true;
+               erasePtl = false;
+            }
+            
+            // Decode key#; key == 127 signifies entire keyboard
+            // Key information is only looked at when a patch frame is created
+            if (whichKey == 127) {
+               DESTINATION.SKEY.# = 0;
+               DESTINATION.EKEY.# = num.keys-1;
+               DESTINATION.XPOS.# = 45;
+            }
+            
+            // Octave implies non diatonic
+            else if (doOctave != 0) {
+               DESTINATION.SKEY.# = whichKey;
+               DESTINATION.XPOS.# = whichKey+ 7;
+               DESTINATION.EKEY.# = whichKey+11;
+               
+               if (DESTINATION.SKEY.# > (num.keys-1))
+                  DESTINATION.SKEY.# = (num.keys-1);
+               
+               if (DESTINATION.XPOS.# > (num.keys-1))
+                  DESTINATION.XPOS.# = (num.keys-1);
+                  
+               if (DESTINATION.EKEY.# > (num.keys-1))
+                  DESTINATION.EKEY.# = (num.keys-1);
+            }
+            
+            // Diatonic key assignment
+            else if (doDiaton != 0) {
+               dcl whichPitch fixed;
+               
+               DESTINATION.SKEY.# = whichKey;
+               DESTINATION.EKEY.# = whichKey;
+               DESTINATION.XPOS.# = whichKey;
+               
+               whichPitch = (whichKey MOD 12);
+               
+               // Expand end key to include diatonic
+               if (whichPitch == 0 || whichPitch == 2 || whichPitch == 5 || whichPitch == 7 || whichPitch == 9)
+                  DESTINATION.EKEY.# = DESTINATION.EKEY.# + 1;
+                  
+               if (DESTINATION.SKEY.# > (num.keys-1))
+                  DESTINATION.SKEY.# = (num.keys-1);
+               
+               if (DESTINATION.XPOS.# > (num.keys-1))
+                  DESTINATION.XPOS.# = (num.keys-1);
+                  
+               if (DESTINATION.EKEY.# > (num.keys-1))
+                  DESTINATION.EKEY.# = (num.keys-1);
+            }
+            
+            // Else chromatic key assignment
+            else {
+               DESTINATION.SKEY.# = whichKey;
+               DESTINATION.EKEY.# = whichKey;
+               DESTINATION.XPOS.# = whichKey;
+               
+               if (DESTINATION.SKEY.# > (num.keys-1))
+                  DESTINATION.SKEY.# = (num.keys-1);
+               
+               if (DESTINATION.XPOS.# > (num.keys-1))
+                  DESTINATION.XPOS.# = (num.keys-1);
+               
+               if (DESTINATION.EKEY.# > (num.keys-1))
+                  DESTINATION.EKEY.# = (num.keys-1);
+            }
+            
+            // send 'Process.Interpreter.Message eraseTmb', eraseTmb, ' erasePtl', erasePtl, ' DESTINATION.PARTIAL.#', DESTINATION.PARTIAL.#, ' DESTINATION.FRAME.#', DESTINATION.FRAME.#, ' DESTINATION.SKEY.#', DESTINATION.SKEY.#, ' DESTINATION.EKEY.#', DESTINATION.EKEY.#;
+            
+            options = RSF#UseDest;
+            
+            if (eraseTmb != 0)
+               options = options | RSF#EraseTimb;
+            
+            if (erasePtl != 0)
+               options = options | RSF#ErasePrtl;
+			}
+			
+			else if (patch.screen.active != 0)
+			{
+				DESTINATION.PARTIAL.# = patch.screen.partial;
+				DESTINATION.FRAME.#   = patch.screen.frame;
+			}
+			
+         else
+			{
+				DESTINATION.PARTIAL.# = 0;
+				DESTINATION.FRAME.#   = 0;
+			}
+
+			if (code == Synclavier_audition_sound_file)
+          	Recall.Sound.File(name.buf, 1, where, length, options \ (RSF#NoIO \ RSF#NoCheck \ RSF#Audition \ RSF#LongName), gotRev);
+			else
+          	Recall.Sound.File(name.buf, 1, where, length, options \ (RSF#NoIO \ RSF#NoCheck                \ RSF#LongName), gotRev);
+				
+			new.timbre.info = new.timbre.info \ 1;
+		end;
+
+		interp_audition_stopped();
+	}
+	
+	else if (code == Synclavier_callup_timbre_file)
+	{
+		if (TBANKNAME.PTR != 0)
+		{
+			write(MAM) = TBANKNAME.PTR;
+			write(MDI) = true;
+			
+			COPY.OUT(addr(name.buf(0)), 130);
+			
+         // Setting new.entry.writes will refresh the a page
+			new.entry.writes = new.entry.writes | (255 | 256);
+		}
+	}
+
+   else if (code == Synclavier_callup_workspace)
+   {
+      if (SPACENAME.PTR != 0)
+      {
+         write(MAM) = SPACENAME.PTR;
+         write(MDI) = true;
+         
+         COPY.OUT(addr(name.buf(0)), 130);
+         
+         // Setting new.entry.writes will refresh the c page
+         new.entry.writes = new.entry.writes | 512;
+      }
+   }
+
+end Process.Interpreter.Message;
+
+/*	$page - Initialize source.dest to sequencer activity:	*/
+
+Em.addr = NN#MAC;	/*	Initially, assume emulating packets from the MAC	*/
+
+end;
+
+end TRAPMOD;

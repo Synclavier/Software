@@ -1,0 +1,199 @@
+/* 24-ANAL2  $TITLE  Analysis Routines -- Part 2 (Analysis Driver) */
+
+/* Copyright (c) 1984 by New England Digital Corporation */
+
+/* This program represents proprietary information and may not be released
+   publically without written permission from New England Digital Corp. */
+
+analyze_wave:  proc(inbuf,len,outbuf,ncoefs) floating; /* gives Fourier series of a wave */
+   dcl inbuf         fixed array; /* holds samples of sound */
+   dcl len           fixed; /* number of samples in array */
+   dcl outbuf        fixed array; /* holds normalized harmonic coefs */
+   dcl ncoefs        fixed; /* number of Fourier coefs to compute */
+   dcl peak          floating; /* largest raw, unnormalized fourier coefficient */
+   dcl (max,i,j,k)   fixed;
+
+   peak=compute_fourier_series(inbuf,len,outbuf,ncoefs); /* get fourier coefs */
+
+   if not break.rcvd then do;
+      /* plot wave as it will appear in wavetable */
+      call calcwave(outbuf,ncoefs); /* generate a wavetable */
+      viewport(205,405,327,454); window(0,255,0,255); border;
+      move_to(0,wave.msb(0)&"377");
+      do i=1 to 255; if i then plot(i,shr(wave.msb(i/2),8)); else plot(i,wave.msb(i/2)&"377"); end;
+      transparent_mode; call pos(9,29); r_video(' Resynthesized Waveform ');
+
+      /* plot harmonic coefficients */
+      viewport(410,610,327,454); window(0,ncoefs+1,0,1000); border;
+      do i=1 to ncoefs;
+         j=outbuf(i-1)&1023;         /* get coef power density */
+         j=int(sqr(j)*sqr(1000)+.5); /* convert to magnitude */
+         move_to(i,0); plot(i,j);    /* and display */
+      end;
+      transparent_mode; call pos(9,57); r_video(' Harmonic Magnitudes ');
+   end;
+
+   return peak; /* return largest raw, unnormalized fourier coefficient */
+end analyze_wave;
+
+/* $SUBTITLE  Routine to Analyze a Sound File with Labels */
+
+analyze_timbre:  proc; /* analyzes current sound file & sets up timbre in core */
+   dcl coef.buf (ncoefs.max)     fixed;    /* temp array to hold coefs for current frame */
+   dcl (attck,peak,cents)        fixed;    /* temps to hold attack, peak, and glide for current frame */
+   dcl (start.time,end.time) (2) fixed;    /* start and end times of current frame */
+   dcl act.cycle.len             floating; /* floating pt. length of current cycle */
+   dcl int.cycle.len             fixed;    /* fixed    pt. length of current cycle */
+   dcl (last.time,cur.time)      fixed;    /* start time of last and current frames */
+   dcl (lfreq,freq,act.cents)    floating; /* freq of last and current frame and cents between them */
+   dcl sym.ind                   fixed;    /* index of current symbol */
+   dcl peak.factor               floating; /* volume factor after endpoint smoothing */
+   dcl ncoefs.ext                fixed;    /* number of harmonics to extract on current frame */
+   dcl (str1,str2)           (4) fixed;    /* temps */
+   dcl (temp,temp1)          (2) fixed;
+   dcl (name.ptr,max)            fixed;
+   dcl (i,j,k)                   fixed;
+
+   timbre.ptr=free.base;  /* init ptr into timbre area */
+   timbre.len=0;          /* init to zero length at start */
+   frames    =0;          /* no frames computed yet */
+   sym.ind   =1;          /* start with first symbol in table */
+
+   do while (sym.ind<(number.of.symbols)) and (not break.rcvd)
+      and   (frames<avail.frames); /* loop through all symbols */
+
+      name.ptr=symbol_name(sym.ind); /* get ptr to symbol name */
+      call strexct(str1,location(name.ptr),core(name.ptr)-2,core(name.ptr)-1);
+
+      if compare(str1,'_1') then do; /* have a symbol which is a start for a wave */
+         clear; reverse(1); ps(' Wave at '); ps(location(name.ptr)); ps(' ');
+         call copy_vector(start.time,location(symbol_time(sym.ind)),3); /* get start time index vector */
+
+         call strcpy (str1,location(name.ptr)); /* get name of first label on cycle */
+         call strexct(str2,location(name.ptr),0,core(name.ptr)-3); /* extract name part of symbol */
+         call strcat (str2,'_2'); /* symbol for end of wave */
+         j=locate_index(str2); /* see if second symbol exists */
+
+         if j<>0 then do; /* symbol found -- user has marked both ends of cycle */
+            call copy_vector(end.time,location(symbol_time(j)),3); /* get end time index vector */
+            name.ptr=symbol_name(j); /* get ptr to name of 2nd label */
+            ps('to '); ps(location(name.ptr)); ps(' '); reverse(0);
+            ps('  ['); call print_time(start.time,3,1); ps(' to ');
+            call print_time(end.time,3,1); ps(' Seconds]');
+            call time_to_index(end.time,temp,period.index);
+            call add_len_to_len(zero.zero.one,temp,temp); /* read in an extra pt */
+            call add_len_to_len(zero.zero.one,temp,temp); /* read in two extra pts */
+            call index_to_time(end.time,temp,period.index);
+
+            act.cycle.len=load_wave(start.time,end.time,databuf1)-2; /* read in samples */
+            int.cycle.len=int(act.cycle.len);
+            call pos(1,65); ps('  [Frame #'); pnum(frames); ps(']');
+         end;
+         else do; /* extract cycle automatically */
+            reverse(0); ps('  ['); call print_time(start.time,3,1); ps(' Seconds]');
+            call pos(1,45); ps('  [Frame #'); pnum(frames); ps(']');
+            /* approximate samples in one cycle */
+            j=int(1000.*30000./(period.index*pitch_to_freq(pcn))+.5); /* compute approx cycle length in samples */
+            call time_to_index(start.time,temp,period.index); /* convert time to sectors */
+            call add_len_to_addr(temp,location(f.data.index),temp1); /* get abs addr of wave on disk */
+            call copy_vector(temp,temp1,3);
+            call sub_len_from_addr(temp,zero.zero.one,temp1);
+
+            /* read in 2 times max cycle length samples, plus a little to be safe */
+            call read_samples(temp1,databuf1,shl(j+(j*pitch.window/100),1)+128);
+
+            act.cycle.len=compute_period(location(addr(databuf1(1))),j,pitch.window);
+            if act.cycle.len=(-1)
+            then act.cycle.len=1000.*30000./(period.index*pitch_to_freq(pcn));
+
+            /* interpolate two extra points so error function below will be correct */
+            int.cycle.len=interpolate(databuf1,act.cycle.len);
+         end;
+
+         /* $PAGE */
+
+         /* plot raw wave before smoothing */
+         max=0;
+         do i=0 to int.cycle.len-1;
+            k=abs(databuf1(i));
+            if k=(-32768) then max=32767; else if k>max then max=k;
+         end;
+         viewport(0,200,327,454); window(0,int.cycle.len-1,-max,max); border;
+         move_to(0,databuf1(0)); do i=1 to int.cycle.len-1; plot(i,databuf1(i)); end;
+         transparent_mode; call pos(9,3); r_video(' Original Waveform ');
+
+         if not break.rcvd then do;
+            pcmd(' Analysis Status: '); ps('  Preparing to compute harmonic coefficients of waveform');
+            /* add in error function to correct for glitches at splice pts in wave */
+            peak.factor=jones_function(databuf1,int.cycle.len);
+         end;
+
+         if not break.rcvd then do;
+            /* limit number of harmonics to extract */
+            ncoefs.ext=shr(int.cycle.len,1);
+            if ncoefs.ext>ncoefs.use then ncoefs.ext=ncoefs.use;  /* limit coefs to bandwidth of signal */
+            else analysis.status(frames)=analysis.status(frames)\band.limit;
+            if (frames=0) and (ncoefs.ext>24) then ncoefs.ext=24; /* only up to 24 for frame 0 */
+         end;
+
+         if not break.rcvd then do;
+            if int.cycle.len IGT max.wave.length /* wave too long */
+            then analysis.status(frames)=analysis.status(frames)\length.err; /* length of wave out of range */
+            else do; /* continue with analysis */
+               do k=0 to ncoefs.use-1; coef.buf(k)=0; end; /* re-zero all coefs */
+               float.peak(frames)=analyze_wave(databuf1,int.cycle.len,coef.buf,ncoefs.ext)/peak.factor;
+
+               if not break.rcvd then do;
+                  cur.time =int((start.time(0)*1000000.+start.time(1)*1000.+start.time(0))/1000+.5);
+                  if frames=0 then do; /* use start play marker for initial LAST.TIME */
+                     call copy_vector(temp,mark.start,3);
+                     last.time=int((temp(0)*1000000.+temp(1)*1000.+temp(0))/1000+.5);
+                     if last.time IGT cur.time then last.time=cur.time;
+                  end;
+                  attck=cur.time-last.time;
+                  last.time=cur.time;
+
+                  if frames=0 then do; /* setting up frame 0 */
+                     lfreq=(clock.rate*1000.0)/(period.index*act.cycle.len);
+                     act.cents=100*((-12.0)/log(2))*log(pitch_to_freq(pcn)/lfreq);
+                     /* adjust partial tuning according to pitch dev of first frame from given pitch */
+                     partial.tuning=int(4400*exp(log(2)*(act.cents/100.0)/12.0)+.5);
+                     do while partial.tuning IGT 17600; partial.tuning=shr(partial.tuning,1); end; /* get tuning in range */
+                  end;
+                  else do; /* set up pitch glide for subsequent frames */
+                     freq=(clock.rate*1000.0)/(period.index*act.cycle.len);
+                     cents=int(100*((-12.0)/log(2))*log(lfreq/freq)+.5);
+                     lfreq=freq;
+                  end;
+
+                  /* NOW WRITE RAW FRAME INFORMATION INTO TIMBRE AREA */
+                  if frames=0 then do; /* set up frame zero differently */
+                     call create.partial(attck,coef.buf,24,partial.tuning);
+                     timbre.len=timbre.len+46;
+                  end;
+                  else do; /* set up subsequent frames */
+                     call create.frame(attck,coef.buf,ncoefs.use,cents);
+                     timbre.len=timbre.len+frame.length;
+                  end;
+
+                  frames=frames+1;
+                  call wait(2000);
+               end;
+            end; /* of continue with analysis */
+         end;
+      end; /* of have a symbol which is a start for a wave */
+      sym.ind=sym.ind+1;
+   end; /* of loop through all symbols */
+
+   /* $PAGE */
+
+   peak.factor=float.peak(0);
+   do i=1 to frames-1; /* find max raw peak */
+      if float.peak(i)>peak.factor then peak.factor=float.peak(i);
+   end;
+   do i=0 to frames-1; /* now rescale and store intermediate peak in timbre */
+      core(find.peak.ptr(i))=int(float.peak(i)*32767/peak.factor+.5);
+   end;
+
+   ncoefs.stored=ncoefs.use; /* now set number of coefs in memory */
+end analyze_timbre;

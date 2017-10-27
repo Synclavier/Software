@@ -1,0 +1,1686 @@
+/* $TITLE - TFORMSOU - terminal formatting routines */
+
+/*
+   2002/08/25 - TY  - Modified CONV.STR.TO.SMPTE() so that a terminal decimal point will be interpreted as .0
+   07/10/90 - PF  - Modified beats/measures conversion routines to
+                    work with Meter Mapping
+   03/21/89 - TSS - Allow user to enter 0 measures in CONV.STR.TO.BEATS
+   08/04/88 - cj  - modified feet/frame to handle signed feet.  Also
+                    other routines to handle signed times.
+   05/12/88 - eg  - added conv.32bit.int.to.str
+   04/12/88 - PF - Added hex conversion routines
+   11/24/87 - MWH - Skip leading white space in ALL (not some) CONV.STR.TO...
+   10/30/87 - MWH - Stop corrupting caller's array in beats -> string
+   08/20/87 - cj - integrated eg's changes for beat conversion
+   08/13/87 - KJO - added date and time conversion routines
+   05/07/87 - ts - add feature to handle overflows a little more nicely
+   04/30/87 - ts - fixed some formatting bugs in CONV.BEATS.TO.STR
+*/
+
+module TFORMMOD;
+
+   /* insert literal files */
+
+   insert ':synlits:comlits';
+   insert ':synlits:asciilit';
+   insert ':synlits:globlits';
+   insert ':synlits:synclits';
+   insert ':synauxs:errlits';
+   insert ':synauxs:tformlit';
+   insert ':synauxs:mathlits';
+
+   insert ':synmods:globdcl';    /* get powers */
+
+   DCL POWERS.MSB       DATA    EXTERNAL; /* from 03-pdcls */
+   DCL POWERS.LSB       DATA    EXTERNAL; /* from 03-pdcls */
+
+   dcl Convert.Long.Measures.Beats.To.Long.Beats proc (array,array) external;
+
+   dcl str.ptr  fixed;           /* current byte position in string */
+   dcl conv.err fixed;           /* gets set if error during string conversion */
+
+
+   /* $SUBTITLE  Some General String Utilities */
+
+
+   MIN: proc (a,b) fixed public recursive;
+      dcl (a,b) fixed;
+      if a ilt b then return a;
+      return b;
+   end MIN;
+
+   MAX: proc (a,b) fixed public recursive;
+      dcl (a,b) fixed;
+      if a igt b then return a;
+      return b;
+   end MAX;
+
+   UCASE: proc (ch) fixed public recursive;
+      dcl ch fixed;
+      if (ch>=lower.a) and (ch<=lower.z) then ch=ch-"40";
+      return ch;
+   end UCASE;
+
+   GETC:  proc(str) fixed recursive; 
+      dcl str fixed array;
+      dcl ch  fixed;
+
+      if str.ptr=str(0) then return 0; /* return null at end of string */
+      str.ptr=str.ptr+1; /* increment pointer */
+      return UCASE(byte(str,str.ptr-1));
+   end GETC;
+
+   APPENDC:  proc(str,ch) fixed public recursive;    /* add ch to end of str */
+      dcl str fixed array;
+      dcl ch  fixed;
+
+      call pbyte(str,str(0),ch);
+      str(0)=str(0)+1;
+      return str(0);   /* return new length of string */
+   end APPENDC;
+
+   EQSTR:  proc (s1,s2) public recursive;  /* NON-SWAP SO STRINGS ARE IN EXT MEMORY */
+      /* String comparison, ignores case, returns:
+           1 if s1 > s2
+           0 if equal
+          -1 if s1 < s2
+      */
+
+      dcl (s1) fixed array;
+      dcl (s2) fixed array;
+      dcl (c1,c2,i)    fixed;
+
+      if (s1(0) <> s2(0)) then do;    /* lengths are different */
+         if   (s1(0) > s2(0))
+         then return  1;              /* s1 > s2 */
+         else return -1;              /* s1 < s2 */
+      end;
+      else do i=0 to s1(0)-1;
+         c1=UCASE(byte(s1,i));        /* get chars, convert to upper case */
+         c2=UCASE(byte(s2,i));
+
+         if (c1 <> c2) then do;          /* characters are different */
+            if   (c1 > c2)
+            then return  1;              /* c1 > c2 */
+            else return -1;              /* c1 < c2 */
+         end;
+      end;
+
+      return 0;         /* if we are here, strings are equal */
+
+   end EQSTR;
+
+   APPEND.TO.STR: proc(s1,s2) fixed public recursive;  /* appends s2 to s1 */
+      dcl (s1,s2) array;
+      dcl i       fixed;
+
+      do i=0 to s2(0)-1;
+         call pbyte(s1,s1(0)+i,byte(s2,i));
+      end;   
+
+      s1(0)=s1(0)+s2(0);
+
+      return(s1(0));          /* return length of new string */
+   end APPEND.TO.STR;
+
+   COPY.STRING: proc(s1,s2) fixed public recursive;  /* copies S1 to S2 */
+      dcl (s1,s2) array;
+
+      s2(0) = 0;
+
+      return append.to.str(s2,s1);
+
+   end COPY.STRING;
+
+   Append.Bytes.To.Str: proc (StrBytes,NumBytes,OutStr,MaxLen) public swapable;
+      dcl StrBytes array;
+      dcl NumBytes fixed;
+      dcl OutStr   array;
+      dcl MaxLen   fixed;
+      dcl (ch,i)   fixed;
+
+      if (OutStr(0)+NumBytes) igt MaxLen  /* limit line length to max */
+      then NumBytes=MaxLen-OutStr(0);
+
+      do i=0 to NumBytes-1;
+
+         ch=StrBytes(shr(i,1));
+
+         if (i&1)=0
+         then ch=ch&"377";
+         else ch=shr(ch,8);
+
+         if ch<A.SP then ch=A.SP;
+
+         call pbyte(OutStr,OutStr(0),ch);
+
+         OutStr(0)=OutStr(0)+1;
+
+      end;
+   end Append.Bytes.To.Str;
+
+   Strip.Leading.Spaces: proc (InStr,OutStr) public swapable; /* removes leading spaces from a string */
+      dcl (InStr,OutStr) array; /* Both arrays can be the same */
+      dcl (I,J,Go,Ch)    fixed;
+
+      do I=0 to InStr(0)-1;     /* loop over bytes in input string */
+         Ch=Byte(InStr,I);      /* get next char from input string */
+         if (Ch IGT SP) or (Go<>0) then do;  /* copy over all remaining chars */
+            Go=1;
+            call PByte(OutStr,J,Ch); /* uppercase it        */
+            J=J+1;              /* advance output string length    */
+         end;
+      end;
+      OutStr(0)=J;              /* save final length of cleaned up string */
+
+   end Strip.Leading.Spaces;
+
+   UpperCase.String: proc (InStr,OutStr) public swapable; /* removes leading spaces from a string */
+      dcl (InStr,OutStr) array; /* Both arrays can be the same */
+      dcl I              fixed;
+
+      do I=0 to InStr(0)-1;     /* loop over bytes in input string */
+         call PByte(OutStr,I,UCASE(Byte(InStr,I))); /* copy to dest & uppercase them */
+      end;
+      OutStr(0)=InStr(0);
+
+   end UpperCase.String;
+
+
+   Remove.Spaces.From.String: proc (InStr,OutStr) public swapable; /* removes all leading,imbedded, or trailing garbage, uppercases what's left */
+      dcl (InStr,OutStr) array; /* Both arrays can be the same */
+      dcl (I,J,Ch)       fixed;
+
+      do I=0 to InStr(0)-1;     /* loop over bytes in input string */
+         Ch=Byte(InStr,I);      /* get next char from input string */
+         if Ch IGT SP then do;  /* want to keep this char          */
+            call PByte(OutStr,J,Ch); 
+            J=J+1;              /* advance output string length    */
+         end;
+      end;
+      OutStr(0)=J;              /* save final length of cleaned up string */
+
+   end Remove.Spaces.From.String;
+
+   SET.CONV.ERR: proc(code,str) swapable;
+      dcl code fixed;
+      dcl str  array;
+      call set.error(code,str);
+      if conv.err=0 then conv.err=code;
+   end SET.CONV.ERR;
+
+
+   /* $SUBTITLE  Routine to Parse an Integer from a String */
+
+
+   CONV.STR.TO.FIXED:  proc(str,dp,sign) fixed public swapable; /* Read str Routine and Convert to a Numeric Value */
+      dcl str       fixed array;
+      dcl dp        fixed; /* digits following decimal point */
+      dcl sign      fixed; /* 1 -> expecting signed number, 0 -> unsigned */
+      dcl sum       fixed;
+      dcl ch        fixed static;
+      dcl dp.read   fixed; /* =1 after decimal is read */
+      dcl sign.read fixed; /* +1 if positive, -1 is negative */
+      dcl fract     fixed; /* number of digits following decimal point */
+      dcl i         fixed;
+
+      SKIP.SPACES: proc(str);
+         dcl str fixed array;
+
+         do while (ch=sp);
+            ch = getc(str);
+         end;
+      end SKIP.SPACES;
+
+      conv.err=0;         /* clear conversion error flag */
+      str.ptr=0;
+      ch=getc(str);
+      sign.read=0;        /* assume positive sign */
+
+      call SKIP.SPACES(str);
+
+      if sign<>0 then do; /* expecting some sign on number */
+         if ch=asc.min then do;
+            sign.read=(-1);
+            ch=getc(str);
+         end;
+         else if ch=asc.plus
+         then ch=getc(str);
+      end;
+      else if ch=asc.plus then ch=getc(str);
+
+      sum=0;     /* init read value */
+      dp.read=0; /* no decimal point typed yet */
+      fract=0;   /* no digits typed after decimal yet */
+
+      do while ((ch=dot) or ((ch>=asc.0) and (ch<=asc.9))) and (ch<>0);
+         if ch=dot then do;
+            if dp.read<>0 then call set.conv.err(err.ifm,str);
+            dp.read=1; 
+         end;
+         else do;
+            if dp.read<>0 then fract=fract+1;
+            if ((dp=0)  and (dp.read=0))
+            or ((dp<>0) and (fract ILE dp)) then do;
+               if sum IGT 6553 then call set.conv.err(err.big,str);
+               load sum; mul 10; sum=res+(ch-asc.0);
+               if sum ILT (ch-asc.0) then call set.conv.err(err.big,str);
+            end;
+         end;
+         ch=getc(str);
+      end;
+
+      if (dp<>0) then do; /* expected a decimal point */
+         do i=fract to dp-1;
+            if sum IGT 6553 then call set.conv.err(err.big,str);
+            load sum; mul 10; sum=res;
+         end;
+      end;
+
+      if sign<>0 then do;
+         if sign.read=0 then sign=32767;
+         else                sign=32768;
+         if sum IGT sign then call set.conv.err(err.big,str);
+         if sign.read<0 then sum=-sum;
+      end;
+      if ch<>0 then call set.conv.err(err.ifm,str);
+
+      return sum;
+
+   end CONV.STR.TO.FIXED;
+
+
+   /* $SUBTITLE  Routine to Parse a Seconds.Msecs Time from a String */
+
+
+   CONV.STR.TO.SEC.MSEC:  proc(str,time) boolean public swapable; 
+      dcl str    fixed array;  /* input string  */
+      dcl time   fixed array;  /* output: will hold sec, msec */
+      dcl ch     fixed static;
+      dcl i      fixed;
+      dcl sec    lit 'time(0)';
+      dcl msec   lit 'time(1)';
+      dcl sign   fixed;
+      
+      SKIP.SPACES: proc(str);
+         dcl str fixed array;
+
+         do while (ch=sp);
+            ch = getc(str);
+         end;
+      end SKIP.SPACES;
+
+      conv.err=0;              /* clear conversion error flag */
+      str.ptr=0; ch=getc(str); /* init ptr to str and get first char */
+      sec=0; msec=0;
+
+      call SKIP.SPACES(str);
+
+      if      ch=asc.plus then do;   /* see if string begins with +  */
+         ch=getc(str);
+         call SKIP.SPACES(str);
+      end;
+      else if ch=asc.min  then do;   /* see if string begins with -  */
+         sign=1;
+         ch=getc(str); 
+         call SKIP.SPACES(str);
+      end;
+
+      do while ((ch>=asc.0) and (ch<=asc.9));
+         if sec IGT 6553 then call set.conv.err(err.big,str);
+         load sec; mul 10; sec=res+(ch-asc.0);
+         if sec ILT (ch-asc.0) then call set.conv.err(err.big,str);
+         ch=getc(str);
+      end;
+
+      if ch=dot then ch=getc(str);   /* scan past decimal */
+      i=100;
+      do while ((ch>=asc.0) and (ch<=asc.9)) and (ch<>0);
+         load ch-asc.0; mul i; msec=msec+res;
+         load i; div 10; i=res;
+         ch=getc(str);
+      end;
+      if ch<>0 then call set.conv.err(err.ifm,str);
+
+      if sign then do;             /* if minus,  store as one's */
+         msec = (-  msec);         /* complement form for now   */
+         sec  = (-  sec );
+      end;
+
+      return conv.err;
+
+   end CONV.STR.TO.SEC.MSEC;
+
+
+   CONV.MIN.SEC.STR.TO.SEC.MSEC:  proc(str,time) boolean public swapable; /* parses a time from str(), puts in seconds,msec */
+      dcl str         array;  /* input string  */
+      dcl time        array;  /* output: will hold secs, fractions */
+      dcl ch          fixed static;
+      dcl i           fixed;
+      dcl mins        fixed;
+      dcl sign   fixed;
+
+      dcl secs   lit 'time(0)';  /* secs or frames  */
+      dcl frac   lit 'time(1)';  /* fractions 0-999  */
+
+      SKIP.SPACES: proc(str);
+         dcl str fixed array;
+
+         do while (ch=sp);
+            ch = getc(str);
+         end;
+      end SKIP.SPACES;
+
+      conv.err=0;              /* clear errors flag */
+      mins=0; secs=0; frac=0;  /* init time value */
+      str.ptr=0; ch=getc(str); /* init ptr to str and get first char */
+
+      call SKIP.SPACES(str);
+
+      /* minutes */
+
+      if      ch=asc.plus then do;   /* see if string begins with +  */
+         ch=getc(str);
+         call SKIP.SPACES(str);
+      end;
+      else if ch=asc.min  then do;   /* see if string begins with -  */
+         sign=1;
+         ch=getc(str); 
+         call SKIP.SPACES(str);
+      end;
+
+      do while (ch>=asc.0) and (ch<=asc.9);
+         if mins IGT 100 then call set.conv.err(err.big,str); 
+         load mins; mul 10; mins=res+(ch-asc.0);
+         if mins ILT (ch-asc.0) then call set.conv.err(err.big,str); 
+         ch=getc(str);
+      end;
+
+      if (ch=colon) or (ch=slash) or (ch=sp) then do;           
+         ch=getc(str);                    /* scan past colon             */
+         if (ch<>0) and ((ch<asc.0) or (ch>asc.9)) and (ch<>dot) then call set.conv.err(err.ifm,str);
+         do while (ch>=asc.0) and (ch<=asc.9);
+            if secs IGE 6 then call set.conv.err(err.big,str); 
+            load secs; mul 10; secs=res+(ch-asc.0);
+            ch=getc(str);
+         end;
+      end;
+      else do;
+         if ch=dot then call set.conv.err(err.ifm,str);
+      end;
+
+      if ch=dot then ch=getc(str);   /* scan past decimal */
+
+      i=100;
+      do while (i<>0) and (ch>=asc.0) and (ch<=asc.9);
+         load ch-asc.0; mul i; frac=frac+res;
+         load i; div 10; i=res;
+         ch=getc(str);
+      end;
+
+      secs = secs+(mins*60);
+
+      if ch<>0 then call set.conv.err(err.ifm,str); 
+
+      if sign then do;             /* if minus,  store as one's */
+         frac = (- frac);          /* complement form for now   */
+         secs = (- secs);
+      end;
+
+      return conv.err;
+
+   end CONV.MIN.SEC.STR.TO.SEC.MSEC;
+
+   /* $SUBTITLE  Routine to Parse a Beat Time (Meas:Beats.Fractions) from a String */
+
+   CONV.STR.TO.BEATS:  proc(str,time.or.dur,bpm,format,time) boolean public swapable; /* parses a time from str(), puts in beats format */
+      dcl str          array;  /* input string  */
+      dcl time.or.dur  fixed;  /* either cf#time or cf#dur */
+      dcl bpm          fixed;
+      dcl format       fixed;  /* display format, 1-beats, 2-meas:beats */
+      dcl time         array;  /* output: will hold beats, fractions */
+      dcl ch           fixed static;
+      dcl i            fixed;
+      dcl meas         fixed;
+      dcl got.measure# fixed;
+      dcl sign         fixed;
+      dcl measures(3)  fixed;
+		dcl result  (2)  fixed;
+
+      dcl beats  lit 'time(0)';  /* beats or frames  */
+      dcl frac   lit 'time(1)';  /* fractions 0-999  */
+
+      SKIP.SPACES: proc(str);
+         dcl str fixed array;
+
+         do while (ch=sp);
+            ch = getc(str);
+         end;
+      end SKIP.SPACES;
+
+      conv.err=0;              /* clear errors flag */
+      meas=0; beats=0; frac=0; /* init time value */
+      got.measure#=0;
+      str.ptr=0; ch=getc(str); /* init ptr to str and get first char */
+
+      call SKIP.SPACES(str);
+
+      /* measures */
+
+      if      ch=asc.plus then do;   /* see if string begins with +  */
+         ch=getc(str);
+         call SKIP.SPACES(str);
+      end;
+      else if ch=asc.min  then do;   /* see if string begins with -  */
+         sign=1;
+         ch=getc(str); 
+         call SKIP.SPACES(str);
+      end;
+
+      do while (ch>=asc.0) and (ch<=asc.9);
+         got.measure# = 1;
+         if meas IGT 6553 then call set.conv.err(err.big,str); 
+         load meas; mul 10; meas=res+(ch-asc.0);
+         if meas ILT (ch-asc.0) then call set.conv.err(err.big,str); 
+         ch=getc(str);
+      end;
+
+      if (ch=colon) or (ch=slash) or (ch=sp) then do;           
+         ch=getc(str);                    /* scan past colon             */
+
+         if  ((ch<asc.0) or (ch>asc.9))   /* if not a number             */
+         and (ch<>0)                      /* and not end of string       */
+         and (ch<>13)                     /* carriage return             */
+         and (ch<>dot)                    /* period                      */
+         and (time.or.dur=cf#time)        /* and showing times           */
+         then do;
+            call set.conv.err(err.ifm,str);   /* this is an error      */
+         end;
+
+         do while (ch>=asc.0) and (ch<=asc.9);
+            if beats IGT 6553 then call set.conv.err(err.big,str); 
+            load beats; mul 10; beats=res+(ch-asc.0);
+            if beats ILT (ch-asc.0) then call set.conv.err(err.big,str); 
+            ch=getc(str);
+         end;
+      end;
+      else do;
+         if (format=1)    /* format is showing beats, not meas:beats */
+         or (ch=dot)
+         then do;         /* beat value got put into MEAS variable */
+            beats=meas; meas=0;   /* ripple values from meas to beats */
+         end;
+      end;
+
+      if ch=dot then ch=getc(str);   /* scan past decimal */
+
+      i=100;
+      do while (i<>0) and (ch>=asc.0) and (ch<=asc.9);
+         load ch-asc.0; mul i; frac=frac+res;
+         load i; div 10; i=res;
+         ch=getc(str);
+      end;
+
+      if  (format = 2)               /* showing measures:beats */
+      and ((meas|beats) = 0)         /* 0:0 parsed             */
+      and (time.or.dur = cf#time)    /* not in duration mode   */
+      and (got.measure#<>0)          /* we did parse a meas #  */
+      then beats = 1;                /* must be at least 1     */
+
+      if  (beats=0)                   /* no beats     */
+      and (time.or.dur = cf#time)     /* showing time */
+      then do;
+         if (meas<>0)                 /* some measures were entered */
+         then beats = 1;              /* beats must be at least 1   */
+         else if (sign = 0)           /* if positive                */
+         or      (frac = 0)           /* or no fraction             */
+         then do;
+            call set.conv.err(err.ifm,str);  /* meas=0 and beats=0 therefore less than 1 beat, which is illegal in time mode */
+         end;
+      end;
+
+      if time.or.dur = cf#time
+      then do;
+         measures(0) = 0;
+         measures(1) = meas;
+         measures(2) = beats;
+         measures(3) = frac;
+			
+			if (sign != 0)
+			{
+				measures(2) = -measures(2);
+				measures(3) = -measures(3);
+			}
+			
+         call Convert.Long.Measures.Beats.To.Long.Beats(Measures, result);
+			
+			beats = result(1);
+			frac  = result(2);
+      end;
+      else
+		{
+			beats = beats+(meas*bpm);
+			
+			if sign then do;             /* if minus,  store as one's */
+				frac  = (- frac );        /* complement form for now   */
+				beats = (- beats);
+			end;
+		}
+		
+      if (ch<>0) 
+      then call set.conv.err(err.ifm,str);
+
+      return conv.err;
+
+   end CONV.STR.TO.BEATS;
+
+   /* $SUBTITLE  Routine to Parse a Footage Time (Feet/Frames.Fractions) from a String */
+
+
+   CONV.STR.TO.FEET:  proc(str,time) boolean public swapable; 
+      dcl str         array;  /* input string  */
+      dcl time        array;  /* output: will hold feet,frames & fbits */
+      dcl ch          fixed static;
+      dcl i           fixed;
+      dcl sign        fixed;
+
+      dcl feet   lit 'time(0)';  
+      dcl frms   lit 'time(1)';  
+      dcl frac   lit 'time(2)';  
+
+      SKIP.SPACES: proc(str);
+         dcl str fixed array;
+
+         do while (ch=sp);
+            ch = getc(str);
+         end;
+      end SKIP.SPACES;
+
+      conv.err=0;                    /* clear errors flag */
+      feet=0; frms=0; frac=0;        /* init time value */
+      str.ptr=0; ch=getc(str);       /* init ptr to str and get first char */
+
+      call SKIP.SPACES(str);
+
+      /* feet */
+
+      if      ch=asc.plus then do;   /* see if string begins with +  */
+         ch=getc(str);
+         call SKIP.SPACES(str);
+      end;
+      else if ch=asc.min  then do;   /* see if string begins with -  */
+         sign=1;
+         ch=getc(str); 
+         call SKIP.SPACES(str);
+      end;
+
+      do while (ch>=asc.0) and (ch<=asc.9);
+         if feet IGT 6553 then call set.conv.err(err.big,str); 
+         load feet; mul 10; feet=res+(ch-asc.0);
+         if feet ILT (ch-asc.0) then call set.conv.err(err.big,str); 
+         ch=getc(str);
+      end;
+
+      if (ch=colon) or (ch=slash) or (ch=sp) then do;           
+         ch=getc(str);                    /* scan past colon             */
+         if (ch<>0) and ((ch<asc.0) or (ch>asc.9)) and (ch<>dot) then call set.conv.err(err.ifm,str);
+         do while (ch>=asc.0) and (ch<=asc.9);
+            if frms IGT 6553 then call set.conv.err(err.big,str); 
+            load frms; mul 10; frms=res+(ch-asc.0);
+            if frms ILT (ch-asc.0) then call set.conv.err(err.big,str); 
+            ch=getc(str);
+         end;
+      end;
+      else do;     /* no feetures entered, ripple down */
+         frms=feet; feet=0;
+      end;
+
+      if ch=dot then ch=getc(str);   /* scan past decimal */
+
+      i=10; /* only use 2 digits after decimal point */
+      do while (ch>=asc.0) and (ch<=asc.9);
+         load ch-asc.0; mul i; frac=frac+res;
+         load i; div 10; i=res;
+         ch=getc(str);
+      end;
+
+      if ch<>0 then call set.conv.err(err.ifm,str); 
+
+      if sign then do;      /* negate entire string if */
+         feet = (- feet);   /* was minus footage       */
+         frms = (- frms);
+         frac = (- frac);
+      end;
+
+      return conv.err;
+
+   end CONV.STR.TO.FEET;
+  
+
+   /* $SUBTITLE  Routine to Parse a SMPTE Time (HH:MM:SS:FF.BB) from a String */
+
+
+   CONV.STR.TO.SMPTE:  proc(str,time) boolean public swapable; 
+      dcl str						fixed array;
+      dcl time						fixed array;
+      dcl ch						fixed static;
+      dcl (i,j,l)					fixed;
+      dcl (count,field.count)	fixed;
+
+      dcl hrs  lit 'time(0)';
+      dcl min  lit 'time(1)';
+      dcl sec  lit 'time(2)';
+      dcl fra  lit 'time(3)';
+      dcl bit  lit 'time(4)';
+
+      SKIP.SPACES: proc(str);
+         dcl str fixed array;
+
+         do while (ch=sp);
+            ch = getc(str);
+         end;
+      end SKIP.SPACES;
+
+      conv.err=0;          /* clear errors flag */
+
+		//	confusing terms:
+		//		count				keeps track of the time unit we're scanning, i.e.,
+		//								0 = hrs
+		//								1 = min
+		//								2 = sec
+		//								3 = fra
+		//		field.count		keeps track of which character in the current time unit we're on (0 or 1)
+
+      str.ptr=0; ch=getc(str); count=0; field.count=0; /* init ptr to str and get first char */
+      do i=0 to 4; time(i)=0; end;
+
+      call SKIP.SPACES(str);
+
+      if ch=colon then ch=getc(str);	/* ignore leading unused colon  */
+
+      do while (ch<>0)&(ch<>dot);		/* process input characters */
+         if ((ch ige asc.0) and (ch ile asc.9) and (field.count ilt 2))
+         then do;								/* get number */
+            if fra IGT 6553 then call set.conv.err(err.big,str);
+            load fra; mul 10; fra=res+(ch-asc.0);
+            if fra ILT res then call set.conv.err(err.big,str);
+            ch=getc(str);
+            field.count=field.count+1;
+         end;
+         else if (ch=colon or field.count=2) then do;	/* next field */
+            field.count=0;
+            count=count+1;
+            if count igt 3 then call set.conv.err(err.ifm,str);
+            do i=0 to 2;					/* ripple min, sec, frame up */
+               core(addr(hrs)+i)=core(addr(min)+i);
+            end;
+            fra=0;							/* initialize new field */
+
+            if (ch=colon)					/* throw away colon if there is one */
+            then ch=getc(str);
+         end;
+         else do;
+            call set.conv.err(err.ifm,str);	/* if not 0-9, it better be a ':' */
+            ch=getc(str);
+         end;									/* skip past this bad char */
+      end;
+
+      if field.count=1 then do;			/* this means odd # of digits, must shuffle numbers down by one place */
+			//	note: this doesn't account for the possibility that colons were used to delineate previous fields
+         sec	= sec/10;	fra	= fra+(rem*10);
+         min	= min/10;	sec	= sec+(rem*10);
+         hrs	= hrs/10;	min	= min+(rem*10);
+      end;
+
+      if ch=dot then do;					/* scan off bits if dot */
+         ch=getc(str);						/* skip dot, get next   */
+
+			if (ch != 0)						//	allow terminating decimal to mean ".0"
+			{
+				if (ch ilt asc.0)\(ch igt asc.9) then call set.conv.err(err.ifm,str);
+				bit=(ch-asc.0)*10;
+				ch=getc(str);
+				if ch<>0 then do;					/* still more     */
+					if (ch ilt asc.0)\(ch igt asc.9) then call set.conv.err(err.ifm,str);
+					bit=bit+ch-asc.0;
+				end;
+				ch=getc(str);						/* that should be it */
+				if ch<>0 then call set.conv.err(err.ifm,str);
+			}
+      end;
+
+      return conv.err;
+
+   end CONV.STR.TO.SMPTE;
+
+
+   /* $SUBTITLE  Routine to Parse a Sound File Time (Sec.Msec Mcsecs) from a String */
+
+
+   CONV.STR.TO.SFTIME: proc (str,time) boolean public swapable; /* parses a time from str(), puts in SEC, MSEC, MCSEC */
+      dcl str       array;   /* input parameter value */
+      dcl time      array;   /* outgoing time values */
+      dcl (i,j)     fixed;
+      dcl ch        fixed static;
+      dcl sign      fixed;
+
+      dcl sec   lit 'time(0)';
+      dcl msec  lit 'time(1)';
+      dcl mcsec lit 'time(2)';
+
+      SKIP.SPACES: proc(str);
+         dcl str fixed array;
+
+         do while (ch=sp);
+            ch = getc(str);
+         end;
+      end SKIP.SPACES;
+
+      conv.err=0;              /* clear errors flag */
+      sec=0; msec=0; mcsec=0;  /* init time value */
+      str.ptr=0; ch=getc(str); /* init ptr to str and get first char */
+
+      call SKIP.SPACES(str);
+
+      if      ch=asc.plus then do;   /* see if string begins with +  */
+         ch=getc(str);
+         call SKIP.SPACES(str);
+      end;
+      else if ch=asc.min  then do;   /* see if string begins with -  */
+         sign=1;
+         ch=getc(str); 
+         call SKIP.SPACES(str);
+      end;
+
+      do while (ch>=asc.0) and (ch<=asc.9);
+         if sec > 999 then call set.conv.err(err.big,str);  /* 1 megabyte => 10 seconds of sound */
+         load sec; mul 10; sec=res+(ch-asc.0);
+         ch=getc(str);
+      end;
+
+      if ch=DOT then ch=getc(str);   /* skip over decimal point */
+      else if (ch<>0) then call set.conv.err(err.ifm,str); 
+
+      i=0;                            /* init count */
+      do while (i<3) and (ch>=asc.0) and (ch<=asc.9);
+         load msec; mul 10; msec=res+(ch-asc.0);
+         ch=getc(str); i=i+1;
+      end;
+      if i<>3 then do;
+         if (ch<>0) then call set.conv.err(err.ifm,str);
+         do while i<>3;
+            load msec; mul 10; msec=res;
+            i=i+1;
+         end;
+      end;
+      else call skip.spaces(str);    /* skip over space to match display   */
+
+      do while (i<6) and (ch>=asc.0) and (ch<=asc.9);
+         load mcsec; mul 10; mcsec=res+(ch-asc.0);
+         ch=getc(str); i=i+1;
+      end;
+      do while i<>6;                 /* process the last of the microseconds*/
+         load mcsec; mul 10; mcsec=res;
+         i=i+1;
+      end;
+      if (ch<>0) then call set.conv.err(err.ifm,str); 
+
+      if sign then do;      /* negate entire string if */
+         sec   = (-  sec);
+         msec  = (- msec);
+         mcsec = (-mcsec);
+      end;
+
+      return conv.err;
+
+   end CONV.STR.TO.SFTIME;
+
+
+   /* $SUBTITLE  Routine to Parse a Pitch Value from a String */
+
+
+	dcl recent.keyboard.key fixed public;
+	
+   CONV.STR.TO.KEY#:  proc(str) fixed public swapable; /* convert the pitch in the passed str to a key number */
+      dcl str        array;
+      dcl pdata      data (9,11,0,2,4,5,7);
+      dcl (ch,pitch) fixed;
+
+      conv.err=0;                        /* clear errors flag */
+      str.ptr=0;                         /* re-init ptr into str */
+      pitch=(-1);                        /* assume an error */
+      ch=getc(str);                      /* get first char */
+
+		if (ch == ASC.X)						  /* look for 'XX' */
+		{
+			ch = getc(str);					  /* get second x */
+			
+			if (ch == ASC.X)
+				pitch = recent.keyboard.key;
+			else
+				pitch = (-1);
+		}
+     
+	   else if (ch ige ASC.A) and (ch ile ASC.G) then do;
+         pitch=pdata(ch-ASC.A);          /* look up base pitch */
+         ch=getc(str);                   /* get next char */
+         if ch=asc.sharp then do;        /* a sharp is present */
+            pitch=pitch+1; ch=getc(str); /* get next char */
+         end;
+         else if ch=ASC.F then do;       /* a flat is present */
+            pitch=pitch-1; ch=getc(str); /* next char */
+         end;
+         if (ch ilt ASC.0) or (ch igt ASC.7)
+         then pitch=(-1);                /* signal error */
+         else pitch=pitch+(ch-ASC.0)*12;
+      end;
+
+      if (pitch<0) or (pitch>=num.keys) then do; 
+         call set.conv.err(err.ifm,str); 
+         pitch=-1;
+      end;
+
+      return pitch;
+
+   end CONV.STR.TO.KEY#;
+
+   /* $subtitle - Routines to Convert From Numbers To Strings */
+
+   CONV.FIXED.TO.STR:  proc(val,dp,field.width,format,str) fixed public swapable;  /* put a decimal number into str */
+      dcl val          fixed; /* 16-bit value to convert */
+      dcl dp           fixed; /* decimal point position */
+      dcl field.width  fixed; /* string length used for filling */
+      dcl format       fixed; /* collection of formatting control bits */
+      dcl str          array; /* output string */
+      dcl outstate     fixed; /* output state control */
+      dcl orig.len     fixed; /* original length of STR */
+      dcl digit        fixed;
+      dcl sign.flag    fixed;
+      dcl temp.str (4) fixed;
+      dcl extra.char   fixed;
+      dcl i            fixed;
+
+      /* NOTE:  This routine will append at least (DP + SIGN + 2) chars */
+      /*        to the end of the output string.                        */
+
+      if  ((format&cf#justmask)=cf#right) /* right justifying output   */
+      and ((format&cf#fillmask)=0)        /* but no fill specified     */
+      then format=format\cf#spfill;       /* default to use space fill */
+
+      if (format&cf#appendmask)=0 then str(0)=0; /* erase current string to start */
+      orig.len=str(0);
+
+      if ((format&cf#signmask)<>0) then do;
+         if (val < 0) then do;
+            val = -val;
+            sign.flag=(-1);
+         end;
+         else sign.flag=(+1);
+      end;
+      else if ((format&cf#forcemin)<>0) then do;
+         sign.flag = (-1);
+      end;
+
+      temp.str(0)=0;                   /* init temp str to null */
+
+      if  ((format&cf#justmask)=cf#left)   /* left justifying output */
+      and (sign.flag<>0)                   /* and doing signed conversion */
+      then do;
+         if      sign.flag< 0 then call appendc(str,asc.min);
+         else if sign.flag<>0 then call appendc(str,sp);
+         sign.flag=0; extra.char=1;
+      end;
+
+      outstate=0;                      /* not printing digits yet */
+      do i=0 to 4;                     /* loop over digits - build temp string left justified */
+         if (i+dp)=5 then do;
+            if (outstate=0)&(sign.flag<>0) then do;
+               if      sign.flag< 0 then call appendc(temp.str,asc.min);
+               else if sign.flag<>0 then call appendc(temp.str,sp);
+               sign.flag=0;
+            end;
+            if outstate=0 then call appendc(temp.str,asc.0);
+            call appendc(temp.str,dot);
+         end;
+
+         digit=0;                      /* assume zero */
+         if val IGE powers(i) then do; /* non-zero digit */
+            load val; div powers(i); digit=res; val=rem;
+            outstate=1;                /* start printing */
+            if sign.flag<>0 then do;
+               if      sign.flag< 0 then call appendc(temp.str,asc.min);
+               else if sign.flag<>0 then call appendc(temp.str,sp);
+               sign.flag=0;
+            end;
+         end;
+
+         if  (outstate<>0)              /* if output has started already   */
+         or  ((i=4)                     /* or this is last digit           */
+         and  ((format&cf#subspace)=0)) /* and user wants it               */
+         or  ((i+dp)>=5)                /* or to right of DP               */
+         then do;
+            if sign.flag<>0 then do;
+               if      sign.flag< 0 then call appendc(temp.str,asc.min);
+               else if sign.flag<>0 then call appendc(temp.str,sp);
+               sign.flag=0;
+            end;
+            call appendc(temp.str,ASC.0+digit);
+         end;
+      end;                              /* of digit loop                   */
+
+      if  (dp=0)                        /* if no fractional part specified */
+      and ((format&cf#forcedp)<>0)      /* but user wants DP at end        */
+      then call appendc(temp.str,dot);  /* then give him one               */
+
+      if field.width=0 then field.width=temp.str(0)+extra.char; /* defaults to min length */
+
+      if (temp.str(0)+extra.char) igt field.width /* out string is too long */
+      then do;                                    /* string won't fit in field */
+         temp.str(0)=field.width-extra.char;      /* limit it to max len */
+         do i=0 to temp.str(0)-1;                 /* loop over remaining chars */
+            digit=byte(temp.str,i);
+            if (digit>=asc.0) & (digit<=asc.9)    /* replace all digits  */
+            then call pbyte(temp.str,i,asc.star); /* with asterisks      */
+         end;
+      end;
+
+      if (format&cf#justmask)=cf#left then call append.to.str(str,temp.str);
+      
+      if (format&cf#fillmask)<>0 then do;
+         do i=temp.str(0)+extra.char to field.width-1; /* put fill chars into output string */
+            if (format&cf#spfill)<>0
+            then call appendc(str,sp);        /* fill with spaces */
+            else call appendc(str,asc.0);     /* fill with zeroes */
+         end;
+      end;
+
+      if (format&cf#justmask)=cf#right then call append.to.str(str,temp.str);
+      
+      return (str(0)-orig.len);      /* return # of chars appended to output string */
+
+   end CONV.FIXED.TO.STR;
+
+   CONV.SEC.MSEC.TO.STR: proc (time,out.str,maxl,maxr) fixed public swapable;
+      dcl time        array; /* INPUT: 0-seconds, 1-milliseconds */
+      dcl out.str     array; /* OUTPUT: string */
+      dcl (maxl,maxr) fixed; /* max chars to left and right of dec. point */
+      dcl sign   fixed;
+      dcl sec    fixed;
+      dcl msec   fixed;
+
+      dcl cf#sec  lit 'cf#unsigned\cf#erase\cf#right\cf#spfill';  /* seconds format bits */
+      dcl cf#msec lit 'cf#unsigned\cf#append\cf#right\cf#zerofill'; /* msec format bits */
+
+      if maxl=cf#default then maxl=5;
+      if maxr=cf#default then maxr=3;
+
+      sec  = time(0);
+      msec = time(1);
+
+      if (sec<0) or (msec<0)
+      then do;
+         sec  = (- sec  );
+         msec = (- msec );
+         sign   = cf#forcemin;
+      end;
+
+      call conv.fixed.to.str(sec,0,maxl,cf#sec\sign,out.str);
+      if maxr<>cf#suppress then do;
+         call appendc(out.str,dot);
+         call conv.fixed.to.str(msec,0,maxr,cf#msec,out.str);
+      end;
+
+      return(out.str(0));
+   end CONV.SEC.MSEC.TO.STR;
+
+   CONV.SEC.MSEC.TO.MIN.SEC.STR: proc (time,out.str,maxl,maxr) fixed public swapable;
+      dcl time        array; /* INPUT: 0-seconds, 1-milliseconds */
+      dcl out.str     array; /* OUTPUT: string */
+      dcl (maxl,maxr) fixed; /* maxl = minutes digits */
+                             /* always 3 seconds      */
+                             /* maxr = beat fract     */
+      dcl sign        fixed;
+      dcl secs        fixed;
+      dcl frac        fixed;
+
+      dcl cf#mins lit 'cf#unsigned\cf#erase \cf#right\cf#spfill ';  /* minutes format bits */
+      dcl cf#beat lit 'cf#unsigned\cf#append\cf#right\cf#zerofill'; /* secs format bits */
+      dcl cf#frac lit 'cf#unsigned\cf#append\cf#right\cf#zerofill'; /* fracs format bits */
+
+      if maxl=cf#default then maxl=5;
+      if maxr=cf#default then maxr=3;
+
+      secs = time(0);  /* secs             */
+      frac = time(1);  /* fractions 0-999  */
+
+      if (secs<0) or (frac<0)
+      then do;
+         secs  = (- secs);
+         frac  = (- frac);
+         sign   = cf#forcemin;
+      end;
+
+      load secs;
+      div 60;
+      secs=rem;                 /* but not for durations */
+
+      call conv.fixed.to.str(res,0,maxl,cf#mins\sign,out.str);
+      call appendc(out.str,colon);
+      call conv.fixed.to.str(secs,0,2,cf#beat,out.str);
+      if maxr<>cf#suppress then do;
+         call appendc(out.str,dot);
+         call conv.fixed.to.str(frac,0,maxr,cf#frac,out.str);
+      end;
+
+      return (out.str(0));
+   end CONV.SEC.MSEC.TO.MIN.SEC.STR;
+
+   CONV.SFTIME.TO.STR: proc (time,out.str,maxl,maxr) fixed public swapable;
+      dcl time    array; /* INPUT: 0-seconds, 1-milliseconds, 2-microseconds */
+      dcl out.str array; /* OUTPUT: string */
+      dcl (maxl,maxr) fixed; /* max chars to left and right of dec. point */
+      dcl sign        fixed;
+      dcl sec         fixed;
+      dcl msec        fixed;
+      dcl mcsec       fixed;
+
+      dcl cf#sec  lit 'cf#unsigned\cf#erase\cf#right\cf#spfill';  /* seconds format bits */
+      dcl cf#msec lit 'cf#unsigned\cf#append\cf#right\cf#zerofill'; /* msec format bits */
+
+      if maxl=cf#default then maxl=5;
+      if maxr=cf#default then maxr=7;
+
+      sec   = time(0);
+      msec  = time(1);
+      mcsec = time(2);
+
+      if (sec<0) or (msec<0) or (mcsec<0)
+      then do;
+         sec   = (- sec  );
+         msec  = (- msec );
+         mcsec = (- mcsec);
+         sign   = cf#forcemin;
+      end;
+
+      call conv.fixed.to.str(sec,0,maxl,cf#sec\sign,out.str);
+      if maxr<>cf#suppress then do;
+         call appendc(out.str,dot);
+         call conv.fixed.to.str(msec,0,min(maxr,3),cf#msec,out.str);
+         if maxr>3 then do;
+            call appendc(out.str,sp);
+            maxr=maxr-4;
+            if maxr<>0 then call conv.fixed.to.str(mcsec,0,maxr,cf#msec,out.str);
+         end;
+      end;
+
+      return(out.str(0));
+   end CONV.SFTIME.TO.STR;
+
+   CONV.KEY#.TO.STR: proc (key#,out.str) fixed public swapable;
+      dcl key#    fixed; /* INPUT: a key numbr 0 - 84 */
+      dcl out.str array; /* OUTPUT: string */
+      dcl i       fixed;
+      dcl keydata1 data ('CCDDEFFGGAAB');
+      dcl keydata2 data (' # #  # # # ');
+
+      out.str(0)=0;     /* init string to null */
+
+      if (key# IGT num.keys-1) or (key# ILT 0) then do;      /* blow up */
+         call append.to.str(out.str,'???');
+         return (out.str(0));
+      end;
+
+      load key#; div 12;                     
+      key#=res;                              /* octave      */
+      i=rem;                                 /* key #       */
+      call appendc(out.str,(byte(keydata1,i))); /* letter name */
+
+      i=byte(keydata2,i);                    /* find out if sharp */
+      if i<>sp then call appendc(out.str,i);    /* append sharp */
+
+      call appendc(out.str,(asc.0+key#));       /* append octave number */
+      if i=sp  then call appendc(out.str,i);    /* append trailing space if no sharp sign */
+
+      return(out.str(0));
+   end CONV.KEY#.TO.STR;
+
+   CONV.BEATS.TO.STR: proc(time,out.str,maxl,maxr) fixed public swapable;
+      dcl time      array;               /* time to be converted  */
+      dcl out.str   array;               /* string to be returned */
+      dcl fw        fixed;               /* field width           */
+      dcl (maxl,maxr) fixed; /* max chars to left of colon and right of dec. point */
+      dcl tform    fixed;
+      dcl sign     fixed;
+      dcl beats    fixed;     /* beats            */
+      dcl frac     fixed;     /* fractions 0-999  */
+
+      dcl cf#meas lit 'cf#unsigned\cf#erase\cf#right\cf#spfill'; /* measures format bits */
+      dcl cf#beat lit 'cf#unsigned\cf#append\cf#right\cf#zerofill'; /* beats format bits */
+      dcl cf#frac lit 'cf#unsigned\cf#append\cf#right\cf#zerofill'; /* fracs format bits */
+
+      beats = time(0);             /* Make local copy of caller's data */
+      frac  = time(1);
+
+      if maxl=cf#default then maxl=5;
+      if maxr=cf#default then maxr=3;
+
+      if (beats<0) or (frac<0)
+      then do;
+         beats = (- beats);
+         frac  = (- frac );
+         sign   = cf#forcemin;
+      end;
+
+      tform=cf#meas\sign; /* beats format: erase with space fill */
+      fw=maxl;
+
+      call conv.fixed.to.str(beats,0,fw,tform,out.str);
+      if maxr<>cf#suppress then do;
+         call appendc(out.str,dot);
+         call conv.fixed.to.str(frac,0,maxr,cf#frac,out.str);
+      end;
+
+      return (out.str(0));
+   end CONV.BEATS.TO.STR;
+
+   CONV.MEASURES.BEATS.TO.STR: proc(time, bpm, out.str, maxl, maxr) fixed public swapable;
+      dcl time      array;               /* time to be converted  */
+      dcl bpm       fixed;               /* beats per measure at start time */
+      dcl out.str   array;               /* string to be returned */
+      dcl fw        fixed;               /* field width           */
+      dcl (maxl,maxr) fixed; /* max chars to left of colon and right of dec. point */
+      dcl tform    fixed;
+      dcl meas     fixed;     /* measures         */
+      dcl beats    fixed;     /* beats            */
+      dcl frac     fixed;     /* fractions 0-999  */
+      dcl sign     fixed;
+
+      dcl cf#meas lit 'cf#unsigned\cf#erase\cf#right\cf#spfill';    /* measures format bits */
+      dcl cf#beat lit 'cf#unsigned\cf#append\cf#right\cf#zerofill'; /* beats format bits */
+      dcl cf#frac lit 'cf#unsigned\cf#append\cf#right\cf#zerofill'; /* fracs format bits */
+
+      meas  = time(0);             /* Make local copy of caller's data */
+      beats = time(1);
+      frac  = time(2);
+
+      if maxl=cf#default then maxl=5;
+      if maxr=cf#default then maxr=3;
+
+      if (beats<0) or (frac<0)
+      then do;
+         beats = (- beats);
+         frac  = (- frac );
+         sign   = cf#forcemin;
+      end;
+
+      tform=cf#beat;   /* beats format: append with zero fill */
+
+      call conv.fixed.to.str(meas,0,maxl,cf#meas\sign,out.str);
+      call appendc(out.str,colon);
+
+      if      bpm > 99 then fw = 3;               
+      else if bpm >  9 then fw = 2;
+      else                  fw = 1;
+
+      call conv.fixed.to.str(beats,0,fw,tform,out.str);
+      if maxr<>cf#suppress then do;
+         call appendc(out.str,dot);
+         call conv.fixed.to.str(frac,0,maxr,cf#frac,out.str);
+      end;
+
+      return (out.str(0));
+   end CONV.MEASURES.BEATS.TO.STR;
+
+   CONV.FEET.TO.STR: proc(time,out.str,maxl,maxr) fixed public swapable;
+      dcl time        array; /* time to be converted  */
+      dcl out.str     array; /* string to be returned */
+      dcl (maxl,maxr) fixed; /* max chars to left of slash and right of dec. point */
+      dcl sign        fixed;
+      dcl feet        fixed;  /* feet             */
+      dcl frames      fixed;  /* frames           */
+      dcl frac        fixed;  /* fractions 0-79   */
+
+      dcl cf#feet lit 'cf#unsigned\cf#erase \cf#right\cf#spfill  '; /* feet format bits */
+      dcl cf#fram lit 'cf#unsigned\cf#append\cf#right\cf#zerofill'; /* frames format bits */
+      dcl cf#frac lit 'cf#unsigned\cf#append\cf#right\cf#zerofill'; /* fractions of frames format bits */
+
+      if maxl=cf#default then maxl=5;
+      if maxr=cf#default then maxr=2;
+
+      feet    = time(0);  /* feet             */
+      frames  = time(1);  /* frames           */
+      frac    = time(2);  /* fractions 0-999  */
+
+      if (feet<0) or (frames<0) or (frac<0)
+      then do;
+         feet   = (- feet  );
+         frames = (- frames);
+         frac   = (- frac  );
+         sign   = cf#forcemin;
+      end;
+
+      call conv.fixed.to.str(feet,0,maxl,cf#feet\sign,out.str);
+      call appendc(out.str,colon);
+
+      call conv.fixed.to.str(frames,0,2,cf#fram,out.str);
+
+      if maxr<>cf#suppress then do;
+         call appendc(out.str,dot);
+         call conv.fixed.to.str(frac,0,maxr,cf#frac,out.str);
+      end;
+
+      return (out.str(0));
+   end CONV.FEET.TO.STR;
+
+   CONV.SMPTE.TO.STR: proc(time,out.str,maxl,maxr) fixed public swapable;
+      dcl time        array; /* time to be converted  */
+      dcl out.str     array; /* string to be returned */
+      dcl (maxl,maxr) fixed; /* max chars to left and right of dec. point */
+      dcl i           fixed;
+
+      dcl hrs  lit 'time(0)';
+      dcl min  lit 'time(1)';
+      dcl sec  lit 'time(2)';
+      dcl fra  lit 'time(3)';
+      dcl bit  lit 'time(4)';
+
+      dcl cf#smpte lit  'cf#unsigned\cf#append\cf#right\cf#zerofill'; /* smpte subfield format bits */
+
+      if maxl=cf#default then maxl=11; /* display entire SMPTE time */
+      if maxr=cf#default then maxr=2;  /* and show SMPTE bits       */
+
+      out.str(0)=0;         /* erase string here */
+
+      if maxl igt 11
+      then maxl=0;          /* print entire smpte time */
+      else maxl=11-maxl;    /* number of chars to skip */
+
+      do i=0 to 3;
+         if maxl<2 then do;
+            call conv.fixed.to.str(time(i),0,2-maxl,cf#smpte,out.str);
+            maxl=0;
+         end;
+         else maxl=maxl-2;
+
+         if i<>3 then do;
+            if maxl=0
+            then call appendc(out.str,colon);
+            else maxl=maxl-1; /* have skipped one more char */
+         end;
+      end;
+
+      if maxr<>cf#suppress then do;
+         call appendc(out.str,dot);
+         call conv.fixed.to.str(bit,0,maxr,cf#smpte,out.str);
+      end;
+
+      return (out.str(0));
+   end CONV.SMPTE.TO.STR;
+
+   GetStringField: proc(Source,Field,Index,Terminator) returns (fixed) swapable; /* get field from string */
+      dcl Source     fixed array; /* source string */
+      dcl Field      fixed array; /* field string */
+      dcl Index      fixed; /* starting index in source string */
+      dcl Terminator fixed; /* terminating character */
+      dcl ch         fixed;
+
+      Field(0) = 0; /* nothing in field string */
+
+      ch = -1; /* get into loop */
+      do while (Index < Source(0)) and (ch <> Terminator); /* loop over source characters until terminating character is found */
+         ch = byte(Source,Index); /* get character from source */
+
+         if ch <> Terminator then do; /* not the terminating character */
+            call pbyte(Field,Field(0),ch); /* add character to field string */
+            Field(0) = Field(0) + 1; /* adjust length */
+            Index = Index + 1; /* go to next source character */
+         end;
+      end;
+
+      return (Index); /* return character of next */
+   end GetStringField;
+
+   GetStringNumber: proc(Source) returns (fixed) swapable; /* get number from string */
+      dcl Source   fixed array; /* source array */
+      dcl Number   fixed; /* number to return */
+      dcl (i,j,ch) fixed;
+
+      Number = 0;
+      do i = 0 to Source(0) - 1; /* loop over characters */
+         ch = byte(Source,i); /* get character */
+
+         if (ch >= a.0) and (ch <= a.9) then do; /* got a digit */
+            j = Number;
+            Number = Number*10 + (ch - a.0); /* add to number */
+            if Number ilt j then return (-1); /* overflow */
+         end;
+         else return (-1); /* bad numeric character */
+      end;
+
+      return (Number); /* return number */
+   end GetStringNumber;
+
+   /* $SUBTITLE  Time Of Day Conversion Routines */
+
+   CONV.STR.TO.TIME: proc(TimeStr) returns (fixed) public swapable; /* convert time string to encoded time format */
+      dcl TimeStr      fixed array; /* string to convert */
+      dcl FieldStr(10) fixed; /* field parsed out of time string */
+      dcl (hours,minutes,seconds,PM) fixed; /* time parameters */
+      dcl i            fixed;
+
+      i = 0;
+      do while (i < TimeStr(0)) and (byte(TimeStr,i) = a.SP); /* get rid of leading spaces */
+         i = i + 1;
+      end;
+
+      i = GetStringField(TimeStr,FieldStr,i,a.colon); /* get hours field */
+      if FieldStr(0) = 0 then return (0); /* no hours entered */
+      hours = GetStringNumber(FieldStr); /* convert to number */
+      if (hours igt 23) then return (0); /* bad number entered */
+
+      i = GetStringField(TimeStr,FieldStr,i + 1,a.SP); /* get minutes field */
+      if FieldStr(0) = 0 then return (0); /* no minutes entered */
+      minutes = GetStringNumber(FieldStr); /* convert to number */
+      if (minutes igt 59) then return (0); /* bad number entered */
+
+      seconds = 0; /* user cannot enter seconds */
+
+      i = GetStringField(TimeStr,FieldStr,i + 1,a.SP); /* get AM/PM field */
+      if FieldStr(0) = 0 then do; /* nothing in this field, so assume military time */
+         if hours ilt 12 then do; /* this is AM */
+            if hours = 0 then hours = 12; /* zero is midnight */
+            PM = 0; /* set to AM */
+         end;
+         else do; /* this is PM */
+            hours = hours - 12; /* adjust */
+            if hours = 0 then hours = 12; /* zero is noon */
+            PM = 1; /* set to PM */
+         end;
+      end;
+      else do; /* got something to process */
+         if FieldStr(0) <> 2 then return (0); /* wrong size */
+         i = shr(FieldStr(1),8); /* get second character */
+         if (i <> a.M) and (i <> l.m) then return (0); /* not an "M" */
+
+         i = (FieldStr(1) and "HFF"); /* get first character */
+         if      (i = a.A) or (i = l.a) then PM = 0; /* AM */
+         else if (i = a.P) or (i = l.p) then PM = 1; /* PM */
+         else return (0); /* something random */
+
+         if (hours = 0) or (hours igt 12) then return (0); /* trying to use military time with AM/PM modifier */
+      end;
+      
+      i = ( shl(PM,15) or shl(hours,11) or shl(minutes,5) or shr(seconds,1) ); /* construct encoded time */
+      return (i); /* return encoded time */
+   end CONV.STR.TO.TIME;
+
+   CONV.TIME.TO.STR: proc(Time,TimeStr,ShowSec) public swapable; /* convert encoded time to string format */
+      dcl Time    fixed; /* time to convert */
+      dcl TimeStr fixed array; /* string to store converted time */
+      dcl ShowSec boolean; /* TRUE to show seconds */
+      dcl i       fixed;
+
+      if Time = 0 /* invalid time */
+      then TimeStr(0) = 0; /* nothing to convert */
+      else do; /* convert time */
+         if ShowSec then TimeStr(0) = 11; else TimeStr(0) = 8; /* set length of time string */
+
+         i = (shr(Time,11) and "HF"); /* get hours */
+         call pbyte(TimeStr,0,a.0 + (i / 10) ); /* store hours */
+         call pbyte(TimeStr,1,a.0 + (i mod 10) );
+
+         call pbyte(TimeStr,2,a.colon); /* separator */
+
+         i = (shr(Time,5) and "H3F"); /* get minutes */
+         call pbyte(TimeStr,3,a.0 + (i / 10) ); /* store minutes */
+         call pbyte(TimeStr,4,a.0 + (i mod 10) );
+
+         if ShowSec then do; /* show seconds */
+            call pbyte(TimeStr,5,a.colon); /* separator */
+
+            i = (shl(Time and "H1F",1)); /* get seconds */
+            call pbyte(TimeStr,6,a.0 + (i / 10) ); /* store seconds */
+            call pbyte(TimeStr,7,a.0 + (i mod 10) );
+            i = 8;
+         end;
+         else i = 5;
+
+         call pbyte(TimeStr,i,a.SP); /* separator */
+
+         if Time < 0
+         then call pbyte(TimeStr,i + 1,a.P); /* store PM */
+         else call pbyte(TimeStr,i + 1,a.A); /* store AM */
+         call pbyte(TimeStr,i + 2,a.M);
+      end;
+   end CONV.TIME.TO.STR;
+
+   /* $SUBTITLE  Date Conversion Routines */
+
+   GetMonthNames: proc(Str) swapable;
+      dcl Str fixed array; /* array to return month data in */
+
+      call Copy.String('JANFEBMARAPRMAYJUNJULAUGSEPOCTNOVDEC',Str); /* month names */
+   end GetMonthNames;
+
+   CONV.STR.TO.DATE: proc(DateStr) returns (fixed) public swapable; /* convert date string to encoded date format */
+      dcl DateStr      fixed array; /* string to convert */
+      dcl FieldStr(10) fixed; /* field parsed out of date string */
+      dcl (day,month,year) fixed; /* date parameters */
+      dcl i            fixed;
+
+      FindMonth: proc(Str) returns (boolean);
+         dcl Str        fixed array;
+         dcl Months(18) fixed; /* month names */
+         dcl (i,j) fixed;
+
+         call GetMonthNames(Months); /* get month names */
+
+         do i = 0 to 2;
+            if (byte(Str,i) >= l.a) and (byte(Str,i) <= l.z) /* lowercase */
+            then call pbyte(Str,i,byte(Str,i) - "40"); /* make uppercase */
+         end;
+
+         j = 0;
+         do i = 0 to 11;
+            if  (byte(Str,0) = byte(Months,j))
+            and (byte(Str,1) = byte(Months,j + 1))
+            and (byte(Str,2) = byte(Months,j + 2)) /* all three characters match */
+            then return (i + 1); /* return month found */
+            j = j + 3; /* go to next month */
+         end;
+         return (0); /* month not found */
+      end FindMonth;
+
+      i = 0;
+      do while (i < DateStr(0)) and (byte(DateStr,i) = a.SP); /* get rid of leading spaces */
+         i = i + 1;
+      end;
+
+      i = GetStringField(DateStr,FieldStr,i,a.SP); /* get day field */
+      if FieldStr(0) = 0 then return (0); /* no day entered */
+      day = GetStringNumber(FieldStr); /* convert to number */
+      if (day = 0) or (day igt 31) then return (0); /* bad number entered */
+
+      i = GetStringField(DateStr,FieldStr,i + 1,a.SP); /* get month field */
+      if FieldStr(0) ilt 3 then return (0); /* no month entered */
+      month = FindMonth(FieldStr); /* find month */
+      if (month = 0) or (month igt 12) then return (0); /* bad month entered */
+
+      i = GetStringField(DateStr,FieldStr,i + 1,a.SP); /* get year field */
+      if FieldStr(0) = 0 then return (0); /* no year entered */
+      year = GetStringNumber(FieldStr); /* convert to number */
+      if (year ige 1900) and (year ile 2027) /* convert to proper year format */
+      then year = year - 1900;
+      if (year igt 127) then return (0); /* bad year entered */
+
+      i = ( shl(year,9) or shl(month,5) or day ); /* construct encoded date */
+      return (i); /* return encoded date */
+   end CONV.STR.TO.DATE;
+
+   CONV.DATE.TO.STR: proc(Date,DateStr) public swapable; /* convert encoded date to string */
+      dcl Date       fixed; /* date to print */
+      dcl DateStr    fixed array; /* string to return formatted date in */
+      dcl (i,j)      fixed;
+      dcl Months(18) fixed; /* month names */
+
+      if Date = 0 /* invalid date */
+      then DateStr(0) = 0; /* no date to display */
+      else do;
+         call GetMonthNames(Months);
+         DateStr(0) = 9; /* no. characters in output string */
+
+         i = (Date and "H1F"); /* get day */
+         call pbyte(DateStr,0,a.0 + (i / 10) ); /* store day */
+         call pbyte(DateStr,1,a.0 + (i mod 10) );
+
+         call pbyte(DateStr,2,a.SP); /* separator */
+
+         j = ((shr(Date,5) and "HF") - 1)*3; /* get index into month name array */
+         do i = 0 to 2;
+            call pbyte(DateStr,3 + i,byte(Months,j + i)); /* print character */
+         end;
+
+         call pbyte(DateStr,6,a.SP); /* separator */
+
+         i = (shr(Date,9) mod 100); /* get year mod 100 */
+         call pbyte(DateStr,7,a.0 + (i / 10) ); /* store year */
+         call pbyte(DateStr,8,a.0 + (i mod 10) );
+      end;
+   end CONV.DATE.TO.STR;
+
+   CONV.32BIT.INT.TO.STR:PROC (NUM,STR) PUBLIC SWAPABLE; 
+      DCL NUM           ARRAY; /* 32BIT INTEGER TO BE CONVERTED */
+      DCL STR           ARRAY; /* RETURN STRING                 */
+      DCL (I,J,K)       FIXED;
+      DCL (MSB, LSB)    FIXED;
+
+      MSB = NUM(0);            /* copy to local vars             */
+      LSB = NUM(1);
+
+      STR(0) = 0; /* INIT STRING */
+
+      I=0;
+      DO J=0 TO 6;                         /* PRINT DIGITS */
+         K=0;
+        
+         DO WHILE ((MSB IGT POWERS.MSB(J)))
+         OR       ((MSB  =  POWERS.MSB(J))
+         AND       (LSB IGE POWERS.LSB(J)));
+            IF LSB ILT POWERS.LSB(J) THEN MSB=MSB-1;
+            LSB=LSB-POWERS.LSB(J);
+            MSB=MSB-POWERS.MSB(J);
+            K=K+1;
+         END;
+         
+         IF K<>0 THEN I=1;           /* SUPPRESS LEADING ZEROS */
+
+         IF J=6  THEN I=1;           /* ALWAYS DISPLAY 1 ZERO  */
+
+         IF I<>0 THEN DO;
+
+            CALL PBYTE(STR, STR(0), (K + "60"));
+            STR(0) = STR(0)+1;
+
+            IF (J=0)\(J=3) THEN DO;           /* USE COMMAS */
+               CALL PBYTE(STR, STR(0), A.COMMA);
+               STR(0) = STR(0)+1;
+            END;
+         END;
+      END;
+
+   END CONV.32BIT.INT.TO.STR;
+
+   REMOVE.GARBAGE: proc(Str) public swapable; /* used by CONV.HEXSTR.TO.FIXED to clean up str */
+      dcl Str      fixed array;
+      dcl (i,j)    fixed;
+      dcl instr    fixed;
+
+      j=0;
+      instr=0;
+
+      do i=0 to str(0)-1;
+         if  ((byte(str,i)<>sp)
+         and (byte(str,i)<>asc.h)
+         and (byte(str,i)<>lower.h))
+         or  ((instr=1)
+         and (byte(str,i)<>sp))
+         then do;
+            instr=1;
+            call pbyte(str,j,byte(str,i));
+            j=j+1;
+         end;
+         if (byte(str,i)=asc.h)
+         or (byte(str,i)=lower.h) 
+         then instr=1;
+      end;
+      str(0)=j;
+
+   end REMOVE.GARBAGE;
+
+
+   /* This procedure converts the passed string from hex characters to a  */
+   /* fixed point value.  Spaces and a/or a preceding 'h' or 'H' are      */
+   /* removed by REMOVE.GARBAGE above. The remaining characters (0-F)     */
+   /* are then converted and the fixed point value is returned.           */
+
+   CONV.HEXSTR.TO.FIXED: Proc(str) public swapable;
+      dcl str       fixed array;
+      dcl (i,j,num) fixed;
+      num=0;
+
+      call REMOVE.GARBAGE(str);
+      conv.err=0;
+
+      do i=0 to str(0)-1;
+         j=byte(str,i);
+         if  ((j >= lower.a)
+         and ( j <= lower.f))
+         or  ((j >= asc.a)  
+         and ( j <= asc.f))
+         or  ((j >= asc.0) 
+         and ( j <= asc.9))
+         then do;
+            if  (j >= lower.a) and (J <= lower.f)
+            then num=(16*num)+J-lower.a+10;
+            else if  (j >= asc.a) and (j <= asc.f)
+            then num=(16*num)+j-asc.a+10;
+            else num=(16*num)+j-asc.0;
+         end;
+         else do;
+            call set.conv.err(err.ifm,str); 
+            return(-1);
+         end;
+      end;
+      return(num);
+
+   end CONV.HEXSTR.TO.FIXED;
+
+
+   /* This procedure accepts fixed point numbers in the range      */
+   /* of 0 to 255 only!!  Numbers outside this range will cause    */
+   /* unpredictable results.  The passed number is converted to a  */
+   /* string of 4 characters and is stored in the passed array.    */
+   /* The format is ' Hnn' where n is a hex digit(0-F)             */
+
+   CONV.FIXED.TO.HEXSTR: Proc(num,str) public swapable;
+      dcl num  fixed;
+      dcl str  fixed array;
+      dcl i    fixed;
+      dcl char fixed;
+
+      call pbyte(str,0,sp);
+      call pbyte(str,1,asc.h);
+      i=num;
+      i=int(i/16);
+      if i<10 then char=i+asc.0;
+      else char=i+asc.a-10;
+      call pbyte(str,2,char);
+      num=num-(i*16);
+      if num<10 then char=num+asc.0;
+      else char=num+asc.a-10;
+      call pbyte(str,3,char);
+      str(0)=4;
+
+   end CONV.FIXED.TO.HEXSTR;
+
+end TFORMMOD;

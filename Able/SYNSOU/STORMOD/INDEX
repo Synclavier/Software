@@ -1,0 +1,1959 @@
+/*	:SYNSOU:STORMOD:INDEX  $TITLE  Routines to Mount and Read an Index File	*/
+
+/*
+Modified:
+2000/02/23 - TY  - Added Append.Current.FileList.Loop.Info()
+1992/02/09 - PF  - Increased poly cache file limit from 8k to 64k
+1989/11/14 - SGS - Added code to handle old sound files' sample rates
+1989/06/09 - TSS - Added code to display Sample Rate and Stereo/Mono info
+1989/05/02 - TSS - Merged changes for Optical disk to DTD transfer project
+1989/04/29 - TSS - Modified GET.CURRENT.FILENAME.AND.INFO to return file word lengths
+1988/05/25 - SGS - Bug fix: backing up through cat records that are > 1 sector
+1988/01/15 - MWH - Add column to display second poly bin if there
+1987/12/21 - MWH - Update poly cache base to be a 32 bit pointer
+1987/10/30 - LSS - bug fix displaying stereo length in seconds
+*/
+
+dcl SPECIAL_VERSION lit 'false';	//	MAKE SURE THIS IS SET TO FALSE FOR GENERAL RELEASE
+
+#if (SPECIAL_VERSION)	/////////////////////////////////////////////////////////////////
+	dcl symbol_buf(2*256-1) fixed static;
+#endif						/////////////////////////////////////////////////////////////////
+
+
+Index.FileList.Seek: proc (Item)	fixed swapable;
+	dcl Item				fixed;		/*	index ptr into filelist	*/
+	dcl (Sector,Word)	fixed;
+
+	if Device.Mounted=0 then return ITEM$EOF;
+
+	FListIndex=Item;					/*	new current position	*/
+
+	if Item IGE TotalFileCount		/*	have hit end of file list	*/
+	then CurItemType=ITEM$EOF;
+	else do;								/*	have a record to seek to	*/
+		CurItemType=ITEM$Filename;
+
+		load Item; mul L#Rec_Length; mwait; div 256;
+		FListSector=res; FListWord=rem;
+	end;
+
+	if debug=1 then call dumppos;
+
+	return CurItemType;	/*	pointing at a file list record	*/
+end Index.FileList.Seek;
+
+SnapShot.FileList.Seek: proc (Item)	fixed swapable;
+	dcl Item	fixed;		/*	index ptr into filelist	*/
+
+	if Device.Mounted=0 then return ITEM$EOF;
+
+	FListIndex=Item;				/*	new current position	*/
+
+	if Item IGE TotalFileCount	/*	have hit end of file list	*/
+	then CurItemType=ITEM$EOF;
+	else do;							/*	have a record to seek to	*/
+		CurItemType=ITEM$Filename;
+
+		load Item; mul SnapFCBLen; mwait; div 256;
+
+		FListSector=res; FListWord=rem;	/*	new ptrs relative to start of snapshot area	*/
+	end;
+
+	if debug=1 then call dumppos;
+
+	return CurItemType;			/*	pointing at a file list record	*/
+end SnapShot.FileList.Seek;
+
+SetFListPos: proc (Index)	fixed public swapable;	/*	resets current position	*/
+	dcl Index	fixed;
+
+	if Device.Mounted=0 then return ITEM$EOF;	/*	nothing mounted yet	*/
+
+	FListIndex=Index;						/*	new current position	*/
+
+	if FListIndex IGE TotalFileCount	/*	accessing beyond end of file	*/
+	then do;
+		FListIndex=TotalFileCount;		/*	limit to first item beyond end	*/
+		CurItemType=ITEM$EOF;
+	end;
+	else do;									/*	have a record to seek to	*/
+		CurItemType=ITEM$Filename;
+
+		load FListIndex;
+
+		if DirDevice=LaserDev
+		then mul L#Rec_Length;
+		else mul SnapFCBLen;
+
+		mwait; div 256;
+
+		FListSector=res; FListWord=rem;	/*	new ptrs relative to start of snapshot area	*/
+	end;
+
+	if debug=1 then call dumppos;
+
+	return CurItemType;						/*	pointing at a file list record	*/
+end SetFListPos;
+
+/*	$PAGE	*/
+
+Append.Current.FileList.Length.Info: proc (Sectors,SRate,Stereo,Buf,MaxLen) public swapable;
+	dcl Sectors		array;	/*	sector len of file	*/
+	dcl SRate		fixed;	/*	Sample Rate in kHz * 10	*/
+	dcl Stereo		fixed;	/*	1 => Stereo, 0 => Mono	*/
+	dcl Buf			array;	/*	output buffer	*/
+	dcl MaxLen		fixed;	/*	max char len	*/
+	dcl Duration	fixed;	/*	Seconds*10 + tenths of seconds	*/
+	dcl I				fixed;
+
+	if (ShowInfo&INFO$Second)<>0 then begin;
+		dcl InfoChars	lit '6';
+		if Buf(0) ILT (MaxLen-(InfoChars+2)) then do;
+			i = SRate*10;								/*	gives kHz * 100	*/
+			if Stereo<>0 then i = i + i;			/*	double sample rate if stereo	*/
+			BitMsb = Sectors(0); BitLsb = Sectors(1);
+			call Shl32(loc(addr(BitMsb)),8);		/*	Convert sectors to samples	*/
+			call ratio_multiply(1,i);				/*	computes duration of sample in 10ths of seconds	*/
+			if BitMsb<>0 then do;					/*	really big time	*/
+				BitMsb = Sectors(0); BitLsb = Sectors(1);
+				call Shl32(loc(addr(BitMsb)),8);	/*	Convert sectors to samples	*/
+				call ratio_multiply(1,i);			/*	computes duration of sample in 10ths of seconds	*/
+				call ratio_multiply(1,10);			/*	computes duration of sample in seconds	*/
+				if BitMsb=0
+				then call Conv.Fixed.To.Str(BitLsb,0,InfoChars,CF#Unsigned|CF#Append|CF#Right|CF#SPFill,Buf);
+				else call Append.To.Str(Buf,' >64K ');
+			end;
+			else do;
+				Duration = BitLsb;					/*	Seconds * 10	*/
+				if  ((Sectors(0)|Sectors(1))<>0)
+				and  (Duration=0)
+				then Duration=1;	/*	at least display 0.1	*/
+				call Conv.Fixed.To.Str(Duration,1,InfoChars,CF#Unsigned|CF#Append|CF#Right|CF#SPFill,Buf);
+			end;
+			call Append.To.Str(Buf,'  ');
+		end;
+	end;
+
+	if (ShowInfo&INFO$MByte)<>0 then begin;
+		dcl InfoChars	lit '6';
+		if Buf(0) ILT (MaxLen-(InfoChars+1)) then do;
+			BitMsb = Sectors(0); BitLsb = Sectors(1);
+			call ratio_multiply(100,2048);		/*	MBytes * 100	*/
+			if BitMsb<>0 then do;
+				BitMsb = Sectors(0); BitLsb = Sectors(1);
+				call ratio_multiply(10,2048);		/*	MBytes * 10	*/
+				call Conv.Fixed.To.Str(BitLsb,1,InfoChars,CF#Unsigned|CF#Append|CF#Right|CF#SPFill,Buf);
+			end;
+			else do;
+				if  ((Sectors(0)|Sectors(1))<>0)
+				and  (BitLsb=0)
+				then BitLsb = 1;						/*	at least .01 MBytes	*/
+				call Conv.Fixed.To.Str(BitLsb,2,InfoChars,CF#Unsigned|CF#Append|CF#Right|CF#SPFill,Buf);
+			end;
+			call AppendC(Buf,SP);
+		end;
+	end;
+
+	if (ShowInfo&INFO$Sector)<>0 then begin;
+		dcl InfoChars	lit '6';
+		if Buf(0) ILT (MaxLen-(InfoChars+2)) then do;
+			if sectors(0)=0
+			then call Conv.Fixed.To.Str(sectors(1),0,InfoChars,CF#Unsigned|CF#Append|CF#Right|CF#SPFill,Buf);
+			else call Append.To.Str(Buf,' >64K ');
+			call Append.To.Str(Buf,'  ');
+		end;
+	end;
+
+	if (ShowInfo&(INFO$Sector|INFO$MByte|INFO$Second))<>0 then begin;
+		dcl InfoChars	lit '8';
+		if Buf(0) ILT (MaxLen-(InfoChars+1)) then do;
+			call Conv.Fixed.To.Str(SRate,1,5,CF#Unsigned|CF#Append|CF#Right|CF#SPFill,Buf);
+			call Append.To.Str(Buf,'  ');
+			if Stereo<>0
+			then call Append.To.Str(Buf,'S ');
+			else call Append.To.Str(Buf,'M ');
+		end;
+	end;
+
+end Append.Current.FileList.Length.Info;
+
+Append.Current.FileList.Loop.Info: proc (Buf,MaxLen) public swapable;
+	dcl Buf		fixed array;	//	output string
+	dcl MaxLen	fixed;			//	maximum character length of output string
+	dcl loop_start	( 2)	fixed;
+
+	//	from :SYNRSOU:03-PRIM:194-SAMP
+	dcl (time.seconds, time.milliseconds, time.microseconds)	fixed	external;
+	dcl index_to_time				proc(fixed,fixed,fixed,fixed,fixed)	external;
+	dcl index_to_period_time	proc(fixed,fixed,fixed,fixed)			external;
+
+	#if (SPECIAL_VERSION)	/////////////////////////////////////////////////////////////////
+		//	FOR TODD'S SINISTER PURPOSES ONLY
+		dcl temp_string(27)		fixed;
+		dcl i							fixed;
+		dcl (found_#, found_$)	boolean;
+
+		//	from :SYNRSOU:03-PRIM:194-SAMP
+		dcl (sector.msb, sector.numb, sector.offset)	fixed					external;
+		dcl time_to_index				proc(fixed,fixed,fixed,fixed,fixed)	external;
+
+		//	search symbol_buf for # and $
+		i = 0; found_# = false; found_$ = false;
+		//	loop through all symbols
+		while ((i != (Misc.Buf(sf.number.of.symbols) * symbol_length)) && ((found_# == false) || (found_$ == false)))
+		{
+			//	see if this symbol is "#"
+			if ((symbol_buf(i + name_entry) == 1) && ((symbol_buf(i + name_entry +1) & 255) == a.sharp))
+			{
+				found_# == true;
+				//	warn me if this is at a different time than SFM's mark start 
+				if ((symbol_buf(i  ) != Misc.Buf(sf.mark.start  ))
+				||  (symbol_buf(i+1) != Misc.Buf(sf.mark.start+1))
+				||  (symbol_buf(i+2) != Misc.Buf(sf.mark.start+2)))
+				{
+					//	convert the funky mark start time to index and back (using the poly system sample rate)
+					time_to_index(Misc.Buf(sf.mark.start  ), Misc.Buf(sf.mark.start+1), Misc.Buf(sf.mark.start+2),
+									  Misc.Buf(sf.sample.rate), Misc.Buf(sf.stereo));
+					index_to_time(sector.msb, sector.numb, sector.offset,
+									  Misc.Buf(sf.sample.rate), Misc.Buf(sf.stereo));
+					// now check again
+					if ((symbol_buf(i  ) != time.seconds)
+					||  (symbol_buf(i+1) != time.milliseconds)
+					||  (symbol_buf(i+2) != time.microseconds))
+					appendc(temp_string, a.sharp);	//	indicate something's really fucked
+
+					//	copy this symbol time over the mark time
+					Misc.Buf(sf.mark.start  ) = symbol_buf(i  );
+					Misc.Buf(sf.mark.start+1) = symbol_buf(i+1);
+					Misc.Buf(sf.mark.start+2) = symbol_buf(i+2);
+				}
+			}
+			//	see if this symbol is "$"
+			else if ((symbol_buf(i + name_entry) == 1) && ((symbol_buf(i + name_entry +1) & 255) == a.dollar))
+			{
+				found_$ == true;
+				//	warn me if this is at a different time than SFM's mark end 
+				if ((symbol_buf(i  ) != Misc.Buf(sf.mark.end  ))
+				||  (symbol_buf(i+1) != Misc.Buf(sf.mark.end+1))
+				||  (symbol_buf(i+2) != Misc.Buf(sf.mark.end+2)))
+				{
+					//	convert the funky mark end time to index and back (using the poly system sample rate)
+					time_to_index(Misc.Buf(sf.mark.end  ), Misc.Buf(sf.mark.end+1), Misc.Buf(sf.mark.end+2),
+									  Misc.Buf(sf.sample.rate), Misc.Buf(sf.stereo));
+					index_to_time(sector.msb, sector.numb, sector.offset,
+									  Misc.Buf(sf.sample.rate), Misc.Buf(sf.stereo));
+					// now check again
+					if ((symbol_buf(i  ) != time.seconds)
+					||  (symbol_buf(i+1) != time.milliseconds)
+					||  (symbol_buf(i+2) != time.microseconds))
+					appendc(temp_string, a.dollar);	//	indicate something's really fucked
+
+					//	copy this symbol time over the mark time
+					Misc.Buf(sf.mark.end  ) = symbol_buf(i  );
+					Misc.Buf(sf.mark.end+1) = symbol_buf(i+1);
+					Misc.Buf(sf.mark.end+2) = symbol_buf(i+2);
+				}
+			}
+			i = i + symbol_length;
+		}
+
+		//	Display mark_start if non-zero
+		if ((Misc.Buf(sf.mark.start)|Misc.Buf(sf.mark.start+1)|Misc.Buf(sf.mark.start+2)) != 0) {
+			conv.fixed.to.str(Misc.Buf(sf.mark.start  ), 0, 4, cf#unsigned|cf#append|cf#right|cf#spfill|cf#forcedp, temp_string);
+			conv.fixed.to.str(Misc.Buf(sf.mark.start+1), 0, 3, cf#unsigned|cf#append|cf#right|cf#zerofill, temp_string);
+			conv.fixed.to.str(Misc.Buf(sf.mark.start+2), 0, 3, cf#unsigned|cf#append|cf#right|cf#zerofill, temp_string);
+		}
+		else append.to.str(temp_string,'  (Origin)');
+
+		//	Display mark_end if not the same as the end of signal data
+		if (Misc.Buf(sf.mark.end  ) != Misc.Buf(sf.data.end  ))
+		|| (Misc.Buf(sf.mark.end+1) != Misc.Buf(sf.data.end+1))
+		|| (Misc.Buf(sf.mark.end+2) != Misc.Buf(sf.data.end+2)) {
+			conv.fixed.to.str(Misc.Buf(sf.mark.end  ), 0, 4, cf#unsigned|cf#append|cf#right|cf#spfill|cf#forcedp, temp_string);
+			conv.fixed.to.str(Misc.Buf(sf.mark.end+1), 0, 3, cf#unsigned|cf#append|cf#right|cf#zerofill, temp_string);
+			conv.fixed.to.str(Misc.Buf(sf.mark.end+2), 0, 3, cf#unsigned|cf#append|cf#right|cf#zerofill, temp_string);
+		}
+		else append.to.str(temp_string,'  (End)   ');
+
+	#else							/////////////////////////////////////////////////////////////////
+		dcl temp_string(16)	fixed;
+	#endif						/////////////////////////////////////////////////////////////////
+
+	//	Step 1:	find out if we even have a loop
+	if ((Misc.Buf(sf.total.length)|Misc.Buf(sf.total.length+1)|Misc.Buf(sf.total.length+2)) == 0) {
+		append.to.str(temp_string,'  (No loop)');
+		//	we must pad with spaces if captions are yet to be appended
+		if ((ShowInfo | INFO$Caption) != 0) append.to.str(temp_string,'                   ');
+	}
+	else {
+		//	Step 2:	find loop_start by subtracting loop_length from loop_end
+		//	start by copying loop_end into loop_start
+		loop_start(0) = Misc.Buf(sf.total.length  );
+		loop_start(1) = Misc.Buf(sf.total.length+1);
+		loop_start(2) = Misc.Buf(sf.total.length+2);
+		//	subtract words
+		loop_start(2) = loop_start(2) - Misc.Buf(sf.loop.length+2);
+		if (loop_start(2) < 0) {	//	borrow if necessary
+			loop_start(2) = loop_start(2)+256;
+			if (loop_start(1) == 0) loop_start(0) = loop_start(0)-1;
+			loop_start(1) = loop_start(1)-1;
+		}
+		//	subtract sectors_lsw
+		if (Misc.Buf(sf.loop.length+1) igt loop_start(1)) loop_start(0) = loop_start(0) - 1;	//	borrow if necessary
+		loop_start(1) = loop_start(1) - Misc.Buf(sf.loop.length+1);
+		//	subtract sectors_msw
+		loop_start(0) = loop_start(0) - Misc.Buf(sf.loop.length);
+
+		//	Step 3:	convert loop parameters from sector_msw,sector_lsw,word_offset format to sec,msec,usec format
+		if (Misc.Buf(sf.sample.rate) != 0) {	//	sound file has Khz*10 rate
+			//	loop_start
+			index_to_time(loop_start(0), loop_start(1), loop_start(2),
+							  Misc.Buf(sf.sample.rate), Misc.Buf(sf.stereo));
+			loop_start(0) = time.seconds;
+			loop_start(1) = time.milliseconds;
+			loop_start(2) = time.microseconds;
+			//	loop_end
+			index_to_time(Misc.Buf(sf.total.length), Misc.Buf(sf.total.length+1), Misc.Buf(sf.total.length+2),
+							  Misc.Buf(sf.sample.rate), Misc.Buf(sf.stereo));
+			Misc.Buf(sf.total.length  ) = time.seconds;
+			Misc.Buf(sf.total.length+1) = time.milliseconds;
+			Misc.Buf(sf.total.length+2) = time.microseconds;
+			//	loop_length
+			index_to_time(Misc.Buf(sf.loop.length), Misc.Buf(sf.loop.length+1), Misc.Buf(sf.loop.length+2),
+							  Misc.Buf(sf.sample.rate), Misc.Buf(sf.stereo));
+			Misc.Buf(sf.loop.length  ) = time.seconds;
+			Misc.Buf(sf.loop.length+1) = time.milliseconds;
+			Misc.Buf(sf.loop.length+2) = time.microseconds;
+		}
+		else {	//	must use D66 period
+			//	handle old files
+			if (Misc.Buf(sf.compatibility) ilt 1)	Misc.Buf(sf.period.index) = 600;	//	not set in old files, 600=50 khz
+			if (Misc.Buf(sf.period.index) ilt 300)	Misc.Buf(sf.period.index) = 300;
+			//	loop_start
+			index_to_period_time(loop_start(0), loop_start(1), loop_start(2),
+										Misc.Buf(sf.period.index));
+			loop_start(0) = time.seconds;
+			loop_start(1) = time.milliseconds;
+			loop_start(2) = time.microseconds;
+			//	loop_end
+			index_to_period_time(Misc.Buf(sf.total.length), Misc.Buf(sf.total.length+1), Misc.Buf(sf.total.length+2),
+										Misc.Buf(sf.period.index));
+			Misc.Buf(sf.total.length  ) = time.seconds;
+			Misc.Buf(sf.total.length+1) = time.milliseconds;
+			Misc.Buf(sf.total.length+2) = time.microseconds;
+			//	loop_length
+			index_to_period_time(Misc.Buf(sf.loop.length), Misc.Buf(sf.loop.length+1), Misc.Buf(sf.loop.length+2),
+										Misc.Buf(sf.period.index));
+			Misc.Buf(sf.loop.length  ) = time.seconds;
+			Misc.Buf(sf.loop.length+1) = time.milliseconds;
+			Misc.Buf(sf.loop.length+2) = time.microseconds;
+		}
+
+		//	Step 4:	append the final results to the string for display
+		//	Note: columns will align except for the rare cases when the loop times exceed 99.999999 seconds
+		//	loop_start
+		conv.fixed.to.str(loop_start(0), 0, 4, cf#unsigned|cf#append|cf#right|cf#spfill|cf#forcedp, temp_string);
+		conv.fixed.to.str(loop_start(1), 0, 3, cf#unsigned|cf#append|cf#right|cf#zerofill, temp_string);
+		conv.fixed.to.str(loop_start(2), 0, 3, cf#unsigned|cf#append|cf#right|cf#zerofill, temp_string);
+		//	loop_end
+		if (Misc.Buf(sf.total.length) ige 100) appendc(temp_string, a.space);
+		conv.fixed.to.str(Misc.Buf(sf.total.length  ), 0, 4, cf#unsigned|cf#append|cf#right|cf#spfill|cf#forcedp, temp_string);
+		conv.fixed.to.str(Misc.Buf(sf.total.length+1), 0, 3, cf#unsigned|cf#append|cf#right|cf#zerofill, temp_string);
+		conv.fixed.to.str(Misc.Buf(sf.total.length+2), 0, 3, cf#unsigned|cf#append|cf#right|cf#zerofill, temp_string);
+		//	loop_length
+		if (Misc.Buf(sf.loop.length) ige 100) appendc(temp_string, a.space);
+		conv.fixed.to.str(Misc.Buf(sf.loop.length  ), 0, 4, cf#unsigned|cf#append|cf#right|cf#spfill|cf#forcedp, temp_string);
+		conv.fixed.to.str(Misc.Buf(sf.loop.length+1), 0, 3, cf#unsigned|cf#append|cf#right|cf#zerofill, temp_string);
+		conv.fixed.to.str(Misc.Buf(sf.loop.length+2), 0, 3, cf#unsigned|cf#append|cf#right|cf#zerofill, temp_string);
+	}
+	//	guard against overrunning the output string
+	if ((temp_string(0)+Buf(0)) igt MaxLen) temp_string(0) = MaxLen-Buf(0);
+	append.to.str(Buf, temp_string);
+end Append.Current.FileList.Loop.Info;
+
+/*	$PAGE	*/
+
+Append.Current.FileList.Item: proc (Buf,MaxLen)	fixed public swapable;
+	dcl Buf		fixed array;	/*	output string	*/
+	dcl MaxLen	fixed;
+	dcl Sectors (1)		fixed;
+	dcl (Stereo,SRate,I)	fixed;
+	dcl words	lit 'Stereo';
+
+	if Device.Mounted=0 then return ITEM$EOF;	/*	nothing mounted yet	*/
+
+	if (CurItemType=ITEM$Filename) then do;	/*	have a record here	*/
+
+		if Buf(0) ILE (MaxLen-2) then call Append.To.Str(Buf,'  ');
+
+		if DirDevice=LaserDev then do;								/*	laser disk	*/
+			call Seek(FileList,I$FileStart+FListSector,3);		/*	seek to appropriate sector in file list	*/
+			call Seek(FileList,shl(FListWord,1),1);				/*	seek to appropriate word in this sector	*/
+
+			if ShowInfo=INFO$Filename
+			then call FRead(Copy.Buf,4,2,FileList);				/*	only get the filename	*/
+			else call FRead(Copy.Buf,L#Rec_Length,2,FileList);	/*	get the entire file list record	*/
+
+			if (ShowInfo&INFO$Filename)<>0 then do;
+				call Append.Bytes.To.Str(Copy.Buf,8,Buf,MaxLen);
+			end;
+
+			if (ShowInfo&(INFO$Second|INFO$MByte|INFO$Sector|INFO$Loops|INFO$Caption))<>0
+			AND Buf(0) ILT MaxLen then call AppendC(Buf,SP);
+
+			if (ShowInfo&(INFO$Second|INFO$MByte|INFO$Sector))<>0 then do;
+				SRate = Copy.Buf(L$Sample_Rate);						/*	Sample Rate * 10	*/
+				Stereo = ((Copy.Buf(L$Flags) & "002000") <> 0);	/*	Stereo or Mono		*/
+				Sectors(0) = Copy.Buf(L$MS_SecLen);		/*	MSB sector length of file	*/
+				Sectors(1) = Copy.Buf(L$LS_SecLen);		/*	LSB sector length of file	*/
+
+				call Append.Current.FileList.Length.Info(Sectors,SRate,Stereo,Buf,MaxLen);
+			end;
+
+			if (((ShowInfo & INFO$Loops) != 0) && (Buf(0) ilt MaxLen)) {
+				//	get location of sf header on optical disk
+				EntryToSec(Copy.Buf(L$Dir_Entry));			//	get absolute sector of directory entry on optical disk
+				Sectors(0) = F#MS_Sector|shl(LaserDev,8);	//	header is the 2nd sector in directory entry
+				Sectors(1) = F#LS_Sector+1;
+				if (Sectors(1) == 0) Sectors(0) = Sectors(0)+1;	//	carry if necessary
+				//	copy words 0 through 42 from header into misc.buf  (only words 0 through 42 are needed to show loops)
+				ReadData(Sectors(0),Sectors(1),misc.buf,sf.sample.rate+1);
+				Append.Current.FileList.Loop.Info(Buf,MaxLen);
+			}
+
+			if (ShowInfo&INFO$Caption)<>0 then do;
+				if Buf(0) ILT MaxLen then call AppendC(Buf,SP);
+
+				call Append.Bytes.To.Str(Loc(Addr(Copy.Buf(L$Caption+1))),
+												 Copy.Buf(L$Caption),Buf,MaxLen);
+			end;
+
+		end;
+
+		/*	$PAGE	*/
+
+		else if (DirDevice=PolyMemDev) or (DirDevice ILT 8)
+		then do;	/*	Device which uses snapshot (Poly Memory or Real Disk Drive)	*/
+         dcl ThisShow fixed;
+         dcl NameLen  fixed;
+
+         // Read in the snapshot
+			write(mam)=SnapBase+FListSector;
+			write(mal)=FListWord;
+			write("313")=Addr(Copy.Buf(0));
+			rpc 8; write("373")=read(mdi);
+
+         // Get possible
+         // Start with desired presentation and assume 8-character name
+         ThisShow = ShowInfo;
+         NameLen  = 8;
+
+         // If showing poly mem in Sync3, get long name handy
+         if ((DirDevice == PolyMemDev) && (interp_is_running != 0)) {
+            dcl NamePtr  fixed;
+            
+            // For poly memory, original pointer to name was stored here.
+            NamePtr = Copy.Buf(7);
+            write(mam)=NameBase+shr(NamePtr,5);    /* init ptr to snap shot area */
+            write(mal)=shl(NamePtr,3);
+
+            rpc sf.file.handle.wl; write("373")=read(mdi);
+            // And get its length handy
+            NameLen = 0;
+            
+            // Store the long name characters in copy.buf(8)
+            while ((NameLen < (sf.file.handle.bl-1)) && (byte(loc(addr(Copy.Buf(7))), NameLen) != 0))
+               NameLen = NameLen + 1;
+         }
+
+			if (ThisShow&INFO$Filename)<>0 then do;
+				//	input bytes from array:						Copy.Buf
+				//	number of BYTES to copy (not words):	8	
+				//	output string:									Buf
+				//	limit of output string's length:			MaxLen
+
+            // If showing long names, give that priority over the rest of the line
+            if ((NameLen > 8) && ((ThisShow&INFO$Names) != 0)) {
+               dcl activeLen fixed;
+               dcl where     fixed;
+               
+               activeLen = NameLen;
+               where     = addr(Copy.Buf(7));
+               
+               if (activeLen > MaxLen)
+                  activeLen = MaxLen;
+               
+               // Chop of last byte if start of unisequence
+               if ((byte(loc(where),activeLen-1)&0xC0) == 0xC0)
+                  activeLen = activeLen - 1;
+               
+               // Else chop of trailing sequence. See if last byte is a continuation byte.
+               else if ((byte(loc(where),activeLen-1)&0xC0) == 0x80) {
+                  dcl uni    fixed;
+                  
+                  uni = activeLen-2;
+                  
+                  while ((uni > 0) && ((byte(loc(where),uni)&0xc0) == 0x80))
+                     uni = uni-1;
+                  
+                  // Better find start byte at 2 or later
+                  if (uni >= 2) {
+                     dcl sig fixed;
+                     
+                     // Get the unicode signal byte
+                     sig = byte(loc(where), uni);
+                     
+                     if ((((sig&0xE0)==0xC0) && (uni>activeLen-2))
+                     ||  (((sig&0xF0)==0xE0) && (uni>activeLen-3))
+                     ||  (((sig&0xF8)==0xF0) && (uni>activeLen-4))
+                     ||  (((sig&0xFC)==0xF8) && (uni>activeLen-5))
+                     ||  (((sig&0xFE)==0xFC) && (uni>activeLen-6)))
+                        activeLen = uni-1;
+                  }
+               }
+               
+               call Append.Bytes.To.Str(loc(addr(Copy.Buf(8))),activeLen,Buf,MaxLen);
+               
+               ThisShow = 0;
+            }
+
+            else {
+               // chop off half-baked unicode
+               dcl str(4) fixed;
+               
+               str(1)=Copy.Buf(0);
+               str(2)=Copy.Buf(1);
+               str(3)=Copy.Buf(2);
+               str(4)=Copy.Buf(3);
+               str(0)=8;
+               
+               // Chop of last byte if start of unisequence
+               if ((byte(str,7)&0xC0) == 0xC0)
+                  pbyte(str, 8, 0);
+               
+               // Else chop of trailing sequence. See if last byte is a continuation byte.
+               else if ((byte(str,7)&0xC0) == 0x80) {
+                  dcl uni    fixed;
+                  
+                  uni = 6;
+                  
+                  while ((uni > 0) && ((byte(str,uni)&0xc0) == 0x80))
+                     uni = uni-1;
+                  
+                  // Better find start byte at 2 or later
+                  if (uni >= 2) {
+                     dcl sig fixed;
+                     
+                     // Get the unicode signal byte
+                     sig = byte(str, uni);
+
+                     if ((((sig&0xE0)==0xC0) && (uni>6))
+                     ||  (((sig&0xF0)==0xE0) && (uni>5))
+                     ||  (((sig&0xF8)==0xF0) && (uni>4))
+                     ||  (((sig&0xFC)==0xF8) && (uni>3))
+                     ||  (((sig&0xFE)==0xFC) && (uni>2))) {
+                        while (uni<8) {
+                           pbyte(str, uni, 0);
+                           uni = uni + 1;
+                        }
+                     }
+                  }
+               }
+               
+               call Append.Bytes.To.Str(loc(addr(str(1))),8,Buf,MaxLen);
+            }
+			end;
+
+			if ((ThisShow&(INFO$Second|INFO$MByte|INFO$Sector|INFO$Bin|INFO$Loops|INFO$Caption|INFO$Names))<>0) && (Buf(0) ilt MaxLen)
+			then do;	/*	go and read Sound File header from disk or poly memory	*/
+				AppendC(Buf,SP);
+
+				//	we only need words 0 through 42 from the header if not showing captions, otherwise get the entire sector
+				if (ThisShow&INFO$Caption) == null
+				then words = sf.sample.rate+1;
+				else words = 256;
+
+				if DirDevice<>PolyMemDev then do;	/*	file is on the disk	*/
+					ReadData(Copy.Buf(4),Copy.Buf(5),Misc.Buf,words);	/*	read sound file header from disk	*/
+				end;
+				else do;	/*	File is in Poly Memory	*/
+               FnBuf(0)=8;
+               do I=1 to 4; FnBuf(I)=Copy.Buf(I-1); end;
+
+               if (interp_is_running != 0) {
+                  lnbuf(0) = NameLen;
+                  do i= 1 to sf.file.handle.wl;
+                     lnbuf(i) = Copy.Buf(7+i);
+                  end;
+               }
+
+               else
+                  LnBuf(0) = 0;
+
+					if ps.search<>0 then do;			/*	compute ptr to file	*/
+						Copy.Buf(4)=SFile.Base(LW#MSB);
+						Copy.Buf(5)=SFile.Base(LW#LSB);
+                  call Psmread(Loc(Addr(Copy.Buf(4))),SF.HDR,0);	/*	set up to read SF header	*/
+                  call Poly.In(Addr(Misc.Buf(0)),words);
+					end;
+               else {	/*	SYSTEM ERROR??	won't find the name if there are any spaces in it*/
+                  do I = 0 to words-1;
+                     Misc.Buf(i)=0;
+                  end;
+               }
+				end;
+
+				if (ThisShow&(INFO$Second|INFO$MByte|INFO$Sector))<>0 then do;
+					Sectors(0)= Misc.Buf(SF.Total.Data	);
+					Sectors(1)= Misc.Buf(SF.Total.Data+1)+3;	/*	total sector len	*/
+					Stereo	 = Misc.Buf(SF.Stereo);				/*	get stereo/mono bit	*/
+					SRate		 = Misc.Buf(SF.Sample.Rate);		/*	kHz * 10	*/
+
+					/*	Check for old sound file format	*/
+					if SRate = 0 then do;
+						SRate = Misc.Buf(SF.Period.Index);	/*	look up sampling period, 600=50 khz	*/
+						if Misc.Buf(SF.Compatibility) < 1 then
+							SRate = 600;							/*	not set in old files	*/
+						if SRate < 300 then SRate = 300;		/*	handle old files	*/
+						load 1000; mul 300; mwait; div SRate;
+						if shl(rem,1)>=SRate then SRate=res+1;
+						else							  SRate=res;
+					end;
+
+					call Append.Current.FileList.Length.Info(Sectors,SRate,Stereo,Buf,MaxLen);
+				end;
+
+				if (ThisShow&INFO$Bin)<>0
+				AND DirDevice = PolyMemDev						/*	Only show bin when looking at poly	*/
+				then do;
+					if Buf(0) ILT (MaxLen-5) then do;
+						call Append.to.Str(Buf,'  ');
+
+						i = shr(Copy.Buf(4) & Base#Bin_B, Base#Bin_P) + 1;	/*	Get poly bin in "i"	*/
+						call AppendC(Buf,ASC.0 + i);
+
+						call AppendC(Buf,a.space);
+					end;
+				end;
+
+				if (((ThisShow & INFO$Loops) != 0) && (Buf(0) ilt MaxLen)) Append.Current.FileList.Loop.Info(Buf,MaxLen);
+
+				if (ThisShow&INFO$Caption)<>0 then do;
+					if Buf(0) ILT MaxLen then call AppendC(Buf,SP);
+
+					if (Misc.Buf(SF.Id.Field.Bytes)+Buf(0)) IGT MaxLen
+					then Misc.Buf(SF.Id.Field.Bytes)=MaxLen-Buf(0);
+
+					call Append.To.Str(Buf,Loc(Addr(Misc.Buf(SF.Id.Field.Bytes))));
+				end;
+			end;
+		end;
+	end;
+
+	return CurItemType;
+end Append.Current.FileList.Item;
+
+/*	$SUBTITLE	*/
+
+Forward.Index.Seek: proc (Item)	fixed swapable;
+	dcl Item	fixed;
+
+	do while CListIndex ILT Item;	/*	advance to desired category record	*/
+		CListIndex=CListIndex+1;	/*	about to step to next record	*/
+
+		/*	compute ptr to next record	*/
+		CListSector=CListSector+shr(CListWord+CListRecLen,8);
+		ClistWord  =(CListWord+CListRecLen)&"377";
+
+		if CListIndex=TotalCatCount then do;	/*	have hit end of category list	*/
+			CListCurPos=(-1); CListFiles=0;
+			CurItemType=ITEM$EOF;
+			return ITEM$EOF;
+		end;
+		else do;
+			call Seek(CatList,I$CatStart+CListSector,3);	/*	seek to new record	*/
+			call Seek(CatList,shl(CListWord,1),1);
+			CListRecLen=GetW(CatList);	/*	read length of next record	*/
+		end;
+	end;
+
+	/*	NOTE: leaves procedure positioned to read 2nd word of record	*/
+
+	CurItemType=ITEM$Category;
+	return ITEM$Category;
+end Forward.Index.Seek;
+
+Backward.Index.Seek: proc (Item)	fixed swapable;
+	dcl Item	fixed;
+
+	do while CListIndex IGT Item;	/*	backup to desired category record	*/
+		CListIndex=CListIndex-1;	/*	about to back up to prior record	*/
+
+		call Seek(CatList,I$CatStart + CListSector,3);	/*	seek to start of current record	*/
+		call Seek(CatList,shl(CListWord,1),1);
+		call Seek(CatList,-2,1);					/*	go back one word	*/
+		CListRecLen=GetW(CatList);					/*	read length of prior record	*/
+
+		if CListWord ilt CListRecLen then do;	/*	back up file ptrs	*/
+			load CListRecLen;	/*	determine how many sectors to back up	*/
+			div 256; mwait;
+			CListSector=CListSector-1-res;
+			CListWord=CListWord+256-rem;
+		end;
+		else CListWord=CListWord-CListRecLen;
+	end;
+
+	call Seek(CatList,I$CatStart+CListSector,3);	/*	step back to prior record	*/
+	call Seek(CatList,shl(CListWord+1,1),1);
+
+	/*	NOTE: leaves procedure positioned to read 2nd word of record	*/
+
+	CurItemType=ITEM$Category;
+	return ITEM$Category;
+end Backward.Index.Seek;
+
+/*	$SUBTITLE	*/
+
+Index.CatList.Seek: proc(Item,Offset)	fixed swapable;
+	dcl Item			fixed;		/*	which category list record to get	*/
+	dcl Offset		fixed;		/*	which element from the record	*/
+	dcl (Sec,Wd)	fixed;
+	dcl MinBufLen	lit '64';	/*	assumes BUF is at least this big	*/
+
+	/*	NOTE: BUF must be big enough to hold the largest	*/
+	/*			possible category name + 3 extra words			*/
+
+	if (MinBufLen igt Copy.Blen) then do;		/*	work buffer is too small	*/
+		call Set.Optical.Error(ERR#SYSTEMWorkBufTooSmall);
+		return ITEM$EOF;
+	end;
+
+	if Device.Mounted=0 then return ITEM$EOF;	/*	nothing mounted yet	*/
+
+	if Item IGE TotalCatCount then Item=TotalCatCount;	/*	limit to end of CatList	*/
+
+	if CListIndex<>Item then do;	/*	need to seek to new item	*/
+		if CListIndex ILT Item then do;
+			if Forward.Index.Seek(Item)=ITEM$EOF then do;
+				return ITEM$EOF;
+				if debug=1 then call dumppos;
+			end;
+		end;
+		else if CListIndex IGT Item then do;
+			call Backward.Index.Seek(Item);		/*	no error conditions on backward seek	*/
+		end;
+
+		if CListIndex=TotalCatCount then do;
+			CListFiles=0; CListCurPos=(-1);
+			CurItemType=ITEM$EOF;
+			if debug=1 then call dumppos;
+			return ITEM$EOF;
+		end;
+
+		/*	NOTE: At this point, code assumes we are		*/
+		/*			positioned to read 2nd word of record	*/
+
+		CListCatWords=1+shr(GetW(CatList)+1,1);		/*	words in category name	*/
+		call Seek(CatList,shl(CListCatWords-1,1),1);	/*	seek past category name	*/
+		CListFiles=GetW(CatList);							/*	number of files in this category	*/
+	end;
+	else if CListIndex=TotalCatCount then do;
+		if debug=1 then call dumppos;
+		return CurItemType;
+	end;
+
+	if Offset=(-1) then do;						/*	get the category name	*/
+		CListCurPos=(-1);							/*	set new position value	*/
+		CurItemType=ITEM$Category;
+	end;
+	else do;											/*	get the specified file ptr	*/
+		if Offset ige CListFiles then do;	/*	beyond end of files in current category	*/
+			CListCurPos=CListFiles;				/*	limit to one beyond	*/
+			CurItemType=ITEM$EndOfCategory;
+			call Set.Optical.Error(ERR#SYSTEMEndOfCategory);
+			if debug=1 then call dumppos;
+			return CurItemType;
+		end;
+
+		CListCurPos=Offset;								/*	set new position value	*/
+
+		Wd=CListWord+CListCatWords+2+CListCurPos;	/*	CLISTCURPOS may be large	*/
+		Sec=I$CatStart+CListSector+shr(Wd,8);
+		if Wd ILT CListCurPos then Sec=Sec+256;	/*	had a 16 bit wrap	*/
+		Wd=Wd&255;											/*	normalize Sec & Wd	*/
+
+		call Seek(CatList,		Sec,3);
+		call Seek(CatList,shl(Wd,1),1);
+
+		CurItemType=SetFListPos(GetW(CatList));	/*	reset current file list ptr	*/
+	end;
+
+	if debug=1 then call dumppos;
+	return CurItemType;
+end Index.CatList.Seek;
+
+/*	$SUBTITLE	*/
+
+Forward.PolyCache.Seek: proc (Item)	fixed swapable;
+	dcl Item	fixed;
+
+	do while CListIndex ILT Item;	/*	advance to desired category record	*/
+
+		CListIndex=CListIndex+1;	/*	about to step to next record	*/
+		CListWord =CListWord +1;	/*	advance ptr to next FCB	*/
+
+		if ClistWord ilt Cache.Ptr then do;
+			call psmread(Cache.Base,CListSector+shr(CListWord,5),shl(CListWord&"37",3)+7);
+			do while	(CListWord ilt Cache.Ptr)			/*	have not hit end of cache	*/
+				and	(read(psd)=(-1));						/*	current record is not a catalog FCB	*/
+				CListWord=CListWord+1;						/*	advance ptr to next FCB	*/
+				if CListWord ilt Cache.Ptr
+				then call psmread(Cache.Base,CListSector+shr(CListWord,5),shl(CListWord&"37",3)+7);	/*	set up for read of type word	*/
+			end;
+		end;
+		else do;
+			CListCurPos=(-1); CListFiles=0;
+			CurItemType=ITEM$EOF;
+			return ITEM$EOF;
+		end;
+	end;
+
+	CurItemType=ITEM$Category;
+	return ITEM$Category;
+end Forward.PolyCache.Seek;
+
+Backward.PolyCache.Seek: proc (Item)	fixed swapable;
+	dcl Item	fixed;
+
+	if ClistWord<>0							/*	not already at start of cache	*/
+	then do while CListIndex IGT Item;	/*	backup to desired category record	*/
+		CListIndex=CListIndex-1;			/*	about to back up to prior record	*/
+		CListWord=CListWord-1;				/*	backup ptr to prior FCB	*/
+
+		call psmread(Cache.Base,CListSector+shr(CListWord,5),shl(CListWord&"37",3)+7);		/*	set up to read last word of prior FCB	*/
+		do while	(read(psd)=(-1))								/*	prior record is not a catalog FCB	*/
+			and	(CListWord<>0);
+			if ClistWord<>0 then CListWord=CListWord-1;	/*	backup ptr to prior FCB	*/
+			call psmread(Cache.Base,CListSector+shr(CListWord,5),shl(CListWord&"37",3)+7);	/*	set up to read last word of prior FCB	*/
+		end;
+	end;
+
+	CurItemType=ITEM$Category;
+	return ITEM$Category;
+end Backward.PolyCache.Seek;
+
+/*	$SUBTITLE	*/
+
+PolyCache.CatList.Seek: proc(Item,Offset)	fixed swapable;
+	dcl Item		fixed;	/*	which category list record to get	*/
+	dcl Offset	fixed;	/*	which element from the record	*/
+	dcl Wd		fixed;
+
+	if Device.Mounted=0 then do;
+		CurItemType=ITEM$EOF;
+		return ITEM$EOF;	/*	nothing mounted yet	*/
+	end;
+	if Find.Cache =0 then do;
+		CurItemType=ITEM$EOF;
+		return ITEM$EOF;	/*	no cache exists	*/
+	end;
+
+	CListSector=1;
+
+	if Item IGT TotalCatCount then Item=TotalCatCount;	/*	limit to end of CatList	*/
+
+	if CListCurPos<>(-1) then do;					/*	not pointing at category record	*/
+		CListWord=CListWord-(CListCurPos+1);	/*	realign word ptr to be at current category record	*/
+	end;
+
+	if CListIndex<>Item then do;
+		if CListIndex ILT Item then do;
+			if Forward.PolyCache.Seek(Item)=ITEM$EOF then do;
+				if debug=1 then call dumppos;
+				return ITEM$EOF;
+			end;
+		end;
+		else if CListIndex IGT Item then do;
+			call Backward.PolyCache.Seek(Item);
+		end;
+
+		if CListIndex=TotalCatCount then do;
+			CListFiles=0; CListCurPos=(-1);
+			CurItemType=ITEM$EOF;
+			if debug=1 then call dumppos;
+			return CurItemType;
+		end;
+
+		/*	Compute CLISTFILES var for this subcatalog entry	*/
+		CListFiles=0; Wd=CListWord+1;
+
+		if Wd ilt Cache.Ptr then do;
+			call psmread(Cache.Base,CListSector+shr(Wd,5),shl(Wd&"37",3)+7);
+			do while	(read(psd)=(-1))				/*	count # of sound files in this catalog	*/
+				and	(Wd ilt Cache.Ptr);			/*	and have not hit end of cache	*/
+				CListFiles=CListFiles+1;			/*	one more file	*/
+				Wd=Wd+1;									/*	step to next FCB	*/
+				if Wd ilt Cache.Ptr then call psmread(Cache.Base,CListSector+shr(Wd,5),shl(Wd&"37",3)+7);
+			end;
+		end;
+
+		CListRecLen=shl(CListFiles+1,3);			/*	total length of this block (NOT REALLY USED)	*/
+		CListCatWords=4;								/*	words in subcatalog name	*/
+	end;
+	else if CListIndex=TotalCatCount then do;
+		if debug=1 then call dumppos;
+		return CurItemType;
+	end;
+
+	if Offset=(-1) then do;							/*	get the category name	*/
+		CListCurPos=(-1);								/*	set new position value	*/
+		CurItemType=ITEM$Category;
+	end;
+	else do;												/*	get the specified file ptr	*/
+		if Offset ige CListFiles then do;		/*	beyond end of files in current category	*/
+			CListCurPos=CListFiles;					/*	limit to one beyond	*/
+			CurItemType=ITEM$EndOfCategory;
+			call Set.Optical.Error(ERR#SYSTEMEndOfCategory);
+			if debug=1 then call dumppos;
+			return CurItemType;
+		end;
+
+		CListCurPos=Offset;							/*	set new position value	*/
+		ClistWord  =CListWord+Offset+1;			/*	bump ptr to desired FCB	*/
+		CurItemType=ITEM$Filename;
+	end;
+
+	if debug=1 then call dumppos;
+	return CurItemType;
+end PolyCache.CatList.Seek;
+
+/*	$PAGE	*/
+
+SetCListPos: proc (Index,Offset) public swapable;	/*	sets current position	*/
+	dcl (Index,Offset)	fixed;
+
+	if Device.Mounted=0 then return ITEM$EOF;			/*	nothing mounted yet	*/
+
+	if Index igt TotalCatCount then do;					/*	limit to 1st record beyond end of file	*/
+		Index =TotalCatCount;
+		Offset=(-1);
+	end;
+
+	if (Index=CListIndex) and (Offset=CListCurPos)	/*	already positioned	*/
+	then return CurItemType;
+
+	if DirDevice=LaserDev
+	then return Index.CatList.Seek	 (Index,Offset);	/*	seek to new position	*/
+	else return PolyCache.CatList.Seek(Index,Offset);	/*	seek to new position	*/
+end SetCListPos;
+
+/*	$SUBTITLE	*/
+
+Append.PolyCache.FileList.Item: proc (Buf,MaxLen) swapable;	/*	sound file cache	*/
+	dcl Buf				array;
+	dcl MaxLen			fixed;
+	dcl Sectors (1)	fixed;
+	dcl Stereo			fixed;
+	dcl SRate			fixed;
+
+	call psmread(Cache.Base,CListSector+shr(CListWord,5),shl(CListWord&"37",3));
+	write("313")=Addr(Copy.Buf(0));
+	rpc 8; write("373")=read(psd);
+
+	if (ShowInfo&INFO$Filename)<>0 then do;
+		if Buf(0) ILE (MaxLen-2) then call Append.To.Str(Buf,'  ');
+		call Append.Bytes.To.Str(Copy.Buf,8,Buf,MaxLen);
+	end;
+
+	if ((ShowInfo&(INFO$Second|INFO$MByte|INFO$Sector|INFO$Loops|INFO$Caption))<>0) && (Buf(0) ilt MaxLen)
+	then do;	/*	go and read Sound File header from disk	*/
+		AppendC(Buf,SP);
+
+		//	we only need words 0 through 42 from the header if not showing captions, otherwise get the entire sector
+		if (ShowInfo&INFO$Caption) == null
+		then write("313") = sf.sample.rate+1;
+		else write("313") = 256;
+		ReadData(Copy.Buf(4),Copy.Buf(5),Misc.Buf,read("313"));	/*	read sound file header from disk	*/
+
+		if (ShowInfo&(INFO$Second|INFO$MByte|INFO$Sector))<>0 then do;
+			Sectors(0)= Misc.Buf(SF.Total.Data	);
+			Sectors(1)= Misc.Buf(SF.Total.Data+1)+3;	/*	total sector len	*/
+			Stereo	 = Misc.Buf(SF.Stereo);				/*	get stereo/mono bit	*/
+			SRate		 = Misc.Buf(SF.Sample.Rate);		/*	kHz * 10	*/
+
+			/*	Check for old sound file format	*/
+			if SRate = 0 then do;
+				SRate = Misc.Buf(SF.Period.Index);		/*	look up sampling period, 600=50 khz	*/
+				if Misc.Buf(SF.Compatibility) < 1 then
+					SRate = 600;								/*	not set in old files	*/
+				if SRate < 300 then SRate = 300;			/*	handle old files	*/
+				load 1000; mul 300; mwait; div SRate;
+				if shl(rem,1)>=SRate then SRate=res+1;
+				else							  SRate=res;
+			end;
+
+			call Append.Current.FileList.Length.Info(Sectors,SRate,Stereo,Buf,MaxLen);
+		end;
+
+		if (((ShowInfo & INFO$Loops) != 0) && (Buf(0) ilt MaxLen)) Append.Current.FileList.Loop.Info(Buf,MaxLen);
+
+		if (ShowInfo&INFO$Caption)<>0 then do;
+			if Buf(0) ILT MaxLen then call AppendC(Buf,SP);
+
+			if (Misc.Buf(SF.Id.Field.Bytes)+Buf(0)) IGT MaxLen
+			then Misc.Buf(SF.Id.Field.Bytes)=MaxLen-Buf(0);
+
+			call Append.To.Str(Buf,Loc(Addr(Misc.Buf(SF.Id.Field.Bytes))));
+		end;
+	end;
+end Append.PolyCache.FileList.Item;
+
+/*	$SUBTITLE	*/
+
+Append.Current.CatList.Item: proc (Buf,MaxLen)	fixed public swapable;
+	dcl Buf		array;
+	dcl MaxLen	fixed;
+	dcl (i,j)	fixed;
+	dcl level	fixed;
+	dcl temp.buf(8)	fixed;
+
+	if Device.Mounted=0 then return ITEM$EOF;		/*	nothing mounted yet	*/
+
+	if DirDevice=PolyCacheDev then do;
+		if Find.Cache=0 then return ITEM$EOF;		/*	no cache exists	*/
+		CListSector=1;
+	end;
+
+	if (CurItemType=ITEM$Filename) then do;		/*	cur record is file list ptr	*/
+		if DirDevice=LaserDev
+		then call Append.Current.FileList.Item  (Buf,MaxLen);	/*	read the filelist record	*/
+		else call Append.PolyCache.FileList.Item(Buf,MaxLen);	/*	sound file cache	*/
+	end;
+	else if CurItemType=ITEM$Category then do;	/*	cur record is category name	*/
+		if DirDevice=LaserDev then do;
+			call Seek(CatList,I$CatStart+CListSector,3);
+			call Seek(CatList,shl(CListWord+1,1),1);
+			call FRead(Copy.Buf,64,2,CatList);		/*	read category name in	*/
+
+			if (Buf(0)+Copy.Buf(0)) IGT MaxLen
+			then Copy.Buf(0)=MaxLen-Buf(0);
+
+			call Append.To.Str(Buf,Copy.Buf);		/*	append category name to end of current line	*/
+		end;
+		else do;												/*	reading from poly cache	*/
+			call psmread(Cache.Base,CListSector+shr(CListWord,5),shl(CListWord&"37",3));
+			do i=1 to 4; temp.buf(i)=read(psd); end;
+
+			/*	skip over start and length fields	*/
+			do i=1 to 3; level=read(psd); end;
+
+			level=shr(read(psd),8);				/*	get level of recursion	*/
+
+			j=0;
+			do while (j ilt level);
+				call pbyte(Copy.Buf,j,colon);	/*	add ":" for each level	*/
+				j=j+1;
+			end;
+
+			do i=j to j+7;
+				call pbyte(Copy.Buf, i, byte(temp.buf,i-j) );
+			end;
+
+			i=7+level;								/*	this should be set already from prev loop	*/
+			do while	(i>=0)						/*	make sure filename is space filled	*/
+			and		(byte(Copy.Buf,i) ILE SP);
+				call pbyte(Copy.Buf,i,SP);		/*	put a space there	*/
+				i=i-1;
+			end;
+			Copy.Buf(0)=8+level;
+
+			if (Buf(0)+Copy.Buf(0)) IGT MaxLen
+			then Copy.Buf(0)=MaxLen-Buf(0);
+
+			call Append.To.Str(Buf,Copy.Buf);
+		end;
+	end;
+
+	return CurItemType;
+end Append.Current.CatList.Item;
+
+/*	$SUBTITLE	*/
+
+SaveListPos: proc(Mem#) public swapable;
+	dcl (Mem#,Ptr)	fixed;
+
+	if Device.Mounted=0 then return;	/*	nothing mounted yet	*/
+
+	if Mem#<>ScratchMem#
+	then Mem#=(ActiveWindowId*(Max.Window.Lines+2))+Mem#;	/*	map to correct absolute memory loc	*/
+
+	if SortInfo=SORT$Filename then do;
+
+		SAVE.FLIST.POS:
+
+		Ptr=Mem#*FMEM#Len;				/*	convert to offset ptr	*/
+
+		if Ptr ige FMem.Len then return;
+
+		write(mam)=FMem.Base+shr(Ptr,8);
+		write(mal)=Ptr;
+		write(mdi)=FListIndex;
+		write(mdi)=FListSector;
+		write(mdi)=FListWord;
+		write(md )=CurItemType;
+	end;
+	else do;									/*	polycache and optical disk	*/
+		Ptr=Mem#*CMEM#Len;				/*	convert to offset ptr	*/
+
+		if Ptr ige CMem.Len then return;
+
+		write(mam)=CMem.Base+shr(Ptr,8);
+		write(mal)=Ptr;
+		write(mdi)=CListIndex;
+		write(mdi)=CListSector;			/*	save these ptrs for speedier	*/
+		write(mdi)=CListWord;			/*	memory recalls					*/
+		write(mdi)=CListRecLen;
+		write(mdi)=CListCurPos;
+		write(mdi)=CListFiles;
+		write(md )=CListCatWords;
+
+		GOTO SAVE.FLIST.POS;				/*	save filelist state info too	*/
+
+	end;
+end SaveListPos;
+
+/*	$PAGE	*/
+
+GetListPos: proc(Mem#) public swapable;
+	dcl (Mem#,Ptr)			fixed;
+	dcl (Index,Offset)	fixed;
+
+	if Device.Mounted=0 then return;		/*	nothing mounted yet	*/
+
+	if Mem#<>ScratchMem#
+	then Mem#=(ActiveWindowId*(Max.Window.Lines+2))+Mem#;	/*	map to correct absolute memory loc	*/
+
+	if SortInfo=SORT$Filename then do;	/*	polymemory and subcatalogs on disk devices	*/
+
+		RESTORE.FLIST.POS:
+
+		Ptr=Mem#*FMEM#Len;			/*	convert to offset ptr	*/
+
+		if Ptr ige FMem.Len then return;
+
+		write(mam)=FMem.Base+shr(Ptr,8);
+		write(mal)=Ptr;
+		FListIndex =read(mdi);
+		FListSector=read(mdi);
+		FlistWord  =read(mdi);
+		CurItemType=read(md );
+	end;
+	else do;								/*	polycache and optical disk	*/
+		Ptr=Mem#*CMEM#Len;			/*	convert to offset ptr		*/
+
+		if Ptr ige CMem.Len then return;
+
+		write(mam)=CMem.Base+shr(Ptr,8);
+		write(mal)=Ptr;
+
+		CListIndex	 =read(mdi);	/*	by loading global vars directly	*/
+		CListSector	 =read(mdi);	/*	we speed up the seek a lot			*/
+		CListWord	 =read(mdi);
+		CListRecLen	 =read(mdi);
+		CListCurPos	 =read(mdi);
+		CListFiles	 =read(mdi);
+		CListCatWords=read(md );
+
+		GOTO RESTORE.FLIST.POS;		/*	get filelist info too	*/
+
+	end;
+end GetListPos;
+
+dcl PushPos	lit 'SaveListPos(ScratchMem#)';	/*	a couple of useful literals	*/
+dcl PopPos	lit 'GetListPos (ScratchMem#)';
+
+/*	$SUBTITLE	*/
+
+Advance.To.Next.Item: proc	fixed public swapable;
+	dcl (NewIndex,NewPos)	fixed;
+
+	if Device.Mounted=0 then return ITEM$EOF;	/*	nothing mounted yet	*/
+
+	if SortInfo=SORT$Filename then do;
+		return SetFListPos(FListIndex+1);
+	end;
+	else do;	/*	stepping through category list	*/
+		NewPos=CListCurPos+1;						/*	want to advance to next file	*/
+
+		if (NewPos ige CListFiles)					/*	no more files in current category	*/
+		or (ItemFilter=FILTER$Filename)			/*	skipping filenames	*/
+		then do;
+			NewIndex=CListIndex+1;					/*	step to next category	*/
+			NewPos  =(-1);
+		end;
+		else NewIndex=CListIndex;					/*	no change here	*/
+
+		return SetCListPos(NewIndex,NewPos);
+	end;
+
+end Advance.To.Next.Item;
+
+BackUp.To.Prior.Item: proc	fixed public swapable;
+	dcl ItemType	fixed;
+
+	if Device.Mounted=0 then return ITEM$EOF;	/*	nothing mounted yet	*/
+
+	if SortInfo=SORT$Filename then do;
+		if FListIndex<>0
+		then return SetFListPos(FListIndex-1);
+		else return ITEM$BOF;			/*	have hit start of file	*/
+	end;
+	else do;
+		if CListCurPos=(-1) then do;	/*	current pointing at category name	*/
+			if CListIndex=0
+			then return ITEM$BOF;		/*	hit start of category list	*/
+			else do;
+
+				ItemType=SetCListPos(CListIndex-1,(-1));
+
+				if ItemFilter=FILTER$Filename then return ItemType;
+
+				return SetCListPos(CListIndex,CListFiles-1);
+			end;
+		end;
+
+		return SetCListPos(CListIndex,CListCurPos-1);
+	end;
+
+end BackUp.To.Prior.Item;
+
+/*	$SUBTITLE	*/
+
+Advance.To.Next.Line: proc	fixed public swapable;
+	dcl NewIndex	fixed;
+	dcl NewPos		fixed;
+
+	if Device.Mounted=0 then return ITEM$EOF;	/*	nothing mounted yet	*/
+
+	if SortInfo=SORT$Filename then do;
+
+		NewIndex=FListIndex+MaxRowItems(SortInfo);		/*	put new ptr into temp	*/
+		if NewIndex ilt FListIndex then NewIndex=(-1);	/*	limit to max index		*/
+
+		return SetFListPos(NewIndex);
+	end;
+	else do;
+		NewPos=CListCurPos; NewIndex=CListIndex;		/*	assume no change	*/
+		if (CurItemType=ITEM$Filename)
+		or (CurItemType=ITEM$EndOfCategory) then do;	/*	line of filenames	*/
+			if ItemFilter<>FILTER$Filename
+			then NewPos=CListCurPos+MaxRowItems(CurItemType);
+			else NewPos=CListFiles;	/*	force step to next category	*/
+
+			if (NewPos ilt CListCurPos)
+			or (NewPos ige CListFiles) then do;			/*	force step to next category	*/
+				NewPos=(-1);
+				NewIndex=CListIndex+1;
+			end;
+		end;
+		else if (CurItemType=ITEM$Category) then do;
+			if  (ItemFilter<>FILTER$Filename)			/*	not skipping files		*/
+			and (CListFiles<>0)								/*	and we have some files	*/
+			then do; NewPos=	0;									end;
+			else do; NewPos=(-1); NewIndex=CListIndex+1;	end;
+		end;
+		return SetCListPos(NewIndex,NewPos);			/*	Go to new location	*/
+	end;
+
+end Advance.To.Next.Line;
+
+/*	$PAGE	*/
+
+BackUp.To.Prior.Line: proc	fixed public swapable;
+	dcl NewPos	fixed;
+
+	if Device.Mounted=0 then return ITEM$EOF;		/*	nothing mounted yet	*/
+
+	if SortInfo=SORT$Filename then do;
+		if FListIndex ilt MaxRowItems(ITEM$Filename) then do;
+			call SetFListPos(0);
+			return ITEM$BOF;
+		end;
+
+		return SetFListPos(FListIndex-MaxRowItems(ITEM$Filename));
+	end;
+	else do;
+		if CurItemType=ITEM$Filename then do;		/*	on a file ptr	*/
+			if (CListCurPos=0) or (ItemFilter=FILTER$Filename)	/*	at first file in category	*/
+			then NewPos=(-1);								/*	step back to category name	*/
+			else do;
+				if CListCurPos ilt MaxRowItems(ITEM$Filename)	/*	can't back up a whole line of file ptrs	*/
+				then NewPos=0;								/*	back up to first file under current category	*/
+				else NewPos=CListCurPos-MaxRowItems(ITEM$Filename);	/*	back up 1 line of file ptrs	*/
+			end;
+		end;
+		else do;												/*	on a category line	*/
+			if CListIndex=0 then do;					/*	have hit start of category list	*/
+				call SetCListPos(0,-1);
+				return ITEM$BOF;
+			end;
+
+			call SetCListPos(CListIndex-1,(-1));	/*	step back to prior record	*/
+
+			if (CListFiles=0) or (ItemFilter=FILTER$Filename)
+			then return ITEM$Category;					/*	no files in this category	*/
+
+			if MaxRowItems(ITEM$Filename) igt 1 then do;
+				load CListFiles; div MaxRowItems(ITEM$Filename);
+				if rem<>0
+				then NewPos=CListFiles-rem;
+				else NewPos=CListFiles-MaxRowItems(ITEM$Filename);
+			end;
+			else NewPos=CListFiles-1;
+		end;
+		return SetCListPos(CListIndex,NewPos);
+	end;
+
+end BackUp.To.Prior.Line;
+
+/*	$SUBTITLE	*/
+
+Get.Next.Item: proc (Buf)	fixed public swapable;
+	dcl Buf			array;
+	dcl ItemType	fixed;
+
+	if Device.Mounted=0 then return ITEM$EOF;		/*	nothing mounted yet	*/
+
+	if SortInfo=SORT$Filename then do;
+
+		if ItemFilter=FILTER$Filename then return ITEM$Eof;	/*	not interested in file data	*/
+
+		ItemType=Append.Current.FileList.Item(Buf,GID(DirTableCols));
+
+	end;
+	else do;
+		ItemType=Append.Current.CatList.Item(Buf,GID(DirTableCols));
+	end;
+
+	call Advance.To.Next.Item;			/*	advance to next item in list	*/
+
+	return ItemType;						/*	return type of item we just got	*/
+end Get.Next.Item;
+
+Get.Next.Line: proc (Buf)	fixed public swapable;
+	dcl Buf						array;	/*	output buffer	*/
+	dcl FirstItemType			fixed;
+	dcl (ItemType,I,Num)		fixed;
+	dcl (NewPos,NewIndex)	fixed;
+
+	Buf(0)=0;								/*	start with empty line	*/
+
+	if (Device.Mounted=0)				/*	nothing mounted yet	*/
+	or (CurItemType=ITEM$EOF)			/*	at end of file		*/
+	then return ITEM$EOF;
+
+	FirstItemType=CurItemType;
+
+	I=0;
+	do while	(CurItemType = FirstItemType)			/*	next item is same type as first	*/
+		and	(I ilt MaxRowItems(CurItemType));	/*	and line is not full yet			*/
+
+		if SortInfo=SORT$Filename then do;
+			ItemType=Append.Current.FileList.Item(Buf,GID(DirTableCols));
+
+			call SetFListPos(FListIndex+1);			/*	advance to next item	*/
+		end;
+		else do;
+			ItemType=Append.Current.CatList.Item(Buf,GID(DirTableCols));
+
+			NewPos=CListCurPos+1;						/*	want to advance to next file	*/
+
+			if (NewPos ige CListFiles)					/*	no more files in current category	*/
+			or (ItemFilter=FILTER$Filename)			/*	skipping filenames	*/
+			then do;
+				NewIndex=CListIndex+1;					/*	step to next category	*/
+				NewPos  =(-1);
+			end;
+			else NewIndex=CListIndex;					/*	no change here	*/
+
+			call SetCListPos(NewIndex,NewPos);
+		end;
+
+		I=I+1;
+	end;
+
+   return FirstItemType;	/*	return type of line we just got	*/
+end Get.Next.Line;
+
+/*	$SUBTITLE	*/
+
+Get.Prior.Item: proc (Buf)	fixed public swapable;
+	dcl Buf	array;
+
+	if Device.Mounted=0 then return ITEM$EOF;		/*	nothing mounted yet	*/
+
+	if BackUp.To.Prior.Item<>ITEM$BOF then do;	/*	able to back up one item	*/
+
+		if SortInfo=SORT$Filename then do;
+
+			if ItemFilter=FILTER$Filename then return ITEM$BOF;	/*	not interested in file data	*/
+
+			call Append.Current.FileList.Item(Buf,GID(DirTableCols));
+
+		end;
+		else do;
+		end;
+	end;
+
+	return CurItemType;	/*	return type code for current item	*/
+end Get.Prior.Item;
+
+Get.Prior.Line: proc (Buf)	fixed public swapable;
+	dcl Buf				array;
+	dcl FirstItemType	fixed;
+
+	Buf(0)=0;		/*	clear string to start	*/
+
+	if Device.Mounted=0 then return ITEM$EOF;	/*	nothing mounted yet	*/
+
+	if BackUp.To.Prior.Line<>ITEM$BOF then do;
+
+		call PushPos;									/*	save current position	*/
+
+		FirstItemType=Get.Next.Line(Buf);		/*	get the line	*/
+
+		call PopPos;									/*	restore to backed up position	*/
+
+	end;
+	else FirstItemType=ITEM$BOF;					/*	could not back up another line	*/
+
+	return FirstItemType;
+end Get.Prior.Line;
+
+/*	$SUBTITLE	*/
+
+Seek.To.Line: proc (WhichLine)	fixed public swapable;
+	dcl WhichLine	fixed;	/*	display line from index file	*/
+	dcl Line			fixed;
+
+	if Device.Mounted=0 then return ITEM$EOF;		/*	nothing mounted yet	*/
+
+	if WhichLine ige TotalDisplayLines	/*	beyond end of index file	*/
+	then WhichLine=TotalDisplayLines-1;	/*	limit to last line			*/
+
+	if SortInfo=SORT$Filename then do;
+		Line = WhichLine*MaxRowItems(SortInfo);
+		call SetFListPos(Line);							/*	position at start of desired line	*/
+		Line = FListIndex/MaxRowItems(SortInfo);	/*	reconfirm position	*/
+		call PID(Scroll.CurrentLine,Line);			/*	save new position for next call	*/
+		call SaveListPos(ScrollMem#);
+	end;
+	else do;
+		Line=GID(Scroll.CurrentLine);	/*	set new position to last	*/
+		call GetListPos(ScrollMem#);
+
+		do while	(Line ilt WhichLine)
+			and	(CurItemType<>ITEM$EOF);
+
+			call Advance.To.Next.Line;					/*	try to step to next line	*/
+
+			if CurItemType<>ITEM$EOF then Line=Line+1;	/*	were able to advance	*/
+		end;
+
+		do while	(Line igt WhichLine)
+			and	(CurItemType<>ITEM$BOF);
+
+			call Backup.To.Prior.Line;					/*	try to step back a line	*/
+
+			if CurItemType<>ITEM$BOF then Line=Line-1;	/*	were able to backup	*/
+		end;
+
+		call PID(Scroll.CurrentLine,Line);			/*	save new position for next call	*/
+		call SaveListPos(ScrollMem#);
+	end;
+
+	return CurItemType;									/*	type of item we are pointing at	*/
+end Seek.To.Line;
+
+Get.Line: proc (WhichLine,Buf)	fixed public swapable;	/*	builds the specified line from index file without changing current position	*/
+	dcl WhichLine		fixed;	/*	display line from index file	*/
+	dcl Buf				array;	/*	output string	*/
+	dcl FirstItemType	fixed;
+
+	if Device.Mounted=0 then return ITEM$EOF;	/*	nothing mounted yet	*/
+
+	call Seek.To.Line(WhichLine);			/*	step to desired line	*/
+
+	FirstItemType=Get.Next.Line(Buf);	/*	read next line into buffer	*/
+
+	return FirstItemType;
+end Get.Line;
+
+/*	$SUBTITLE	*/
+
+Get.Current.Filename.And.Info: proc(Name,Info) public swapable;	/*	gets file at current position	*/
+	dcl Name	array;	/*	will hold name of file				*/
+	dcl Info	array;	/*	will hold the following info:		*/
+							/*	words	0-1 = file address			*/
+							/*	words	2-3 = file length				*/
+							/*	word	4	 = sample rate				*/
+							/*	word	5	 = stereo/mono				*/
+							/*	word	6	 = data type				*/
+							/*	word	7	 = word length mod 64K	*/
+	/*	see SYNAUXS:ODISKLIT for actual literals for INFO fields	*/
+
+	dcl FileAddr(1)	fixed;	/*	will hold abs address on physical device (Optical, PolyMem or other disk drive)	*/
+	dcl FileLen (1)	fixed;	/*	will hold sector length of file	*/
+	dcl WordLen			fixed;	/*	will hold word length of file mod 64K	*/
+	dcl SRate			fixed;	/*	will hold sample rate	*/
+	dcl Stereo			fixed;	/*	will hold whether or not file is stereo	*/
+	dcl DataType		fixed;	/*	will hold file data type (looping type)	*/
+	dcl I					fixed;
+
+	Name(0)	  =0;	/*	init string and info to start	*/
+	FileAddr(0)=(-1);	FileAddr(1)=(-1);	/*	all 1's by default (better in case of bugs)	*/
+	FileLen(0) =0;		FileLen(1) =0;
+	WordLen	  =0;
+	SRate		  =0;
+	Stereo	  =0;
+	DataType	  =0;
+
+	if Device.Mounted=0 then return ITEM$EOF;	/*	nothing mounted yet	*/
+
+	if (CurItemType=ITEM$Filename) then do;	/*	have a record here	*/
+
+		if DirDevice=LaserDev then do;							/*	laser disk	*/
+			call Seek(FileList,I$FileStart+FListSector,3);	/*	seek to appropriate sector in file list	*/
+			call Seek(FileList,shl(FListWord,1),1);			/*	seek to appropriate word in this sector	*/
+			call FRead(Copy.Buf,18,2,FileList);					/*	get first 18 words from file list record	*/
+
+			FileAddr(0)=Copy.Buf(09)|shl(LaserDev,8);			/*	address on laser disk	*/
+			FileAddr(1)=Copy.Buf(08);								/*	stored in LSB,MSB order in INDEX file!	*/
+			FileLen (0)=Copy.Buf(11);								/*	length of data	*/
+			FileLen (1)=Copy.Buf(10);								/*	stored in LSB,MSB order in INDEX file!	*/
+			WordLen	  =Copy.Buf(12);								/*	word length mod 64K	*/
+			SRate		  =Copy.Buf(16);								/*	sample rate	*/
+			Stereo	  =shr(Copy.Buf(17),10)&1;					/*	stereo or not	*/
+			DataType	  =Copy.Buf(17)&"1777";						/*	file data type	*/
+
+         call Append.Bytes.To.Str(Copy.Buf,8,Name,8);
+         call Remove.Spaces.From.String(Name,Name);
+         call UpperCase.String			(Name,Name);
+		end;
+
+		else if (DirDevice=PolyMemDev) or (DirDevice ILT 8)
+		then do;	/*	Device which uses snapshot (Poly Memory or Real Disk Drive)	*/
+         dcl NamePtr  fixed;
+			write(mam)=SnapBase+FListSector;
+			write(mal)=FListWord;
+			write("313")=Addr(Copy.Buf(0));
+			rpc 4; write("373")=read(mdi);
+			FileAddr(0)=read(mdi); FileAddr(1)=read(mdi);	/*	address in poly or on disk	*/
+			FileLen (0)=0;			  FileLen (1)=read(mdi);
+         NamePtr    =read(mdi);                          // snapptr before ort
+			/*	The following should be set someday	*/
+			Stereo  =shr(read(md),10)&1;	/*	ARE THESE LINES CORRECT? I THOUGHT		*/
+			DataType=read(mdi)&"1777";		/*	SNAPSHOT DID NOT HOLD THIS INFO - TSS	*/
+			WordLen = shl(FileLen(1),8);
+			Srate   = 0;
+
+			if DirDevice=PolyMemDev then do;	/*	for poly files look for file in case it moved	*/
+            FnBuf(0)=8;
+            do I=1 to 4; FnBuf(I)=Copy.Buf(I-1); end;
+
+            // If interpreter is running, get long name from area
+            if (interp_is_running != 0) {
+               dcl NameLen fixed;
+               
+               write(mam)=NameBase+shr(NamePtr,5);    /* init ptr to snap shot area */
+               write(mal)=shl(NamePtr,3);
+               write("313")=addr(LnBuf(1));           /* set up for quick write */
+               rpc sf.file.handle.wl; write("373")=read(mdi);
+               
+               // And get its length handy
+               NameLen = 0;
+               
+               // Store the long name characters in copy.buf(8)
+               while ((NameLen < (sf.file.handle.bl-1)) && (byte(LnBuf, NameLen) != 0))
+                  NameLen = NameLen + 1;
+                  
+               LnBuf(0) = NameLen;
+
+               call Copy.String(LnBuf, Name);
+            }
+
+            else {
+               LnBuf(0) = 0;
+               call Append.Bytes.To.Str(Copy.Buf,8,Name,8);
+               call Remove.Spaces.From.String(Name,Name);
+               call UpperCase.String			(Name,Name);
+            }
+
+            if ps.search<>0 then do;				/*	compute ptr to file	*/
+					FileAddr(0)=SFile.Base(LW#MSB);
+					FileAddr(1)=SFile.Base(LW#LSB);
+					call ADD16(1,FileAddr);				/*	point to actual sound file in poly	*/
+					call psmread(Sfile.Base,0,0);
+					FileLen(1)=read(psd)-1;				/*	and recheck poly sound file length	*/
+					WordLen	 =shl(FileLen(1),8);
+				end;
+			end;
+
+         else {
+            call Append.Bytes.To.Str(Copy.Buf,8,Name,8);
+            call Remove.Spaces.From.String(Name,Name);
+            call UpperCase.String			(Name,Name);
+         }
+		end;
+
+		else if DirDevice=PolyCacheDev then do;
+			if Find.Cache=0 then return ITEM$EOF;	/*	no cache exists	*/
+			CListSector=1;
+
+			call psmread(Cache.Base,CListSector+shr(CListWord,5),shl(CListWord&"37",3));
+			write("313")=Addr(Copy.Buf(0));
+			rpc 4; write("373")=read(psd);
+			FileAddr(0)=read(psd); FileAddr(1)=read(psd);	/*	address on winchester	*/
+			FileLen (0)=0;			  FileLen (1)=read(psd);
+			/*	The following should be set someday	*/
+			SRate		= 0;
+			Stereo	= 0;
+			DataType	= 0;
+			WordLen	= shl(FileLen(1),8);
+         call Append.Bytes.To.Str(Copy.Buf,8,Name,8);
+         call Remove.Spaces.From.String(Name,Name);
+         call UpperCase.String			(Name,Name);
+		end;
+	end;
+
+	/*	load values into output array	*/
+
+	call Copy32(FileAddr,loc(addr(Info(SFINFO#F_Base  ))));
+	call Copy32(FileLen, loc(addr(Info(SFINFO#F_SecLen))));
+	Info(SFINFO#S_Rate	) = SRate;
+	Info(SFINFO#Stereo	) = Stereo;
+	Info(SFINFO#Data_Type) = DataType;
+	Info(SFINFO#F_WordLen) = WordLen;
+
+   return CurItemType;
+end Get.Current.Filename.And.Info;
+
+/*	$SUBTITLE	*/
+
+Shuffle.Memories: proc (Dist) swapable;
+	dcl Dist	fixed;	/*	number of positions to shuffle memories	*/
+	dcl Mem	fixed;
+	dcl Base	fixed;	/*	base memory #	*/
+
+	Copy.Memory: proc (Sou,Des);
+		dcl (Sou,Des)			fixed;
+		dcl (SouPtr,DesPtr)	fixed;
+		dcl T (CMEM#Len-1)	fixed;
+
+		if SortInfo=SORT$Filename then do;
+
+			COPY.FLIST.MEMORY:
+
+			SouPtr=Sou*FMEM#Len;			/*	convert to offset ptr	*/
+			DesPtr=Des*FMEM#Len;
+
+			if (SouPtr ige FMem.Len)
+			or (DesPtr ige FMem.Len) then return;
+
+			write(mam)=FMem.Base+shr(SouPtr,8);
+			write(mal)=SouPtr;
+			write("313")=Addr(T(0));
+			rpc FMEM#Len; write("373")=read(mdi);
+
+			write(mam)=FMem.Base+shr(DesPtr,8);
+			write(mal)=DesPtr;
+			write("313")=Addr(T(0));
+			rpc FMEM#Len; write(mdi)=read("373");
+
+		end;
+		else do;
+			SouPtr=Sou*CMEM#Len;		/*	convert to offset ptr	*/
+			DesPtr=Des*CMEM#Len;
+
+			if (SouPtr ige CMem.Len)
+			or (DesPtr ige CMem.Len) then return;
+
+			write(mam)=CMem.Base+shr(SouPtr,8);
+			write(mal)=SouPtr;
+			write("313")=Addr(T(0));
+			rpc CMEM#Len; write("373")=read(mdi);
+
+			write(mam)=CMem.Base+shr(DesPtr,8);
+			write(mal)=DesPtr;
+			write("313")=Addr(T(0));
+			rpc CMEM#Len; write(mdi)=read("373");
+
+			GOTO COPY.FLIST.MEMORY;
+
+		end;
+	end Copy.Memory;
+
+	if (Dist=0) or (Dist>GID(DirTableRows)) then return;
+
+	Base=ActiveWindowId*(Max.Window.Lines+2);
+
+	if Dist>0 then do;	/*	shuffle memories up	*/
+		Mem=GID(DirTableRows)-Dist;
+		do while Mem>=0;
+			call Copy.Memory(Base+Mem,Base+Mem+Dist);
+			Mem=Mem-1;
+		end;
+	end;
+	else do;			/*	shuffle memories down	*/
+		Dist=-Dist;	/*	convert to positive distance	*/
+		do Mem=0 to GID(DirTableRows)-Dist;
+			call Copy.Memory(Base+Mem+Dist,Base+Mem);
+		end;
+	end;
+
+end Shuffle.Memories;
+
+/*	$SUBTITLE	*/
+
+Compute.Total.Index.Lines: proc (FileCount,CatCount) swapable;	/*	recompute total lines of info in index file	*/
+	dcl (FileCount,CatCount)	fixed;
+	dcl (Lines#1,Lines#N)		fixed;
+	dcl (  New#1,  New#N)		fixed;
+	dcl NextItemType				fixed;
+	dcl (i,j,wd)					fixed;
+	dcl MaxLen						fixed;
+	dcl NPerLine					fixed;
+
+	if Device.Mounted=0 then do;	/*	nothing mounted yet	*/
+		FListDisplayLines(F#1PerLine)=0;
+		FListDisplayLines(F#NPerLine)=0;
+		CListDisplayLines(C#1PerLine)=0;
+		CListDisplayLines(C#NPerLine)=0;
+		CListDisplayLines(C#JustCats)=0;
+		return;
+	end;
+
+	MaxLen=GID(DirTableCols);
+	load MaxLen; div CharsPerFile; NPerLine=res;	/*	# of files per line	*/
+
+	load FileCount; div NPerLine;
+
+	FListDisplayLines(F#NPerLine)=res+(rem<>0);	/*	this index file will result in	*/
+	FListDisplayLines(F#1PerLine)=FileCount;		/*	compute # of display lines	*/
+
+	Lines#1=0; Lines#N=0;				/*	assume no category list display lines to start	*/
+
+	if DirDevice=LaserDev then do;	/*	Laser Disk device	*/
+
+		TotalCatCount =CatCount;		/*	save passed values into globals	*/
+		TotalFileCount=FileCount;
+
+		call Seek(FileList,shl(H$CatLines,1),0);	/*	seek to appropriate sector in file list	*/
+		Lines#1=GetW(FileList)+CatCount;
+		call Seek(FileList,shl(H$CatLines+NPerLine-1,1),0);	/*	seek to appropriate sector in file list	*/
+		Lines#N=GetW(FileList)+CatCount;
+	end;
+
+	/*	$PAGE	*/
+
+	else if DirDevice=PolyCacheDev then do;
+		CatCount=0;						/*	reset count of catalogs	*/
+
+		if Find.Cache<>0 then do;	/*	have located the poly cache	*/
+			call psmread(Cache.Base,0,bl.filecount);	/*	gets no. files in cache	*/
+			FileCount = read(psd);
+			call psmread(Cache.Base,0,bl.catcount);	/*	gets no. catalogs in cache	*/
+			CatCount = read(psd);
+			call psmread(Cache.Base,0,bl.lines);		/*	get no. lines required for one files/line value	*/
+			Lines#1 = read(psd) + CatCount;				/*	number of lines at 1 file per line	*/
+			call psmread(Cache.Base,0,bl.lines+NPerLine-1);	/*	get no. lines required for this files/line value	*/
+			Lines#N = read(psd) + CatCount;
+		end;
+
+		TotalCatCount =CatCount;
+		TotalFileCount=FileCount;
+	end;
+
+	else do;	/*	all other devices (PolyMemory, Normal Disk Devices)	*/
+		TotalCatCount =CatCount;
+		TotalFileCount=FileCount;
+	end;
+
+	CListDisplayLines(C#1PerLine)=Lines#1;	/*	limit to 16 bit count for now	*/
+	CListDisplayLines(C#NPerLine)=Lines#N;	/*	limit to 16 bit count for now	*/
+	CListDisplayLines(C#JustCats)=CatCount;
+
+end Compute.Total.Index.Lines;
+
+/*	$SUBTITLE	*/
+
+Compute.Mode.Globals: proc swapable;	/*	reset some global vars	*/
+
+	MaxItemChars(ITEM$Category)=GID(DirTableCols);
+	MaxRowItems (ITEM$Category)=1;
+
+	if (ShowInfo & (INFO$Second|INFO$Mbyte|INFO$Sector|INFO$Bin|INFO$Loops|INFO$Caption|INFO$Names))<>0 then do;
+		MaxItemChars(ITEM$Filename)=GID(DirTableCols);
+		MaxRowItems (ITEM$Filename)=1;
+	end;
+	else do;
+		load GID(DirTableCols); div CharsPerFile;
+		MaxRowItems (ITEM$Filename)=res;
+		MaxItemChars(ITEM$Filename)=CharsPerFile;
+	end;
+
+	if SortInfo=SORT$Filename then do;
+		if (ShowInfo & (INFO$Second|INFO$Mbyte|INFO$Sector|INFO$Bin|INFO$Loops|INFO$Caption|INFO$Names))<>0
+		then TotalDisplayLines=FListDisplayLines(F#1PerLine);
+		else TotalDisplayLines=FListDisplayLines(F#NPerLine);
+	end;
+	else do;
+		if (ItemFilter<>FILTER$Filename) then do;
+			if (ShowInfo & (INFO$Second|INFO$Mbyte|INFO$Sector|INFO$Bin|INFO$Loops|INFO$Caption|INFO$Names))<>0
+			then TotalDisplayLines=CListDisplayLines(C#1PerLine);
+			else TotalDisplayLines=CListDisplayLines(C#NPerLine);
+		end;
+		else TotalDisplayLines=CListDisplayLines(C#JustCats);
+	end;
+
+end Compute.Mode.Globals;
+
+Rezero.Index.File.Ptrs: proc swapable;
+	dcl Wd	fixed;
+	dcl rc	fixed;
+
+	if SortInfo=SORT$Filename
+	then rc = SetFListPos(0);	/*	reset current position to start of file list	*/
+
+	else do;
+		CListIndex	 =0;
+		CListCurPos	 =(-1);
+		CListSector	 =0;
+		CListWord	 =0;
+		CListRecLen	 =0;	/*	set these two vars in case we bomb out below	*/
+		CListFiles	 =0;
+		CListCatWords=0;
+
+		/*	Need to manually seek to start of CatList file to	*/
+		/*	set up CListRecLen before calling CatList.Seek		*/
+		/*	routines below.												*/
+
+		if DirDevice=LaserDev then do;
+			call Seek(CatList,I$CatStart,3);
+			CListRecLen=GetW(CatList);
+			CListCatWords=1+shr(GetW(CatList)+1,1);		/*	words in category name	*/
+			call Seek(CatList,shl(CListCatWords-1,1),1);	/*	seek past category name	*/
+			CListFiles=GetW(CatList);							/*	number of files in this category	*/
+		end;
+		else do;
+			if Find.Cache<>0 then do;
+				CListSector=1;
+				CListFiles=0; Wd=CListWord+1;
+
+				if Wd ilt Cache.Ptr then do;
+					call psmread(Cache.Base,CListSector+shr(Wd,5),shl(Wd&"37",3)+7);
+					do while	(read(psd)=(-1))			/*	count # of sound files in this catalog	*/
+						and	(Wd ilt Cache.Ptr);		/*	and have not hit end of cache	*/
+						CListFiles=CListFiles+1;		/*	one more file	*/
+						Wd=Wd+1;								/*	step to next FCB	*/
+						rpc 7;
+						write("324")=read(psd);			/*	advance poly ptr	*/
+					end;
+				end;
+
+				CListRecLen=shl(CListFiles+1,3);		/*	total length of this block (NOT REALLY USED)	*/
+				CListCatWords=4;							/*	words in subcatalog name	*/
+			end;
+		end;
+
+		/*	need to do a seek to set up CListFiles & CListCatWords vars	*/
+
+		if DirDevice=LaserDev
+		then rc = Index.CatList.Seek	  (0,-1);	/*	seek to start of file	*/
+		else rc = PolyCache.CatList.Seek(0,-1);
+
+	end;
+
+	call PID(Scroll.CurrentLine,0);
+	call SaveListPos(ScrollMem#);
+
+	return rc;
+
+end Rezero.Index.File.Ptrs;
+
+/*	$SUBTITLE	*/
+
+dcl Default.Activate.Optical.Control.Bits	fixed public;
+
+Open.Device: proc (Dev)	fixed swapable;
+	dcl (Dev,I)	fixed;
+
+	if Dev=LaserDev then do;	/*	Mount Laser Disk	*/
+		if (CatList<>NULLF) & (FileList<>NULLF) then do;	/*	Index already mounted	*/
+			if not Activate.Optical(Default.Activate.Optical.Control.Bits)
+			then return false;
+		end;
+		else do;		/*	no index mounted yet	*/
+			I=(Default.Activate.Optical.Control.Bits&(not O#VolChangeDialog))|O#AutoVolChange;
+			if not Activate.Optical(I) then return false;
+		end;
+		Optical.Disk.Ready=0;	/*	reset flag since we are only interested in reading Index file	*/
+		TotalFileCount=I$FileCount;
+		TotalCatCount =I$CatCount;
+	end;
+	else if DirDevice<>PolyCacheDev then do;	/*	other device types	*/
+
+		call Sound.File.SnapShot(Dev);			/*	take first snapshot	*/
+
+		TotalCatCount =0;				/*	no Category List available here	*/
+		TotalFileCount=SnapFCBs;	/*	this is number of files in snap shot	*/
+
+	end;
+	else do;	/*	Assumes POLYCACHE can always be opened	*/
+		TotalFileCount=0;				/*	no filelist supported for Poly Cache	*/
+		TotalCatCount =0;				/*	will compute # of subcats later	*/
+	end;
+
+	return true;
+end Open.Device;
+
+/*	$SUBTITLE	*/
+
+Mount.New.Device: proc (Device)	fixed public swapable;
+	dcl Device	fixed;
+
+	Device.Mounted=0;	/*	start out with nothing mounted	*/
+
+	ScreenTopLine	  =0;				/*	assume MOUNT will fail	*/
+	TotalCatCount	  =0;
+	TotalFileCount	  =0;
+	TotalDisplayLines=0;
+	CurItemType=ITEM$EOF;
+
+	DirDevice=Device;					/*	new mounted device code	*/
+
+	if not Open.Device(Device) then return false;	/*	nothing there	*/
+
+	Device.Mounted=1;					/*	means it's okay to call other routines now	*/
+
+	call Compute.Total.Index.Lines(TotalFileCount,TotalCatCount);	/*	compute # of lines in display	*/
+	call Compute.Mode.Globals;		/*	recompute total lines of info in index file	*/
+
+	call Rezero.Index.File.Ptrs;	/*	reset to start of file	*/
+
+	Disable.Deposits=true;			/*	temporarily turn off	*/
+
+	if TotalDisplayLines igt GID(DirTableRows)			/*	need to scroll	*/
+	then call Activate.Scroll.Bar(GID(ScrollBar),0);	/*	reset scroll bar to top	*/
+	else do;
+		Disable.Deposits=true;
+			call Deposit.Scroll.Bar(GID(ScrollBar),0);	/*	reset position to top	*/
+		Disable.Deposits=false;
+		call Deactivate.Scroll.Bar(GID(ScrollBar));	/*	no scrolling on this one	*/
+	end;
+
+	Disable.Deposits=false;			/*	turn back on	*/
+
+	return true;
+end Mount.New.Device;

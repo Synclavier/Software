@@ -1,0 +1,1735 @@
+/* 11-MAIN  $TITLE  Start of Main Program */
+
+/* THIS IS THE START OF THE MONITOR. UPON LOADING FROM THE DISK,
+   THE MONITOR PRINTS 'READY' ON THE TERMINAL.
+ 
+   THE GLOBAL LABEL 'ERROR' IS GONE TO TO RESTART THE MONITOR WITHOUT
+   AFFECTING SAVED DATA (CURRENT FILE NAME, ETC) IN THE CASE OF A
+   USER FORMAT ERROR.
+*/
+
+/* 10/03/96 - C. Jones - Implemented "smart" alias processing            */
+/* 10/01/96 - C. Jones - Reengineered BUILD command for file transfer... */
+
+SCAN_COMMAND:  PROC; /* READ IN A COMMAND TOKEN */
+   DCL I FIXED;
+
+   DO I = 1 TO 3; STR1(I) = a.SP OR SHL(a.SP,8); END; /* BLANK NAME BUFFER */
+   STR1(0) = 0; /* CLEAR LENGTH */
+
+   CALL UPCASE.INCH; /* UP THE CASE OF CURRENT CHAR */
+   DO WHILE (NOT.END) AND (INCH <> a.comma)
+   AND (INCH <> a.slash) AND (INCH <> a.SP); /* SCAN OFF COMMAND NAME */
+      IF STR1(0) < 3 THEN DO; /* TAKE UP TO 3 CHARS */
+         CALL PBYTE(STR1,STR1(0),INCH); STR1(0) = STR1(0) + 1; /* ADD IN CHAR */
+      END;
+      ELSE IF STR1(0) < 5 THEN DO; /* KEEP FIVE CHARS */
+         CALL PBYTE(STR1,STR1(0)+1,INCH); STR1(0) = STR1(0) + 1; /* ADD IN CHAR IN WORD THREE */
+      END;
+      CALL GET.CHAR.UPCASE; /* GET NEXT CHAR */
+   END; /* OF COMMAND NAME SCAN */
+END SCAN_COMMAND;
+
+INTERPRET_COMMAND: PROC(CODES,ACODES,CMD) RETURNS (FIXED);
+   DCL CODES   FIXED ARRAY;
+   DCL ACODES  FIXED ARRAY; /* AUXILIARY CHARACTERS (NULL STRING IF NONE) */
+   DCL (CMD,I) FIXED;
+   DCL FOUND   BOOLEAN;
+
+   DO I = 1 TO SHR(CODES(0),1) BY 2; /* LOOP OVER CODES */
+      IF (STR1(1) = CODES(I)) AND (STR1(2) = CODES(I + 1)) THEN DO; /* POSSIBLY FOUND */
+         IF ((ACODES (0) <> 0) AND (STR1(0) > 3)) THEN DO; /* CHECK SUBSEQUENT CHARACTERS IF NECESSARY */
+            IF STR1(0) >= 5 /* IF FIVE OR MORE CHARACTERS */
+            THEN FOUND = (STR1 (3) = ACODES (I)); /* MATCH */
+            ELSE FOUND = ((STR1 (3) AND "377") = (ACODES (I) AND "377")); /* COMPARE FOURTH CHARACTER */
+         END; /* OF CHECKING SUBSEQUENT CHARACTERS */
+         ELSE FOUND = TRUE; /* NO SUBSEQUENT CHARACTERS - FOUND IT */
+
+         IF FOUND THEN RETURN (CMD + SHR(I,1)); /* COMMAND NUMBER */
+      END;
+   END;
+
+   RETURN (0); /* NOT IN LIST */
+END INTERPRET_COMMAND;
+
+SCAN_ON_OFF: PROC RETURNS (FIXED);  /* RETURNS  0=OFF, 1=ON, 2=INVALID */
+   DCL RET FIXED;
+   CALL SCAN_COMMAND;
+   DO CASE (INTERPRET_COMMAND('ON  1   OFF 0   ','',1));
+      DO;
+         CALL PSTRINGR ('Valid entries are: On or Off');
+         RET = 2;
+      END;
+      RET = 1; /* ON */
+      RET = 1; /* 1 */
+      RET = 0; /* OFF */
+      RET = 0; /* 0 */
+   END;
+   RETURN (RET);
+END SCAN_ON_OFF;
+
+END_DO: PROC RETURNS (BOOLEAN); /* TRUE IF AT END OF DO FILE */
+   RETURN (SHR(PERPTR, 1) >= PERFLEN); /* RETURN END OF FILE (MUST ALSO CHECK INCH FOR A.CR!) */
+END END_DO;
+
+START_DO: PROC(MS, LS, WORDS); /* HANDLE STARTUP OF A COMMAND FILE */
+   DCL (MS, LS) FIXED; /* STARTING SECTOR OF COMMAND FILE */
+   DCL WORDS    FIXED; /* WORD LENGTH OF COMMAND FILE */
+   DCL LEVEL    FIXED; /* CURRENT DO FILE LEVEL */
+   DCL I        FIXED;
+
+   LEVEL = (PERFORMING AND PERF_LEVEL); /* GET CURRENT DO LEVEL */
+
+   IF NOT (END_DO AND (INCH = A.CR) AND (LEVEL <> 0)) THEN DO; /* NEST IF NOT AT END OF DO */
+      IF EMSIZE <> 0 THEN DO; /* IF WE HAVE EXTERNAL MEMORY */
+         IF INCH <> A.CR THEN DO; /* IF NOT AT END OF COMMAND LINE */
+            IF LEVEL = 0 THEN DO; /* IF FIRST LEVEL */
+               CALL EXPORT (EMAREA, EM.PERFORM + DO_CLINE, TYB, SHR(TYBMAX + 3, 1)); /* SAVE COMMAND LINE */
+               PERPTR = TYBP; /* SAVE WHERE WE LEFT OFF */
+            END; /* OF FIRST LEVEL */
+            ELSE DO; /* NOT FIRST LEVEL */
+               /* THIS ONLY WORKS BECAUSE ALL LINES IN A TEXT FILE BEGIN ON A WORD BOUNDARY */
+               IF (CORE(TYB.BASE) - 1) THEN I = 1; ELSE I = 2; /* ADJUSTMENT FOR END-OF-LINE IN FILE (W/OUT FINAL CR) */
+               PERPTR = PERPTR - ((CORE(TYB.BASE) - 1) - TYBP) - I - 2; /* ADJUST PERPTR TO WHERE WE LEFT OFF (LESS TWO FOR LINE NUMBER SKIP) */
+            END; /* OF NOT FIRST LEVEL */
+         END; /* OF NOT AT END OF COMMAND LINE */
+         
+         I = LEVEL*DO_SIZE + EM.PERFORM; /* GET POINTER TO NEXT ENTRY */
+         PBUFFER (DO_SEC) = PERFSEC; PBUFFER (DO_DEV) = PERFDEV; /* SAVE CURRENT SETTINGS */
+         PBUFFER (DO_LEN) = PERFLEN; PBUFFER (DO_PTR) = PERPTR;
+         IF INCH = A.CR THEN PBUFFER (DO_CNUM) = CNUM; /* STACK COMMAND NUMBER ALSO */
+         ELSE PBUFFER (DO_CNUM) = -CNUM; /* MAKE NEGATIVE SO WE KNOW THERE'S MORE ON THIS LINE */
+         CALL EXPORT (EMAREA, I, PBUFFER, DO_SIZE); /* WRITE IT OUT */
+
+         INCH = A.CR; /* FORCE END OF LINE */
+         CNUM = 0; /* STARTING FRESH - DON'T PRINT COMMAND NUMBER TILL WE RETURN */
+      END; /* OF WE HAVE EXTERNAL MEMORY */
+
+      PERFORMING = PERFORMING + 1; /* WE'VE GONE IN A LEVEL */
+   END; /* OF NESTING A LEVEL */
+
+   PERPTR = 0; /* INIT FILE READ POINTER */
+   PERFDEV = F#MS_SECTOR; /* STORE FILE LOCATION INFO */
+   PERFSEC = F#LS_SECTOR;
+   PERFLEN = F#WORDS;
+   CALL LOAD.CMD.BUF; /* SET UP COMMAND FILE */
+END START_DO;
+
+COMPLETE_DO: PROC(LEVEL); /* HANDLE COMPLETION OF A COMMAND FILE */
+   DCL LEVEL FIXED; /* LEVEL OF DO FILE THAT JUST TERMINATED */
+   DCL I     FIXED;
+
+   DO I = (PERFORMING AND PERF_LEVEL) TO LEVEL - 1; /* DELETE ALL TEMPORARY DO FILES */
+      CALL MOVE.NAME (DO_FILE, STR2); /* PICK UP CANONICAL NAME */
+      CALL PBYTE(STR2, STR2 (0) - 1, A.0 + I); /* CREATE UNIQUE NAME FOR THIS LEVEL */
+      CALL DELETE (STR2, 0); /* DELETE IT */
+   END;
+
+   IF EMSIZE <> 0 THEN DO; /* IF WE HAVE EXTERNAL MEMORY */
+      I = (PERFORMING AND PERF_LEVEL)*DO_SIZE + EM.PERFORM; /* GET POINTER TO LAST ENTRY */
+      CALL IMPORT (EMAREA, I, PBUFFER, DO_SIZE); /* READ IT IN */
+      PERFSEC = PBUFFER (DO_SEC); PERFDEV = PBUFFER (DO_DEV); /* RESTORE SETTINGS */
+      PERFLEN = PBUFFER (DO_LEN); PERPTR  = PBUFFER (DO_PTR);
+      CALL PCN; /* PRINT FINAL COMMAND NUMBER IF THERE */
+      CNUM = ABS(PBUFFER (DO_CNUM)); /* RESTORE COMMAND NUMBER */
+
+      IF PBUFFER (DO_CNUM) < 0 THEN DO; /* NEGATIVE COMMAND NUMBER IS MULTICOMMAND LINE */
+         IF (PERFORMING AND PERF_LEVEL) = 0 THEN DO; /* IF FIRST LEVEL */
+            CALL IMPORT (EMAREA, EM.PERFORM + DO_CLINE, TYB, SHR(TYBMAX + 3, 1)); /* RESTORE COMMAND LINE */
+            TYBP = PERPTR; /* THIS IS WHERE WE LEFT OFF */
+            CALL GET.CHAR.UPCASE; /* GET FIRST CHARACTER */
+         END; /* OF FIRST LEVEL */
+         ELSE RESUME_MULTI = TRUE; /* NEED TO CONTINUE A MULTICOMMAND LINE */
+      END;
+
+      CALL LOAD.CMD.BUF; /* AND RELOAD THE BUFFER (PBUFFER) */
+   END; /* OF WE HAVE EXTERNAL MEMORY */
+END COMPLETE_DO;
+
+CANCEL_DO: PROC; /* CANCEL COMMAND FILE EXECUTION */
+   DCL LEN FIXED; /* COMMAND LINE LENGTH */
+
+   PERFORMING = (PERFORMING AND (NOT PERF_LEVEL)); /* CANCEL COMMAND FILE */
+
+   IF EMSIZE <> 0 THEN DO; /* IF WE HAVE EXTERNAL MEMORY, CANCEL MULTICOMMAND LINE WITH DO */
+      CALL IMPORT (EMAREA, EM.PERFORM + DO_CLINE, LOC(ADDR(LEN)), 1); /* PICK UP COMMAND LINE LENGTH */
+      CALL EXTSET (EMAREA, EM.PERFORM + DO_PTR, 1, LEN - 1); /* SET POINTER TO END OF LINE */
+   END; /* OF WE HAVE EXTERNAL MEMORY */
+END CANCEL_DO;
+
+/*** MAIN CODE ***/
+
+DCL LAST_LEVEL FIXED; 				/* LAST COMMAND FILE LEVEL */
+DCL (LOC,LEN)  FIXED; 				/* TEMPORARY FILE VARIABLES */
+DCL (MSW,LSW)  FIXED; 				/* USED FOR 32-BIT CALCULATIONS */
+DCL (I,J,K)    FIXED;
+
+IF (WORKMED == 0 && WORKSEC = 0) THEN CALL TRAP('WORKSEC=0 in MONITOR init phase');
+
+IF (FILSEC = 0) AND (FILNS <> 0)
+THEN CALL TRAP('FILSEC=0 when FILNS>0 in MONITOR init phase');
+
+TYB.BASE = LOC.TYB; 					/* SELECT COMMAND BUF AS CURRENT INPUT BUF */
+
+IF STORED THEN DO; 					/* SEE IF CURRENT FILE IS AVAILABLE (AFTER RUN) */
+  STORED = 0; 							/* SET TO ZERO IN CASE DISK IS MISSING & OPERATOR RELOADS */
+  CALL MOVE.NAME(LOCATION(LOC.CFN),CNAM); /* READ IN CURRENT FILE NAME */
+
+  IF FILMED = 1 THEN DO; 			/* IN CORE CURRENT FILE - MOVE TO WORK */
+    IF FILNG IGT FBUFSZ THEN DO; /* MUST WRITE OUT TO .WORK */
+      CALL WORKWRITE(0,LOCATION(FILSEC),FILNG);
+      FILSEC = WORKSEC; 			/* THE CURRENT FILE IS NOW IN THE WORKFILE */
+      BALT = 0; I = FBUFSZ;
+    END;
+    ELSE DO; BALT = 1; I = FILNG; END;
+    BSTRT = 0; BLEN = I; FSTRT = I; /* INDICATE FIRST BUFFER IN MEMORY */
+    DO I = 0 TO (I - 1); 			/* COPY OVER FIRST BUFFER LOAD */
+      FBUF(I) = CORE(FILSEC + I);
+    END;
+  END; 									/* OF MAIN MEMORY CURRENT FILE */
+
+  ELSE DO; 								/* CURRENT FILE NOT IN MAIN MEMORY - MAKE SURE IT IS IN .WORK */
+    IF  (FILSEC = WORKSEC) AND (FILDEV = WORKDEV) /* IF CURRENT FILE IS IN .WORK */
+    AND (WORKMED = 0) 				/* AND .WORK IS ON DISK */
+    THEN DO; 							/* THEN READ IT FROM .WORK FILE */
+      IF (FILNS ILT 256) AND (FILNG ILE FBUFSZ) THEN DO; /* SMALL */
+        IF FILNG <> 0 THEN CALL WORKREAD(0,FBUF,FILNG);
+        BALT = 1;
+        BSTRT = 0; BLEN = FILNG; FSTRT = FILNG;
+      END;
+      ELSE IF FILNS ILT 256 THEN DO;
+        BSTRT = FILNG; FSTRT = FILNG; BLEN = 0; BALT = 0;
+        CALL PRIME; 					/* GET FIRST BUFFER LOAD FROM FILE */
+      END;
+      ELSE DO; BSTRT = (-1); FSTRT = (-1); END; /* LARGE - MAKE SURE NO ONE MESSES */
+    END;
+    ELSE DO; 							/* CORE WORK FILE, OR CURRENT FILE NOT = .WORK */
+      CALL READIN(FILDEV,FILSEC,FILNG,FILNS); /* READ IN ENTIRE FILE INTO WORK SPACE */
+    END;
+  END; 									/* OF DO FOR DISK RESIDENT CURRENT FILES */
+
+  STORED = 1; 							/* AFTER WE READ IT IN WE KNOW IT IS STORED */
+END; 										/* OF IF STORED */
+ELSE DO; 								/* FILE ISN'T STORED - ZAP CURRENT FILE */
+  FILNG=0; FILNS=0; FILDEV=UDEV; FILSEC=0; FILTP=0; /* INITIALIZE TO NULL CURRENT FILE */
+END;
+
+IF ((CORE(LOC.RST) <> 0) AND (CORE(LOC.RST) <> 2)) THEN DO; /* IF OTHER THAN GOOD TERMINATION, ABORT LINE */
+  ERROR:; 																	/* ENTER HERE ON ERROR */
+  OUTDEV = 0; 																/* RESTORE TERMINAL */
+  BREAK.RECEIVED = 1; 													/* CAUSE RESET */
+  INCH = a.CR; 															/* FORCE NEW INPUT */
+END;
+
+CALL NEWLINE;
+
+CORE(LOC.RST) = -1; 														/* ABORT COMMAND LINE IF LOAD PRESSED */
+LAST_LEVEL = (PERFORMING AND PERF_LEVEL); 						/* SAVE PRESENT COMMAND FILE LEVEL */
+RESUME_MULTI = FALSE; 													/* INITIALLY, WE AREN'T EVEN IN A COMMAND FILE */
+
+CALL LOAD.CMD.BUF; 														/* IF IN MIDDLE OF COMMAND FILE, RECOVER CONTENTS */
+
+DO FOREVER; 																/* MAIN MONITOR LOOP - SCAN COMMANDS UNTIL OVERLAY */
+CALL SKIP_LEADING_CHARS;
+
+IF BRKC THEN DO; 															/* CANCEL MULTICOMMAND LINES AND COMMAND FILES ON BREAK */
+   INCH = A.CR; 															/* CANCEL MULTICOMMAND LINES */
+   CALL CANCEL_DO; 														/* CANCEL COMMAND FILE EXECUTION */
+END;
+
+DO WHILE (INCH = A.CR); 												/* IF AT END OF LINE */
+   IF BRKC THEN CALL CANCEL_DO; 										/* CANCEL COMMAND FILE ON BREAK */
+
+   IF (PERFORMING AND PERF_LEVEL) <> 0 THEN DO; 				/* IF IN A COMMAND FILE */
+      IF END_DO THEN PERFORMING = PERFORMING - 1; 				/* END OF DO FILE */
+   END;
+
+   IF LAST_LEVEL > (PERFORMING AND PERF_LEVEL) 					/* IF WE DECREASED COMMAND FILE LEVEL */
+   THEN CALL COMPLETE_DO (LAST_LEVEL); 							/* FINISH OFF DO FILE */
+
+   LAST_LEVEL = (PERFORMING AND PERF_LEVEL); 					/* SAVE PRESENT COMMAND FILE LEVEL */
+
+   IF INCH = a.CR THEN DO; 											/* GET NEXT COMMAND LINE */
+      CALL GET.LINE(1); 												/* GET LINE, FIRST CHARACTER */
+
+      IF NOT RESUME_MULTI THEN CNUM = 0; 							/* RESET COMMAND NUMBER (MUST BE AFTER GET.LINE FOR DO'S) */
+      RESUME_MULTI = FALSE; 											/* COMPLETE_DO SETS THIS */
+   END; 																		/* OF GET NEXT COMMAND LINE */
+
+   CALL SKIP_LEADING_CHARS;
+   CALL ENABLE_CACHE(CACHE.NUM); 									/* CAUSE DISK READ FOR FIRST OPERATION */
+END; 																			/* OF IF AT END OF LINE */
+CNUM = CNUM + 1; 															/* ADVANCE COMMAND NUMBER */
+
+BREAK.RECEIVED = 0; 														/* CLEAR EXTRA BREAK DURING LAST 'PRINT' */
+
+IF INCH = A.STAR THEN CALL SKIPEND; 	/* COMMENT */
+ELSE IF (INCH - a.0) ILT 10 THEN DO; 	/* DIGIT OF LINE NUMBER */
+  CALL SCANARG; 								/* READ IN LINE NUMBER */
+  CALL MERGE; 									/* SCAN ALTER LINE, MERGE IT IN */
+END;
+ELSE DO; 										/* PROCESS AS COMMAND */
+
+	IF (winpoll_needed != 0)				/* IF POLL OF WINCHESTER SIZE FAILS, TRY AGAIN AT EACH	*/
+	{												/* COMMAND TO CONTINUE THIS BATTLE OF WILLS WITH THE		*/
+		winpoll_needed = FALSE;				/* USER...																							*/
+		
+		CALL SET_WIN_SIZE(6);
+		CALL SET_WIN_SIZE(7);
+	}
+
+  RESCAN:;
+
+  CORE(LOC.USR1) = TYBP - 1; 				/* USR1 POINTS TO COMMAND */
+  CALL SCAN_COMMAND;
+  CALL SKIPSPA; 								/* SKIP SPACES TO ARGUMENT FIELD */
+
+  I               = INTERPRET_COMMAND(COM1,COM1A, 1); /* PARSE COMMAND */
+  IF I = 0 THEN I = INTERPRET_COMMAND(COM2,COM2A,19);
+  IF I = 0 THEN I = INTERPRET_COMMAND(COM3,COM3A,37);
+  IF I = 0 THEN I = INTERPRET_COMMAND(COM4,COM4A,55);
+
+  STR2(0) = 0; /* INIT TO NO DO FILE NAME SCANNED */
+
+  NEXTCOMMAND:;
+
+  DO CASE (I); /* BRANCH ON COMMAND NUMBER */
+
+    IF STR1(0) > 0 THEN DO; /* 0:  INVALID COMMAND */
+       IF BYTE(STR1, 0) <> A.PERIOD THEN DO; /* IF DOESN'T START WITH A PERIOD - COULD BE A TRANSIENT COMMAND */
+          TYBP = CORE(LOC.USR1); /* SET POINTER BACK */
+          CALL GET.CHAR.UPCASE; /* GET FIRST CHARACTER AGAIN */
+          IF NOT READ.NAME (STR2, TRUE) THEN GOTO ERROR; /* SCAN OFF FULL NAME */
+
+          IF (LOCATE (STR2, -2) OR LOCATE (STR2, 0)) THEN DO; /* IF IN PATH OR SYSTEM CATALOG [DON'T USE OPENFILE - IT CHECKS CURRENT AS WELL] */
+             IF F#TYPE = T#EXEC THEN DO; /* MUST BE EXECUTABLE TO RUN IT */
+                CALL RUN (0,9); /* TRANSIENT COMMAND (0 means trans, 1 means COMpile, 2 means RUN) */
+                GOTO ERROR; /* IN CASE RUN FAILS */
+             END; /* OF RUN IT */
+             IF (F#TYPE = T#TEXT & F#WORDS > 1) THEN BEGIN;
+                DCL (INPTR, OUTPTR, THECHAR, FILECHAR) FIXED;
+
+                /* handle alias files... */
+
+                /* if command line ends here, then simply process the */
+                /* alias file as a do command...                      */
+
+                IF INCH = a.cr then do;  /* if name with no args, then simulate a do... */
+                   I = 39;               /* fake entry into 'do' as grossly as possible... */
+                   GOTO NEXTCOMMAND;
+                end;
+
+                /* else if arguments follow the alias, then insert the */
+                /* alias file contents in front of the command line    */
+                /* arguments...                                        */
+
+                /* begin by stashing current command line in temp buffer: */
+                I = 0;
+                DO WHILE INCH <> A.CR;
+                   LINEBUF(I) = INCH;
+                   CALL GET.CHAR;
+                   I = I + 1;
+                END;
+                LINEBUF(I) = INCH;   /* STORE TRAILING CR  */
+
+                /* read in alias file from disk: */
+                CALL READDATA(F#MS_SECTOR,F#LS_SECTOR,ALIASBUF,F#WORDS);
+
+                /* copy alias file (up to semicolon) into front of monitors command buffer: */
+                CORE(TYB.BASE) = 0;
+                INPTR          = 0;
+                OUTPTR         = 0;
+
+                COPYALIASBUF:;
+
+                IF (INPTR&1)=0 THEN FILECHAR = ALIASBUF(1 + SHR(INPTR,1)) & 255;   /* GET LOW BYTE */
+                ELSE                FILECHAR = SHR(ALIASBUF(1 + SHR(INPTR,1)), 8); /* GET HI BYTE */
+
+                THECHAR = FILECHAR;
+                IF (THECHAR = 0 OR THECHAR = A.SEMICOLON) THEN THECHAR = A.SP;  /* INSERT SPACE BEFORE ARG LIST */
+
+                IF (OUTPTR&1)=0 THEN CORE(TYB.BASE + 1 + SHR(OUTPTR,1)) = THECHAR;
+                ELSE CORE(TYB.BASE + 1 + SHR(OUTPTR,1)) = CORE(TYB.BASE + 1 + SHR(OUTPTR,1)) + SHL(THECHAR,8);
+
+                INPTR  = INPTR  + 1;
+                OUTPTR = OUTPTR + 1;
+                CORE(TYB.BASE) = OUTPTR;
+
+                IF (FILECHAR <> 0 & FILECHAR <> A.SEMICOLON) THEN GOTO COPYALIASBUF;   /* COPY TILL END OF LINE, SPACE, OR SEMICOLON */
+ 
+                /* now copy arg list into place */
+                I = 0;                                /* COPY PRIOR LINE CONTENTS */
+
+                COPYLINEBUF:;
+                THECHAR = LINEBUF(I);
+
+                IF (FILECHAR = A.SEMICOLON & THECHAR = A.CR) THEN DO;
+                   DO WHILE FILECHAR <> 0;
+                      IF (OUTPTR&1)=0 THEN CORE(TYB.BASE + 1 + SHR(OUTPTR,1)) = FILECHAR;
+                      ELSE CORE(TYB.BASE + 1 + SHR(OUTPTR,1)) = CORE(TYB.BASE + 1 + SHR(OUTPTR,1)) + SHL(FILECHAR,8);
+
+                      OUTPTR = OUTPTR + 1;
+                      CORE(TYB.BASE) = OUTPTR;
+
+                      IF (INPTR&1)=0 THEN FILECHAR = ALIASBUF(1 + SHR(INPTR,1)) & 255;   /* GET LOW BYTE */
+                      ELSE                FILECHAR = SHR(ALIASBUF(1 + SHR(INPTR,1)), 8); /* GET HI BYTE */
+
+                      INPTR  = INPTR  + 1;
+                   END;
+                END;
+
+                IF (OUTPTR&1)=0 THEN CORE(TYB.BASE + 1 + SHR(OUTPTR,1)) = THECHAR;
+                ELSE CORE(TYB.BASE + 1 + SHR(OUTPTR,1)) = CORE(TYB.BASE + 1 + SHR(OUTPTR,1)) + SHL(THECHAR,8);
+
+                I      = I      + 1;
+                OUTPTR = OUTPTR + 1;
+                CORE(TYB.BASE) = OUTPTR;
+
+                IF (THECHAR <> A.CR) THEN GOTO COPYLINEBUF;   /* COPY TILL END OF LINE, INCLUDING CR */
+
+                LEN = CORE(TYB.BASE);
+                LINEC = 0; /* INITIALIZE CRT LINE COUNT */
+                TYBP = 0; /* SET POINTER TO START OF BUFFER */
+                CALL GET.CHAR.UPCASE; /* GET FIRST CHAR */
+
+                GOTO RESCAN;
+
+             END;
+          END; /* OF IN PATH OR SYSTEM CATALOG */
+       END; /* OF TRANSIENT COMMAND */
+
+       CALL PCN; CALL PSTRINGR ('What?');
+       GOTO ERROR; /* STOP COMMAND FILES */
+    END;
+
+/* $PAGE  MONITOR COMMANDS -- NEW, OLD, SAVE, UNSAVE, REPLACE, RENAME */
+
+/*  THE FOLLOWING ROUTINES, SELECTED BY A 'DO CASE' STATEMENT,
+    ARE ENTERED TO PERFORM THE ABOVE COMMANDS.
+*/
+
+DO; /* NEW */
+  IF NOT READ.NAME(STR2,TRUE) THEN GOTO ERROR; /* MUST SPECIFY A NAME */
+  IF STR2(0) = 0 THEN DO;
+     CALL PSTR (FNMMS); CALL PSTRINGR ('NEW command');
+     GOTO ERROR;
+  END;
+  FILNG = 0; FILNS = 0; BSTRT = 0; BLEN = 0; BALT = 0; FILTP = 0; FSTRT = 0;
+  STORED = 0; SAVED = 0; /* NEW FILES ARE NOT SAVED */
+  AFLNG = 0; /* NO ALTER LINES FOR NEW FILE */
+  CALL MOVE.NAME(STR2,CNAM); /* GET NEW FILE NAME */
+  CALL STORE.NAME(CNAM); /* SAVE POSSIBLY NEW NAME IN UPPER MEMORY */
+END; /* NEW */
+
+DO; /* OLD */
+  IF NOT GET.TREENAME(STR2,'OLD',FALSE,TRUE) THEN GOTO ERROR; /* MUST SPECIFY A NAME */
+  IF LOCATE(STR2,1) THEN DO; /* FILE FOUND ON DEVICE */
+     IF (F#MS_LENGTH <> 0) OR ((F#MS_LENGTH = 0) AND (F#LS_LENGTH IGT WORKNS)) THEN DO; /* FILE TOO LARGE */
+       CALL PSTRINGR (PTLMS);
+       GOTO ERROR;
+     END;
+     CALL MOVE.NAME(F#NAME,CNAM); /* PUT NEW NAME IN CNAM */
+     CALL READIN(F#MS_SECTOR,F#LS_SECTOR,F#WORDS,F#LS_LENGTH); /* READ IN FILE AS APPROP */
+     CALL SETUP.STORED(F#NAME,F#MS_SECTOR,F#LS_SECTOR); /* STORE INFO */
+     FILTP = F#TYPE; /* STORE FILE TYPE */
+     AFLNG = 0; /* NO ALTERS */
+     CALL STORE.NAME(CNAM);
+  END;
+  ELSE DO;
+     CALL CAT.ERROR; /* PRINT CATALOG ERROR */
+     GOTO ERROR;
+  END;
+END; /* OLD */
+
+DO; /* SAVE */
+  IF NOT GET.TREENAME(STR2,'SAVE',TRUE,TRUE) THEN GOTO ERROR; /* ERROR IF NO NAME AVAILABLE */
+  CALL SORT; /* SORT IN ALTERS */
+  IF NOT SAVE(STR2,TRUE) THEN GOTO ERROR; /* TRY TO SAVE IT, IF CAN'T, STOP */
+  CALL SETUP.STORED(F#NAME,F#MS_SECTOR,F#LS_SECTOR); /* SET UP SAVED INFO */
+END; /* SAVE */
+
+DO; /* UNSAVE */
+  DCL PINCH FIXED;
+  PINCH = INCH; /* SAVE NEXT INPUT CHARACTER FOR LATER REFERENCE */
+  IF NOT GET.TREENAME(STR2,'UNSAVE',TRUE,TRUE) THEN GOTO ERROR; /* ERROR IF NO NAME AVAILABLE */
+  IF NOT UNSAVE(STR2) THEN GOTO ERROR; /* IF ERROR, THEN STOP */
+  IF (PINCH = a.semicolon) OR (PINCH = a.CR)
+  OR (PINCH = a.slash) OR (PINCH = a.comma) THEN SAVED = 0; /* IS NOT SAVED FOR COMPILATION */
+END; /* UNSAVE */
+
+DO; /* REPLACE */
+  IF NOT GET.TREENAME(STR2,'REPLACE',TRUE,TRUE) THEN GOTO ERROR; /* ERROR IF NO NAME AVAILABLE */
+  CALL SORT; /* TRY TO MERGE IN ALTER LINES */
+  IF ((FILNS IGE 256) OR (FILNG IGT FBUFSZ)) /* LARGE PROGRAM */
+  AND (SYSTYP = 0) AND (WORKMED = 0) THEN DO; /* AND WORK FILE ON FLOPPY */
+    DO WHILE READ("100");END; /* WAIT FOR RESTORE TO STOP */
+    WRITE ("104")=0; /* TURN ON DRIVE 0 FOR LARGE PROGRAMS */
+  END;
+  IF NOT SAVE(STR2,FALSE) THEN GOTO ERROR;
+  CALL SETUP.STORED(F#NAME,F#MS_SECTOR,F#LS_SECTOR);
+END; /* REPLACE */
+
+DO; /* RENAME */
+  IF NOT READ.NAME(STR2,TRUE) THEN GOTO ERROR;
+  IF STR2(0) = 0 THEN DO;
+     CALL PSTR (FNMMS); CALL PSTRINGR ('RENAME command');
+     GOTO ERROR;
+  END;
+  CALL MOVE.NAME(STR2,CNAM);
+  CALL STORE.NAME(CNAM);
+END; /* RENAME */
+
+/* $PAGE MONITOR COMMANDS - RUN, CAT, DIR, LINK, LENGTH */
+
+DO; /* RUN */
+  I = TYBP - 1; /* SAVE POINTER TO FILENAME TO RUN/ARGS */
+  IF (INCH = A.COLON) OR (VALID_FILECHAR (INCH) AND (INCH <> A.MINUS)) THEN DO; /* SAVE HYPHEN FOR ARGS (ALLOW LEADING COLONS) */
+     IF NOT GET.TREENAME (STR2, 'RUN', NOT.END AND (INCH <> A.COMMA), TRUE) THEN GOTO ERROR; /* PICK UP ANY FILE TO RUN */
+  END;
+  ELSE STR2(0) = 0;
+
+  IF STR2(0) = 0 /* IF NO TREENAME */
+  THEN CALL RUN(0,0); /* TRY TO RUN THE CURRENT FILE */
+  ELSE DO; /* TRY TO RUN THE SPECIFIED FILE */
+     CORE(LOC.USR1) = I; /* POINT TO NAME OF FILE WE'RE RUNNING */
+     CALL RUN(2,9); /* 0 means trans, 1 means COMpile, 2 means RUN */
+  END;
+  GOTO ERROR; /* IF RUN DETECTED AN ERROR */
+END; /* RUN */
+
+DO; /* CAT */
+  IF NOT CAT(0,STR2) THEN GOTO ERROR; /* CALL ROUTINE, STOP IF BREAK */
+END; /* CAT */
+
+DO; /* DIR */
+  IF NOT CAT(1,STR2) THEN GOTO ERROR; /* CALL ROUTINE, STOP IF BREAK */
+END; /* DIR */
+
+DO; /* LINK */
+  CALL PCN; CALL PSTRINGR ('*** LINK');
+  CALL ENABLE_CACHE(CACHE.NUM); /* CAUSE DISK READ NEXT TIME */
+  I = 0; J = 32; /* INITIALIZE */
+  DO WHILE I = 0; /* CONTINUE LOOP UNTIL EXIT */
+    IF (READ(TTY + 1) and "2") <> 0 THEN DO; /* TTY CHARACTER */
+      K = READ(TTY) and "177"; /* EXTRACT IT */
+      IF K = a.ESC THEN I = 1; /* GET OUT OF LOOP IF ESCAPE CHARACTER */
+      ELSE WRITE(LNK) = K; /* ELSE SEND TO LINK */
+    END;
+    IF (READ(LNK + 1) and "2") <> 0 THEN DO; /* RVCD CHARACTER FROM LINK */
+      K = READ(LNK); /* GET CHARACTER */
+      IF K <> c.E THEN DO; /* NOT CRTL E */
+        WRITE(TTY) = K; /* WRITE CHAR */
+        J = 32; /* RESET COUNTER */
+      END;
+      ELSE IF INCLUDE.LINK THEN DO; /* CONTROL E */
+        J = J - 1;
+        IF J = 0 THEN DO; /* DETECT 32 CONTROL E'S */
+          FILNG = 0; FILNS = 0; BSTRT = 0; BLEN = 0; FSTRT = 0; BALT = 0; /* INITIALIZE IN CASE OF ERROR */
+          STORED = 0; SAVED = 0; AFLNG = 0; FILTP = 0;
+          K = GW; LEN = GW; FILNG = -LEN; K = K + LEN; /* SKIP LOC, GET LEN, K IS CHECKSUM */
+          IF FILNG IGT FBUFSZ THEN DO; /* TOO BIG TO LOAD */
+            WRITE(LNK) = 0; CALL PSTRINGR (PTLMS); FILNG = 0;
+          END;
+          ELSE DO; /* LOAD FILE */
+            I = 0; FBUF(0) = 0; /* INITIALIZE PTR AND FIRST WORD */
+            DO WHILE LEN <> 0; /* LOAD DATA */
+              FBUF(I) = GW; /* GET WORD, STORE IT */
+              K = K + FBUF(I); I = I + 1; LEN = LEN + 1; /* COUNT POS, LEN */
+            END;
+            K = K + GW; /* GET FINAL CHECK SUM WORD */
+            IF K <> 0 THEN DO; /* CHECK SUM ERROR DETECTED */
+              CALL PSTRINGR ('CRC error during load - retry it');
+              WRITE(LNK) = 0;
+              FILNG = 0; /* ZERO LENGTH - OTHER DATA IS ALL ZEROS */
+            END;
+            ELSE DO; /* NO CHECK ERROR */
+              IF FBUF(0) < 0 THEN FILTP = 1; /* MUST BE COMPILED */
+              BLEN = FILNG; /* INDICATE LENGTH IN BUFFER */
+              FILNS = SHR(FILNG + 255,8); /* LENGTH IN SECTORS */
+            END;
+            I = 0; /* INITIALIZE FOR LOOP CONTINUE */
+          END; /* OF LOAD FILE */
+          J = 32; /* RESET COUNTER */
+        END; /* OF GOT 32 CONTROL E'S */
+      END; /* OF CONTROL E */
+    END; /* OF RVCD CHAR FROM LINK */
+  END; /* OF DO WHILE READING LINK */
+  CALL PCN; CALL PSTRINGR ('*** MONITOR');
+END; /* LINK */
+
+DO; /* LENGTH */
+  CALL SORT;
+  CALL PCN; CALL PSTR ('Length:  ');
+  IF FILNS ILT 256 THEN DO;
+     CALL PDEC(0,FILNG,0); CALL PSTR (' words (');
+  END;
+  CALL PDEC(0,FILNS,0); CALL PSTR (' sectors');
+  IF FILNS ILT 256 THEN CALL PSTR (')');
+  CALL NEWLINE;
+END; /* LENGTH */
+
+/* $PAGE MONITOR COMMANDS - NAME, DDUMP, DPATCH, LIST, RES, EXT, DEL, DES, SEQ */
+
+DO; /* NAME */
+  CALL PCN; CALL PSTR ('Name:  '); CALL PSTR (CNAM); CALL PSTR ('  ');
+  CALL PRINT_TYPE (FILTP); CALL NEWLINE;
+END; /* NAME */
+
+DO; /* DDUMP   DDU SECTOR,LOCATION,LENGTH */
+  IF INCH = a.slash THEN DO; /* CHECK FOR TRAILING DEVICE */
+     I = SCANDEV; /* GET DEVICE - VALIDITY ERROR IS NOT FATAL */
+     IF I = -1 THEN GOTO ERROR; /* ERROR */
+     MSW = SHL(I,8); LSW = 0; /* DUMP OF TOP-MOST CATALOG OF THIS DEVICE */
+  END;
+  ELSE DO; /* DUMP OF CURRENT CATALOG */
+     MSW = UDEV; LSW = UCAT; /* SET TO CURRENT CATALOG */
+  END;
+
+  CALL SCANO; /* GET 32-BIT SECTOR OFFSET */
+  MSW = MSW + ARGMSW; /* ADD IN MSW OF SECTOR OFFSET */
+  LSW = LSW + ARGLSW; /* ADD IN LSW OF SECTOR OFFSET */
+  IF LSW ILT ARGLSW THEN MSW = MSW + 1;
+
+  LOC = SCANO and "177770"; /* GET STARTING WORD LOCATION IN THAT SECTOR */
+  LEN = SCANO; /* GET NO. WORDS TO DUMP */
+  IF LEN = 0 THEN LEN = 1; IF LEN > (256 - LOC) THEN LEN = (256 - LOC);
+
+  CALL SDREAD(MSW,LSW,CBUF,256); /* READ THIS SECTOR */
+  CALL ENABLE_CACHE(CACHE.NUM); /* CAUSE DISK READ NEXT TIME */
+
+  CALL PSTR('Sector: '); CALL POCT(MSW AND "HFF",LSW,6); CALL NEWLINE;
+  DO WHILE LEN > 0; /* LOOP */
+    CALL POCT(0,LOC,3); CALL PCHAR(A.COLON); /* PRINT LINE HEADER */
+    DO I = 0 TO 7; CALL PCHAR(A.SP); CALL POCT(0,CBUF(LOC + I),6); END; /* PRINT OCTALS */
+    CALL PCHAR(a.SP);
+    DO I = 0 TO 15; /* PRINT CHARS */
+      J = CBUF(LOC + SHR(I,1)); /* GET WORD */
+      IF (I AND "1") <> 0 THEN J = SHR(J,8); /* CONVERT TO A BYTE */
+      ELSE J = J and "377";
+      IF (J - a.SP) ILE ("177" - a.SP) THEN CALL PCHAR(J); /* PRINT CHARACTER, IF POSSIBLE */
+      ELSE CALL PCHAR(a.period);
+    END;
+    CALL NEWLINE; IF BRKC THEN GOTO ERROR; /* NEW LINE, TEST FOR BREAK */
+    LOC = LOC + 8; LEN = LEN - 8;
+  END; /* OF LOOP */
+END; /* DDUMP */
+
+DO; /* DPATCH  DPA SECTOR,LOCATION,VALUE,VALUE,VALUE... */
+  IF INCH = a.slash THEN DO; /* CHECK FOR TRAILING DEVICE */
+     I = SCANDEV; /* GET DEVICE - VALIDITY ERROR IS NOT FATAL */
+     IF I = -1 THEN GOTO ERROR; /* ERROR */
+     MSW = SHL(I,8); LSW = 0; /* PATCH SECTOR IN TOP-MOST CATALOG OF THIS DEVICE */
+  END;
+  ELSE DO; /* PATH SECTOR OF CURRENT CATALOG */
+     MSW = UDEV; LSW = UCAT; /* CURRENT CATALOG */
+  END;
+
+  CALL SCANO; /* GET 32-BIT SECTOR OFFSET */
+  MSW = MSW + ARGMSW; /* ADD IN MSW OF SECTOR OFFSET */
+  LSW = LSW + ARGLSW; /* ADD IN LSW OF SECTOR OFFSET */
+  IF LSW ILT ARGLSW THEN MSW = MSW + 1;
+
+  LOC = SCANO; /* GET STARTING WORD IN THAT SECTOR */
+
+  CALL SDREAD(MSW,LSW,CBUF,256); /* READ THIS SECTOR */
+  DO WHILE (NOT.END); /* LOOP UNTIL END OF COMMAND */
+    IF LOC >= 256 THEN LOC = 255; /* LIMIT ADDRESS */
+    CBUF(LOC) = SCANO; /* PATCH VALUE */
+    LOC = LOC + 1; /* ADVANCE */
+  END;
+  CALL SDWRITE(MSW,LSW,CBUF,256); /* RESTORE IT */
+  CALL ENABLE_CACHE(CACHE.NUM);   /* CAUSE DISK READ NEXT TIME */
+END; /* DPATCH */
+
+DO; /* LIST */
+  OUTDEV = 0;
+  IF LISTSUB THEN GOTO ERROR; /* GO TO ERROR IF BREAK DETECTED */
+END; /* LIST */
+
+DO; /* RESEQUENCE */
+  IF RESEQ(100,10) THEN GOTO ERROR;
+END; /* RESEQUENCE */
+
+DO; /* EXTRACT LN-LN,LN,LN,LN-LN */
+  IF EXT.DEL(0) THEN GOTO ERROR;
+END; /* EXTRACT */
+
+DO; /* DELETE LN-LN,LN,LN,LN-LN */
+  IF EXT.DEL(1) THEN GOTO ERROR;
+END; /* DELETE */
+
+DO; /* DESEQUENCE */
+  IF RESEQ(0,0) THEN GOTO ERROR;
+END; /* DESEQUENCE */
+
+DO; /* SEQUENCE */
+  IF RESEQ(1,1) THEN GOTO ERROR;
+END; /* SEQUENCE */
+
+DO; /* LAST */
+  CALL SORT;
+  IF NONCOMCHK THEN GOTO ERROR; /* EMPTY OR COMPILED */
+  CALL PRIME; PTR1 = 0;
+  DO WHILE PTR ILT FILNG; /* LOOP OVER LINES */
+    PTR1 = FBUF(PTR - BSTRT); CALL STEPPTR; /* SAVE LINE NUMBER */
+  END;
+  CALL PSTR ('Last line number is '); CALL PDEC(0,PTR1,0); CALL NEWLINE;
+END; /* LAST */
+
+/* $PAGE MONITOR COMMAND:  MOVE */
+
+DO; /* EDIT MOVE */
+   DCL (SPTR,EPTR,DPTR) FIXED; /* START POINTER, END POINTER, DPTR */
+
+   CALL SORT; /* SORT IN ALTERS */
+   IF NONCOMCHK THEN GOTO ERROR; /* FAIL IF COMPILED OR ZERO LENGTH */
+   CALL PRIME;
+   STORED = 0; SAVED = 0; /* VERSION IS NOT SAVED IF EDIT */
+   CALL SCANARG; /* SCAN THE ARGUMENT */
+   CALL SKIPTOLINE(ARG); /* GO THERE */
+   SPTR = PTR; /* SAVE POINTER TO START OF BLOCK TO MOVE */
+   IF INCH = a.minus THEN DO; /* DETECT MINUS SIGN */
+      CALL GET.CHAR.UPCASE;
+      CALL SKIPSPA; CALL SCANARG; CALL SKIPSPA; /* GET ARGUMENT */
+      CALL SKIPTOLINE(ARG); /* MOVE PTR TO LINE */
+   END;
+
+   IF FBUF(PTR - BSTRT) = ARG THEN CALL STEPPTR; /* MOVE LAST SPECIFIED LINE */
+   EPTR = PTR; /* SAVE POINTER TO END */
+   DPTR = ARG; /* SAVE CURRENT LINE NUMBER, IN CASE DEST IS AFTER - NO REST */
+   IF INCH <> a.comma THEN DO;
+      CALL PSTRINGR (FORMS); GOTO ERROR;
+   END;
+   CALL GET.CHAR.UPCASE; CALL SKIPSPA; CALL SCANARG; CALL SKIPSPA; /* GET DESTINATION NUMBER */
+   IF (NOT.END) THEN DO;
+      CALL PSTRINGR (FORMS); GOTO ERROR;
+   END;
+   IF ARG ILT DPTR THEN CALL PRIME; /* IF MUST BACK UP THEN RESET FILE */
+   CALL SKIPTOLINE(ARG); /* FIND DESTINATION */
+   IF FBUF(PTR - BSTRT) = ARG THEN CALL STEPPTR; /* AFTER SPECIFIED LINE */
+   DPTR = PTR; /* SAVE DESTINATION POINTER */
+
+   /* NOW PERFORM MOVE */
+   IF (DPTR IGE SPTR) and (DPTR ILE EPTR) THEN DO; /* FORMAT ERROR */
+     CALL PSTRINGR (FORMS); GOTO ERROR;
+   END;
+
+   DO WHILE EPTR <> SPTR; /* LOOP WHILE MORE TO COPY */
+      IF (SPTR ILT BSTRT) OR (SPTR IGE BSTRT + BLEN) THEN DO; /* IF OUT OF RANGE - DIRECT READ IN */
+          BSTRT = SPTR and "177400";
+          FSTRT = BSTRT; BLEN = 0; BALT = 0;
+          CALL FILL;
+      END;
+      PTR1 = SPTR; /* DEST PTR IS START POINTER */
+      AFLNG = EPTR - SPTR; /* MOVE MAX # */
+      IF AFLNG IGT ABUFSZ THEN AFLNG = ABUFSZ;
+      PTR = PTR1 + AFLNG; /* READ POINTER */
+      CALL LCHK(PTR1,PTR1); /* MAKE SURE IN MEMORY */
+      DO PTR2 = 0 TO AFLNG - 1; /* COPY OUT OF IT */
+         ABUF(PTR2)=FBUF(SPTR-BSTRT+PTR2);
+      END;
+      CALL DELETE.WORDS(AFLNG); /* DELETE THAT MUCH FROM PTR1 TO PTR */
+      IF DPTR IGE EPTR THEN DPTR = DPTR - AFLNG; /* MOVE DEST DOWN IF UPPER */
+      EPTR = EPTR - AFLNG; /* END POINTER DOWN TOO */
+
+      IF (DPTR ILT SPTR) and (FILNG IGT FBUFSZ) THEN DO; /* IF LARGE FILE & RESET - MUST MOVE BACK */
+        CALL MOVEBPTRUP(FILNG); /* FORCE HOLE OUT THROUGH END */
+        BSTRT = DPTR and "177400"; /* RESET TO HERE */
+        FSTRT = BSTRT; BLEN = 0; BALT = 0;
+        CALL FILL; /* FILL BUFFER */
+      END;
+
+      IF DPTR IGT BSTRT + BLEN THEN CALL MOVEBPTRUP(DPTR and "177400"); /* MOVE HERE */
+      PTR = DPTR; /* READ POINTER */
+      PTR1 = DPTR; /* WRITE POINTER */
+      CALL LCHK(PTR,PTR); /* MAKE SURE IN MEMORY AFLNG ILE LINSZ */
+      CALL ISERT(AFLNG); /* MAKE ROOM FOR ALTERS */
+      DO PTR2 = 0 TO AFLNG - 1; /* COPY IN */
+        FBUF(PTR1 - BSTRT + PTR2) = ABUF(PTR2);
+      END;
+      BALT = 1;
+      IF SPTR IGT DPTR THEN DO; SPTR = SPTR + AFLNG; EPTR = EPTR + AFLNG; END; /* IS MOVED UP AFTER INSERT */
+      DPTR = DPTR + AFLNG; /* NEXT BATCH GOES HERE */
+      IF (FILNG IGT FBUFSZ) and (SPTR <> EPTR) THEN DO; /* IF MORE OF LARGE FILE, THEN DO */
+        IF SPTR ILT DPTR THEN CALL MOVEBPTRUP(FILNG); /* IF BACK UP FOR SOURCE, THEN FORCE BUFFER */
+        ELSE CALL MOVEBPTRUP(SPTR and "177400"); /* ELSE GET SOURCE IN MEMORY */
+      END;
+   END; /* OF WHILE MORE TO COPY */
+   CALL BFORCE; /* FORCE FILE IF LONG ONE */
+   AFLNG = 0; /* CLEAR ALTER LINE BUFFER */
+   CALL RESEQ(100,10); /* RESEQUENCE THE FILE AFTER MOVE */
+END; /* END OF MOVE COMMAND */
+
+/* $SUBTITLE  Routines to Process System Commands */
+
+/* APPEND, JOIN, LOCATE, CHANGE, PRINT, BUILD, BOOT */
+
+DO; /* APPEND - CHANGE THE LINE NUMBERS AFTER */
+  IF JOINPROC(STR2) THEN GOTO ERROR; /* CALL JOIN PROC, GOTO ERROR IF FAIL */
+  IF FILTP = T#TEXT THEN CALL RESEQ(100,10); /* RESEQUENCE ON APPEND */
+END; /* APPEND */
+
+DO; /* JOIN - NO LINE NUMBER CHANGE */
+  IF JOINPROC(STR2) THEN GOTO ERROR; /* CALL JOIN PROC, DETECT ERROR */
+END; /* JOIN */
+
+DO; /* LOCATE COMMAND */
+  IF GLOBAL(0) THEN GOTO ERROR;
+END; /* LOCATE */
+
+DO; /* CHANGE */
+  IF GLOBAL(1) THEN GOTO ERROR;
+END; /* CHANGE */
+
+DO; /* PRINT */
+  OUTDEV = 1; /* SELECT PRINTER */
+  WRITE(PRI) = a.CR; WRITE(PRI) = a.LF;
+  IF LISTSUB THEN DO;
+    WRITE(PRI) = a.CR; WRITE(PRI) = a.LF;
+    GOTO ERROR;
+  END;
+  OUTDEV = 0; /* RESTORE TERMINAL */
+END; /* PRINT */
+
+BEGIN; /* IMPORT */
+  DCL FILELEN FIXED;
+  DCL FILESEC FIXED;
+  DCL BYTETOG FIXED;
+  DCL (MS,LS) FIXED;
+
+  CALL SORT;                         /* why not?                             */
+  IF FILNG <> 0 THEN IF NONCOMCHK THEN GOTO ERROR;
+
+  IF (WORKMED <> 0 OR ((WORKDEV&255) = 0 & WORKSEC ILT 4)) THEN DO;
+     CALL PSTRINGR ('.WORK file missing...');
+     GOTO ERROR;
+  END;
+
+  CALL PSTRINGR ('Entering Import Mode Now.  Type control-d to exit.');
+
+	/*	Instructions for import:
+
+			ZTERM Setings:
+				Connection: 	select Xon/Xoff protocol
+											unselect harware handshake
+				
+				Text pacing: 	non required.  use all zeroes.
+				
+				General Preferences: Set the 'Text File Creator' for whatever macintosh
+														 word processor you use to edit text files.  I find that
+														 the MPW Shell text editor is **fantastic** for editing
+														 programs.  Using a Word processor like Word 5.1 is
+														 **ghastly** for editing programs; of course I use
+														 Word all the time for documentation and letters and
+														 other formatted text.
+														 
+				Terminal:			"Capture text by line" **must** be off.  This is very important!
+											Otherwise Zterm inserts crlfs in the transferred file
+											if the line is too long for the zterm window...
+											
+			I use 38400 all the time...
+			
+			To import a text file to the Synclavier:
+					1) Quit NED startup (aka "Termulator").
+					2) Launch ZTERM and verify ZTERM settings.
+					3) type the IMPORT command into the MONITOR.  Monitor responds
+					   with "Entering Import Mode Now.  Type control-d to exit."
+					4) Use the Zterm File Menu command "Send Text..." to send
+						 a text file to the able.
+				  5) When ZTERM is through sending the file, type a single
+					   control-D character.  Monitor responds with READY.
+					6) Note: at this point the name of your current file on the able
+						 has not been changed, so if you type REPLACE it will likely
+						 not do what you want!
+					7) save/replace/edit the ABLE text file as needed...
+	*/
+											
+			
+  write("60") = 0;                    /* store file in external memory       */
+  filelen     = 0;                    /* init file len                       */
+  filesec     = 0;                    /* also sector length                  */
+  bytetog     = 0;                    /* init line length                    */
+
+  i = read("50") & 127;               /* get input character     */
+
+  do while i <> 4;                    /* wait for control-d      */
+     if bytetog = 0 then do;          /* start of line           */
+        write("63") = 0;              /* store line no.          */
+        filelen     = filelen + 1;    /* count one word          */
+        if (filelen&255)=1 then filesec = filesec + 1;
+     end;
+     if i=a.cr then do;               /* end of line             */
+        if (bytetog&1) = 0 then do;   /* store 0 at eol          */
+           write("63") = 0;           /* store line no.          */
+        end;
+        else do;                      /* preserve chare stored   */
+           write("63") = read("62");
+        end;
+        filelen = filelen + 1;        /* count one word          */
+        if (filelen&255)=1 then filesec = filesec + 1;
+        bytetog = 0;                  /* after cr                */
+     end;
+     else do;                         /* middle of line          */
+        if (bytetog&1) = 0 then do;   /* store low byte          */
+           write("62") = i;
+        end;
+        else do;
+           write("63") = read("62") or shl(i,8);
+           filelen     = filelen + 1; /* count one word          */
+           if (filelen&255)=1 then filesec = filesec + 1;
+        end;
+        bytetog = bytetog + 1;
+     end;
+     i = read("50") & 127;               /* get input character     */
+  end;
+
+  /* copy contents to disk... */
+
+  i = filelen;                           /* fill sector with 0's    */
+  do while (i&255)<>0;
+     write("63") = 0;
+     i = i + 1;
+  end;
+
+  write("60") = 0;                       /* reset to top of buffer  */
+
+  i = filesec; ms = workdev; ls = worksec;
+
+  do while i <> 0;
+     do j=0 to 255;
+        aliasbuf(j) = read("63");
+     end;
+
+     call writedata(ms, ls, aliasbuf, 256);
+     i  = i  - 1;
+     ls = ls + 1;
+     if (ls = 0) then ms = ms + 1;
+  end;
+
+  FILNG=FILELEN; FILNS=FILESEC;      /* SET WORD AND SECTOR LENGTH */
+  BSTRT=0; BLEN=0; FSTRT=0; BALT=0;  /* INITIALIZE FLAGS FOR NULL FILE */
+  STORED=0;SAVED=0;
+  FILTP = T#TEXT;
+  AFLNG = 0; /* NO ALTERS */
+  
+  IF (FILNS ILT 256) AND (FILNG ILE FBUFSZ) THEN DO; /* WILL ALL FIT IN BUFFER */
+     BSTRT=0; FSTRT=FILNG; BLEN=FILNG; BALT=1;
+     CALL READDATA(WORKDEV,WORKSEC,FBUF,BLEN);
+  END;
+END; /* IMPORT */
+
+DO; /* BOOT */
+	if (locate('MONITOR',0) == false)		/* make sure monitor exists.  Also clears unit attention */
+		NO_OVERLAY = TRUE;								/* if media has been changed...													 */
+	
+  CORE(LOC.MAGIC) = 0; /* MAKE SURE THE OVERLAY ROUTINE KNOWS THIS IS A COLD BOOT */
+  IF NO_OVERLAY /* OVERLAY ROUTINE IS MISSING */
+  THEN WRITE("320") = "176000"; /* SO JUMP INTO THE ROM (AND PRAY FOR A BOOTLOAD DISK) */
+  ELSE CALL EXIT(0); /* OKAY TO BOOT */
+END;
+
+DO; /* PROMPT SET */
+  CALL SCANSTR(LOCATION(LOC.PRMT),8,0);
+END;
+
+/* $PAGE  COMMANDS - RECALL, STORE, ENTER */
+
+DO; /* REC - RECALL SEQUENCE */
+  IF NOT GET.TREENAME(STR2,'RECALL',FALSE,TRUE) THEN GOTO ERROR; /* MUST GIVE A SEQUENCE NAME */
+  IF NOT COMPUTE.SEQ.NAME(STR2) THEN GOTO ERROR; /* BAD FILE NAME SPECIFIED */
+  IF NOT LOCATE(STR2,1) THEN DO;
+     IF C#STATUS = E#NO_FILE THEN CALL PSTRINGR (SNFMS); /* FILE NOT FOUND */
+     ELSE CALL CAT.ERROR; /* CATALOG ERROR */
+     GOTO ERROR;
+  END;
+
+  CALL SDREAD(F#MS_SECTOR,F#LS_SECTOR,CBUF,256); /* GET FIRST SECTOR */
+  CALL ENABLE_CACHE(CACHE.NUM); /* CAUSE DISK READ NEXT TIME */
+
+  I = CBUF(32); /* GET MAGIC NUMBER */
+  IF (I IGE "123456") AND (I ILE "123460") THEN DO; /* REGULAR SEQUENCE */
+    F#WORDS = CBUF(64 + 16) + (16 * 192); /* COMPUTE FILE LENGTH FROM NUMBER OF NOTES */
+    F#LS_LENGTH = SHR(F#WORDS + 255,8);
+  END;
+  ELSE IF I="123461" THEN DO; /* NEW FORMAT SEQUENCE */
+    F#LS_LENGTH = 0;
+    F#WORDS = CBUF(64 + 16) + CBUF(64 + 18); /* SEQUENCE PLUS TIMBRES */
+    IF F#WORDS ILT CBUF(64 + 16) THEN F#LS_LENGTH = 256; /* WRAP AROUND CORRECT */
+    F#WORDS = F#WORDS + 256; /* PLUS EXTRA MISC AREA */
+    IF F#WORDS ILT 256 THEN F#LS_LENGTH = F#LS_LENGTH + 256; /* WRAP AROUND CORRECT */
+    F#LS_LENGTH = F#LS_LENGTH + SHR(F#WORDS,8); /* GET LENGTH IN SECTORS */
+    IF (F#WORDS and "377") <> 0 THEN F#LS_LENGTH = F#LS_LENGTH + 1; /* ADJUST FOR FRACTIONAL SEC */
+  END;
+  ELSE IF I IGE "123462" and I ILE "123467" THEN DO; /* 32-TRACK FORMAT */
+    F#LS_LENGTH = CBUF(63);
+    F#WORDS = SHL(F#LS_LENGTH,8);
+  END;
+  ELSE DO; /* NOT VALID MAGIC NUMBER */
+    CALL PSTRINGR ('Not a valid Synclavier sequence');
+    GOTO ERROR;
+  END;
+  F#TYPE = T#SYNC; /* SEQUENCE FILE TYPE */
+  IF (F#MS_LENGTH <> 0) OR ((F#MS_LENGTH = 0) AND (F#LS_LENGTH IGT WORKNS)) THEN DO; /* FILE TOO LARGE */
+    CALL PSTRINGR (PTLMS);
+    GOTO ERROR;
+  END;
+  STR2(0) = 1;
+  STR2(1) = BYTE(F#NAME,3) + 1; /* RE-CONSTRUCT NAME */
+  CALL MOVE.NAME(STR2,CNAM); /* PUT NEW NAME IN CNAM */
+  CALL READIN(F#MS_SECTOR,F#LS_SECTOR,F#WORDS,F#LS_LENGTH); /* READ IN FILE AS APPROP */
+  CALL SETUP.STORED(CNAM,F#MS_SECTOR,F#LS_SECTOR); /* STORE INFO */
+  FILTP = F#TYPE; /* STORE FILE TYPE */
+  AFLNG = 0; /* NO ALTERS */
+  CALL STORE.NAME(CNAM);
+END; /* REC */
+
+DO; /* STO - STORE SEQUENCE */
+  IF FILTP <> T#SYNC THEN DO;
+    CALL PSTRINGR ('Incorrect File Type for STORE');
+    GOTO ERROR;
+  END;
+  IF NOT GET.TREENAME(STR2,'STORE',TRUE,TRUE) THEN GOTO ERROR; /* GET FILE NAME */
+  IF NOT COMPUTE.SEQ.NAME(STR2) THEN GOTO ERROR; /* INCORRECT FILE NAME */
+  IF NOT LOCATE(STR2,1) THEN DO;
+     IF C#STATUS = E#NO_FILE THEN CALL PSTRINGR (SNFMS);
+     ELSE CALL CAT.ERROR;
+     GOTO ERROR;
+  END;
+  IF (F#MS_LENGTH = 0) AND (F#LS_LENGTH ILT FILNS) THEN DO; /* TOO BIG */
+     CALL PSTRINGR ('Sequence too long to STORE'); GOTO ERROR;
+  END;
+  STR2(0) = 1;
+  STR2(1) = BYTE(F#NAME,3) + 1; /* RE-CONSTRUCT NAME */
+  CALL MOVE.NAME(STR2,CNAM); /* PUT NEW NAME IN CNAM */
+  CALL WRITEOUT(F#MS_SECTOR,F#LS_SECTOR); /* WRITE OUT SEQUENCE */
+  CALL RESTORE.HEAD(F#MS_SECTOR); /* RESTORE THE HEAD, SINCE WE DIDN'T HAVE TO WRITE THE CAT */
+  CALL SETUP.STORED(CNAM,F#MS_SECTOR,F#LS_SECTOR); /* SET UP SAVED, SAVED.SEC, LOC.CMED */
+END; /* STORE */
+
+DO; /* ENTER COMMAND */ /* NOTE: THIS CODE ALSO IN 'SET CAT' */
+  IF NOT GET.TREENAME(STR2,'ENTER',FALSE,FALSE) THEN GOTO ERROR; /* MUST GIVE A CATALOG NAME */
+  IF NOT ENTER_CATALOG(STR2,1) THEN DO; /* TRY TO MAKE THIS THE CURRENT CATALOG */
+     CALL CAT.ERROR; /* PRINT ERROR MESSAGE */
+     GOTO ERROR;
+  END;
+END; /* ENTER */
+ 
+/* $PAGE - CREATE, WRITE, PAUSE, CLS, HELP, PROMPT */
+
+DO; /* CRE - CREATE CATALOG */
+  DCL CREMS DATA ('Syntax is CREATE <catalog name>, [LARGE | SMALL] <size>');
+
+  IF NOT GET.TREENAME(STR2,'CREATE',FALSE,TRUE) THEN DO; /* COULD NOT READ NAME */
+     CALL PCN; CALL PSTRINGR (CREMS); /* PRINT COMMAND FORMAT */
+     GOTO ERROR; /* READ THE NAME */
+  END;
+
+  IF LOCATE(STR2,1) THEN DO; /* CATALOG ALREAD SAVED */
+     CALL PCN;
+     IF (F#TYPE = T#SUBC) OR (F#TYPE = T#LSUBC)
+     THEN CALL PSTR ('Catalog');
+     ELSE CALL PSTR ('File');
+     CALL PCHAR (A.SP); CALL PSTR (F#NAME); CALL PSTRINGR (' already exists');
+     GOTO ERROR;
+  END;
+  ELSE IF C#STATUS <> E#NO_FILE THEN DO;
+     CALL CAT.ERROR; /* PRINT CATALOG ERROR MESSAGE */
+     GOTO ERROR;
+  END;
+
+  MSW = 0; LSW = 0; ARG1 = 0; /* NO ARGUMENTS GIVEN YET */
+  IF INCH = a.comma THEN DO; /* TYPE AND/OR SIZE HAVE BEEN GIVEN */
+     CALL GET.CHAR.UPCASE; /* SKIP OVER COMMA */
+     CALL SKIPSPA; CALL UPCASE.INCH; /* SKIP TO FIRST CHAR OF FIELD */
+
+     IF NOT ( (INCH >= a.0) AND (INCH <= a.9) ) THEN DO; /* NOT A DIGIT - A TYPE HAS BEEN GIVEN */
+        IF      INCH = a.S THEN ARG1 = T#SUBC;  /* SMALL SUBCATALOG REQUESTED */
+        ELSE IF INCH = a.L THEN ARG1 = T#LSUBC; /* LARGE SUBCATALOG REQUESTED */
+        ELSE DO; /* INVALID TYPE */
+           CALL PCN; CALL PSTRINGR ('Invalid Subcatalog Type');
+           CALL PSTRINGR (CREMS); /* PRINT COMMAND FORMAT */
+           GOTO ERROR;
+        END;
+
+        DO WHILE (NOT.END) AND (INCH <> a.SP); /* SKIP OVER KEYWORD */
+           CALL GET.CHAR.UPCASE;
+        END;
+        CALL SKIPSPA; /* SKIP TO NEXT FIELD */
+     END; /* NON-DIGIT */
+
+     CALL SCANARG; /* READ THE VALUE */
+     MSW = ARGMSW; /* STORE SIZE */
+     LSW = ARGLSW;
+  END;
+  ELSE IF NOT.END THEN DO; /* IF NOT AT END OF COMMAND */
+     CALL PCN; CALL PSTRINGR (CREMS); /* PRINT COMMAND FORMAT */
+     GOTO ERROR; /* READ THE NAME */
+  END;
+
+  IF (MSW = 0) AND (LSW = 0) THEN DO; /* NO SIZE SPECIFIED */
+     MSW = 0;
+     LSW = 595; /* DEFAULT: 595 SECTOR CATALOG */
+  END;
+
+  IF ARG1 = 0 THEN DO; /* NO TYPE SPECIFIED */
+     IF (MSW <> 0) OR ((MSW = 0) AND (LSW IGT 1000)) /* LARGER THAN 1000 SECTORS */
+     THEN ARG1 = T#LSUBC; /* DEFAULT: LARGE SUBCAT */
+     ELSE ARG1 = T#SUBC;  /* DEFAULT: SMALL SUBCAT */
+  END;
+
+  IF ARG1 = T#SUBC /* SET CATALOG SIZE */
+  THEN LEN = 1; /* SIZE OF CATALOG FOR SMALL SUBCATS */
+  ELSE LEN = 4; /* SIZE OF CATALOG FOR LARGE SUBCATS */
+
+  LSW = LSW + LEN; /* ADD SIZE OF CATALOG TO SUBCAT LENGTH */
+  IF LSW ILT LEN THEN MSW = MSW + 1;
+
+  IF REPLACE(STR2,ARG1,MSW,LSW,SHL(LSW,8),1) THEN DO; /* FILE CAN BE SUCCESSFULLY ADDED */
+     DO I = 0 TO 255; CBUF(I) = 0; END; /* ZERO OUT A SECTOR OF CBUF */
+     MSW = F#MS_SECTOR; /* SET TO BEGINNING OF CATALOG */
+     LSW = F#LS_SECTOR;
+     DO I = 1 TO LEN; /* LOOP OVER CATALOG SECTORS */
+        CALL SDWRITE(MSW,LSW,CBUF,256); /* ZERO-OUT THIS SECTOR */
+        LSW = LSW + 1; /* NEXT SECTOR */
+        IF LSW ILT 1 THEN MSW = MSW + 1;
+     END;
+     CALL ENABLE_CACHE(CACHE.NUM); /* CAUSE DISK READ NEXT TIME */
+  END;
+  ELSE DO; /* ERROR OCCURRED DURING REPLACE */
+     CALL CAT.ERROR; /* PRINT CATALOG ERROR MESSAGE */
+     GOTO ERROR;
+  END;
+END; /* OF CREATE CATALOG */
+ 
+CALL PUTSTR; /* WRITE */
+
+DO; /* PAUSE */
+   CALL PUTSTR;
+   CALL PSTR ('Press any key to continue >');
+   I = RCHAR;
+   CALL NEWLINE;
+   CALL ENABLE_CACHE(CACHE.NUM); /* CAUSE DISK READ NEXT TIME */
+END;
+
+CALL CLEARSCREEN; /* CLS */
+
+DO; /* HELP */
+  STR1(0) = 0; /* CLEAR KEYWORD */
+  INCH = UPCASE(INCH); /* MAKE FIRST CHAR UPPER CASE */
+  DO WHILE NOT.END; /* LOOP UNTIL END OF COMMAND */
+     IF STR1(0) < 24 THEN DO; /* STORE ONLY FIRST 24 CHARS */
+        CALL PBYTE(STR1,STR1(0),INCH); /* STORE CHARACTER */
+        STR1(0) = STR1(0) + 1;
+     END;
+     CALL GET.CHAR.UPCASE; /* NEXT CHAR */
+  END;
+
+  COMPLETE = TRUE; /* ASSUME FILES WILL BE FOUND */
+  CALL OPENFILE('.HELP',LOC.P1,TRUE); /* OPEN THE HELP TEXT FILE */
+  CALL OPENFILE('.HINDEX',LOC.P2,TRUE); /* OPEN THE HELP INDEX FILE */
+
+  IF NOT COMPLETE THEN GOTO ERROR; /* FILES COULD NOT BE OPENED */
+
+  CALL ENABLE_CACHE(CACHE.NUM); /* CAUSE DISK READ NEXT TIME */
+
+  IF NOT HELP(STR1) THEN DO; /* KEYWORD NOT FOUND */
+     CALL PSTR ('No Help available on '); CALL PSTRINGR (STR1);
+     CALL PSTRINGR ('Type HELP CONTENTS for a list of help topics.');
+     GOTO ERROR;
+  END;
+END; /* OF HELP COMMAND */
+
+/* $PAGE - COMMANDS:  DO, DRENAME */
+
+DO; /* DO */
+   DCL CMD.FILE.IS DATA ('Command file is '); /* COMMON MESSAGE */
+
+   I = (PERFORMING AND PERF_LEVEL); /* GET CURRENT LEVEL */
+
+   IF I <> 0 THEN DO; /* NESTED PERFORMS */
+      IF EMSIZE = 0 THEN DO; /* CAN'T DO THIS W/OUT EXTERNAL MEMORY */
+         IF NOT END_DO THEN DO; /* IF WE AREN'T CHAINING */
+            CALL PCN; CALL PSTRINGR ('Nested DO files not allowed');
+            GOTO ERROR;
+         END;
+      END;
+      ELSE IF I >= DO_LEVELS THEN DO; /* NESTED TOO DEEP */
+         CALL PCN; CALL PSTRINGR ('DO files nested too deep');
+         GOTO ERROR;
+      END;
+   END; /* OF NESTED PERFORMS */
+
+   IF STR2(0) = 0 THEN DO;
+      IF NOT.END THEN DO; /* IF NOT AT END, GET TREENAME */
+         IF NOT GET.TREENAME(STR2,'DO',FALSE,TRUE) THEN GOTO ERROR; /* PULL OFF TREENAME */
+      END;
+      ELSE STR2 (0) = 0; /* NO NAME GIVEN */
+   END;
+
+   IF EMSIZE = 0 THEN DO; /* IF NO EXTERNAL MEMORY */
+      IF INCH <> A.CR THEN DO; /* DO FOLLOWED BY OTHER COMMANDS */
+         CALL PCN; CALL PSTRINGR ('DO may not be followed by other commands');
+         GOTO ERROR;
+      END;
+   END;
+
+   IF CORE(TYB.BASE) < 0 THEN I = 0; /* SPECIAL PROFILE COMMAND:  CHANGE TO SYSTEM DIR */
+   ELSE                       I = 1; /* START AT CURRENT CATALOG */
+
+   IF ((STR2 (0) = 0) OR LOCATE(STR2, 1) OR LOCATE(STR2, 0) OR LOCATE (STR2, -2)) THEN DO; /* FOUND IT */
+      IF STR2 (0) = 0 THEN DO; /* IF DO OF CURRENT FILE */
+         CALL SORT; /* SORT ALTERS INTO CURRENT FILE */
+         F#MS_LENGTH = 0; F#LS_LENGTH = FILNS; /* SET UP CATALOG VARIABLES */
+         F#WORDS = FILNG; F#TYPE = FILTP;
+      END;
+
+      IF F#TYPE <> T#TEXT THEN DO; /* NOT A TEXT FILE */
+         CALL PCN; CALL PSTR (CMD.FILE.IS); CALL PSTRINGR ('not text');
+         GOTO ERROR;
+      END;
+
+      IF (F#MS_LENGTH <> 0) OR (F#LS_LENGTH IGE 256) THEN DO; /* ONLY UP TO 256 SECTORS */
+         CALL PCN; CALL PSTR (CMD.FILE.IS); CALL PSTRINGR ('too large');
+         GOTO ERROR;
+      END;
+
+      IF (F#WORDS != 0) {
+         IF STR2 (0) = 0 THEN DO; /* IF DO OF CURRENT FILE, SAVE DO FILE */
+            CALL VERIFY.STORED; /* VERIFY THAT THE CURRENT FILE IS STORED */
+
+            IF (STORED AND SAVED) THEN DO; /* IF STORED ON DISK (STORED) BY USER (SAVED - I.E., UNMODIFIED) */
+               CALL MOVE.NAME (LOCATION(LOC.STRN), STR2); /* PICK UP ITS NAME */
+               F#MS_SECTOR = FILDEV; /* FINISH SETTING UP CAT VARS */
+               F#LS_SECTOR = FILSEC;
+            END;
+            ELSE DO; /* NEED TO SAVE IT */
+               CALL MOVE.NAME (DO_FILE, STR2); /* PICK UP CANONICAL NAME */
+               CALL PBYTE(STR2, STR2 (0) - 1, A.0 + (PERFORMING AND PERF_LEVEL)); /* CREATE UNIQUE NAME FOR THIS LEVEL */
+
+               IF NOT REPLACE (STR2, FILTP, 0, FILNS, FILNG, 0) THEN DO; /* TRY TO SAVE IN SYSTEM CATALOG */
+                  CALL PCN;
+                  CALL PSTR (NDSMS); CALL PSTRINGR ('DO file');
+                  CALL PSTR (FNMMS); CALL PSTRINGR ('DO command');
+                  GOTO ERROR; /* MUST HAVE SPACE */
+               END; /* OF UNABLE TO SAVE IN SYSTEM CATALOG */
+
+               CALL WRITEOUT (F#MS_SECTOR, F#LS_SECTOR); /* WRITE OUT FILE */
+
+               STORED = 1; /* INDICATE FILE IS NOW STORED ON DISK (MOVED IF STORED IS ALREADY SET) */
+               FILDEV = F#MS_SECTOR; /* FILE IS SAVED HERE */
+               FILSEC = F#LS_SECTOR;
+               FILMED = 0; /* FILE IS ON DISK */
+            END; /* OF MUST SAVE IT */
+         END; /* OF SAVE DO FILE */
+
+         CALL START_DO (F#MS_SECTOR, F#LS_SECTOR, F#WORDS); /* START UP NEXT DO LEVEL */
+      }
+   END;
+   ELSE IF C#STATUS = E#NO_FILE THEN DO; /* FILE NOT FOUND ERROR */
+      IF CORE(TYB.BASE) >= 0 THEN CALL CAT.ERROR; /* FILE NOT FOUND */
+   END;
+   ELSE CALL CAT.ERROR;
+END; /* DO */
+
+DO; /* DRENAME - CHANGE NAME OF A FILE ON DISK */
+   STR1(0) = 0; STR2(0) = 0; /* CLEAR NAMES */
+   CALL UPCASE.INCH;
+   DO WHILE (INCH > a.SP); /* LOOP OVER FIELD */
+      IF STR1(0) < STRING.MAX THEN DO; /* STORE CHARACTERS */
+         CALL PBYTE(STR1,STR1(0),INCH);
+         STR1(0) = STR1(0) + 1;
+      END;
+      CALL GET.CHAR.UPCASE;
+   END;
+   CALL SKIPSPA; /* SKIP OVER SPACES */
+
+   CALL UPCASE.INCH;
+   DO WHILE (VALID_FILECHAR(INCH)) AND (INCH > a.SP); /* LOOP OVER FIELD OF VALID CHARS */
+      IF STR2(0) < SHL(F#NAME_LEN,1) THEN DO; /* STORE FIRST 8 CHARS */
+         CALL PBYTE(STR2,STR2(0),INCH);
+         STR2(0) = STR2(0) + 1;
+      END;
+      CALL GET.CHAR.UPCASE;
+   END;
+   CALL SKIPSPA;
+
+   IF (STR1(0) = 0) OR (STR2(0) = 0) OR (NOT.END) THEN DO; /* INVALID PARSE */
+      CALL PCN; CALL PSTRINGR ('Name missing or invalid');
+      CALL PSTRINGR ('Syntax is DRENAME <old name> <new name>');
+      GOTO ERROR;
+   END;
+
+   IF NOT RENAME(STR1,STR2,1) THEN DO; /* OLD NAME DOES NOT EXIST */
+      IF C#STATUS = E#DUPLICATE THEN DO;
+         CALL PCN; CALL PSTR ('File '); CALL PSTR (STR2); CALL PSTRINGR (' already exists');
+      END;
+      ELSE CALL CAT.ERROR;
+      GOTO ERROR;
+   END;
+END; /* OF DRE */
+
+/* $SUBTITLE  Set Command */
+
+DO; /* SET COMMAND */
+  CALL SCAN_COMMAND;
+  CALL SKIPSPA; /* SKIP TO NEXT FIELD */
+
+  DO CASE (INTERPRET_COMMAND(SET.ARGS,'',1)); /* PARSE COMMAND */
+
+    DO; CALL PCN; CALL PSTRINGR ('Invalid request to SET'); END; /* ERROR */
+
+    CALL SCANSTR(LOCATION(LOC.PRMT),8,0); /* SET PROMPT */
+
+    DO; /* SET TERM */
+      CALL SCANARG;
+      SCREEN = ARG; /* USE RESULT */
+      IF SCREEN > 99 THEN SCREEN = 99;
+    END;
+
+    DO; /* SET RTPNAME */
+      IF NOT READ.NAME(STR2,TRUE) THEN GOTO ERROR;
+      IF STR2(0) = 0 THEN DO; /* NULL NAME */
+         CALL PSTR (FNMMS); CALL PSTRINGR ('SET RTP command');
+         GOTO ERROR;
+      END;
+      CALL MOVE.NAME(STR2,LOCATION(LOC.SYNRTPN));
+    END;
+
+    DO; /* SET PATH */
+      IF NOT GET.TREENAME(STR2,'SET PATH',FALSE,FALSE) THEN GOTO ERROR; /* MUST GIVE A CATALOG NAME */
+
+      IF NOT READ_CATALOG(STR2,1) THEN DO; /* TRY TO READ IT */
+         CALL CAT.ERROR; /* DISPLAY ERROR */
+         GOTO ERROR; /* OPEN FAILED */
+      END;
+
+      IF NOT VALID.TO.OVERLAY(C#MS_SECTOR) THEN DO; /* MAKE SURE THAT WE CAN OVERLAY TO THIS */
+         CALL PCN; CALL PSTRINGR ('You may not select a PATH device different from system device');
+         GOTO ERROR;
+      END;
+
+      PDEV = C#MS_SECTOR; PCAT = C#LS_SECTOR; /* SET PATH DEVICE AND SECTOR */
+      PLEN = C#DIR_SIZE; /* SET PATH CATALOG SIZE */
+      PMAXMS = 0; PMAX = SHR(C#DIR_SIZE,8); /* SET PATH LENGTH */
+      DO I = 0 TO F#NAME_LEN;
+         CORE(LOC.PCNM + I) = 0;
+      END;
+      CALL MOVE.NAME(F#NAME,LOCATION(LOC.PCNM)); /* SET PATH NAME */
+    END;
+
+    DO; /* SET TYPE */
+      CALL SCAN_COMMAND;
+      IF FILTP < T#SUBC /* DON'T ALLOW CHANGE FROM SUBC, LSUBC, DUMP, SPECT */
+      THEN DO CASE (INTERPRET_COMMAND('TEX DAT SYN ','',1));
+        CALL PSTRINGR ('Valid types are: TEXT, DATA, and SYNC');
+        FILTP = T#TEXT; /* TEXT */
+        FILTP = T#DATA; /* DATA */
+        FILTP = T#SYNC; /* SYNC */
+      END;
+      ELSE DO; CALL PSTRINGR ('May not change Type of file'); GOTO ERROR; END;
+    END; /* SET TYPE */
+
+    DO; /* SET NAME */
+      IF NOT READ.NAME(STR2,TRUE) THEN GOTO ERROR;
+      IF STR2(0) = 0 THEN DO;
+         CALL PSTR (FNMMS); CALL PSTRINGR ('SET NAME command');
+         GOTO ERROR;
+       END;
+      CALL MOVE.NAME(STR2,CNAM);
+      CALL STORE.NAME(CNAM);
+    END;
+
+    DO; /* SET CAT */
+      IF NOT GET.TREENAME(STR2,'SET CATALOG',FALSE,FALSE) THEN GOTO ERROR; /* MUST GIVE A CATALOG NAME */
+      IF NOT ENTER_CATALOG(STR2,1) THEN DO; /* TRY TO MAKE THIS THE CURRENT CATALOG */
+         CALL CAT.ERROR; /* PRINT ERROR MESSAGE */
+         GOTO ERROR;
+      END;
+    END;
+
+    DO; /* SET ECHO */
+      DO CASE SCAN_ON_OFF;
+        PERFORMING = (PERFORMING AND (NOT PERF_ECHO)); /* CLEAR IT */
+        PERFORMING = (PERFORMING OR PERF_ECHO);        /* TURN ECHO ON */
+      END;
+    END;
+
+    DO; /* SET LOG */
+      DO CASE SCAN_ON_OFF;
+        CORE(LOC.MONBITS) = CORE(LOC.MONBITS) & (NOT M#LOG);  /* OFF */
+        CORE(LOC.MONBITS) = CORE(LOC.MONBITS) | M#LOG;      /* ON */
+      END;
+    END;
+
+    DO; /* SET HISTORY */
+       /* NOTHING TO SET (SHOW ONLY) */
+    END;
+
+    DO; /* SET MACROS */
+       /* NOTHING TO SET (SHOW ONLY) */
+    END;
+
+	  DO; /* SET TRACK GROUPING PREFERENCE */
+      I = SCAN_ON_OFF;
+			i = i XOR 1;			/* invert logic to provide compatibility with earlier software */
+			if (i ILT 2)			/* ignore unrecognized value */
+				export (EMAREA, em.disallow_grouping_by_holding, LOCATION(ADDR(i)), 1);
+		END;
+  
+	END; /* OF DO CASE */
+END; /* OF SET COMMAND */
+
+/* $SUBTITLE  Show Command */
+
+DO; /* SHOW COMMAND */
+  CALL SCAN_COMMAND;
+  CALL SKIPSPA; /* SKIP TO NEXT FIELD */
+
+  DO CASE (INTERPRET_COMMAND(SET.ARGS,'',1)); /* PARSE COMMAND */
+    IF BYTE(STR1,0) = a.V THEN DO; /* SHOW VERSION */
+      CALL PCN; CALL PSTR (REL.TITLE); CALL PSTRINGR (REL.DATE);
+      CALL PDEC(0,SHR(MEM.SIZ,10),0); CALL PSTR ('K Computer Memory');
+      IF EMSIZE > 0 THEN DO;
+        CALL PSTR (', '); CALL PDEC(0,SHR(EMSIZE+EMRSVD,2),0); CALL PSTR ('K External Memory');
+      END;
+      CALL NEWLINE;
+			if (interp_is_running != 0)
+				CALL PSTR ('Synclavier³');
+			else
+			{
+				IF SYSTYP = 0 THEN CALL PSTR ('Floppy');
+				ELSE CALL PSTR ('Winchester');
+				CALL PSTR ('-based System, Model '); CALL PCHAR(a.A+processor_type); CALL PSTR (' Proc');
+      }
+			IF D130_PRESENT THEN CALL PSTR (', Keyboard');
+      IF D160_PRESENT THEN CALL PSTR (', Synthesizer');
+      IF D66_PRESENT  THEN CALL PSTR (', Sample-to-Disk');
+      CALL NEWLINE;
+    END; /* SHOW VERSION */
+
+    ELSE IF (STR1(0) = 0) OR (BYTE(STR1,0) = a.I) THEN DO; /* SHOW INFORMATION */
+      CALL PSTR ('Name:    '); CALL PSTR (CNAM);
+      DO I = CNAM(0) TO SHL(F#NAME_LEN,1) - 1; /* FILL AFTER THE NAME */
+        CALL PCHAR(a.SP);
+      END;
+      CALL PSTR ('  '); CALL PRINT_TYPE(FILTP);
+      CALL PSTR ('               Device:   '); CALL PRINT.DEVICE(UDEV); CALL NEWLINE;
+
+      CALL PSTR ('Status:  ');
+      IF SAVED THEN CALL PSTR ('Unmodified');
+      ELSE          CALL PSTR ('Modified  ');
+      CALL PSTR ('                    Catalog:  ');
+      CALL PSTRINGR (LOCATION(LOC.CCNM));
+
+      CALL SORT; CALL PSTR ('Length:  ');
+      IF FILNS ILT 256 THEN DO;
+         CALL PDEC(0,FILNG,0); CALL PSTR (' words ('); I=#DIGITS;
+      END;
+      ELSE I=0;
+      CALL PDEC(0,FILNS,0); CALL PSTR (' sectors'); I=I+#DIGITS;
+      IF FILNS ILT 256 THEN CALL PSTR (')'); ELSE CALL PSTR ('         ');
+      IF NOT ((UMAX = 0) AND (UMAXMS = 0)) THEN DO; /* ONLY SHOW CATALOG LENGTH IF ENTERED */
+         DO I=I TO 10-1; CALL PCHAR(a.SP); END; /* SPACE FILL LENGTH */
+         CALL PSTR ('   Size:     '); CALL PDEC(UMAXMS,UMAX,0); CALL PSTR (' sectors');
+      END;
+      CALL NEWLINE;
+    END; /* OF SHOW INFORMATION */
+
+    ELSE DO;
+      CALL PCN; CALL PSTRINGR ('Invalid request to SHOW');
+    END;
+
+    DO; /* SHOW PROMPT */
+      CALL PCN; CALL PSTR ('Prompt:  '); CALL PSTRINGR (LOCATION(LOC.PRMT));
+    END;
+
+    DO; /* SHOW TERM */
+      CALL PCN; CALL PSTR ('Terminal Screen Size ');
+      CALL PDEC(0,SCREEN,0); CALL PSTRINGR (' lines');
+    END;
+
+    DO; /* SHOW RTP */
+      CALL PCN; CALL PSTR ('Real Time Program Name:  ');
+      CALL PSTRINGR (LOCATION(LOC.SYNRTPN));
+    END;
+
+    DO; /* SHOW PATH */
+      CALL PCN; CALL PSTR ('Path Device:  '); CALL PRINT.DEVICE(PDEV);
+      CALL PSTR ('   Path Catalog:  '); CALL PSTRINGR (LOCATION(LOC.PCNM));
+    END;
+
+    DO; /* SHOW TYPE */
+      CALL PCN; CALL PSTR ('File Type:  ');
+      CALL PRINT_TYPE(FILTP); CALL NEWLINE;
+    END;
+
+    DO; /* SHOW NAME */
+      CALL PCN; CALL PSTR ('File:  '); CALL PSTRINGR (CNAM); CALL PSTR ('Type:  ');
+      CALL PRINT_TYPE(FILTP); CALL NEWLINE;
+    END;
+
+    DO; /* SHOW CATALOG */
+      CALL PCN; CALL PSTR ('Device:  '); CALL PRINT.DEVICE(UDEV);
+      CALL PSTR ('   Catalog:  '); CALL PSTRINGR (LOCATION(LOC.CCNM));
+    END;
+
+    DO; /* SHOW ECHO */
+      CALL PCN; CALL PSTR ('Echo:  ');
+      IF (PERFORMING AND PERF_ECHO) <> 0 /* IF ECHO ON */
+      THEN CALL PSTRINGR ('On');
+      ELSE CALL PSTRINGR ('Off'); /* ECHO OFF */
+    END;
+
+    DO; /* SHOW LOG */
+      CALL PCN; CALL PSTR ('Log:  ');
+      IF (CORE(LOC.MONBITS) & M#LOG) <> 0
+      THEN CALL PSTRINGR ('On');
+      ELSE CALL PSTRINGR ('Off');
+    END;
+
+    DO; /* SHOW HISTORY */
+      CALL SHOW_HISTORY;
+    END;
+
+    DO; /* SHOW MACROS */
+      CALL SHOW_MACROS;
+    END;
+
+		DO; /* SHOW GRP BUTTON PREFERENCE */
+      import (EMAREA, em.disallow_grouping_by_holding, LOCATION(ADDR(i)), 1); 			/* bring in group button preference */
+		
+      CALL PCN; CALL PSTR ('Allow track grouping by holding track buttons:  ');
+      IF (i != 0)
+				 CALL PSTRINGR ('Off');
+      ELSE
+      	 CALL PSTRINGR ('On');
+		END;
+		
+  END; /* OF DO CASE */
+END; /* OF SHOW COMMAND */
+
+/* $PAGE - COMMANDS COM, SED, DSK, PLA, HFO, LSP, CON, PLO, ASM, SFM, PAT, SYN, REV */
+
+DO; /* COMPILE */
+  CALL RUN(1,0);
+  GOTO ERROR; /* SHOULD NEVER GET BACK ERR */
+END; /* COMPILE */
+
+DO; /* SED - RUN THE SCREEN EDITOR */
+  CALL RUN(0,3); /* TRY TO EDIT THE FILE */
+  GOTO ERROR; /* IF RUN DETECTED AN ERROR */
+END; /* SED */
+
+DO; /* DSK - RUN THE DESK IMAGE EDITOR */
+  CALL RUN(0,7); /* ACTIVATE DESK PROGRAM */
+  GOTO ERROR; /* IF RUN DETECTED AN ERROR */
+END; /* DSK */
+
+DO; /* PLAY */
+  IF (D130_PRESENT) AND (D160_PRESENT) AND (D4567_PRESENT) THEN DO; /* CORRECT CONFIGURATION FOR PLAY */
+    CALL RUN(0,1);
+    GOTO ERROR;
+  END;
+  ELSE DO; CALL PSTR (CONF_ERR); CALL PSTRINGR ('PLAY'); END;
+END; /* PLAY */
+
+DO; /* HFORM - INVOKE TEXT FORMATTER */
+   //90 nsec per loop CJ 2015-04-4
+   #if (0)
+      dcl xyz fixed;
+      dcl buf(100) fixed;
+      do xyz = 0 to 99;
+         buf(xyz) = interp_fetch_real_micros(0);
+      end;
+      do xyz = 0 to 99;
+         send buf(xyz);
+         flush_termulator_output_to_host();
+      end;
+   #endif
+  CALL RUN(0,5);
+  GOTO ERROR;
+END;
+
+DO; /* LSP - INVOKE LISP INTERPRETER */
+  CALL RUN(0,6);
+  GOTO ERROR;
+END;
+
+DO; /* CONVERT - CONVERT FROM SCRIPT TO COMPILED SEQUENCE */
+  CALL RUN(1,1);
+  GOTO ERROR;
+END; /* CONVERT */
+
+DO; /* PLOT - PLOT A SCRIPT FILE WITHOUT GOING TO SYNCLAVIER */
+  CALL RUN(3,1);
+  GOTO ERROR;
+END; /* PLOT */
+
+DO; /* ASSEMBLER */
+  CALL RUN(1,4);
+  GOTO ERROR;
+END; /* ASSEMBLER */
+
+DO; /* SIGNAL FILE MANAGER */
+  CALL RUN(0,2);
+  GOTO ERROR;
+END; /* SFM */
+
+DO; /* SYN - INVOKE RESYNTHESIS */
+  CALL RUN(0,8);
+  GOTO ERROR;
+END; /* SYN */
+
+DO; /* REVERSE - REVERSE COMPILE A SCRIPT FILE WITHOUT GOING TO SYNCLAVIER */
+  CALL RUN(4,1);
+  GOTO ERROR;
+END; /* REVERSE */
+
+DO; /* BUILD */
+  DCL BUIBUF(TYBMAX/2) FIXED; /* BUILD LINPUT BUFFER */
+  DCL BUILDLN          FIXED;
+  DCL (S.INCH,S.TYBP)  FIXED; /* SAVE THESE POINTERS TO RESUME COMMAND */
+
+  CALL SORT;
+  IF FILNG <> 0 THEN IF NONCOMCHK THEN GOTO ERROR;
+  CALL PRIME;
+  BUILDLN = 100; /* ASSUME START AT 100 */
+  DO WHILE PTR ILT FILNG; /* SCAN THROUGH FILE */
+    BUILDLN = FBUF(PTR - BSTRT) + 10; /* START .+10 NORMALLY */
+    IF BUILDLN < 100 THEN BUILDLN = 100;
+    CALL STEPPTR;
+  END;
+  CALL PSTRINGR ('Entering Build Mode Now');
+  CALL NEWLINE;
+  S.INCH = INCH; S.TYBP = TYBP; /* PRESERVE COMMAND PARSING */
+  TYB.BASE = ADDR(BUIBUF(0)); /* SELECT INTERNAL BUILD LINPUT BUFFER */
+
+  NEXT.BUILD.LINE:;
+  CALL PDEC(0,BUILDLN,0); CALL PCHAR(a.SP); /* PRINT LINE NUMBER */
+  CALL GET.LINE(0); /* GET LINE OF INPUT */
+  IF BUIBUF(0) > 1 THEN DO; /* NOT A NULL LINE - MERGE IN */
+    SAVED = 0; STORED = 0;
+    ARG = BUILDLN; /* PASS NEW LINE NUMBER TO MERGE */
+    TYBP = TYBP - 1; CALL GET.CHAR; /* RE-GET CHARACTER WITHOUT UPPER CASE */
+    CALL MERGE;
+    BUILDLN = BUILDLN + 10;
+    GOTO NEXT.BUILD.LINE;
+  END;
+  CALL NEWLINE;
+  CALL PSTRINGR ('Leaving Build Mode Now');
+  INCH = S.INCH; TYBP = S.TYBP; /* RESTORE PARSING */
+  TYB.BASE = LOC.TYB; /* SELECT MAIN COMMAND BUFFER */
+END; /* BUILD */
+
+DO; /* EXPORT */
+	
+	/*	Instructions for export:
+
+			ZTERM Setings:
+				Connection: 	select Xon/Xoff protocol
+											unselect harware handshake
+				
+				Text pacing: 	non required.  use all zeroes.
+				
+				General Preferences: Set the 'Text File Creator' for whatever macintosh
+														 word processor you use to edit text files.  I find that
+														 the MPW Shell text editor is **fantastic** for editing
+														 programs.  Using a Word processor like Word 5.1 is
+														 **ghastly** for editing programs; of course I use
+														 Word all the time for documentation and letters and
+														 other formatted text.
+														 
+				Terminal:			"Capture text by line" **must** be off.  This is very important!
+											Otherwise Zterm inserts crlfs in the transferred file
+											if the line is too long for the zterm window...
+											
+			I use 38400 all the time...
+			
+			To export the file from the Synclavier to the Mac
+					1) Quit NED startup (aka "Termulator").
+					2) Launch ZTERM and verify ZTERM settings.
+					3) type the EXPORT command into the MONITOR.  Monitor will
+					   appear to 'freeze'.  This is normal.  Don't type
+						 anything else yet!!!
+				  4) From the Zterm File Menu, select "Start Capture".
+					   Navigate to where you want the file to be saved
+						 on the Mac.
+				  5) Once ZTERM is in capture mode, type a single
+						 character to the MONITOR (like a carriage
+						 return).  The MONITOR sends the file to ZTERM
+						 at that point.
+				  6) HINT: The screen drawing is in ZTERM is quite slow.
+					   The file transfer will occur much faster if you
+						 'page up' zterm once the file transfer has started.
+						 This tells ZTERM to continue receiving the characters
+						 but don't display them in the window.
+				  7) When the file has been completely transferred,
+					   select the 'Stop Capture' item from the ZTERM file
+						 menu.
+					8) Once you have done the 'stop capture' in zterm, type
+					   another character to the MONITOR (again, I use a
+						 Carriage Return).  Monitor responds with 'ready'.
+						 
+					A couple of round trips and a compare should verify that
+					everything is transferred OK.  By the way, MPW has
+					a terrific 'comparefiles' function that does a nice job
+					of comparing text files...
+	*/
+
+  I = READ("50");
+  OUTDEV = 0;
+  IF EXPORTSUB THEN GOTO ERROR; /* GO TO ERROR IF BREAK DETECTED */
+  I = READ("50");
+END; /* LIST */
+
+DO;	/* EJECT COMMAND */
+  CALL SCAN_COMMAND;
+  CALL SKIPSPA; /* SKIP TO NEXT FIELD */
+  
+	DO CASE (INTERPRET_COMMAND(EJE.ARGS, '', 1));
+		CALL PSTRINGR ('Unrecognized argument for EJECT');
+		CALL EJECT_DISK(6, EJECT_CODE);
+		CALL EJECT_DISK(6, EJECT_CODE);
+		CALL EJECT_DISK(7, EJECT_CODE);
+		CALL EJECT_DISK(7, EJECT_CODE);
+	END;
+END;
+
+DO;	/* SLEEP COMMAND */
+  CALL SCAN_COMMAND;
+  CALL SKIPSPA; /* SKIP TO NEXT FIELD */
+  
+	DO CASE (INTERPRET_COMMAND(EJE.ARGS, '', 1));
+		CALL PSTRINGR ('Unrecognized argument for SLEEP');
+		CALL EJECT_DISK(6, STOP_CODE);
+		CALL EJECT_DISK(6, STOP_CODE);
+		CALL EJECT_DISK(7, STOP_CODE);
+		CALL EJECT_DISK(7, STOP_CODE);
+	END;
+END;
+
+DO;	/* SPIN COMMAND */
+  CALL SCAN_COMMAND;
+  CALL SKIPSPA; /* SKIP TO NEXT FIELD */
+  
+	DO CASE (INTERPRET_COMMAND(EJE.ARGS, '', 1));
+		CALL PSTRINGR ('Unrecognized argument for SPIN');
+		CALL EJECT_DISK(6, START_CODE);
+		CALL EJECT_DISK(6, START_CODE);
+		CALL EJECT_DISK(7, START_CODE);
+		CALL EJECT_DISK(7, START_CODE);
+	END;
+END;
+
+DO;	/* STOP COMMAND */
+  CALL SCAN_COMMAND;
+  CALL SKIPSPA; /* SKIP TO NEXT FIELD */
+  STOP(0);
+END;
+
+END; /* OF DO CASE FOR COMMANDS */
+
+CALL SKIPEND; /* SKIP TO END OF COMMAND LINE */
+END; /* OF COMMAND PROCESSING */
+
+END; /* OF MAIN DO FOREVER */

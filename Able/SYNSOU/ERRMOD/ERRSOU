@@ -1,0 +1,539 @@
+/*	:SYNSOU:ERRMOD:ERRSOU  $TITLE  Error Handling and Printing Routines
+
+Modified:
+1999/10/24 - TY  - Added "Division by Zero", "Overflow" and "Incorrect Sign" error messages
+1989/08/24 - PF  - Add "Use MIDInet software..." message
+1988/08/23 - MWH - Add DSP messages
+1987/11/16 - cj  - provided linkage to VK error message displays
+1987/08/25 - eg  - added handle.cat.error, routine to display errors set by cat routines
+1987/02/09 - BSW - Created this module
+*/
+
+Module ERRMOD;
+
+	insert ':synlits:comlits';		/*	compilation literals		*/
+	insert ':synlits:globlits';	/*	good globals				*/
+	insert ':synauxs:errlits';		/*	valid error literals		*/
+
+	insert ':synmods:ttydcl';		/*	terminal i/o routines	*/
+	insert ':synmods:globdcl';		/*	for set.error				*/
+	insert ':-xpl:catrout';			/*	system literals			*/
+	insert ':-xpl:messages';		/*	cat/scsi messages			*/
+	insert ':-xpl:intrprtr';		/*	interpreter interface	*/
+
+	/*	Global variables to hold protocol error messages		*/
+
+	dcl Protocol.Error.ID			fixed public;
+	dcl Protocol.Error.Attr			fixed public;
+	dcl Protocol.Error.Arg0(17-1)	fixed public;
+	dcl Protocol.Error.Arg1			fixed public;
+	dcl Protocol.Error.Arg2			fixed public;
+	dcl Protocol.Error.Arg3			fixed public;
+
+	dcl display.err proc (fixed) external;
+
+	term.err: proc(t) swapable;	/*	sets up info for errors	*/
+		dcl (t,i)			fixed;
+		dcl null.string	data ('');
+
+		/*	NOTE:  Negative error codes mean set ERSYM	*/
+
+		if t<0 then do;				/*	save token or filename for error display	*/
+			if (t=err.cat) or (t=err.ifm) or (t=err.big)
+			or (t=err.dev) or (t=err.smp) or (t=err.nfi)
+			or (t=err.nsy) or (t=err.nss) or (t=err.svc)
+			or (t=err.lor) or (t=err.gor) or (t=err.cfo)
+
+			or (t=err.ind) or (t=err.chr) or (t=err.dup)
+			or (t=err.fnf) or (t=err.int) or (t=err.icf)
+			or (t=err.tme)
+			then call set.error(t,token);
+			else call set.error(t,fnbuf);
+		end;
+		else call set.error(t,null.string);
+	end term.err;
+
+	/*	the following routines just use more intelligible names	*/
+
+	nomem.error:				proc public swapable; call term.err(err.oom); end;
+	format.error:				proc public swapable; call term.err(err.ifm); end;
+	overlap.error:				proc public swapable; call term.err(err.ove); end;
+	missing.error:				proc public swapable; call term.err(err.mis); end;
+	type.error:					proc public swapable; call term.err(err.typ); end;
+	noroom.error:				proc public swapable; call term.err(err.nor); end;
+	range.error:				proc public swapable; call term.err(err.ran); end;
+	io.error:					proc public swapable; call term.err(err.io);  end;
+	overflow.error:			proc public swapable; call term.err(err.big); end;
+	no.changes.allowed:		proc public swapable; call term.err(err.chg); end;
+	term.input.err:			proc public swapable; call term.err(err.ter); end;
+	feature.not.available:	proc public swapable; call term.err(err.fea); end;
+	no.edit.allowed:			proc public swapable; call term.err(err.edi); end;
+	no.add.delete.allowed:	proc public swapable; call term.err(err.add); end;
+	cannot.change.pitch:		proc public swapable; call term.err(err.pit); end;
+	subcat.error:				proc public swapable; call term.err(err.cat); end;
+	device.error:				proc public swapable; call term.err(err.dev); end;
+	no.floppy:					proc public swapable; call term.err(err.nfl); end;
+	no.graphics.terminal:	proc public swapable; call term.err(err.ngt); end;
+	no.printer:					proc public swapable; call term.err(err.npr); end;
+	no.timbre.frame.parm:	proc public swapable; call term.err(err.npa); end;
+	duplicate.filename:		proc public swapable; call term.err(err.dup); end;
+	invalid.filename:			proc public swapable; call term.err(err.chr); end;
+	no.more.labels:			proc public swapable; call term.err(err.nlb); end;
+	out.of.limits:				proc public swapable; call term.err(err.lim); end;
+	duplicate.label:			proc public swapable; call term.err(err.dul); end;
+	duplicate.time.values:	proc public swapable; call term.err(err.dut); end;
+	no.delete:					proc public swapable; call term.err(err.del); end;
+	no.symbol:					proc public swapable; call term.err(err.nsy); end;
+	no.amplitude:				proc public swapable; call term.err(err.amp); end;
+	no.space:					proc public swapable; call term.err(err.nsp); end;
+	no.sound.file:				proc public swapable; call term.err(err.nsf); end;
+	poly.required:				proc public swapable; call term.err(err.ply); end;
+	big.trouble:				proc public swapable; call term.err(err.btr); end;
+	file.not.on.disk:			proc public swapable; call term.err(err.nfi); end;
+	no.stm.hardware:			proc public swapable; call term.err(err.nhw); end;
+	not.enough.memory:		proc public swapable; call term.err(err.nmr); end;
+	no.sound.file.delete:	proc public swapable; call term.err(err.dna); end;
+	no.stereo.sound:			proc public swapable; call term.err(err.nss); end;
+	incompat.sf.rates:		proc public swapable; call term.err(err.isr); end;
+	no.mono.sound:				proc public swapable; call term.err(err.nms); end;
+	split.stereo.sound:		proc public swapable; call term.err(err.sss); end;
+	left.or.right.channel:	proc public swapable; call term.err(err.lor); end;
+	gain.out.of.range:		proc public swapable; call term.err(err.gor); end;
+	no.edit.outside.loop:	proc public swapable; call term.err(err.eol); end;
+	cant.edit.loop:			proc public swapable; call term.err(err.cel); end;
+	no.direct.to.disk:		proc public swapable; call term.err(err.ndd); end;
+	noexit.err:					proc public swapable; call term.err(err.noe); end;
+	password.error:			proc public swapable; call term.err(err.pwd); end;
+	inverse.error:				proc public swapable; call term.err(err.inv); end;
+	incompat.sf.types:		proc public swapable; call term.err(err.sft); end;
+	iteration.error:			proc public swapable; call term.err(err.itr); end;
+	no.edit.while.play:		proc public swapable; call term.err(err.ewp); end;
+	no.fill.time:				proc public swapable; call term.err(err.nft); end;
+	no.edit.buf:				proc public swapable; call term.err(err.neb); end;
+	crossfade.override:		proc public swapable; call term.err(err.cfo); end;
+	write.protect.error:		proc public swapable; call term.err(err.wpr); end;
+	no.contig.space:			proc public swapable; call term.err(err.ncs); end;
+	invalid.directory:		proc public swapable; call term.err(err.ind); end;
+	incorrect.treename:		proc public swapable; call term.err(err.int); end;
+	inter.cat.not.found:		proc public swapable; call term.err(err.icf); end;
+	stm.time.format:			proc public swapable; call term.err(err.nti); end;
+	stm.file.format:			proc public swapable; call term.err(err.nfn); end;
+	stm.no.editbuf:			proc public swapable; call term.err(err.ena); end;
+	paste.one:					proc public swapable; call term.err(err.pon); end;
+	no.loop.time:				proc public swapable; call term.err(err.nlt); end;
+	paste.no.edit:				proc public swapable; call term.err(err.pne); end;
+	no.stereo.play:			proc public swapable; call term.err(err.pss); end;
+	volume.clipped:			proc public swapable; call term.err(err.svc); end;
+	directory.full:			proc public swapable; call term.err(err.nme); end;
+	No.Timbre.Bank.Warning:	proc public swapable; call term.err(err.nobank); end;	/*	Put up warning message about no timbre bank on current device	*/
+	diff.name.error:			proc public swapable; call term.err(err.dne); end;
+	empty.clip.error:			proc public swapable; call term.err(err.ece); end;
+	file.not.found.error:	proc public swapable; call term.err(err.fnf); end;
+	file.type.error:			proc public swapable; call term.err(err.fte); end;
+	no.find.clip.error:		proc public swapable; call term.err(err.nfc); end;
+	no.open.clip.error:		proc public swapable; call term.err(err.noc); end;
+	no.room.error:				proc public swapable; call term.err(err.nre); end;
+	oldseq.error:				proc public swapable; call term.err(err.ose); end;
+	length.error:				proc public swapable; call term.err(err.lne); end;
+	zerolen.error:				proc public swapable; call term.err(err.zle); end;
+	toolong.error:				proc public swapable; call term.err(err.tle); end;
+	type.mismatch.error:		proc public swapable; call term.err(err.tme); end;
+	timb.no.match.error:		proc public swapable; call term.err(err.tnm); end;
+	chain.live.click.error:	proc public swapable; call term.err(err.clc); end;
+	no.solos.error:			proc public swapable; call term.err(err.nse); end;
+	tsm.range.error:			proc public swapable; call term.err(err.tsm.range); end;
+	tsm.d24.error:				proc public swapable; call term.err(err.tsm.d24); end;
+	tsm.datafile.error:		proc public swapable; call term.err(err.tsm.datafile); end;
+	midi.overrun.error:		proc public swapable; call term.err(err.mor); end;
+	tsm.load.err:				proc public swapable; call term.err(err.tsm.load); end;
+	use.midinet.err:			proc public swapable; call term.err(err.use.midinet); end;
+	bad.tempo.trk.err:		proc public swapable; call term.err(err.bad.tempo.trk); end;
+
+	/*	$SUBTITLE  Routine to Display an Error Message	*/
+
+	dcl cur.err.len	fixed public;	/*	used to keep track of current error message len	*/
+	dcl cur.err.sec	fixed public;	/*	if nonzero, holds external memory sector to build error messge in	*/
+
+	ourps:proc(message);				/*	non swap so strings are in ext mem	*/
+		dcl message	array;
+		dcl i			fixed;
+
+		if (cur.err.sec != 0)		/*	construct error message in external memory instead of sending to terminal	*/
+		{
+			do i = 0 to message(0) - 1;														/*	process all message bytes		*/
+				write(mam) = cur.err.sec;														/*	access xmem sector				*/
+				write(mal) = 1 + shr(cur.err.len, 1);										/*	access xmem word					*/
+
+				if ((cur.err.len & 1) == 0)													/*	low byte								*/
+					write(md) = byte(message, i);												/*	write low byte & zero upper	*/
+				else
+				{
+					write(mdi) = (read(md) & 0x00FF) | shl(byte(message, i), 8);	/*	or in upper byte					*/
+					write(md ) = 0;																/*	add trailing null					*/
+				}
+
+				cur.err.len = cur.err.len + 1;												/*	increment length					*/
+
+				write(mam) = cur.err.sec;														/*	access xmem sector				*/
+				write(md ) = cur.err.len;														/*	post length in xmem as well	*/
+			end;
+
+			return;
+		}
+
+		CUR.ERR.LEN=CUR.ERR.LEN + message(0);
+		call ps(message);
+
+	end ourps;
+
+	/*	$page - routine to map VK error messages to terminal	*/
+
+	DISPLAY.ERR#1:PROC(NUM) SWAPABLE;
+		DCL NUM	FIXED;
+
+		DO CASE(NUM);
+			/*	RULER FOR ERRORS:         1         2         3		*/
+			/*						  12345678901234567890123456789012	*/
+			CALL OURPS('Not enough System Memory for operation');					/*	 0: RECORDER OUT OF NOTES	*/
+			CALL OURPS('Out of FM Wave Tables [1]');									/*	 1: TOO MANY WAVEFORMS, CHANGING PARAMETER	*/
+			CALL OURPS('Out of FM Wave Tables [2]');									/*	 2: TOO MANY WAVEFORMS, RECALLING TIMBRE	*/
+			CALL OURPS('Out of FM Wave Tables [3]');									/*	 3: TOO MANY	*/
+			CALL OURPS('Data File or Sound Files is missing');						/*	 4: NON-EXISTENT FILE	*/
+			CALL OURPS('Sequence will not fit in memory');							/*	 5: SEQUENCE TOO LONG FOR MEMORY	*/
+			CALL OURPS('Sequence is too long to store in sequence file');		/*	 6: SEQUENCE TOO LONG FOR DISK	*/
+			CALL OURPS('Timbres must match to record on same track');			/*	 7: NON-EMPTY TRACK	*/
+			CALL OURPS('There are no free tracks for recording');					/*	 8: NO FREE TRACKS	*/
+			CALL OURPS('Timbres must match to Bounce Tracks');						/*	 9: TIMBRES DO NOT MATCH	*/
+			CALL OURPS('Not enough System Memory is available for overlay');	/*	10: REVCOM,SFM,OR MP TOO BIG TO OVERLAY TO	*/
+			CALL OURPS('New Timbre will not fit in available memory');			/*	11: OUT OF MEMORY-11	*/
+			CALL OURPS('Timbre Bank not available in memory');						/*	12: OUT OF MEMORY-12	*/
+			CALL OURPS('Specified Timbre Bank does not exist in file');			/*	13: TIMBRE BANK DOES NOT EXIST	*/
+			CALL OURPS('Not enough System Memory is available to write');		/*	14: NOT ENOUGH MEMORY FOR TIMBRE WRITE	*/
+			CALL OURPS('Timbre Bank will not fit in data file');					/*	15: TIMBRE BANK WON'T FIT IN .NEWDATA	*/
+			CALL OURPS('Desired software feature is not available');				/*	16: SOFTWARE FEATURE NOT AVAILABLE	*/
+			CALL OURPS('There is no memory left for recording');					/*	17: NO NOTES	*/
+			CALL OURPS('Specified sequence file is empty');							/*	18: UNINITIALZED SEQUENCE	*/
+			CALL OURPS('Feature is not available with this timbre');				/*	19: OPERATION NOT ALLOWED WITH 'PATCH' TIMBRE	*/
+			;																						/*	20: SMARTS	*/
+			;																						/*	21: SMARTS	*/
+			;																						/*	22: BUTTON ERROR	*/
+			;																						/*	23: WRITE BUTTON DISPLAY	*/
+			;																						/*	24	*/
+			/*	RULER FOR ERRORS:         1         2         3		*/
+			/*						  12345678901234567890123456789012	*/
+		END;
+
+	END DISPLAY.ERR#1;
+
+	DISPLAY.ERR#2:PROC(NUM) SWAPABLE;
+		DCL NUM	FIXED;
+
+		DO CASE(NUM);
+			/*	RULER FOR ERRORS:         1         2         3		*/
+			/*						  12345678901234567890123456789012	*/
+			;																						/*	25	*/
+			;																						/*	26	*/
+			;																						/*	27	*/
+			CALL OURPS('Cannot play past end of overall loop');					/*	28	*/
+			CALL OURPS('SMPTE Hardware option is not installed in system');	/*	29	*/
+			CALL OURPS('Loading Halted!!!');												/*	30	*/
+			CALL OURPS('Multi-Channel Hardware is not installed in system');	/*	31	*/
+
+			{
+				if (interp_is_running == 0)
+					CALL OURPS('D16 Timer is not installed in system');						/*	32	*/
+				else
+					CALL OURPS('The SMPTE GENERATOR is not available in this software');	/*	32	*/
+			}
+
+			CALL OURPS('D16 Timer is set at wrong rate');							/*	33	*/
+			CALL OURPS('Drop-out detected in SMPTE signal');						/*	34	*/
+			CALL OURPS('Incoming SMPTE signal does not match SMPTE mode');		/*	35	*/
+			CALL OURPS('Waiting for SMPTE signal');									/*	36	*/
+			CALL OURPS('Model C Process is required');								/*	37	*/
+			CALL OURPS('Must set Total Length before search');						/*	38	*/
+			CALL OURPS('Voice output beginning now....');							/*	39	*/
+			CALL OURPS('MIDI Hardware option is not installed');					/*	40	*/
+			CALL OURPS('Must record STM on empty track');							/*	41	*/
+			CALL OURPS('Out of Poly Sampling memory');								/*	42	*/
+			CALL OURPS('Cannot LOOP live tracks');										/*	43	*/
+			CALL OURPS('Use terminal to erase live tracks');						/*	44	*/
+			CALL OURPS('Cannot bounce live tracks');									/*	45	*/
+			CALL OURPS('Cannot slide live track');										/*	46	*/
+			CALL OURPS('All tracks are "SAFE" - cannot record');					/*	47	*/
+			CALL OURPS('SMT function is not available with live track');		/*	48	*/
+			CALL OURPS('Function is not available for live track');				/*	49	*/
+			CALL OURPS('Loop End Time must be after Loop Start Time');			/*	50	*/
+			CALL OURPS('Cannot RECALL 1 track from old sequence format');		/*	51	*/
+			CALL OURPS('Cannot CHAIN live tracks');									/*	52	*/
+			CALL OURPS('Timbres must match for CHAIN');								/*	53	*/
+			CALL OURPS('ERROR - Disk is WRITE PROTECTED');							/*	54	*/
+			CALL OURPS('Cannot edit track past end of Independent Loop');		/*	55	*/
+			CALL OURPS('No floppy disk in drive');										/*	56	*/
+			CALL OURPS('No contiguous space available');								/*	57	*/
+			CALL OURPS('ERROR - Sequence file is PROTECTED');						/*	58	*/
+			CALL OURPS('Cannot CHAIN with live click track');						/*	59	*/
+			CALL OURPS('Disk Error: Cannot read the Sound File from Disk');	/*	60	*/
+			CALL OURPS('Disk Error: Cannot read Sequence from Disk');			/*	61	*/
+			CALL OURPS('Disk Error: Mount W1 Before Use!');							/*	62	*/
+			/*	RULER FOR ERRORS:         1         2         3		*/
+			/*						  12345678901234567890123456789012	*/
+		END;
+
+
+	END DISPLAY.ERR#2;
+
+
+	DISPLAY.VK.ERROR:PROC(NUM) SWAPABLE;
+		DCL NUM	FIXED;
+
+		IF NUM<25 THEN CALL DISPLAY.ERR#1(NUM);
+		ELSE           CALL DISPLAY.ERR#2(NUM-25);
+	END DISPLAY.VK.ERROR;
+
+	/*	$page - print error codes on terminal	*/
+
+	ps.error1:proc(code) swapable;
+		dcl code	fixed;
+
+		do case (code);
+			/*ERROR:    1         2         3         4         5	*/
+			/*ERROR: 78901234567890123456789012345678901234567890	*/
+			call ourps('Out of Memory!');
+			call ourps('Format Error in Input "');
+			call ourps('Sound Files Overlap');
+			call ourps('Missing Sound File "');
+			call ourps('Not a Sound File "');
+			call ourps('Out of Room in Sample Memory');
+			call ourps('Sampling Rate Out of Range');
+			call ourps('Input/Output Error');
+			call ourps('Number is Too Large "');
+			call ourps('Changes Not Allowed');
+			call ourps('Input Not Recognized');
+			call ourps('Feature is Not Available');
+			call ourps('No Note to Edit');
+			call ourps('Cannot Add or Delete Notes Here');
+			call ourps('Cannot Set Pitch to Desired Value');
+			call ourps('Unable to Find Catalog "');
+			call ourps('Device not Configured "');
+			call ourps('No Floppy Disk in Drive');
+			call ourps('SMPTE before Start Time ==> "');
+			call ourps('Graphics Terminal Required');
+			call ourps('Printer Not Configured');
+			call ourps('Parameter Not Available for Frame 0');
+			call ourps('Duplicate Filename "');
+			call ourps('Invalid Character in Filename "');
+			call ourps('No More Room in Symbol Table');
+			call ourps('Symbol Time is Beyond File Limits');
+			call ourps('Duplicate Symbol Name');
+			call ourps('Duplicate Time Value');
+			call ourps('Cannot Delete ORIGIN or END Symbols');
+			call ourps('Symbol Not Found "');
+			call ourps('Amplitude Level Not Found');
+			call ourps('No Space Available on Disk');
+			call ourps('Sound File Not Available');
+			call ourps('Poly Sampling Required');
+			call ourps('System Catalog Error');
+			call ourps('Sound File Not On Disk "');
+			call ourps('Desired Hardware is Not Available');
+			call ourps('Not Enough Memory To Record');
+			call ourps('Sound Files May Not Be DELETED Here');
+			call ourps('Must Combine Mono Sound Files "');
+			call ourps('Incompatible Sampling Rates');
+			call ourps('Stereo Sound File Required for Exchange');
+			call ourps('Stereo Sound File Required for Extract Mono');
+			call ourps('Specify Left or Right for Extract Mono "');
+			call ourps('Gain Out of Range "');
+			call ourps('"');						/*	used to be lod message	*/
+			call ourps('Cannot Move Note Outside of Current Loop');
+			call ourps('Cannot Edit Pitch or Duration for Loops');
+			call ourps('Direct-To-Disk Not Operating');
+			call ourps('Cannot Leave Screen While Recording');
+		end;
+	end ps.error1;
+
+	ps.error2:proc(code) swapable;
+		dcl code	fixed;
+
+      // These start at error code 50
+		do case (code);
+			call ourps('Incorrect password;  command ignored ');
+			call ourps('Start Time Must be Before End Time');
+			call ourps('Incompatible Sound File Types');
+			call ourps('Rewind Sequence to Edit Loop Times');
+			call ourps('This Edit Not Allowed While Playing');
+			call ourps('Sound File is Too Short for Fill');
+			call ourps('Cannot Edit .EDITBUF');
+			call ourps('Crossfade Time Too Long, Truncated to "');   // 57
+			call ourps('Error - Disk is Write Protected');
+			call ourps('Not Enough Contiguous Storage Available');
+			call ourps('Invalid Directory "');
+			call ourps('Incorrect Treename "');
+			call ourps('Intermediate Catalog Not Found "');
+			call ourps('Use the Following Format: Time,Time');
+			call ourps('Use the Following Format: Time,Time,Filename');
+			call ourps('No .EDITBUF available:  Use Time,Time,Filename');
+			call ourps('Must Paste at Least One Sound File');
+			call ourps('Sound File is Too Short for Loop');
+			call ourps('.EDITBUF not available:  Use Filename');
+			call ourps('Cannot Play Stereo Sound File from Disk : "');
+			call ourps('Signal Level Clipped at Time, "');
+			call ourps('Mouse is Not Operating');
+			call ourps('Desired Software is Not Available');
+			call ourps('Desired Software is Incompatible');
+			call ourps('Sequence is Too Long for Overlay');
+			call ourps('Use Direct-to-Disk Screen to Erase Live Track');
+			call ourps('No More Entries in Directory');
+			call ourps('No Timbre Banks Found on Selected Device');
+			call ourps('TO and FROM Name Must be the Same for BOTH');
+			call ourps('Clipboard is Empty, Do a CUT first');
+			call ourps('File not Found: "');
+			call ourps('File is Not a Sequence Filetype');
+			call ourps('Cannot Find CLIPBOARD file');
+			call ourps('Cannot Open CLIPBOARD file');
+			call ourps('Not Enough Room in Memory for this CUT/PASTE');
+			call ourps('Cannot PASTE from an old format Sequence');
+			call ourps('"FROM" sequence needs overall loop');
+			call ourps('Paste sequence is Empty');
+			call ourps('Resulting Sequence is Too Long');
+			;	/*	do nothing for Optical disk error	*/
+			call ourps('Cannot Replace File with Different Type "');
+			call ourps('Timbres must match for BOUNCE');
+			call ourps('Cannot CHAIN with Live Click Track');
+			call display.vk.error(VK.ERROR.CODE);	/*	display coded vk error message	*/
+			call ourps('Tracks must be soloed for PASTE');
+			call ourps('Compression/Expansion factor is out of range');
+			call ourps('DSP70 hardware is not installed in system.');
+			call ourps('Could not find data file ".TSMDATA"');
+			call ourps('MIDI Overrun');
+			call ourps('Unable to load algorithm in DSP70');
+			call ourps('These digital routings cannot be changed');
+			call ourps('Use MIDInet software to change routings');
+			call ourps('Invalid track for Tempo Map conversion');
+			call ourps('Division by Zero');
+			call ourps('Incorrect Sign');
+			call ourps('Overflow');
+			/*ERROR:    1         2         3         4         5	*/
+			/*ERROR: 78901234567890123456789012345678901234567890	*/
+		end;
+	end ps.error2;
+
+	/*	$page - routine to print error code on terminal	*/
+
+	ps.error: proc (code) public swapable;
+		dcl (code,i)	fixed;
+
+		if code=err.lod			then call ourps('MT:    ');
+		else if code=err.nobank	then call ourps('Note:  ');
+		else								  call ourps('Error: ');
+
+		i=abs(code)-1;			/*	for do case	*/
+
+		if i<50 then call ps.error1(i);
+		else			 call ps.error2(i-50);
+
+		if code<0 then do;
+			call ourps(ersym);
+			if code<>err.opt then call ourps('"');
+		end;
+
+	end ps.error;
+
+	/*	$PAGE - handle error code from catalog routine	*/
+
+	handle.cat.error: proc(term) public swapable;
+		dcl term	fixed;	/*	for some errors... if true-disp error on terminal; false-display on kbd	*/
+		dcl i		fixed;
+
+		do i=0 to F#Name(0)-1;
+			call pbyte(token,i,byte(F#Name,i));
+		end;
+		token(0)=F#Name(0);
+
+		if		  (C#Status = e#no_floppy) then do;	/*	no floppy in drive	*/
+			if (term)
+			then call no.floppy;
+			else call display.err(56);
+		end;
+
+		else if (C#Status = e#diskerror) then do;	/*	could not read catalog	*/
+			dcl W1.STATE	fixed external;
+			if ((c#err_level == 7) && (W1.State == 1))
+				call display.err(62);
+			else
+				call display.err(61);
+		end;
+
+		else if (C#Status = e#storage	 ) then do;	/*	not enough available storage	*/
+			if (term)
+			then call no.space;
+			else call display.err(6);					/*	sequence too long to store	*/
+		end;
+
+		else if (C#Status = e#cstorage ) then do;	/*	not enough contiguous storage available	*/
+			if (term)
+			then call no.contig.space;
+			else call display.err(57);
+		end;
+
+		else if (C#Status = e#dir_full )				/*	no entries left in the directory	*/
+		then call directory.full;
+
+		else if (C#Status = e#invalid	 )				/*	invalid directory	*/
+		then call invalid.directory;
+
+		else if (C#Status = e#name		 )				/*	invalid filename specified for operation requested	*/
+		then call invalid.filename;
+
+		else if (C#Status = e#duplicate)				/*	duplicate filename	*/
+		then call duplicate.filename;
+
+		else if (C#Status = e#no_file	 )				/*	file not found	*/
+		then call file.not.found.error;
+
+		else if (C#Status = e#treename )				/*	incorrect format for treename	*/
+		then call incorrect.treename;
+
+		else if (C#Status = e#no_path	 )				/*	intermediate catalog (in treename) not found	*/
+		then call inter.cat.not.found;
+
+		else if (C#Status = e#type		 )				/*	type mismatch between saved file and replaced file (ADDFILE/REPLACE only)	*/
+		then call type.mismatch.error;
+
+		else if (C#Status = e#protect	 ) then do;	/*	write protected floppy	*/
+			if (term)
+			then call write.protect.error;
+			else call display.err(54);
+		end;
+
+		else if (C#Status = e#too_large) then do;	/*	file too large (>= 2^20 sectors)	*/
+			if (term)
+			then call toolong.error;
+			else call display.err(5);
+		end;
+
+		else if (C#Status <> E#None)					/*	some other error exists	*/
+		then call big.trouble;
+
+		token(0)=0;											/*	reset for good luck (and screen manager)	*/
+
+	end handle.cat.error;
+
+	handle.scsi.cat.error: proc public swapable;
+		dcl TheMes (MESSAGE_BUF_SIZE/2)	fixed;
+
+		dcl S$SenseKey		fixed external;	/*	Extended sense key from last SCSI read/write	*/
+
+		if (C#Status == 0 && S$SenseKey == 0)
+			return;
+
+		if		  (S$SenseKey != 0)
+			get_sense_code_message (S$SenseKey, TheMes);
+
+		else if (C#Status   != 0)
+			get_cat_code_message   (C#Status,   TheMes);
+
+		SET.ERROR(err.opt, TheMes);
+	end handle.scsi.cat.error;
+
+END ERRMOD;

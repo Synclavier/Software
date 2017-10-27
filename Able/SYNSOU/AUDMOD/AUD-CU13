@@ -1,0 +1,1022 @@
+/*	:SYNSOU:AUDMOD:AUD-CU13  $TITLE  Audio Event Editor Direct-To-Disk Shuttle Contoller
+
+Modified:
+2001/02/13 - TY  - Added 24-hour wrap code where appropriate.
+					  - Removed lots of unused automatic variables.
+1992/02/06 - cj  - Activated DSP scrubbing from q-page
+1989/07/19 - cj  - fixed place buttons for "place in seq" and "replace in seq"
+1989/05/25 - cj  - saved CUE.FIN/CUE.FOUT info in event
+1989/05/05 - cj  - added "Place Cue", "Place Event", "Repl Event"
+					  - removed "shuttle.cue.place.mode.button"
+1988/10/20 - cj  - fixed 'black hole of calcutta' problem
+1988/09/18 - cj  - update wave display on changing track bits even if
+						 only fine bar display is up.
+1988/08/16 - CJ  - check for negative numbers from take.system.sequence.time
+1988/07/29 - cj  - argument change to link fine bar if applicable
+					  - used different mechanism for refreshing wave display
+					  - user of take.system.sequence.time
+1988/07/26 - cj  - tried relative mouse reporting for fine bar activity
+1988/06/23 - cj  - change to handle.shuttle.project.switch
+1988/06/10 - SGS - Moved AUD-SH6 to AC1MOD
+1988/05/24 - SGS - Added preview edit button procedures
+1988/05/20 - TSS - Added new insert file; Changed args to HANDLE.FLAG.AREA.MOUSE.SELECT
+1988/04/04 - MWH - Erase wave and redraw when it becomes invalid
+1988/03/30 - MWH - Add LOD wave display data compression and transfer
+*/
+
+/*	$page - routine to open shuttle panel	*/
+
+OPEN.SHUTTLE.PANEL: proc public swapable;
+	dcl (sid,row,size)	fixed;	/*** Declare in order ***/
+
+	if (simulate_dtd <> 0 || LOD.Running <> 0) then do;
+		if Shuttle.Group <> 0 then return;
+
+		if Allocate.Screen.Space(10,10,loc(addr(sid))) then do;
+			call Set.Panel.Menu.Highlight(1,1);
+			call Set.AEE.Panel.Info(1,row,size);	/*	find and set entry for panel	*/
+			if Previous.Clip.Reel=0 then do;
+				Previous.Clip.Reel=1;					/*	initialize last selected reel	*/
+			end;
+			Pending.Edit			= 0;
+			Coarse.Bar.Flag.Pos	= 0;	/*	indicate no flags are drawn	*/
+			Coarse.Bar.In.Flag	= 0;	/*	when shuttle first				*/
+			Coarse.Bar.Out.Flag	= 0;	/*	comes up								*/
+			Coarse.Bar.Ein.Flag	= 0;
+			Coarse.Bar.Eout.Flag = 0;
+			Coarse.Bar.In.Box		= 0;
+			Coarse.Bar.Out.Box	= 0;
+			Edit.Line.Center.Pix	= 0;
+			Edit.Line.Radius		= 0;
+			Coarse.Shuttle.Wave	= 0;	/*	No wave displays (yet) when first up	*/
+			Fine.Shuttle.Wave		= 0;
+			call PID(AEE.Shuttle.Graphics.Code,0);	/*	init graphics area	*/
+			write(mam) = Cue.Flag.Ptr;			/*	zero out initial edit flag	*/
+			rpc 256;									/*	area to be blank				*/
+			write(mdi) = 0;
+			write(mam) = Cue.Symbol.Ptr;		/*	and no symbols displayed	*/
+			rpc 256;									/*	either							*/
+			write(mdi) = 0;
+			Symbol.Stack.Size = 0;
+
+			call Define.Shuttle.Panel(row+1,size-1);
+			Shuttle.Screen.Space = sid;
+			Shuttle.Row  = row+1;
+			Shuttle.Size = size-1;
+
+			call Fill.AEE.Shuttle.Source.Table	(Shuttle.Disk.Table);
+			call Fill.AEE.Shuttle.Reel.Table		(Shuttle.Reel.Table,Shuttle.Leader.Reel);
+			call Fill.AEE.Shuttle.Edit.Table		(Shuttle.Edit.Table);
+			call Fill.AEE.Shuttle.Sbar.Control.Table (Shuttle.Sbar.Control.Table);
+			call Highlight.AEE.Shuttle.Sbar.Control.Table (Shuttle.Sbar.Control.Table);
+			call Display.Current.Reel;	/*	to highlight current reel	*/
+			call Highlight.Graphics.Button.Table(Shuttle.Symbol.Button,	Display.Symbols=0, 2, 0);
+			call Highlight.Graphics.Button.Table(Shuttle.Edit.Button,	Display.Edits=0, 2, 0);
+
+			disable.deposits = 1;
+			call Deposit.Label(Shuttle.Project.Name,AEE.Current.Project.Name);
+			call Deposit.Fixed.Point(Shuttle.Project.Number,AEE.Current.Project+1);
+			disable.deposits = 0;
+			call Send.Project.Times.to.DTD.Scrub.Bars(1);
+			call Display.Cue.And.Shuttle.Displays;	/*	set display & audition cue	*/
+			call DEPOSIT.SHUTTLE.TIME.DISPLAY(AEE.Shuttle.Anchor.Time);
+			call Display.Coarse.Scroll.Bar(AEE.Shuttle.Anchor.Time);
+			call Display.Fine.Scroll.Bar(AEE.Shuttle.Anchor.Time);
+		end;
+		else call Display.Notice(NT#NoMoreRoomOnScreen,ATTR#Normal,NulStr,0,0,0);
+	end;
+end OPEN.SHUTTLE.PANEL;
+
+CLOSE.SHUTTLE.PANEL: proc public swapable;
+
+	if Shuttle.Group <> 0 then do;		/*	Group is defined		*/
+		call Set.Panel.Menu.Highlight(1,0);
+		if GID(Edit.Dialog.Is.Open) then call Close.Edit.Command.Dialog;
+		if Cue.Group = 0 then call ERASE.CUE.AUDITION.TRACK;
+		call Set.AEE.Panel.Info(1,0,0);	/*	mark entry as unused	*/
+		Shuttle.Screen.Space = Erase.Screen.Space(Shuttle.Screen.Space);
+		Shuttle.Group = Ungroup.Objects(Shuttle.Group);
+		call Undefine.Object.Range(Shuttle.Alloc,Shuttle.Alloc+999);
+		call Select.New.Cur.Obj(Corner.Label,-1,-1);
+	end;
+end CLOSE.SHUTTLE.PANEL;
+
+UPDATE.SHUTTLE: proc public swapable;
+
+	if LOD.Running <> 0 then do;
+
+		disable.deposits = 1;
+		call Deposit.Label(Shuttle.Project.Name,AEE.Current.Project.Name);
+		call Deposit.Fixed.Point(Shuttle.Project.Number,AEE.Current.Project+1);
+		disable.deposits = 0;
+
+		/*	update all cue times in case cur project changes and	*/
+		/*	new sampling rate is now being used							*/
+
+		call Display.Cue.And.Shuttle.Displays;
+
+		call Send.Project.Times.to.DTD.Scrub.Bars(1);
+
+	end;
+
+end UPDATE.SHUTTLE;
+
+/*	$page - routine to handle cue place, event place, event replace	*/
+
+/*	routine is called when one of the 2 place buttons is selected:		*/
+
+Handle.Cue.Place.Button:proc swapable;
+	dcl tmp(1)	fixed;
+	dcl i			fixed;
+
+	call Map.Graphics.Button.Table.Mouse.Press(Shuttle.Cue.Place.Button, tmp);
+
+	i = tmp(0);		/*	0 = place in sequence;  1 = replace in sequence	*/
+
+	call Highlight.Graphics.Button.Table (Shuttle.Cue.Place.Button, bits(i), 2, 0);
+
+	call Handle.AEE.Cue.Place(Recalled.Event.Spointer, i);
+
+	/*	turn off highlighted button	*/
+
+	call Highlight.Graphics.Button.Table (Shuttle.Cue.Place.Button, 0, 2, 0);
+
+end Handle.Cue.Place.Button;
+
+/*	$page - shuttle event processing		*/
+
+/*	handle shuttle edit functions			*/
+
+Handle.Shuttle.Edit.Functions:proc (tmp) swapable;
+	dcl tmp	array;
+	dcl i		fixed;
+
+	clear.statuses:proc;
+		call DISPLAY.NOTICE (NT#EraseNotice,ATTR#Normal,NulStr,0,0,0);
+		call REMOVE.ERR;
+	end clear.statuses;
+
+	if Screen.Event.Id = Shuttle.Preview.Edit.Button
+	then do;
+		if (Screen.Event.Info = S#MouseSelect)
+		or (Screen.Event.Info = S#MouseActivate) then do;
+			if GID(Edit.Dialog.Is.Open)<>0 then do;
+				call Handle.Preview.Edit.Button;
+			end;
+			else call Display.Notice(NT#NoEditToPreview,ATTR#Reverse,NulStr,0,0,0);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Reel.Table
+	then do;
+		if (Screen.Event.Info = S#MouseSelect)
+		or (Screen.Event.Info = S#MouseActivate) then do;
+
+			call Map.Graphics.Button.Table.Mouse.Press(Shuttle.Reel.Table,tmp);
+
+			if GID(Edit.Dialog.Is.Open) then do;
+				call Select.Clipboard.Reel(tmp(1)*4+tmp(0));
+			end;
+			else do;
+				call clear.statuses;			/*	clear status on any deposit		*/
+				call SET.DTD.CURRENT.REEL (tmp(1)*4+tmp(0));
+				call Display.Current.Reel;	/*	provide snappy response to user	*/
+
+				call Deposit.A.New.Current.Cue(1);
+
+				call Display.AEE.Cue.Names;
+
+				call UnSet.Cue.Modified;
+				call Select.New.Cur.Obj(Corner.Label,-1,-1);
+
+				call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+				call PLAY.CURRENT.CUE(1,0,0,Shuttle.Drive.Bits,1);
+				call Set.Group.Get(Shuttle.Group,Get.Mouse.Button,true);
+			end;
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Leader.Reel
+	then do;
+		if (Screen.Event.Info = S#MouseSelect)
+		or (Screen.Event.Info = S#MouseActivate) then do;
+			if GID(Edit.Dialog.Is.Open) then do;
+				call Select.Clipboard.Reel(12);
+			end;
+		end;
+	end;
+
+	else if (Screen.Event.Id = Shuttle.Displaced.Audio.Reel)
+	and	  (Shuttle.Displaced.Audio.Reel <> -1)	/*	make sure this button exists	*/
+	then do;
+		if (Screen.Event.Info = S#MouseSelect)
+		or (Screen.Event.Info = S#MouseActivate) then do;
+			if GID(Edit.Dialog.Is.Open) then do;
+				call Select.Clipboard.Reel(13);
+			end;
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Proj.Capt.Switch
+	then do;
+		if Screen.Event.Info = S#Deposit
+		then do;
+			i = Fetch.Switch(Shuttle.Proj.Capt.Switch);
+			if i <> (GID(Saved.AEE.Shuttle.Capt.Switch) + Capt.Switch.Default)
+			then do;
+				call PID(Saved.AEE.Shuttle.Capt.Switch,i - Capt.Switch.Default);
+				call Enable.Shuttle.Proj.Capt.Fields;
+			end;
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Edit.Table
+	then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+
+			call clear.statuses;	/*	clear status on any deposit	*/
+
+			call Perform.Shuttle.Edit.Functions(tmp);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Symbol.Button
+	then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;	/*	clear status on any deposit	*/
+			Display.Symbols = Display.Symbols xor 1;
+			call Highlight.Graphics.Button.Table(Shuttle.Symbol.Button,	Display.Symbols=0, 2, 0);
+			call Set.Shuttle.Flags.And.Edits;
+			call Select.New.Cur.Obj(Corner.Label,-1,-1);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Edit.Button
+	then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;	/*	clear status on any deposit	*/
+			Display.Edits = Display.Edits xor 1;
+			call Highlight.Graphics.Button.Table(Shuttle.Edit.Button,	Display.Edits=0, 2, 0);
+			call Set.Shuttle.Flags.And.Edits;
+			call Select.New.Cur.Obj(Corner.Label,-1,-1);
+		end;
+	end;
+
+	else if Screen.Event.ID = Shuttle.CWave.Button
+	then do;
+		if Coarse.Shuttle.Wave = 0 then do;
+			Coarse.Shuttle.Wave = 2;
+			call Highlight.Graphics.Button.Table(Shuttle.Cwave.Button,1,2,0);
+			call Erase.Wave.Display(1);	/*	Erase coarse bar.  Set transparent bit.	*/
+		end;
+		else do;
+			Coarse.Shuttle.Wave = 0;
+			call Highlight.Graphics.Button.Table(Shuttle.CWave.Button,0,2,0);
+			call Erase.Wave.Display(1);	/*	Erase coarse wave display.  Reset transparent bit.	*/
+		end;
+	end;
+
+	else if Screen.Event.ID = Shuttle.FWave.Button
+	then do;
+		if Fine.Shuttle.Wave = 0 then do;
+			Fine.Shuttle.Wave = 2;
+			call Highlight.Graphics.Button.Table(Shuttle.Fwave.Button,1,2,0);
+			call Erase.Wave.Display(0);	/*	Erase fine bar.  Set transparent bit.		*/
+		end;
+		else do;
+			Fine.Shuttle.Wave = 0;
+			call Highlight.Graphics.Button.Table(Shuttle.FWave.Button,0,2,0);
+			call Erase.Wave.Display(0);	/*	Erase fine wave display.  Reset transparent bit.	*/
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Zoom.In.Button
+	then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;	/*	clear status on any deposit	*/
+			call Handle.Zoom.In.Button;
+			call Select.New.Cur.Obj(Corner.Label,-1,-1);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Zoom.Back.Button
+	then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;	/*	clear status on any deposit	*/
+			call Handle.Zoom.Back.Button;
+			call Select.New.Cur.Obj(Corner.Label,-1,-1);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Left.Scisors.Park
+	then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;	/*	clear status on any deposit	*/
+			call Handle.Left.Scsisors.Park.Select;
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Right.Scisors.Park
+	then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;	/*	clear status on any deposit	*/
+			call Handle.Right.Scsisors.Park.Select;
+		end;
+	end;
+
+	else if GID(Edit.Dialog.Is.Open) then do;	/*	might be an event for edit dialog	*/
+		call Handle.Edit.Dialog.Event;			/*	process events for dialog box			*/
+	end;
+
+end Handle.Shuttle.Edit.Functions;
+
+/*	Handle third priority shuttle events	*/
+
+Handle.Shuttle.Cue.Functions:proc (tmp) swapable;
+	dcl tmp	array;
+	dcl i		fixed;
+
+	clear.statuses:proc;
+		call DISPLAY.NOTICE (NT#EraseNotice,ATTR#Normal,NulStr,0,0,0);
+		call REMOVE.ERR;
+	end clear.statuses;
+
+	if Screen.Event.Id = Shuttle.Switch.Button then do;
+		call clear.statuses;	/*	clear status on any deposit	*/
+		if Screen.Event.Info = S#MouseSelect
+		then call Switch.Current.Cue(Shuttle.Group);
+	end;
+
+	else if Screen.Event.Id = Shuttle.Name.Incr.Button then do;
+		call clear.statuses;	/*	clear status on any deposit	*/
+		if Screen.Event.Info = S#MouseSelect
+		then call Increment.Cue.Name;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Name.Id then do;
+		if (Screen.Event.Info = S#MouseSelect)
+		or (Screen.Event.Info = S#MouseActivate) then do;
+			call Fetch.String(Shuttle.Name.Id,tmp);
+			i = Locate.DTD.Cue(tmp);
+			if i <> 0 then do;			/*	Cue exists	*/
+				call Drag.Cue.To.Sequencer(i,GID(Cue.Drag.Mode));	/*	drag in Replace/Resync mode	*/
+			end;
+			/*	else cue is not saved; cannot be placed	*/
+		end;
+		else if Screen.Event.Info = S#Deposit then do;
+			call Handle.New.Cue.Name(Shuttle.Group);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Comment.Id then do;
+		if Screen.Event.Info = S#Deposit
+		then do;
+			call Fetch.String(Shuttle.Comment.Id,tmp);
+			call STORE.NEW.CUE.CAPTION(tmp);
+			call Set.Cue.Modified;
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Protect.Indicator then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;
+			call Toggle.Current.Cue.Protect;
+		end;
+	end;
+
+
+	/*	second row:	*/
+
+	else if Screen.Event.Id = Shuttle.Cue.Exchange.In.Button then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;
+			call EXCHANGE.IN.TIME;
+			call Update.Object(Shuttle.Cue.In.Time.Id);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Cue.In.Time.Id
+	then do;
+		if Screen.Event.Info = S#Deposit then do;
+			call Handle.New.Cue.In.Time(Shuttle.Cue.In.Time.Id);
+			call Update.Object(Shuttle.Cue.In.Time.Id);
+			call Set.Anchor.Time(Cue.In.Time,1);
+		end;
+
+		else if Screen.Event.Info = S#ObjectDrag then do;
+			call Perform.AEE.Drag.Function(Screen.Event.Id,Screen.Event.Obj.Info);
+			call Select.New.Cur.Obj(Corner.Label,-1,-1);
+		end;
+
+		else if (Screen.Event.Info = S#MouseActivate)	/*	double click	*/
+		then do;
+			call Set.Anchor.Time(Cue.In.Time,1);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Cue.Sync.Time.Id
+	then do;
+		if Screen.Event.Info = S#Deposit then do;
+			call Handle.New.Cue.Sync.Time(Shuttle.Cue.Sync.Time.Id);
+			call Update.Object(Shuttle.Cue.Sync.Time.Id);
+		end;
+		else if Screen.Event.Info = S#ObjectDrag then do;
+			call Perform.AEE.Drag.Function(Screen.Event.Id,Screen.Event.Obj.Info);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Cue.Sync.Lock.Id then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;
+			call Handle.Sync.Lock.Button(Shuttle.Cue.Sync.Time.Id);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Cue.Exchange.Out.Button then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;
+			call EXCHANGE.OUT.TIME;
+			call Update.Object(Shuttle.Cue.Out.Time.Id);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Cue.Out.Switch then do;
+		if Screen.Event.Info = S#Deposit then do;
+			call Handle.Shuttle.Cue.Out.Switch;
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Cue.Out.Time.Id
+	then do;
+		if Screen.Event.Info = S#Deposit then do;
+			call Handle.New.Cue.Out.Time(Shuttle.Cue.Out.Time.Id,Shuttle.Cue.Out.Switch);
+			call Update.Object(Shuttle.Cue.Out.Time.Id);
+			call Set.Anchor.Time(Cue.Out.Time,1);
+		end;
+		else if Screen.Event.Info = S#ObjectDrag then do;
+			call Perform.AEE.Drag.Function(Screen.Event.Id,Screen.Event.Obj.Info);
+			call Select.New.Cur.Obj(Corner.Label,-1,-1);
+		end;
+		else if (Screen.Event.Info = S#MouseActivate)	/*	double click	*/
+		then do;
+			call Set.Anchor.Time(Cue.Out.Time,1);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Edit.Out.Switch then do;
+		if Screen.Event.Info = S#Deposit then do;
+			call Handle.Shuttle.Edit.Out.Switch;
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Cue.Sync.Switch then do;
+		if Screen.Event.Info = S#Deposit then do;
+			call CHANGE.CUE.SYNC.MODE(Fetch.Switch(Shuttle.Cue.Sync.Switch));
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Exchange.Edit.In.Button then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;
+			call EXCHANGE.EDIT.IN.TIME;
+			call Update.Object(Shuttle.Edit.In.Time.Id);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Edit.In.Time.Id
+	then do;
+		if Screen.Event.Info = S#Deposit then do;
+			call HANDLE.NEW.EDIT.IN.TIME (Shuttle.Edit.In.Time.Id);
+			call Update.Object(Shuttle.Edit.In.Time.Id);
+			call Set.Anchor.Time(Cue.Edit.In.Time,1);
+		end;
+		else if Screen.Event.Info = S#ObjectDrag then do;
+			call Perform.AEE.Drag.Function(Screen.Event.Id,Screen.Event.Obj.Info);
+		end;
+		else if (Screen.Event.Info = S#MouseActivate)	/*	double click	*/
+		then do;
+			call Set.Anchor.Time(Cue.Edit.In.Time,1);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Exchange.Edit.Out.Button then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;
+			call EXCHANGE.EDIT.OUT.TIME;
+			call Update.Object(Shuttle.Edit.Out.Time.Id);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Edit.Out.Time.Id
+	then do;
+		if Screen.Event.Info = S#Deposit then do;
+			call HANDLE.NEW.EDIT.OUT.TIME (Shuttle.Edit.Out.Time.Id,Shuttle.Edit.Out.Switch);
+			call Update.Object(Shuttle.Edit.Out.Time.Id);
+			call Set.Anchor.Time(Cue.Edit.Out.Time,1);
+		end;
+		else if Screen.Event.Info = S#ObjectDrag then do;
+			call Perform.AEE.Drag.Function(Screen.Event.Id,Screen.Event.Obj.Info);
+		end;
+		else if (Screen.Event.Info = S#MouseActivate)	/*	double click	*/
+		then do;
+			call Set.Anchor.Time(Cue.Edit.Out.Time,1);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Cue.Block.Button then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;
+			call Handle.Block.Button(Shuttle.Group);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Cue.Save.Button then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;
+			call Save.Current.Cue(Shuttle.Group);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Cue.Audition.Button then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;
+			call ASSIGN.NEW.DTD.AUDITION(Current.Cue.Audition xor 1);
+			call DEPOSIT.AUDITION.BUTTON.DISPLAY;	/*	provide snappy response	*/
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Cue.Place.Button then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;
+			call Handle.Cue.Place.Button;
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Cue.Place.Track.Field then do;
+		if Screen.Event.Info = S#Deposit then do;
+			call SET.PLACE.TRACK(Fetch.Fixed.Point(Shuttle.Cue.Place.Track.Field)+1);
+		end;
+		else if (Screen.Event.Info = S#MouseSelect)
+		or		  (Screen.Event.Info = S#MouseActivate) then do;
+			if abs(Mouse(Button.Result)) = 1
+			then call Increment.Place.Track;
+			else if abs(Mouse(Button.Result)) = 3
+			then call Decrement.Place.Track;
+		end;
+	end;
+
+	else call Handle.Shuttle.Edit.Functions (tmp);
+
+end Handle.Shuttle.Cue.Functions;
+
+/*	Handle second priority shuttle events	*/
+/*		- motion control items					*/
+/*		- shuttle-only functions				*/
+
+Handle.Other.Shuttle.Events:proc (tmp) swapable;
+	dcl tmp			array;
+	dcl waste (3)	fixed;
+	dcl (i,j)		fixed;
+	dcl cueformat	fixed;
+	dcl cuetype		fixed;
+
+	clear.statuses:proc;
+		call DISPLAY.NOTICE (NT#EraseNotice,ATTR#Normal,NulStr,0,0,0);
+		call REMOVE.ERR;
+	end clear.statuses;
+
+	/*	handle motion control items here	*/
+
+	if Screen.Event.Info = S#Deposit
+	then call clear.statuses;
+
+	if Screen.Event.Id = Shuttle.Play.Button then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;
+			call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+			call Play.Current.Cue(4,0,4,Shuttle.Drive.Bits,1);	/*	anchor point to smart limit	*/
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Pause.Button then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;
+			if DTD.Play.State <> 0 then do;	/*	We are playing; stop	*/
+				call Stop.DTD.Playback;
+			end;
+			else do;	/*	We are not playing; continue	*/
+				call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+				call Play.Current.Cue(0,0,4,Shuttle.Drive.Bits,1);	/*	current position play to smart limit	*/
+			end;
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Fast.Play.Button then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;
+			Current.Cue.Rate = Current.Cue.Rate + 1;
+			if DTD.Play.State=0 then do;	/*	if not playing, continue	*/
+				call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+				call Play.Current.Cue(0,0,4,Shuttle.Drive.Bits,1);	/*	continue forward with smart limit	*/
+			end;
+			else do;								/*	else just change rate		*/
+				call SET.DTD.TRIG.RATE(Current.Cue.Rate);
+			end;
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Stop.Button then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;
+			if DTD.Play.State = 0 then do;
+				Current.Cue.Rate = 0;
+			end;
+			else call Stop.DTD.Playback;
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Slow.Play.Button then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;
+			Current.Cue.Rate = Current.Cue.Rate - 1;
+			if DTD.Play.State=0 then do;	/*	if not playing, continue	*/
+				call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+				call Play.Current.Cue(0,0,4,Shuttle.Drive.Bits,1);	/*	continue with smart limiit	*/
+			end;
+			else do;								/*	else just change rate		*/
+				call SET.DTD.TRIG.RATE(Current.Cue.Rate);
+			end;
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Cue.Play.Button then do;
+		if Screen.Event.Info = S#MouseSelect
+		then do;
+			call clear.statuses;
+			call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+			call Play.Current.Cue(1,0,0,Shuttle.Drive.Bits,1);	/*	play start to end of cue	*/
+			call Set.Group.Get(Shuttle.Group,Get.Mouse.Button,true);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Cue.Backup.Button then do;
+		if Screen.Event.Info = S#MouseSelect
+		then do;
+			call clear.statuses;
+			call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+			call Play.Current.Cue(0,1,0,Shuttle.Drive.Bits,1);	/*	current position, back up, to end of cue	*/
+			call Set.Group.Get(Shuttle.Group,Get.Mouse.Button,true);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Cue.Forward.Button then do;
+		if Screen.Event.Info = S#MouseSelect
+		then do;
+			call clear.statuses;
+			call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+			call Play.Current.Cue(0,0,3,Shuttle.Drive.Bits,1);	/*	current position, to end of project	*/
+			call Set.Group.Get(Shuttle.Group,Get.Mouse.Button,true);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Cue.Edit.Play.Id then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;
+			call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+			call Play.Current.Cue(2,0,1,Shuttle.Drive.Bits,1);	/*	play edit in to edit out	*/
+			call Set.Group.Get(Shuttle.Group,Get.Mouse.Button,true);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Edit.Backup.Button then do;
+		if Screen.Event.Info = S#MouseSelect
+		then do;
+			call clear.statuses;
+			call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+			call Play.Current.Cue(0,1,1,Shuttle.Drive.Bits,1);	/*	current position, back up, to end of edit region	*/
+			call Set.Group.Get(Shuttle.Group,Get.Mouse.Button,true);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Edit.Forward.Button then do;
+		if Screen.Event.Info = S#MouseSelect
+		then do;
+			call clear.statuses;
+			call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+			call Play.Current.Cue(0,0,3,Shuttle.Drive.Bits,1);	/*	current position, to end of project	*/
+			call Set.Group.Get(Shuttle.Group,Get.Mouse.Button,true);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Sbar.Control.Table then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;
+			call Map.Graphics.Button.Table.Mouse.Press(Shuttle.Sbar.Control.Table,tmp);
+
+			if tmp(1) = 0 then do;	/*	coarse control area	*/
+				call PID(Saved.AEE.Shuttle.Coarse.Switch,tmp(0)-Coarse.Switch.Default);
+				call Highlight.AEE.Shuttle.Sbar.Control.Table (Shuttle.Sbar.Control.Table);
+
+				/*	When changing to "CUE", send cue in & out times to	*/
+				/*	coarse bar:														*/
+
+				if tmp(0) = CS.Cue.Setting
+				then call Send.Cue.Times.To.DTD.Scrub.Bars;
+
+				/*	When changing to "PROJ", send project start & end	*/
+				/*	times to coarse bar:											*/
+
+				else if tmp(0) = CS.Proj.Setting
+				then call Send.Project.Times.to.DTD.Scrub.Bars(0);
+
+				call Set.Shuttle.Flags.And.Edits;			/*	set in/out flags and edits	*/
+			end;
+
+			else do;						/*	fine control area	*/
+				call PID(Saved.AEE.Shuttle.Fine.Switch,tmp(0)-Fine.Switch.Default);
+				call Highlight.AEE.Shuttle.Sbar.Control.Table (Shuttle.Sbar.Control.Table);
+				call Link.Fine.Bar.If.Applicable(AEE.Shuttle.Anchor.Time,1);
+				call Display.Fine.Scroll.Bar(AEE.Shuttle.Anchor.Time);
+			end;
+
+			call Select.New.Cur.Obj(Corner.Label,-1,-1);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Disk.Table then do;
+		if (Screen.Event.Info = S#MouseSelect)
+		then do;
+			call clear.statuses;
+			call Map.Graphics.Button.Table.Mouse.Press(Shuttle.Disk.Table,tmp);
+			j = Shuttle.Drive.Bits;
+			i = (Shuttle.Drive.Bits xor Bits(tmp(1)*4+tmp(0))) & DTD.AVAIL.TRKS;
+			i = ASSIGN.NEW.DRIVE.BITS.TO.REEL (Current.Cue.Ptr,i);
+			call Set.DTD.Play.Tracks(i);
+			call Display.Drive.Select.Bits;
+			call Set.Shuttle.Flags.And.Edits;			/*	redraw symbols on drive change	*/
+			call Select.New.Cur.Obj(Corner.Label,-1,-1);
+			if (j <> Shuttle.Drive.Bits) then do;		/*	if tracks change...		*/
+				if Coarse.Shuttle.Wave = 1					/*	Wave display is up...	*/
+				then call Invalidate.Wave.Display(1);	/*	then redraw it				*/
+				if Fine.Shuttle.Wave = 1					/*	Wave display is up...	*/
+				then call Invalidate.Wave.Display(0);	/*	then redraw it				*/
+			end;
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Memory.Table then do;
+
+		/*	Look up cue format to have handy	*/
+
+		if (Current.Cue.Audition == false)
+		then cueformat = AEE.Time.Format|O#MSEC.RealTime|O#MSEC.Alt.Offset;	//	audition off: show alt offset (relative to DtoD) in cue time fields
+		else cueformat = AEE.Time.Format|O#MSEC.RealTime|O#MSEC.Allow.Minus;	//	audition on:  show seq offset and allow "negative" input
+
+		if Screen.Event.Info = S#ObjectDrag then do;
+			/*	set time display back to normal so drag TO shuttle	*/
+			/*	time display might do something useful:				*/
+			call Set.32Bit.MSEC.Display.Format(Shuttle.Time.Display,cueformat,cf#time,cf#default,cf#default);
+			call Perform.AEE.Drag.Function(Screen.Event.Id,Screen.Event.Obj.Info);
+			/*	restore shuttle display number, if that is not		*/
+			/*	where we dragged to											*/
+			if Screen.Event.Obj.Info <> Shuttle.Time.Display
+			then do;
+				call DEPOSIT.SHUTTLE.TIME.DISPLAY(Loc(Addr(Cur.DTD.MS.Msb)));
+			end;
+		end;
+		else if Screen.Event.Info = S#ObjectDragAbort then do;
+			call Set.32Bit.MSEC.Display.Format(Shuttle.Time.Display,cueformat,cf#time,cf#default,cf#default);
+			call DEPOSIT.SHUTTLE.TIME.DISPLAY(Loc(Addr(Cur.DTD.MS.Msb)));
+		end;
+		else if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;
+			cueformat = AEE.Time.Format \ (AEE.Memory.Format(Screen.Event.Table.Col) & (O#MSEC.Alt.Offset \ O#MSEC.RealTime));
+			cuetype	 = AEE.Memory.Format(Screen.Event.Table.Col) & 255;
+			call Set.32Bit.MSEC.Display.Format(Shuttle.Time.Display,cueformat,cuetype,cf#default,cf#default);
+			Disable.Deposits = true;
+			if cuetype = CF#TIME
+			then call Deposit.32Bit.MSEC(Shuttle.Time.Display,
+												  loc(addr(AEE.Memory.Array(shl(Screen.Event.Table.Col,1)))),
+												  Zero.Zero);
+			else call Deposit.32Bit.MSEC(Shuttle.Time.Display,
+												  loc(addr(AEE.Memory.Start(shl(Screen.Event.Table.Col,1)))),
+												  loc(addr(AEE.Memory.Array(shl(Screen.Event.Table.Col,1)))));
+			Disable.Deposits = false;
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Time.Display then do;
+		if Screen.Event.Info = S#Deposit then do;
+			call Fetch.32Bit.Msec(Shuttle.Time.Display,waste);
+			if Current.Cue.Audition<>0 then do;
+				if (waste(0) < 0) wrap_24_hours(waste);
+				call SUB32(waste, Cue.Trig.Time, waste);
+				/*	what if Cue.Trig.Time is very large and waste is very small ?	*/
+				call ADD32(waste, Cue.In.Time, waste);
+			end;
+			else do;
+				call SUB32(waste, Cue.Time.Display.Offset, waste);
+				if waste(0) < 0 then call STR32(0,zero.time,waste);
+				else if COM16(zero.time, waste) = lw#igt
+				then call STR32(0,zero.time,waste);
+			end;
+			call Stop.DTD.Playback;
+			call Set.Anchor.Time(waste,0);
+			call Select.New.Cur.Obj(Corner.Label,-1,-1);
+		end;
+
+		else if Screen.Event.Info = S#ObjectDrag then do;
+			call Perform.AEE.Drag.Function(Screen.Event.Id,Screen.Event.Obj.Info);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Project.Switch then do;
+		if Screen.Event.Info = S#MouseSelect then do;
+			call clear.statuses;
+			call Handle.Shuttle.Project.Switch (Shuttle.Proj.Capt.Switch,
+															Shuttle.Project.Name, 0,
+															Shuttle.Project.Number, 1000);
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Project.Number then do;
+		if Screen.Event.Info = S#Deposit then do;
+			call Handle.Shuttle.Project.Switch (Shuttle.Proj.Capt.Switch,
+															Shuttle.Project.Name, 0,
+															Shuttle.Project.Number,
+															Fetch.Fixed.Point(Shuttle.Project.Number));
+		end;
+	end;
+
+	else if Screen.Event.Id = Shuttle.Flag.Region then do;
+		if (Screen.Event.Info = S#MouseSelect)
+		or (Screen.Event.Info = S#MouseActivate)
+		then do;
+			call clear.statuses;
+			call Handle.Flag.Area.Mouse.Select(-1);
+			/*	smgr does not return to previous object correctly	*/
+			/*	on graphics regions (apparently)							*/
+			/*	BUG FIXED, I THINK....										*/
+			/*	call Select.New.Cur.Obj(Corner.Label,-1,-1);			*/
+		end;
+	end;
+
+	else call Handle.Shuttle.Cue.Functions(tmp);
+
+end Handle.Other.Shuttle.Events;
+
+/*	$page - get shuttle event	*/
+
+GET.SHUTTLE.EVENT: proc (event) returns (fixed) public swapable;
+	dcl event			fixed;
+	dcl waste	(3)	fixed;
+	dcl tmp		(32)	fixed;	/*	Must be big enough for caption (63 characters)	*/
+
+	dcl dsp.running	fixed external;
+	//dcl send.to.dsp.subroutine proc(fixed,fixed,fixed) external;
+
+	clear.statuses:proc;
+		call DISPLAY.NOTICE (NT#EraseNotice,ATTR#Normal,NulStr,0,0,0);
+		call REMOVE.ERR;
+	end clear.statuses;
+
+	do while 1;
+		if event <> Get.Null.Event then do;
+			if Screen.Event.Group <> Shuttle.Group then do;
+				if Pending.Edit<>0 then do;
+/*					call Close.Edit.Dialog;	*/	/*	??	*/
+				end;
+				return event;
+			end;
+
+			if event = Get.Screen.Event then do;
+
+				/*	handle take buttons and scroll bars quickly	*/
+
+				if (Screen.Event.Id = Shuttle.Coarse.Bar) then do;
+
+					/*	button press = mouse select	*/
+
+					if Screen.Event.Info = S#MouseSelect then do;
+						Shuttle.Percentage = Preview.Scroll.Bar.Percent(Shuttle.Coarse.Bar);
+						if Shuttle.Percentage >=0 then do;	/*	in slide region	*/
+							call Animate.Coarse.Bar(Shuttle.Percentage);
+							call Select.New.Cur.Obj(Corner.Label,-1,-1);
+						end;
+					end;
+
+					else if Screen.Event.Info = S#SBArrowForward then do;
+						call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+						call Play.Current.Cue(6,0,3,Shuttle.Drive.Bits,1);	/*	play from end of shuttle to end of project	*/
+						call Set.Group.Get(Shuttle.Group,Get.Mouse.Button,true);
+					end;
+
+				end;			/*	of event is shuttle coarse bar	*/
+
+				else if Screen.Event.Id = Shuttle.Fine.Bar then do;
+
+					/*	button press = mouse select	*/
+
+					if Screen.Event.Info = S#MouseSelect then do;
+						if Record.Group <> 0 then do;
+							if Record.Recording.State <> 0
+							then call Stop.Record.Recording;
+						end;
+						Shuttle.Percentage = Preview.Scroll.Bar.Percent(Shuttle.Fine.Bar);
+						if Shuttle.Percentage >0 then do;	/*	in slide region	*/
+							if termulator then call Termulator.Relative.Mouse.Report.Format;
+							call Compute.Time.From.Percent
+								(Shuttle.Percentage,
+								 AEE.Fine.In.Time,AEE.Fine.Out.Time,waste);
+							call Set.DTD.Play.Tracks(Current.Cue.Drive.Bits);
+							call Load.DTD.Temp.Cue	(Current.Cue.Ptr		  );
+							call Send.To.Lod			(DTD.Scrolling.Off, 0  );
+							call Play.DTD.At.Point(waste,Fine.Bar.Play.Code,Mouse(Press.Time),1);
+							if Shuttle.Drive.Bits = 0 then call Display.Notice(NT#NoDrivesSoloed,ATTR#Normal,NulStr,0,0,0);
+							//if dsp.running <> 0
+							//then call send.to.dsp.subroutine(70,0,Scsi.Ptr);
+						end;
+					end;
+
+					/*	button held = box move	*/
+
+					else if Screen.Event.Info = S#SBBoxMove then do;
+						call Animate.Fine.Bar;
+					end;
+
+					/*	button release = deposit	*/
+
+					else if Screen.Event.Info = S#Deposit then do;
+
+						/*	with fine bar, position of bars should match	*/
+						/*	computed time.  just store time in anchor		*/
+						/*	also, we had better not be playing when we	*/
+						/*	deposit into the fine bar							*/
+
+						Call Send.To.Lod(69,0);	/*	stop point playback	*/
+						//if dsp.running <> 0
+						//then call send.to.dsp.subroutine(69,0,Scsi.Ptr);
+						DTD.Play.State = 0;
+
+						call Compute.Time.From.Percent
+							(Fetch.Scroll.Bar(Shuttle.Fine.Bar),
+							 AEE.Fine.In.Time,AEE.Fine.Out.Time,AEE.Shuttle.Anchor.Time);
+						call COPY32(AEE.Shuttle.Anchor.Time,loc(addr(Cur.DTD.MS.Msb)));	/*	save for imminent take	*/
+						call DEPOSIT.SHUTTLE.TIME.DISPLAY(AEE.Shuttle.Anchor.Time);
+						if termulator then call Termulator.Absolute.Mouse.Report.Format;
+					end;
+
+				end;			/*	of event is shuttle fine bar	*/
+
+				else if Screen.Event.Id = Shuttle.Cue.Take.In.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call Handle.Cue.Take.In.Button;
+					end;
+				end;
+
+				else if Screen.Event.Id = Shuttle.Cue.Take.Out.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call Handle.Cue.Take.Out.Button;
+					end;
+				end;
+
+				else if Screen.Event.Id = Shuttle.Take.Edit.In.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call Handle.Cue.Take.Edit.In.Button;
+					end;
+				end;
+
+				else if Screen.Event.Id = Shuttle.Take.Edit.Out.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call Handle.Cue.Take.Edit.Out.Button;
+					end;
+				end;
+
+				else if Screen.Event.Id = Shuttle.Cue.Take.Sync.Button then do;
+					if Screen.Event.Info = S#MouseSelect then do;
+						call TAKE.SYSTEM.REAL.TIME(tmp);		/*	get sequencer or smpte time	*/
+						if (tmp(0) < 0) wrap_24_hours(tmp);
+						if (com16(zero.time,tmp) == lw#igt) STR32(0, zero.time, tmp);	//	THIS SHOULD NEVER HAPPEN
+						call Deposit.32Bit.MSEC(Shuttle.Cue.Sync.Time.Id,tmp,Zero.Zero);
+					end;
+				end;
+
+				else call Handle.Other.Shuttle.Events(tmp);
+
+			end;
+
+			else if event=Get.Mouse.Button then do;	/*	probably a button release from offset play icon	*/
+				call Set.Group.Get(Shuttle.Group,Get.Mouse.Button,false);
+
+				if  ((Mouse(Release.Time)-Mouse(Press.Time)) IGE 200)
+				and (DTD.Play.State<>0)
+				then call Stop.DTD.Playback;	/*	turn off currently playing cue	*/
+			end;
+
+		end;
+
+		event = Get.Next.Screen.Event;
+
+	end;	/*	of do while 1	*/
+end GET.SHUTTLE.EVENT;
+

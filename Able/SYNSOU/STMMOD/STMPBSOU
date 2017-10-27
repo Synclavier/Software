@@ -1,0 +1,1349 @@
+/* $title STMPBSOU - Sample to Memory Mouse Playback
+
+   Modified:
+   08/27/91 - pf  - fine tuning to prevent random poly scrubbing problems
+   08/22/91 - pf  - Use extend mode for poly scrubbing only during trim
+   08/19/91 - PF  - Allow poly scrubbing of looped events
+   07/11/91 - cj  - Added correct mark start to poly scrubbing
+   05/30/91 - CJ  - Added routines to activate playback from protocol.
+                    Changed frequence control logic.  Uncovered hardware
+                    problem writing to poly memory while a stereo voice
+                    is playing...
+   02/07/91 - MWH - Combine 3200, 6400 and 9600 RTP's
+   02/21/90 - MWH - Clean up bug fixes
+   02/01/90 - MWH - Fix bug when mousing ahead >40 seconds (jumping ahead)
+   01/24/90 - MWH - Fix bugs with mousing >16 meg sound files
+   02/24/89 - TSS - Fix bugs with poly ram >> 32 mbytes (sign extend into page bits)
+   10/06/88 - SGS - Make stereo files play properly for VOX BOX
+   10/03/88 - SGS - Fixed bugs in multichannel stuff for MONO VOICE cards
+   01/07/88 - TSS - Added code to allow locked file to play back with mouse
+   12/16/87 - MWH - Merge poly updates with N-Final plus AEE sources
+   08/19/87 - MWH - Fix long standing bug where sectors 0-19, not 1-20 used!
+   08/13/87 - MWH - Update all to support max 4 poly bins, 512mb/bin
+   06/26/87 - MWH - Split FRP.PTR into FP0-FP3.PTR for expanded poly
+   06/23/87 - MWH - Move MULTI.POLY array to external memory
+   
+*/
+
+DCL FAST.RATE LIT '12';  /* INTERPOLATER VALUE FOR 26  MSEC CROSS FADE */
+DCL SLOW.RATE LIT '2';   /* INTERPOLATER VALUE FOR 160 MSEC CROSS FADE */
+
+DCL M$FLS             LIT '64';     /* # SAMPLES IN A LOOPED CROSS FADE */
+DCL M$EXT             LIT '16';     /* EXTRA WORDS COPIED TO FIX BIZARE */
+                                    /* STEREO CLICK & POP PROBLEMS...   */
+
+DCL M$PB.ENBL         FIXED;        /* 0 - OFF;  1 - ON */
+DCL M$PB.TOT.LENGTH   FIXED;        /* TOTAL PLAYBACK LENGTH IN SAMPLES */
+DCL M$PB.LP.LENGTH    FIXED;        /*  LOOP PLAYBACK LENGTH IN SAMPLES */
+DCL M$PB.CUR.BLOCK    FIXED;        /* BLOCK OF 10 SECTORS FROM WHICH POLY IS PLAYING */
+DCL M$PB.LEFT         FIXED;
+DCL M$PB.RIGHT        FIXED;
+DCL M$PREV.PB.LEFT    FIXED;
+DCL M$PREV.PB.RIGHT   FIXED;
+DCL M$PB.BASE (1)     FIXED;        /* SOUND FILE BASE/BIN OF ACTIVE SAMPLE */
+DCL M$PB.SEC.LIMIT    FIXED;        /* SECTOR AND WORD LIMIT OF END OF      */
+DCL M$PB.WRD.LIMIT    FIXED;        /* FILE                                 */
+DCL FORCE.FAST.RATE   FIXED;
+DCL MOUSE.PLAYING     FIXED PUBLIC; /* 0=NO MOUSE PLAYBACK, 1=PLAYING CURRENT SOUND FILE, 2=PLAYING LOCKED SOUND FILE 3=PROTOCOL POLY EVENT SCRUBBING */
+DCL STM.MOUSEX        FIXED PUBLIC; /* CURRENT MOUSE POSITION DURING PLAYBACK */
+
+/* Store poly synth HZ to use in handy variables:                     */
+
+DCL M$NUM             FIXED PUBLIC; /* POLY SYNTH NUMERATOR (99 = 50 KHZ) */
+DCL M$DEN             FIXED PUBLIC; /* POLY SYNTH DENOM    (100 = 50 KHZ) */
+DCL M$ADD             FIXED PUBLIC; /* POLY SYNTH ADDER    (  1 = 50 KHZ) MONO */
+                                    /*                     (  2 = 50 KHZ) STEREO */
+DCL M$LOOP                FIXED;  /* TRUE IF SCRUBBING A LOOPING SOUNDFILE */
+DCL M$EXTEND              FIXED;  /* TRUE IF TO ALLOW SCRUBBING BEFORE OR AFTER EVENT */
+DCL M$LEN(1)              FIXED;  /* EVENT LENGTH */
+DCL M$TLEN(1)             FIXED;  /* TOTAL SOUND FILE LENGTH */
+DCL M$LLEN(1)             FIXED;  /* LOOP LENGTH */
+DCL THIS.ITER             FIXED;  /* ITERATION OF LOOP WE ARE SCRUBBING IN */
+DCL LAST.ITER             FIXED;  /* TO DISALLOW LONG PLAY ACROSS LOOP ITERATIONS */
+DCL M$PB.LONG.PLAY        FIXED;  /* 0 FOR LOOPING, 1 FOR NORMAL SPEED PLAY */
+DCL M$LONG.START.SEC      FIXED;  /* HOLDS SECTOR # OF LONG PLAY START */
+DCL M$LONG.START.WRD      FIXED;  /* HOLDS WORD     OF LONG PLAY START */
+DCL M$LONG.ACCUM.TIME (1) FIXED;  /* ACCUMULATED CURRENT TIIME OF LONG PLAY */
+DCL LAST.MILLISECONDS     FIXED;  /* WHEN WE LAST SAMPLED REAL.MILLISECONDS */
+DCL LAST.PLAY.SEC         FIXED;  /* PLAY SEC AND WORD OF LAST TIME THRU    */
+DCL LAST.PLAY.WRD         FIXED;
+DCL LAST.SILENCE          FIXED;
+DCL M$FIRST               FIXED;  /* REVERSE LOGIC 0=FIRST, 1=NOT FIRST */
+
+dcl MPB$MRKSTART (1) fixed PUBLIC; /* 32 bit sample # of mark start     */
+dcl MPB$SCRBPOS  (1) fixed PUBLIC; /* current scrub sample #            */
+
+DCL SAVED.STM.SAMPLE.RATE FIXED;    /* TEMPS TO HOLD CURRENT FILE INFO */
+DCL SAVED.STEREO          FIXED;    /* DURING MOUSE PLAYBACK OF LOCKED FILE */
+DCL SAVED.TOT.TIME    (2) FIXED;
+
+
+GET.MOUSE.CHANS: PROC SWAPABLE;
+   DCL I FIXED;
+   DCL PTR POINTER;
+   DCL BIN FIXED;
+
+   BIN = SHR(M$PB.BASE(LW#MSB),BASE#BIN_P);  /* GET POLY BIN */
+   PTR = CORE(ADDR(FP0.PTR) + BIN);          /* POINT AT CORRECT FREE CHANNEL LIST */
+
+   M$PB.LEFT  = 0;
+   M$PB.RIGHT = 0;
+
+   IF CORE(PTR) <= STEREO
+   THEN RETURN 0;                       /* NOT ENOUGH CHANNELS FOR PLAYBACK */
+
+   IF (STEREO        = 0)               /* IF MONO SOUND FILE               */
+   OR (POLYADCS(BIN) = 0)               /* OR NO ADC CONTROLLER             */
+   THEN DO;                             /* THEN PLAY MONO                   */
+      M$PB.LEFT = CORE(PTR+CORE(PTR));
+      CORE(PTR) = CORE(PTR) - 1;
+   END;
+   ELSE DO;                           /* MUST FIND MATCHED PAIR           */
+      I=CORE(PTR);                    /* START AT END                     */
+      DO WHILE  (I >= 2)              /* GOING BACKWARDS                  */
+      AND       ((CORE(PTR+I) <> (CORE(PTR+I-1)+1))
+      OR         (CORE(PTR+I-1)));
+         I=I-1;
+      END;
+      IF I<2
+      THEN RETURN 0;                    /* NO STEREO PAIR AVAILABLE         */
+      M$PB.LEFT  = CORE(PTR+I-1);
+      M$PB.RIGHT = CORE(PTR+I  );
+      CALL BLOCKMOVE (LOCATION(PTR+I+1),
+                      LOCATION(PTR+I-1),
+                      CORE(PTR)-I     );
+      CORE(PTR) = CORE(PTR) - 2;
+      IF M$PB.LEFT THEN DO;
+         I=M$PB.LEFT; M$PB.LEFT = M$PB.RIGHT; M$PB.RIGHT = I;
+      END;
+   END;
+
+   RETURN 1;
+
+END GET.MOUSE.CHANS;
+
+/* $page */
+
+PREPARE.FOR.MOUSE.SPLICE:PROC SWAPABLE;
+   DCL J FIXED;
+
+   IF M$PREV.PB.LEFT = 0 THEN RETURN;         /* NO PREVIOUS CHANNEL TO FADE OUT */
+
+   DISABLE;                                   /* ENVELOPE LIMIT OF   */
+                                              /* M$PB.LEFT TO REACH  */
+   WRITE(PSC) = M$PREV.PB.LEFT;               /* ZERO                */
+   WRITE(PSF) = PSRON;
+   IF READ(PSD) <> 0 THEN DO;                 /* IF PREV.PB IS ON... */
+      WRITE(PSF) = PSEVAL;
+      IF READ(PSD) <> 0 THEN DO;              /* IF ENV VAL <> 0...  */
+         IF M$PREV.PB.RIGHT <> 0 THEN DO;     /* IF STEREO...        */
+            WRITE(PSC) = M$PREV.PB.RIGHT;
+            WRITE(PSF) = PSEDEL;
+            WRITE(PSD) = FAST.RATE;
+         END;
+         WRITE(PSC) = M$PREV.PB.LEFT;
+         WRITE(PSF) = PSEDEL;
+         WRITE(PSD) = FAST.RATE;
+         IF M$PB.LEFT <> 0 THEN DO;
+            IF M$PB.RIGHT <> 0 THEN DO;
+               WRITE(PSC) = M$PB.RIGHT;
+               WRITE(PSF) = PSEDEL;
+               WRITE(PSD) = FAST.RATE;           /* YIELDS 1 MSEC CROSS FADE */
+            END;
+            WRITE(PSC) = M$PB.LEFT;
+            WRITE(PSF) = PSEDEL;
+            WRITE(PSD) = FAST.RATE;
+         END;
+         ENABLE;
+
+			// Wait for channel to decay to zero
+
+         J = 1;
+         DO WHILE J <> 0;
+            DISABLE;
+            WRITE(PSC) = M$PREV.PB.LEFT;
+            WRITE(PSF) = PSEVAL;
+            J = READ(PSD);
+            ENABLE;
+				
+				if (j <> 0)									// if did not decay to 0, run mac and low level code (if run.syn enables us to do so)
+					CHILL.OUT.AND.RUN.SYN();
+
+         END;
+         DISABLE;
+      END;
+   END;
+   ENABLE;
+END PREPARE.FOR.MOUSE.SPLICE;
+
+/* $subtitle START MOUSE PLAYBACK */
+
+START.MOUSE.VOICE:PROC(BASE,SECS,WOFF,TLENS,TLENW,LLENS,LLENW) SWAPABLE;
+   /* TLENW AND LLENW MAY BE SENT VALUES GREATER THAN 255; THEY ARE NORMALIZED */
+   DCL BASE      FIXED ARRAY;   /* BASE SECTOR IN POLY MEMORY */
+   DCL SECS      FIXED;         /* SECTOR OFFSET FROM BASE    */
+   DCL WOFF      FIXED;         /* WORD   OFFSET FROM BASE    */
+   DCL TLENW     FIXED;         /* TOT LEN, WORDS             */
+   DCL LLENW     FIXED;         /* LOOP LEN WORDS             */
+   DCL TLENS     FIXED;
+   DCL LLENS     FIXED;
+   DCL XBASE (1) FIXED;
+   DCL (J,K)     FIXED;
+
+   CALL COPY32(BASE,XBASE);     /* NORMALIZE BASE IN LOCAL ARRAY */
+   CALL ADD16(SECS,XBASE);
+
+   IF (TLENW\TLENS) = 0 THEN TLENW = M$ADD;
+   IF (LLENW\LLENS) = 0 THEN LLENW = M$ADD;
+
+   LOAD TLENS; ULOAD TLENW; MUL 256; TLENS = URES; TLENW = RES;
+   LOAD LLENS; ULOAD LLENW; MUL 256; LLENS = URES; LLENW = RES;
+
+   TLENW = NOT(TLENW); TLENS = NOT(TLENS);
+   TLENW = TLENW + 1;
+   IF TLENW = 0 THEN TLENS = TLENS + 1;
+
+   LLENW = NOT(LLENW); LLENS = NOT(LLENS);
+   LLENW = LLENW + 1;
+   IF LLENW = 0 THEN LLENS = LLENS + 1;
+
+   TLENS = SHL(TLENS,8)\SHR(TLENW,8);
+   TLENW = (TLENW & 255) | "177400"; /* sign extend into page bits */
+
+   LLENS = SHL(LLENS,8)\SHR(LLENW,8);
+   LLENW = (LLENW & 255) | "177400"; /* sign extend into page bits */
+
+   DISABLE;
+      
+   IF M$PREV.PB.LEFT <> 0 THEN DO;   /* START DOWN SPLICE ON PRIOR CHANNEL */
+      IF M$PREV.PB.RIGHT <> 0 THEN DO;
+         WRITE(PSC) = M$PREV.PB.RIGHT;
+         WRITE(PSF) = PSEDEL;
+         IF FORCE.FAST.RATE                   /* IF FAST RATE REQUIRED */
+         THEN WRITE(PSD) = FAST.RATE;         /* THEN DO A FAST FADE   */
+         ELSE WRITE(PSD) = SLOW.RATE;         /* ELSE SLOW FADE        */
+         WRITE(PSF) = PSELIM;
+         WRITE(PSD) = 0;                      /* SET ENV LIMIT TO 0    */
+      END;
+      WRITE(PSC) = M$PREV.PB.LEFT;
+      WRITE(PSF) = PSEDEL;
+      IF FORCE.FAST.RATE                      /* IF FAST RATE REQUIRED */
+      THEN WRITE(PSD) = FAST.RATE;            /* THEN DO A FAST FADE   */
+      ELSE WRITE(PSD) = SLOW.RATE;            /* ELSE SLOW FADE        */
+      WRITE(PSF) = PSELIM;
+      WRITE(PSD) = 0;                         /* SET ENV LIMIT TO 0    */
+   END;
+
+   IF M$PB.RIGHT <> 0 THEN DO;          /* STEREO PLAYBACK                    */
+      WRITE(PSC)=M$PB.RIGHT;            /* DECAY RIGHT CHANNEL AS WELL */
+      WRITE(PSF)=PSON;                  /* ON/OFF BIT         */
+      WRITE(PSD)=0;                     /* TURN CHANNEL OFF NOW TO PREPARE FOR SPLICE (IN CASE STOLEN CHANNEL) */
+
+      IF MULTI.THERE<>0 THEN DO;           /* INITIALIZE MULTI STUFF HERE FOR POLY */
+         WRITE(MAM)=TRK.HEAD;              /* POINT TO TRACK HEAD         */
+         WRITE(MAM)=READ(MD);              /* FOR KEYBOARD                */
+         WRITE(MAL)=THD.TROU;
+         J=READ(MD);                       
+         K=SHL(J,8);                       /* GET RIGHT ROUTING (IN LOWER HALF) */
+         J=J&"177400";                     /* GET LEFT  ROUTING (IN UPPER HALF) */
+         WRITE(D32)="21";                  /* SELECT MULTI I/O  */
+         WRITE(MAM)=MPOLY.PTR;             /* POINT AT MULTICHANNEL-POLY MAP */
+         WRITE(MAL)=M$PB.RIGHT & "377";    /* POLY VOICE NUMBER */
+         IF MONO_VOICES_PRESENT            /* MONO DAC VOICE CARDS */
+         THEN WRITE(D33)=K\(READ(MD)&255); /* ROUTE RITE CHANNEL DAC TO RITE OUTPUT */
+         ELSE DO;
+            WRITE(D33)=J\(SHR(READ(MD),8));/* ROUTE LEFT INPUT TO LEFT OUTPUT */
+            WRITE(D33)=K\(READ(MD)&255);   /* ROUTE RITE INPUT TO RITE OUTPUT */
+         END;
+      END;
+
+      WRITE(PSF)=PSRCVOL;                  /* LOAD CURR & DEST VOL */
+      WRITE(PSD)=4095; WRITE(PSD)=0;       /* RIGHT, LEFT          */
+      WRITE(PSD)=4095; WRITE(PSD)=0;       /* RIGHT, LEFT          */
+
+      /* $page */
+
+      WRITE(PSF)=PSWL;                     /* WAVE TABLE LENGTH ENTRY */
+      WRITE(PSD)=0;   WRITE(PSD)=0;        /* WAVE TABLE LENGTH */
+      WRITE(PSD)=0;   WRITE(PSD)=0;        /* BASE ADDRESS      */
+      WRITE(PSD)=0;   WRITE(PSD)=0;        /* LOOP LENGTH       */
+      WRITE(PSD)=0;   WRITE(PSD)=0;        /* PHASE INC          */
+      WRITE(PSD)=255; WRITE(PSD)=0;        /* INCREMENT, MODULUS */
+
+      WRITE(PSF)=PSEINC;
+      WRITE(PSD)=4095;                     /* INCREMENT AT 25 KHZ RATE */
+      IF FORCE.FAST.RATE                   /* IF FAST RATE REQUIRED */
+      THEN WRITE(PSD) = FAST.RATE;         /* THEN DO A FAST FADE   */
+      ELSE WRITE(PSD) = SLOW.RATE;         /* ELSE SLOW FADE        */
+
+   END;                                    /* OF STEREO SOUND FILE */
+      
+   /* START LEFT CHANNEL FOR MOUSE PLAYBACK */
+
+   WRITE(PSC)=M$PB.LEFT;                /* SELECT OUR CHANNEL */
+   WRITE(PSF)=PSON;                     /* ON/OFF BIT         */
+   WRITE(PSD)=0;                        /* TURN CHANNEL OFF NOW TO PREPARE FOR SPLICE (IN CASE STOLEN CHANNEL) */
+
+   IF MULTI.THERE<>0 THEN DO;              /* INITIALIZE MULTI STUFF HERE FOR POLY */
+      WRITE(MAM)=TRK.HEAD;                 /* POINT TO TRACK HEAD         */
+      WRITE(MAM)=READ(MD);                 /* FOR KEYBOARD                */
+      WRITE(MAL)=THD.TROU;
+      J=READ(MD);                       
+      K=SHL(J,8);                          /* GET RIGHT ROUTING (IN LOWER HALF) */
+      J=J&"177400";                        /* GET LEFT  ROUTING (IN UPPER HALF) */
+      WRITE(D32)="21";                     /* SELECT MULTI I/O  */
+      WRITE(MAM)=MPOLY.PTR;                /* POINT AT MULTICHANNEL-POLY MAP */
+      WRITE(MAL)=M$PB.LEFT & "377";        /* POLY VOICE NUMBER */
+      IF MONO_VOICES_PRESENT               /* MONO DAC VOICE CARDS */
+      THEN WRITE(D33)=J\(READ(MD)&255);    /* ROUTE LEFT CHANNEL DAC TO LEFT OUTPUT */
+      ELSE DO;
+         WRITE(D33)=J\(SHR(READ(MD),8));   /* ROUTE LEFT INPUT TO LEFT OUTPUT */
+         WRITE(D33)=K\(READ(MD)&255);      /* ROUTE RITE INPUT TO RITE OUTPUT */
+      END;
+   END;
+
+   WRITE(PSF)=PSRCVOL;                     /* LOAD CURR & DEST VOL */
+   
+   IF MONO_VOICES_PRESENT THEN DO;         /* FOR MONO DAC VOICE CARDS */
+      /* ALWAYS PAN HARD RIGHT, SINCE NO LEFT DACS ON CARD */
+      WRITE(PSD)=4095; WRITE(PSD)=0;       /* RIGHT, LEFT          */
+      WRITE(PSD)=4095; WRITE(PSD)=0;       /* RIGHT, LEFT          */
+   END;
+   ELSE IF M$PB.RIGHT<>0 THEN DO;          /* STEREO               */
+      WRITE(PSD)=0; WRITE(PSD)=4095;       /* RIGHT, LEFT          */
+      WRITE(PSD)=0; WRITE(PSD)=4095;       /* RIGHT, LEFT          */
+   END;
+   ELSE DO;                                /* MONO                 */
+      WRITE(PSD)=2048; WRITE(PSD)=2048;    /* RIGHT, LEFT          */
+      WRITE(PSD)=2048; WRITE(PSD)=2048;    /* RIGHT, LEFT          */
+   END;
+
+   WRITE(PSF)=PSWL;                     /* WAVE TABLE LENGTH ENTRH */
+   WRITE(PSD)=TLENS;                    /* TOTAL LENGTH SECTOR     */
+   WRITE(PSD)=TLENW;                    /* TOTAL LENGTH WORD       */
+   WRITE(PSD)=XBASE(LW#LSB);            /* BASE SECTOR LSB'S       */
+   WRITE(PSD)=SHL(XBASE(LW#MSB) & BASE#PAGE_B,8) \ WOFF;  /* PAGE # IN UPPER BYTE; WORD OFFSET IN LOWER */
+   WRITE(PSD)=LLENS;                    /* LOOP LENGTH SECTOR      */
+   WRITE(PSD)=LLENW;                    /* LOOP LEGNTH WORD        */
+
+   WRITE(PSF)=PSPI;                           /* WRITE FREQ INFO    */
+   WRITE(PSD)=0;       WRITE(PSD)=M$ADD;      /* PHASE INC          */
+   WRITE(PSD)=M$NUM-1; WRITE(PSD)=256-M$DEN;  /* INCREMENT, MODULUS */
+
+   WRITE(PSF)=PSEINC;
+   WRITE(PSD)=4095;                     /* INCREMENT AT 25 KHZ RATE */
+   IF FORCE.FAST.RATE                   /* IF FAST RATE REQUIRED */
+   THEN WRITE(PSD) = FAST.RATE;         /* THEN DO A FAST FADE   */
+   ELSE WRITE(PSD) = SLOW.RATE;         /* ELSE SLOW FADE        */
+
+   /* $page */
+
+   IF M$PB.RIGHT<>0 THEN DO;            /* STEREO SOUND FILE? */
+      WRITE(PSF)=PSADEVSM;              /* SET UP THIS CHANNEL AS THE EVEN STEREO MASTER */
+      WRITE(PSD)=1;
+      WRITE(PSC)=M$PB.RIGHT;            /* TURN ON SLAVE CHAN */
+      WRITE(PSF)=PSELIM;                /* ENV LIM/CVAL    */
+      WRITE(PSD)=4095;
+      WRITE(PSF)=PSON;                  /* ON/OFF FUNCTION CODE */
+      WRITE(PSD)=3;                     /* ON WITH LOOP         */
+   END;
+
+   WRITE(PSC)=M$PB.LEFT;                /* TURN ON SLAVE CHAN */
+   WRITE(PSF)=PSELIM;                   /* ENV LIM/CVAL       */
+   WRITE(PSD)=4095;
+   WRITE(PSF)=PSON;                     /* ON/OFF FUNCTION CODE */
+   WRITE(PSD)=3;                        /* ON WITH LOOP         */
+
+   ENABLE;
+
+   FORCE.FAST.RATE = 0;                 /* PERFORM 1 FAST FADE  */
+
+END START.MOUSE.VOICE;
+
+STOP.MOUSE.VOICE:PROC SWAPABLE;
+   DCL I   FIXED;
+   DCL PTR POINTER;
+
+   IF M$PB.LEFT = 0 THEN RETURN;        /* NO CHANNEL */
+
+   DISABLE;
+   IF M$PB.RIGHT <> 0 THEN DO;
+      WRITE(PSC) = M$PB.RIGHT;
+      WRITE(PSF) = PSELIM;
+      WRITE(PSD) = 0;             /* SET ENVELOPE LIMIT TO 0            */
+   END;
+   WRITE(PSC) = M$PB.LEFT;
+   WRITE(PSF) = PSELIM;
+   WRITE(PSD) = 0;                /* SET ENVELOPE LIMIT TO 0            */
+   ENABLE;
+
+   I=1;
+
+   DO WHILE I<>0;
+      DISABLE;
+      WRITE(PSC) = M$PB.LEFT;
+      WRITE(PSF) = PSEVAL;
+      I=READ(PSD);
+      ENABLE;
+
+		if (i != 0)
+			chill.out.and.run.syn();
+   END;
+
+   IF M$PREV.PB.LEFT <> 0 THEN DO;
+      CALL CLEANUP.SYNTH(M$PREV.PB.LEFT,M$PREV.PB.RIGHT);
+      PTR=CORE(ADDR(FP0.PTR) + (SHR(M$PREV.PB.LEFT,6)&"3"));   /* SET TO CORRECT POLY BIN; L&R MUST BE IN SAME BIN */
+      CORE(PTR)=CORE(PTR)+1;
+      CORE(PTR+CORE(PTR))=M$PREV.PB.LEFT;
+      IF M$PREV.PB.RIGHT <> 0 THEN DO;
+         CORE(PTR)=CORE(PTR)+1;
+         CORE(PTR+CORE(PTR))=M$PREV.PB.RIGHT;
+      END;
+   END;
+
+   CALL CLEANUP.SYNTH(M$PB.LEFT,M$PB.RIGHT);
+   PTR=CORE(ADDR(FP0.PTR) + (SHR(M$PB.LEFT,6)&"3"));           /* SET TO POLY LIST: FP0.PTR + BIN */
+   CORE(PTR)=CORE(PTR)+1;
+   CORE(PTR+CORE(PTR))=M$PB.LEFT;
+
+   IF M$PB.RIGHT <> 0 THEN DO;
+      CORE(PTR)=CORE(PTR)+1;
+      CORE(PTR+CORE(PTR))=M$PB.RIGHT;
+   END;
+
+   M$PB.LEFT       = 0;
+   M$PB.RIGHT      = 0;
+   M$PREV.PB.LEFT  = 0;
+   M$PREV.PB.RIGHT = 0;
+END STOP.MOUSE.VOICE;
+
+/* $page */
+
+GET.MOUSE.FADE.CHANNELS:PROC SWAPABLE;
+   DCL I FIXED;
+
+   IF M$PREV.PB.LEFT  = 0 THEN DO;        /* MUST GET MORE */
+      M$PREV.PB.LEFT  = M$PB.LEFT;
+      M$PREV.PB.RIGHT = M$PB.RIGHT;
+
+      IF GET.MOUSE.CHANS=0 THEN DO;      /* NONE AVAILABLE */
+         M$PB.LEFT    = M$PREV.PB.LEFT;
+         M$PB.RIGHT   = M$PREV.PB.RIGHT;
+         M$PREV.PB.LEFT  = 0;
+         M$PREV.PB.RIGHT = 0;
+         RETURN 0;
+      END;
+   END;
+   ELSE DO;
+      I=M$PREV.PB.LEFT;  M$PREV.PB.LEFT  = M$PB.LEFT;  M$PB.LEFT  = I;
+      I=M$PREV.PB.RIGHT; M$PREV.PB.RIGHT = M$PB.RIGHT; M$PB.RIGHT = I;
+   END;
+
+   RETURN 1;
+END GET.MOUSE.FADE.CHANNELS;
+
+/* Handy routine to compute playback loop length based upon */
+/* actual playback sampling rate:                           */
+
+/* pass in length in milliseconds.  computes various        */
+/* lengths from actual synth frequency rates:               */
+
+MOUSE.PB.SET.LENGTH: PROC(LENGTH) SWAPABLE; 
+
+   /* SETS LENGTH OF PB LOOP; DOES NOT AFFECT PB UNTIL NEW PBSTART SET */
+
+   DCL LENGTH FIXED;          /* PASS LENGTH IN MILLISECONDS           */
+   DCL I FIXED;
+
+   IF INC.POLY=0 THEN RETURN; /* CANNOT DO ANYTHING IF POLY NOT AVAILABLE */
+
+   CALL STR32(0, LENGTH, BitMsbArray);            /* get milliseconds     */
+   CALL ratio_multiply(16*M$NUM*M$ADD, M$DEN);
+   CALL ratio_multiply(625, 99);                  /* compute # of samples at this rate  */
+
+   M$PB.TOT.LENGTH = BITLSB + SHL(M$FLS,STEREO);  /* total playback lngth */
+
+   M$PB.TOT.LENGTH = M$PB.TOT.LENGTH & "177776";  /* make even in case stereo */
+
+   IF   M$PB.TOT.LENGTH IGT (2560-M$EXT)          /* limit to memory      */
+   THEN M$PB.TOT.LENGTH  =  (2560-M$EXT);         /* available (10 sctrs) */
+
+   M$PB.LP.LENGTH = M$PB.TOT.LENGTH - SHL(M$FLS,STEREO);
+
+END MOUSE.PB.SET.LENGTH;
+
+COMPUTE.CROSS.FADE: PROC SWAPABLE;
+   /* THIS PROCEDURE COMPUTES A 256 SAMPLE (MONO) OR A 512 SAMPLE (STEREO)
+      CROSS FADE DIRECTLY IN POLY MEMORY.  IT DOES THIS IN THE BLOCK
+      OF POLY MEMORY INDICATED BY M$PB.CUR.BLOCK (0 OR 1).
+
+      THE DATA THAT IS HEARD BEGINS AT WORD 0 OF THE SECTOR.  THE
+      FOLLOWING M$PB.LP.LENGTH SAMPLES COME DIRECTLY FROM THE
+      FILE WE ARE SCRUBBING.  THE FOLLOWING SHL(M$FLS,STEREO)
+      WORDS ARE COMPUTED BY THIS ROUTINE)
+
+      GRAPHICALLY:
+
+      LOW  MEMORY:   WORD POSITION               0:  FIRST SAMPLE HEARD
+                     WORD POSITION  M$PB.LP.LENGTH:  START OF FADE
+                     WORD POSITION  M$PB.LP.LENGTH
+                              + SHL(M$FLS, STEREO):  EXTRA WORDS COPIES
+                     WORD POSITION  M$PB.LP.LENGTH
+                              + SHL(M$FLS, STEREO)
+      HIGH MEMORY             +     M$EXT         :  LAST SAMPLE WRITTEN
+
+   */
+
+   DCL BASE (1)          FIXED;
+   DCL (I,J,K,L,M,N,P,Q) FIXED;
+
+   BASE(LW#MSB) = M$PB.BASE(LW#MSB) & BASE#BIN_B;   /* POINT AT CORRECT POLY BIN */
+   BASE(LW#LSB) = M$PB.CUR.BLOCK*10+1;              /* SECTOR NUMBER OF CURRENT NEW LOOP BUFFER */
+
+   I = SHL(M$FLS, STEREO);                    /* GET FADE LENGTH IN WORDS   */
+   J = 0;                                     /* INITIALIZE BASE            */
+
+   LOAD  0;          /* LOAD LOW WORD OF 65536   */
+   ULOAD 1;          /* LOAD HI  WORD OF 65536   */
+   DIV   I;          /* DIV LENGTH OF FADE       */
+   M =   RES;        /* YIELDS ADDER             */
+   N =   SHR(M,1);   /* YIELDS FIRST ACCUMULATOR */
+
+   DO WHILE I <> 0;                           /* PROCESS TOTAL CROSS FADE   */
+      IF I > 256 THEN K = 256;                /* GET CHUNK SIZE             */
+      ELSE            K =   I;
+      CALL PSMREAD(BASE,0,J);                 /* LOAD FADING OUT DATA       */
+      CALL POLY.IN(ADDR(MISC.BUF(0)),K);      /* INTO MISC.BUF              */
+      CALL PSMREAD(BASE,0,J+M$PB.LP.LENGTH);  /* PREPARE POLY TO READ FADING IN SECTOR */
+      WRITE("313")=ADDR(MISC.BUF(0));         /* SET R13 TO BEGINNING OF MISC.BUF */
+      DO P=0 to K-1;                          /* COMPUTE ONE CHUNK OF FADE */
+         LOAD (READ("353") XOR "100000");     /* LOAD FADING OUT SAMPLE */    
+         MUL  N;                              /* SHIFT BY ACCUMULATOR */
+         L =  REM;                            /* REM=RESULT OF FRACTIONAL MUL */    
+         LOAD (READ(PSD)   XOR "100000");     /* LOAD FADING IN SAMPLE */    
+         MUL  -N;                             /* SHIFT BY -ACCUMULATOR */    
+         WRITE("373")=(L+REM) XOR "100000";   /* SAVE CROSS FADE RESULT IN MISC.BUF */
+         N=N+M;                               /* INC ACCUMULATOR */    
+      END;
+      DO Q = 0 TO STEREO;                     /* WRITE TWICE IF STEREO VOICE PLAYING */
+         CALL PSMWRITE(BASE,0,J+M$PB.LP.LENGTH); /* SET POLY TO WRITE CROSS FADE TO DESTINATION */
+         CALL POLY.OUT(ADDR(MISC.BUF(0)),K);     /* WRITE DATA */
+      END;
+      I = I - K;
+      J = J + K;
+   END;
+
+   /* COPY EXTRA WORDS TO AVOID STEREO CLICK PROBLEMS OF BIZARRE */
+   /* ORIGIN:                                                    */
+
+   I = SHL(M$FLS, STEREO);                    /* GET FADE LENGTH IN WORDS   */
+
+   CALL PSMREAD(BASE,0,I);                    /* GET DATA TO REPEAT         */
+   CALL POLY.IN(ADDR(MISC.BUF(0)),M$EXT);     /* INTO MISC.BUF              */
+   DO Q = 0 TO STEREO;                        /* WRITE TWICE IF STEREO VOICE PLAYING */
+      CALL PSMWRITE(BASE,0,I+M$PB.LP.LENGTH); /* SET POLY TO WRITE EXTRA    */
+      CALL POLY.OUT(ADDR(MISC.BUF(0)),M$EXT); /* DATA                       */
+   END;
+END COMPUTE.CROSS.FADE;
+
+MOUSE.PB.SET.ENABLE: PROC(ENBL) SWAPABLE; /* ENABLES OR DISABLES MOUSE PLAYBACK */
+   DCL ENBL FIXED;    /* 0 - OFF  1 - ON  */
+
+   IF INC.POLY=0 THEN RETURN;      /* CANNOT DO A THING, IF POLY NOT AVAILABLE */
+
+   IF ENBL = 0 THEN DO;
+      M$PB.ENBL       = 0;
+      FORCE.FAST.RATE = 1;
+   END;
+
+   ELSE DO;
+
+      M$PB.ENBL       = 1;
+      M$FIRST         = 0; /* SET FIRST FLAG TRUE (REVERSE LOGIC) */
+      FORCE.FAST.RATE = 1;
+      M$PB.LONG.PLAY  = 0; /* RESET LONG PLAY FLAG */
+
+      /* STORE MAX SCRUB POSITION OF SOUND FILE:   */
+
+      CALL TIME_TO_INDEX(TOT.TIME(0),TOT.TIME(1),TOT.TIME(2),STM.SAMPLE.RATE,STEREO);
+
+      M$PB.SEC.LIMIT = SECTOR.NUMB;
+      M$PB.WRD.LIMIT = SECTOR.OFFSET;
+
+   END;
+
+END MOUSE.PB.SET.ENABLE;
+
+/* $page */
+
+// Note: This is called from the real time loop with run.syn = 0 during protocol
+// poly ram scrubbing.  Allow execution at DTask level
+
+MOUSE.PB.UPDATE: PROC(SECTOR.MSB, SECTOR.NUMB, SECTOR.OFFSET) SWAPABLE; 
+   /* SETS STARTING TIME OF PB LOOP AND EXECUTES XFADE TO NEW LOOP IF NECESSARY */
+   DCL SECTOR.MSB       FIXED;        /* PASS IN CURRENT SECTOR POSITION OF */
+   DCL SECTOR.NUMB      FIXED;        /* WHERE TO SCRUB.  PASS IN -1,-1,-1  */
+   DCL SECTOR.OFFSET    FIXED;        /* TO SCRUB DIGITAL ZEROES            */
+
+   DCL (I,Q)            FIXED;
+   DCL DELTA.MSEC       FIXED;        /* HOW FAR REAL.MILLISECONDS HAS MOVED */
+   DCL ZERO.BASE (1)    FIXED;
+   DCL SCRUB.SILENCE    FIXED;
+   DCL M$PB.PLAY.SECTOR FIXED;
+   DCL M$PB.PLAY.WORD   FIXED;
+
+   DCL TEMP.SEC         FIXED;
+   DCL TEMP.WRD         FIXED;
+
+   IF INC.POLY=0 THEN RETURN;  /* IF POLY NOT AVAILABLE, DON'T BOTHER   */
+
+   /* Begin by turning off prior voice that has decayed to zero so we   */
+   /* don't get any feed through:                                       */
+
+   IF M$PREV.PB.LEFT <> 0 THEN DO;            /* IF CHANNEL AVAIL...    */
+
+      DISABLE;
+
+      WRITE(PSC) = M$PREV.PB.LEFT;            /* IF CHANNEL IS ON...    */
+      WRITE(PSF) = PSRON;
+      IF READ(PSD) <> 0 THEN DO;
+         WRITE(PSF) = PSELIM;                 /* BUT LIMIT IS 0...      */
+         IF READ(PSD) = 0 THEN DO;
+            WRITE(PSF) = PSEVAL;
+            IF READ(PSD) = 0 THEN DO;         /* AND LIMIT REACHED...   */
+               WRITE(PSF)=PSON;               /* TURN OFF CHANNEL NOW   */
+               WRITE(PSD)=0;                  /* TO PREVENT FEEDTHRU    */
+            END;
+         END;
+      END;
+
+      IF M$PREV.PB.RIGHT <> 0 THEN DO;        /* IF CHANNEL AVAIL...    */
+         WRITE(PSC) = M$PREV.PB.RIGHT;        /* IF CHANNEL IS ON...    */
+         WRITE(PSF) = PSRON;
+         IF READ(PSD) <> 0 THEN DO;
+            WRITE(PSF) = PSELIM;              /* BUT LIMIT IS 0...      */
+            IF READ(PSD) = 0 THEN DO;
+               WRITE(PSF) = PSEVAL;
+               IF READ(PSD) = 0 THEN DO;      /* AND LIMIT REACHED...   */
+                  WRITE(PSF)=PSON;            /* TURN OFF CHANNEL NOW   */
+                  WRITE(PSD)=0;               /* TO PREVENT FEEDTHRU    */
+               END;
+            END;
+         END;
+      END;
+
+      ENABLE;
+
+   END;
+
+   /* Now examine where we would like to scrub.  If we want to          */
+   /* scrub before the file,  or after the file, scrub using digital    */
+   /* zeroes.  Else figure out what portion of the audio we would       */
+   /* like to hear                                                      */
+
+   IF (SECTOR.MSB < 0)         /* IF SCRUBBING BEFORE THE FILE          */
+   THEN DO;
+      SCRUB.SILENCE    = 1;                  /* THEN SCRUB DIGITAL Z'S  */
+      M$PB.PLAY.SECTOR = 0;                  /* SET THESE VARS FOR      */
+      M$PB.PLAY.WORD   = 0;                  /* CONSISTENCY             */
+   END;
+
+   ELSE DO;                                  /* ELSE LOOK FURTHER       */
+
+      IF  (SECTOR.MSB > 0)                   /* IF AFTER FILE ...       */
+      OR  ( SECTOR.NUMB   IGT M$PB.SEC.LIMIT )
+      OR  ((SECTOR.NUMB    =  M$PB.SEC.LIMIT)
+      AND  (SECTOR.OFFSET IGT M$PB.WRD.LIMIT))
+      THEN DO;
+         SCRUB.SILENCE    = 1;               /* THEN SCRUB DIGITAL Z'S  */
+         M$PB.PLAY.SECTOR = M$PB.SEC.LIMIT;  /* BUT POINT TO END OF     */
+         M$PB.PLAY.WORD   = M$PB.WRD.LIMIT;  /* FILE                    */
+      END;
+
+      ELSE DO;                               /* ELSE CAN PLAY SAMPLES   */
+         SCRUB.SILENCE    = 0;               /* POINTED TO BY MOUSE     */
+         M$PB.PLAY.SECTOR = SECTOR.NUMB;
+         M$PB.PLAY.WORD   = SECTOR.OFFSET;
+      END;
+
+      /* Back up by enough samples (total length) to construct playback    */
+      /* audio:                                                            */
+
+      IF (M$PB.PLAY.SECTOR ILT 250)
+      AND ((SHL(M$PB.PLAY.SECTOR,8) + M$PB.PLAY.WORD) ILT M$PB.TOT.LENGTH)
+      THEN DO;
+         M$PB.PLAY.SECTOR = 0;
+         M$PB.PLAY.WORD   = 0;
+      END;
+      ELSE DO;
+         M$PB.PLAY.SECTOR = M$PB.PLAY.SECTOR   - SHR(M$PB.TOT.LENGTH,8);
+         M$PB.PLAY.WORD   = M$PB.PLAY.WORD - (M$PB.TOT.LENGTH & 255);
+         IF M$PB.PLAY.WORD < 0 THEN DO;
+            M$PB.PLAY.WORD = M$PB.PLAY.WORD + 256;
+            M$PB.PLAY.SECTOR = M$PB.PLAY.SECTOR - 1;
+         END;
+      END;
+   END;
+
+   /* IF WE ARE PERFORMING A LONG FORWARD PLAY,  SEE IF IT IS TIME    */
+   /* TO TERMINATE THE LONG FORWARD PLAY                              */
+
+   IF (M$PB.LONG.PLAY <> 0) THEN DO;              /* PLAYING FORWARD OUT OF SOUND FILE */
+
+      /* COMPUTE HOW MANY REAL CLOCK MILLISECONDS ARE NEEDED TO PLAY        */
+      /* FROM WHERE WE STARTED THE LONG PLAY UP TO THIS POINT:              */
+
+      IF (M$PB.PLAY.SECTOR ILE M$LONG.START.SEC)  /* get # of samples       */
+      THEN CALL STR32(0, 0, BitMsbArray);         /* to play                */
+      ELSE DO;
+         CALL STR32(0, M$PB.PLAY.SECTOR - M$LONG.START.SEC - 1, BitMsbArray);
+         CALL SHL32(BitMsbArray, 8);
+         CALL ADD16(256 + M$PB.PLAY.WORD - M$LONG.START.WRD, BitMsbArray);
+      END;
+         
+      CALL ratio_multiply(99, 625);               /* compute 16 * number of milliseconds at 101.010101 khz rate */
+      CALL ratio_multiply(M$DEN, 16*M$NUM*M$ADD); /* compute real clock msecs for this rate */
+
+      DISABLE;                                    /* SEE HOW FAR REAL.MILLISECONDS HAS MOVED SINCE LAST TIME */
+      DELTA.MSEC = REAL.MILLISECONDS - LAST.MILLISECONDS;
+      LAST.MILLISECONDS = REAL.MILLISECONDS;
+      ENABLE;
+
+      CALL ADD16(DELTA.MSEC, M$LONG.ACCUM.TIME);  /* SEE HOW LONG WE HAVE BEEN PLAYING */
+
+      IF (COM32(M$LONG.ACCUM.TIME,BitMsbArray) >= LW#IEQ)  /* CLOSE ENOUGH TO START SCANNING AGAIN */
+      OR (M$PB.ENBL = 0) THEN DO;                          /* OR MOUSE WAS RELEASED */
+         M$PB.LONG.PLAY = 0;                      /* START SCANNING AGAIN, OR STOP ALTOGETHER */
+         FORCE.FAST.RATE = 1;                     /* FAST CROSS FADE */
+      END;
+
+      ELSE RETURN;                                /* ELSE STILL WAITING */
+                                                  /* FOR LONG PLAY      */
+   END;                                           /* TO FINISH ...      */
+
+   /* ELSE IF IT IS NOT THE FIRST TIME THROUGH, SEE IF WE ARE SO FAR  */
+   /* AWAY THAT WE SHOULD DO A LONG PLAY:                             */
+
+   ELSE IF (M$FIRST          <>  0            )  /* SECOND OR > TIME THROUGH */
+   &       (M$PB.ENBL        <>  0            )  /* NOT TRYING TO STOP       */
+   &       (M$PB.PLAY.SECTOR IGT LAST.PLAY.SEC)  /* PLAYING FORWARD          */
+   THEN DO;
+
+      /* BEGIN A LONG PLAY FORWARD IF MOUSE JUMPS FORWARD BY               */
+      /* >= M$PB.TOT.LENGTH SAMPLES:                                       */
+
+      IF ((M$PB.PLAY.SECTOR - LAST.PLAY.SEC) IGE 250)
+      OR ((SHL(M$PB.PLAY.SECTOR - LAST.PLAY.SEC, 8)
+           + (M$PB.PLAY.WORD - LAST.PLAY.WRD)) IGE M$PB.TOT.LENGTH)
+      AND ((M$LOOP = 0)
+      OR  ((M$LOOP <> 0) AND (THIS.ITER = LAST.ITER)))
+      THEN DO;
+
+         CALL PREPARE.FOR.MOUSE.SPLICE;                  /* FADE OUT OLD CHANNEL TO AVOID CLICK WHEN CHANGING LOOP */
+
+         IF GET.MOUSE.FADE.CHANNELS
+         THEN DO;
+
+            LAST.MILLISECONDS = REAL.MILLISECONDS;       /* GET CURRENT TIME */
+
+            M$LONG.START.SEC  = LAST.PLAY.SEC;           /* GET WHERE WE ARE GOINT TO START TO PLAY        */
+            M$LONG.START.WRD  = LAST.PLAY.WRD;
+
+            TEMP.SEC = M$PB.SEC.LIMIT - M$LONG.START.SEC;
+            TEMP.WRD = M$PB.WRD.LIMIT - M$LONG.START.WRD;
+            IF TEMP.WRD < 0 THEN DO;                     /* GET DISTANCE */
+               TEMP.WRD = TEMP.WRD + 256;                /* TO END OF    */
+               TEMP.SEC = TEMP.SEC - 1;                  /* FILE         */
+            END;
+
+            IF SCRUB.SILENCE
+            THEN CALL STR32(0,  0 , M$LONG.ACCUM.TIME);  /* IF PAST EOF, ALLOW PLAYING UP TO VERY END OF FILE */
+            ELSE CALL STR32(0, 60 , M$LONG.ACCUM.TIME);  /* ELSE STOP EARLY TO AVOID OVERSHOOTING */
+
+            FORCE.FAST.RATE = 1;
+
+            CALL START.MOUSE.VOICE(M$PB.BASE,
+                                   M$LONG.START.SEC+SHR(BL.POLY,8), M$LONG.START.WRD,
+                                   TEMP.SEC, TEMP.WRD,
+                                   0, 0); /* NO LOOPING */
+            M$PB.LONG.PLAY = 1;
+         END;
+
+         RETURN;           /* IF NO CHANNELS OR AFTER STARTING LONG PLAY */
+
+      END;
+   END;
+
+   M$FIRST = 1;            /* INDICATE NOW HAVE GONE THROUGH ONCE        */
+
+   IF M$PB.ENBL = 1 THEN DO;                         /* PERFORM ENV XFADE WHEN PLAYBACK IS ON */
+
+      IF (M$PB.PLAY.SECTOR = LAST.PLAY.SEC)          /* IF MOUSE DID NOT CHANGE SECTOR BOUNDARIES */
+      &  (M$PB.PLAY.WORD   = LAST.PLAY.WRD)
+      &  (SCRUB.SILENCE    = LAST.SILENCE )
+      &  (M$PREV.PB.LEFT <> 0)                       /* &  IT IS NOT FIRST TIME */
+      &  (FORCE.FAST.RATE = 0) THEN RETURN;          /* &  WE AREN'T COMING OUT OF LONG PLAY */
+
+      LAST.PLAY.SEC  = M$PB.PLAY.SECTOR;             /* SAVE PRIOR VALUE FOR NEXT COMPARE */
+      LAST.PLAY.WRD  = M$PB.PLAY.WORD;
+      LAST.SILENCE   = SCRUB.SILENCE;
+
+      CALL PREPARE.FOR.MOUSE.SPLICE;                 /* FADE OUT OLD CHANNEL TO AVOID CLICK WHEN CHANGING LOOP */
+
+      M$PB.CUR.BLOCK = M$PB.CUR.BLOCK XOR 1;         /* BLOCK TO WHICH WE WRITE NEW LOOP (EITHER 0 OR 1) */
+
+      /* IF ACTUAL AUDIO IS DESIRED, READ IT FROM THE SF AREA:            */
+
+      ZERO.BASE(LW#MSB) = M$PB.BASE(LW#MSB) & BASE#BIN_B;  /* AT ZERO, IN THE CORRECT BIN */
+
+      IF SCRUB.SILENCE = 0 THEN DO;
+         DO Q = 0 TO STEREO;                         /* WRITE TWICE IF STEREO VOICE PLAYING */
+            CALL COPY.POLY.MEM (M$PB.BASE,
+                                M$PB.PLAY.SECTOR+SHR(BL.POLY,8), M$PB.PLAY.WORD,
+                                ZERO.BASE,
+                                M$PB.CUR.BLOCK*10+1, 0,
+                                0, M$PB.TOT.LENGTH);
+         END;
+         CALL COMPUTE.CROSS.FADE;                    /* CROSS FADE SAMPLES COPIED ABOVE */        
+      END;
+
+      ELSE DO Q = 0 TO STEREO;                       /* WRITE TWICE IF STEREO VOICE PLAYING */
+
+         CALL PSMWRITE(ZERO.BASE,                    /* SET UP TO WRITE    */
+                       M$PB.CUR.BLOCK*10+1, 0);      /* DIGITAL ZEROES     */
+
+         I = M$PB.TOT.LENGTH+M$EXT;                  /* WRITE OUT DIGITAL  */
+         DO WHILE I <> 0;                            /* ZEROES TO POLY     */
+            IF I IGE 256 THEN DO;                    /* FOR DESIRED        */
+               RPC 256;                              /* LENGTH             */
+               WRITE(PSD) = 0;
+               I = I - 256;
+            END;
+            ELSE DO;
+               RPC I;
+               WRITE(PSD) = 0;
+               I = 0;
+            END;
+         END;
+      END;
+
+      IF GET.MOUSE.FADE.CHANNELS                     /* DO WE HAVE CHANNELS? ALLOCATE THEM */
+      THEN CALL START.MOUSE.VOICE(ZERO.BASE,
+                                  M$PB.CUR.BLOCK*10+1,0,
+                                  0,M$PB.TOT.LENGTH,
+                                  0,M$PB.LP.LENGTH);
+   END;
+
+   ELSE DO;                    /* PERFORM ENV XFADE TO SILENCE */
+      CALL STOP.MOUSE.VOICE;
+      M$PB.LONG.PLAY = 0;      /* CLEAR LONG PLAY FLAG */
+   END;
+
+END MOUSE.PB.UPDATE;
+
+/* $page */
+
+ERASE.MOUSE.PB.CURSOR: PROC(X) swapable;
+   dcl X        fixed;
+
+   CALL CONNECT(X,LEFT.RECT.MINY+1,X,LEFT.RECT.MAXY-1);
+   CALL CONNECT(X,RIGHT.RECT.MINY+1,X,RIGHT.RECT.MAXY-1);
+END;
+
+DRAW.MOUSE.PB.CURSOR: PROC(CHANNEL) PUBLIC SWAPABLE;  /* DRAWS THE MOUSE PLAYBACK CURSOR AT THE CURRENT MOUSE POSTION */
+   DCL CHANNEL FIXED;   /* 0-> LEFT CHANNEL; 1-> RIGHT CHANNEL; 2-> BOTH */
+
+   CALL PUSH.GRAPHICS.ATTRIBUTES;
+   CALL BLOCKMODE_OFF;
+   VECTOR_MODE;
+   CALL DATA_LEVEL(2);
+
+   CALL VIEWPORT(0,SCREEN.WIDTH,0,SCREEN.HEIGHT);   
+   CALL WINDOW  (0,SCREEN.WIDTH,0,SCREEN.HEIGHT);
+
+   IF (CHANNEL=0) OR (CHANNEL=2)
+   THEN CALL CONNECT(STM.MOUSEX,LEFT.RECT.MINY+1,STM.MOUSEX,LEFT.RECT.MAXY-1);
+
+   IF (CHANNEL=1) OR (CHANNEL=2)
+   THEN CALL CONNECT(STM.MOUSEX,RIGHT.RECT.MINY+1,STM.MOUSEX,RIGHT.RECT.MAXY-1);
+
+   CALL POP.GRAPHICS.ATTRIBUTES;
+
+END;
+
+Start.Mouse.Playback: proc (WhichFile) swapable;
+   dcl WhichFile   fixed; /* 1=play current file, 2=play locked file */
+   dcl tmp.time(2) fixed;
+
+   call STM.SOUND.EDITOR.INPUT(5,0);         /* turn real cursor off */
+
+   if WhichFile=2 then do;   /* setting up to play back LOCKED sound file */
+      Saved.Stm.Sample.Rate = Stm.Sample.Rate; /* save info for current file */
+      Saved.Stereo          = Stereo;
+      Saved.Tot.Time(0)     = Tot.Time(0);
+      Saved.Tot.Time(1)     = Tot.Time(1);
+      Saved.Tot.Time(2)     = Tot.Time(2);
+
+      Stm.Sample.Rate       = Lock.Sample.Rate; /* set global vars for LOCKED sound file */
+      Stereo                = Lock.Stereo;
+      Tot.Time(0)           = Lock.Tot.Time(0);
+      Tot.Time(1)           = Lock.Tot.Time(1);
+      Tot.Time(2)           = Lock.Tot.Time(2);
+   end;
+
+   /* Set up frequency information for STM usage: */
+
+   CALL COMPUTE.PSYN.FREQ(2816+LOG1000(STM.SAMPLE.RATE)-LOG1000(500)+1024);
+
+   M$NUM = NOTEINC + 1;               /* COMPUTE LOGICAL INCREMENT */
+   M$DEN = 256-NOTENUM;               /* AND LOGICAL DIVISOR       */
+   M$ADD = SHL(NOTEADD,STEREO);       /* AND SAVE ADDER AWAY       */
+   M$LOOP = 0;                        /* CAN'T SCRUB LOOPS FROM HERE */
+
+   CALL MOUSE.PB.SET.ENABLE(1);              /* PREPARE TO TURN ON VOICE */
+   CALL MOUSE.PB.SET.LENGTH(20);             /* 20MSEC LOOP */
+
+   Mouse.Playing = WhichFile;                /* mouse playback is now ON */
+
+   call mouse.switch(0);                     /* Turn off mouse crosshairs */
+   call Compute_Pixel_Time(stm.mousex-Left.Rect.Minx-1,tmp.time);
+   call time_to_index(tmp.time(0),tmp.time(1),tmp.time(2),stm.sample.rate,stereo);  /* SETS SECTOR.NUMB */
+   call Mouse.PB.Update(SECTOR.MSB, SECTOR.NUMB, SECTOR.OFFSET);
+   call Draw.Mouse.PB.Cursor(2);            /* Draw first cursor in both channels and start playback */
+end Start.Mouse.Playback;
+
+Exit.Mouse.Playback: proc swapable;
+
+   CALL MOUSE.PB.SET.ENABLE(0);         /* SET UP FOR MOUSE VOICE SHUT OFF */
+   CALL MOUSE.PB.UPDATE(0, 0, 0);       /* SHUT IF OFF */
+
+   if Mouse.Playing=2 then do;          /* have been playing LOCKED file */
+      Stm.Sample.Rate = Saved.Stm.Sample.Rate; /* restore info for Current sound file */
+      Stereo          = Saved.Stereo;          /* after playing LOCKED file */
+      Tot.Time(0)     = Saved.Tot.Time(0);
+      Tot.Time(1)     = Saved.Tot.Time(1);
+      Tot.Time(2)     = Saved.Tot.Time(2);
+   end;
+
+   Mouse.Playing = 0;                  /* mouse playback is turned off */
+
+   call Erase.Mouse.PB.Cursor(stm.mousex);      /* Erase our temp cursor */
+   vector_mode;
+   call data_level(0);                  /* Put graphics back to normal */
+   transparent_mode;
+   call STM.SOUND.EDITOR.INPUT(6,mouse(release.x)-1); /* set STM cursor X position */
+   call STM.SOUND.EDITOR.INPUT(5,1);    /* turn real cursor on */
+   call MOUSE.SWITCH(1);                /* Change to cross hair */
+   if STM.EDIT.MODE <> 0 then do;       /* if editing a sound file */
+      if STM.ANCHOR.SET = 0 then do;
+         STM.ANCHOR.SET = 1;
+         call STM.SOUND.EDITOR.INPUT(9,MOUSE(release.x)-1); /* set the anchor point on the release */
+         call STM.SOUND.EDITOR.INPUT(8,1); /* draw the dotted line */
+      end;
+      else do;
+         call STM.SOUND.EDITOR.INPUT(8,0); /* erase the dotted line and get new sound file */
+         call STM.SOUND.EDITOR.INPUT(10,0); /* do the edit */
+         STM.ANCHOR.SET = 0;
+      end;
+   end;
+end Exit.Mouse.Playback;
+
+/* $Subtitle Perform Mouse Playback */
+
+/* repeat = 0:  return immediately after starting/checking mouse because
+                we are busy drawing the wave display.
+   repeat = 1:  stay here until button is released.  When we enter
+                here with repeat = 0 and we are not playing, then
+                the mouse button press has been detected
+                with check.next.event but has not been processed
+                by get.next event */
+
+PERFORM.MOUSE.PLAYBACK: proc(repeat) public swapable;  /* play back the sound file using the mouse */
+   dcl (code,i)         fixed;
+   dcl tmp.time(2)      fixed;
+   dcl repeat           fixed; /* When 1 causes this procedure to loop until mouse button is released */
+   dcl Which.File       fixed; /* set to 1 to play current file, 2 to play LOCKED sound file */
+   dcl old.mpbmousex    fixed;
+
+   if (inc.stm = 0) then return;                /* No stm -- sorry charlie */
+
+   call Push.Graphics.Attributes;
+
+   /* HANDLE PERICOM BUG WHERE IF YOU ARE IN POINT MODE */
+   /* MUST BE IN TRANSPARENT MODE FOR VECTOR MODE TO HAPPEN */
+   /* BUT HAVE TO DO ALPHA MODE FIRST */
+
+   IF (MG600<>0) AND (#MODE=#POINT) THEN DO;
+      ALPHA_MODE;
+      TRANSPARENT_MODE;
+   END;
+
+   IF #MODE <> #VECTOR THEN VECTOR_MODE; 
+   IF #DATA.LEVEL <> 2 THEN CALL DATA_LEVEL(2);   /* WE ARE IN DESIRED MODES */
+   IF #BLOCKMODE <> 0  THEN CALL BLOCKMODE_OFF;
+
+   CALL VIEWPORT(0,SCREEN.WIDTH,0,SCREEN.HEIGHT);   
+   CALL WINDOW  (0,SCREEN.WIDTH,0,SCREEN.HEIGHT);
+
+   if  (locked=0)                   /* no file locked in lower display */
+   or  (mouse.playing=1)            /* mouse playback on upper window active */
+   or  ((mouse.playing=0)           /* no mouse playback active yet */
+   and  ((mouse(button.result)=(-2)) /* and user has pressed middle button */
+   and  (mouse(press.y) > RIGHT.RECT.MAXY))) /* in upper display window */
+   then do;                         /* set up info to play current (UPPER) sound file */
+      Which.File=1;
+      CALL LOOK.UP.SF.INFO;
+      IF SF.TYPE <> 1 THEN DO;
+         call Pop.Graphics.Attributes;
+         RETURN;                    /* COULDN'T FIND SOUND FILE */
+      END;
+   end;
+   else do;                         /* set up info to play locked (LOWER) sound file */
+      Which.File=2;
+      do i=0 to 4; FNBUF(i)=lock.name(i); end;
+      FNBUF(0)=8;
+      LNBUF(0)=0;
+      if ps.search=0 then do;
+         call Pop.Graphics.Attributes;
+         return;
+      end;
+   end;
+
+   CALL COPY32(SFILE.BASE,M$PB.BASE);           /* ESTABLISH FILE BASE */
+
+   if  (repeat) & (mouse.playing=0)             /* start playback now  */
+   then do;                                     /* if called from      */
+      stm.mousex = mouse(press.x);              /* main loop           */
+      if stm.mousex < left.rect.minx+1 then stm.mousex = left.rect.minx+1;
+      if stm.mousex > left.rect.maxx-1 then stm.mousex = left.rect.maxx-1;
+      call Start.Mouse.Playback(Which.File);
+   end;
+
+   if (mouse.playing=1)\(mouse.playing=2)       /* recompute tmp.time  */
+   then call Compute_Pixel_Time(stm.mousex-Left.Rect.Minx-1,tmp.time);
+
+   do while 1;
+       call Get_Enable(Get.Mouse.Button);
+       call Get_Enable(Get.Mouse.Movement);
+
+       do while check.next.event = 0;           /* Keep calling to keep playback alive */
+          if (mouse.playing=1)\(mouse.playing=2)   
+          then do;
+             call time_to_index(tmp.time(0),tmp.time(1),tmp.time(2),stm.sample.rate,stereo);  /* SETS SECTOR.NUMB */
+             call Mouse.PB.Update(SECTOR.MSB, SECTOR.NUMB, SECTOR.OFFSET);
+          end;
+		  	 chill.out.and.run.syn();
+       end;
+
+       code = Get.Next.Event;                   
+
+       call Get_Disable(Get.Mouse.Button  );
+       call Get_Disable(Get.Mouse.Movement);
+
+       if code = Get.Mouse.Button then do;     /* start output here when we */
+          if  (mouse.playing   =  0)           /* see actual mouse event    */
+          and (Last.Event.Info = -2)           /* while updating screen     */
+          then do;
+             stm.mousex = mouse(press.x);      /* Place where mouse was pressed */
+             if stm.mousex < left.rect.minx+1 then stm.mousex = left.rect.minx+1;
+             if stm.mousex > left.rect.maxx-1 then stm.mousex = left.rect.maxx-1;
+             call Start.Mouse.Playback(Which.File);
+             call Compute_Pixel_Time(stm.mousex-Left.Rect.Minx-1,tmp.time);
+          end;
+
+          if Last.Event.Info = 2 then do;          /* if middle button release */
+             if (Mouse.Playing=1)\(Mouse.Playing=2)/* if we started playing with the mouse */
+             then call Exit.Mouse.Playback;
+             call Pop.Graphics.Attributes;
+             return;                               /* done with playback */
+          end;
+       end;  /* mouse button code */
+
+       else if code = Get.Mouse.Movement then do; /* Update our cursor and playback */
+          if (Mouse.Playing=1)\(Mouse.Playing=2) then do;
+
+             old.mpbmousex = stm.mousex;
+             stm.mousex = mouse(current.x);
+             if stm.mousex < left.rect.minx+1 then stm.mousex = left.rect.minx+1;
+             if stm.mousex > left.rect.maxx-1 then stm.mousex = left.rect.maxx-1;
+
+             if stm.mousex <> old.mpbmousex then do;
+                call Erase.Mouse.PB.Cursor(old.mpbmousex);
+                call Draw.Mouse.PB.Cursor(2); /* draw cursor in both channels */
+                call Compute_Pixel_Time(stm.mousex-Left.Rect.Minx-1,tmp.time);
+                call time_to_index(tmp.time(0),tmp.time(1),tmp.time(2),stm.sample.rate,stereo);  /* SETS SECTOR.NUMB */
+                call Mouse.PB.Update(SECTOR.MSB, SECTOR.NUMB, SECTOR.OFFSET);
+             end;
+          end;
+       end;
+
+       else do;  /* We don't know what it is?? (as in character typed) */
+          if (Mouse.Playing=1)\(Mouse.Playing=2)
+          then call Exit.Mouse.Playback;
+          call Pop.Graphics.Attributes;
+          return;
+       end;
+
+       if repeat = 0 then do;
+          call Pop.Graphics.Attributes;
+          return;   /* One pass exits here */
+       end;
+    end;
+end PERFORM.MOUSE.PLAYBACK;
+
+/* $page - Routines to initiate L page scrubbing from the protocol */
+
+/* Call Initialize.for.poly.scrubbing to set up some global        */
+/* variables that are needed by the existing mouse playback        */
+/* software:                                                       */
+
+/* Pass in the name of the sound file you want to scrub:           */
+
+/* Returns true if everything is set up to proceed forward.        */
+
+Initialize.for.POLY.Scrubbing: proc(cname, info) PUBLIC swapable;
+   dcl cname           array;  /* pass in name of sound file       */
+   dcl info            array;  /* see seqlits for contents of info */
+   dcl i               fixed;
+   dcl len(1)          fixed;
+
+   if (cname(0) = 0)           /* must have an approximately legit */
+   or (cname(0) > 8)           /* SF name for poly scrubbing       */
+   then return FALSE;
+
+   do i = 0 to 4;              /* copy cname into FNBUF for        */
+      FNBUF(i) = cname(i);     /* PS.SEARCH                        */
+   end;
+   FNBUF(0)=8;
+   LNBUF(0)=0;
+
+   /* map spaces to nulls in FNBUF                                 */
+
+   do i=0 to 7;
+      if (byte(FNBUF,i)=32)
+      then call pbyte(FNBUF,i,0); 
+   end;
+
+   if ps.search=0              /* had better find the file         */
+   then return FALSE;          /* in POLY!!!                       */
+
+   call COPY32(SFILE.BASE,M$PB.BASE);       /* ESTABLISH FILE BASE */
+
+   /* Save STM's variables away in case we are on the L page.      */
+   /* Note numerous blow-up possiblities if we are doing L page    */
+   /* scrubbing at this time!!!!!                                  */
+
+   Saved.Stm.Sample.Rate = Stm.Sample.Rate; /* save info for current file */
+   Saved.Stereo          = Stereo;
+   Saved.Tot.Time(0)     = Tot.Time(0);
+   Saved.Tot.Time(1)     = Tot.Time(1);
+   Saved.Tot.Time(2)     = Tot.Time(2);
+
+   /* look up information from the file to scrub:                 */
+
+   call psmread(SFILE.BASE,SF.HDR,sf.data.end);
+   do i=0 to 2;                                 /* total time */
+      tot.time(i)=read(psd);
+   end;
+
+   call psmread(SFILE.BASE,SF.HDR,sf.sample.rate);   /* sound file sample rate in kHz*10 */ 
+   i=read(psd);
+   if i<>0                                      /* if a sample rate value present use this*/
+   then stm.sample.rate=i;
+   else do;                                     /* otherwise calculate the sample rate from the given period index */
+      call psmread(SFILE.BASE,SF.HDR,sf.period.index);   /* period index */ 
+      i=read(psd);
+      load 300; mul 1000; stm.sample.rate=res; 
+      div i;   stm.sample.rate=res;          /* compute khz*10-> sampling rate */
+      if read(4) ige shr(i,1)
+      then stm.sample.rate=stm.sample.rate+1;        /* round up        */
+   end;
+
+   call psmread(SFILE.BASE,SF.HDR,sf.stereo);         /* stereo         */
+   stereo=read(psd);
+
+   M$NUM            = info(Hzinfo.noteinc);    /* store away the passed HZ info      */
+   M$DEN            = info(Hzinfo.notenum);    /* for later use.                     */
+   M$ADD            = shl(info(Hzinfo.noteadd),stereo);   
+   MPB$MRKSTART (0) = info(Hzinfo.ms.msb);    /* save away mark start               */
+   MPB$MRKSTART (1) = info(Hzinfo.ms.lsb);    /* info for this event                */
+   M$LOOP           = info(Hzinfo.onloop);    /* sf looping bool */
+   M$EXTEND         = info(Hzinfo.extend);    /* extend bool */
+   M$LEN        (0) = info(Hzinfo.len.msb);   /* event len */
+   M$LEN        (1) = info(Hzinfo.len.lsb);
+   M$TLEN       (0) = info(Hzinfo.tlen.msb);  /* total len */
+   M$TLEN       (1) = info(Hzinfo.tlen.lsb);
+   M$LLEN       (0) = info(Hzinfo.llen.msb);  /* loop len */
+   M$LLEN       (1) = info(Hzinfo.llen.lsb);
+
+   if (M$EXTEND=0) then do;                   /* want to limit scrubbing to event definition */
+   
+      call ADD32(M$LEN,MPB$MRKSTART,len);     /* add mark offset to event duration to get absolute length limit */
+
+      len(0)=shl(len(0),8)\shr(len(1),8);     /* convert to sec/wrd */
+      len(1)=len(1)&254;
+
+      call INDEX_TO_TIME(0,len(0),len(1),stm.sample.rate,stereo);
+
+      if ((time.seconds ilt tot.time(0))
+      or ((time.seconds = tot.time(0)) and (time.milliseconds ilt tot.time(1)))
+      or ((time.seconds = tot.time(0)) and (time.milliseconds = tot.time(1)) and (time.microseconds ilt tot.time(2))))
+      then do;
+         tot.time(0) = time.seconds;             /* override prior tot.time with event length */
+         tot.time(1) = time.milliseconds;
+         tot.time(2) = time.microseconds;
+      end;
+   end;
+
+   THIS.ITER = 0;                             /* reset for comparison */
+
+   return TRUE;                               /* variables ok   */
+
+end Initialize.for.POLY.Scrubbing;
+
+/* Call Start.POLY.Scrubbing to actually start the voice output.        */
+
+Start.POLY.Scrubbing: proc PUBLIC swapable;
+   dcl sr       fixed;
+
+   sr = run.syn; run.syn = 0;                /* stop re-entry            */
+
+   CALL MOUSE.PB.SET.ENABLE( 1);             /* PREPARE TO TURN ON VOICE */
+   CALL MOUSE.PB.SET.LENGTH(20);             /* 20MSEC LOOP */
+
+   Mouse.Playing = 3;                        /* mouse playback is now ON */
+
+   run.syn = sr;
+
+end Start.POLY.Scrubbing;
+
+/* Pass in the number of real milliseconds from the start of the sound  */
+/* file that you want to scrub.                                         */
+
+// Note: This is called from the low level real time loop.  Allow execution
+// at DTask level
+
+Update.POLY.Scrubbing: proc(the_pos) PUBLIC swapable;
+   dcl the_pos      array;   /* sector msb, numb, offset to scrub at    */
+   dcl sr           fixed;
+   dcl sec.msb      fixed;
+   dcl sec.numb     fixed;
+   dcl sec.offset   fixed;
+
+   /* note that most of the time MPB$SCRBPOS                            */
+   /* and the_time are the same arrays!!!                               */
+
+   if Mouse.Playing <> 3 then return;       /* check if playing         */
+
+   call blockmove(the_pos, MPB$SCRBPOS, 2); /* store for main loop      */
+
+   sr = run.syn; run.syn = 0;               /* stop re-entry            */
+
+   sec.msb = shr(the_pos(0), 8);            /* get sector msb           */
+   if the_pos(0) < 0                        /* extend sign maybe        */
+   then sec.msb = sec.msb \ "177400";
+
+   sec.numb = shl(the_pos(0),8) \ shr(the_pos(1), 8);
+
+   sec.offset = the_pos(1) & 254;           /* mask off LSB in case stereo */
+
+   call Mouse.PB.Update(sec.msb, sec.numb, sec.offset);
+
+   run.syn = sr;
+   
+end Update.POLY.Scrubbing;
+
+Compute.POLY.Scrubbing: proc(msecs) PUBLIC swapable;
+   dcl msecs      array;
+   dcl samples(1) fixed;
+   dcl len(1)     fixed;
+   dcl tlen(1)    fixed;
+
+   /* map to a 32 bit sample number relative to the start of the       */
+   /* file.  Allow signed math for scrubbing before start of file:     */
+
+   call COPY32(loc(addr(msecs(0))), BitMsbArray); /* copy to global    */
+   if msecs(0) < 0 then call neg32(BitMsbArray);  /* negate if needed  */
+   call ratio_multiply(1000, SAMP.SPEED);         /* get clock msecs   */
+   call ratio_multiply(16*M$NUM*M$ADD, M$DEN);
+   call ratio_multiply(625, 99);                  /* compute # of samples at this rate  */
+   if msecs(0) < 0 then call neg32(BitMsbArray);  /* negate            */
+
+   /* Now add in mark start time to get absolute file position         */
+   /* in real samples (that's because the mark start point in the      */
+   /* sound file is what is triggered after the delay field!!)         */
+
+   call ADD32(BitMSBArray, MPB$MRKSTART, samples); /* get abs file time */
+
+   call ADD32(M$LEN,MPB$MRKSTART,len);             /* add mark offset to event duration for comparison with "samples" */
+
+   if   (samples(0) < 0)                           /* scrubbing before start of file */
+   or  ((M$EXTEND = 0)                             /* limit scrubbing to event */
+   and (COM32(samples,MPB$MRKSTART) = lw#ilt))     /* mouse is before event in time */
+   then call STR32(-1,0,samples);                  /* ensures that we scrub digital zeros BEFORE the file */
+
+   else if  ((M$EXTEND = 0)                        /* limit scrubbing to event */
+   and  (COM32(samples,len) <> lw#ilt))            /* mouse is after event end time */
+   then do;
+      if (M$LOOP <> 0) then do;
+         last.play.sec = -1;
+         last.play.wrd =  0;
+      end;
+      call STR32(256,0,samples);                   /* ensures that we scrub zeros AFTER the file */
+   end;
+
+   else do;                                        /* definitely scrubbing audio if we get here */
+
+      /* check to start a long play from the mark start point */
+      if  (M$EXTEND=0)                             /* can only occur if scrubbing the "event" */
+      and (LAST.SILENCE<>0)                        /* we have just crossed the */
+      and (LAST.PLAY.SEC=0)                        /* mark start point from */
+      and (LAST.PLAY.WRD=0)                        /* left to right.        */
+      then do;
+         LAST.PLAY.SEC = shl(MPB$MRKSTART(0),8) \ shr(MPB$MRKSTART(1), 8);
+         LAST.PLAY.WRD = MPB$MRKSTART(1) & 254;    /* mask off LSB in case stereo */
+      end;
+
+      /* in looping files check for iterative subtract to find scrub point */
+      if (M$LOOP<>0) then do;                      /* scrubbing looping sf */
+         LAST.ITER = THIS.ITER;                    /* save last iter for comparison in long play check */
+         THIS.ITER = 0;                            /* init iteration counter */
+
+         call ADD32(M$TLEN,MPB$MRKSTART,tlen);     /* compute total len from start of sound file for comparison with "samples" */
+
+         do while (COM32(samples,tlen) <> lw#ilt);  
+            THIS.ITER = THIS.ITER + 1;             /* count iterations */
+            call SUB32(samples,M$LLEN,samples);    /* keep subtracting loop len until we are actually before sound file end */
+         end;
+      end;
+   end;
+
+/* Other things we could correct for some day:                            */
+/*    1. Multiple partial timbre situations (more than 1 sound file)      */
+
+   call Update.POLY.Scrubbing(samples);           /* mouse me ...      */
+
+end Compute.POLY.Scrubbing;
+
+Stop.POLY.Scrubbing: proc PUBLIC swapable;
+   dcl sr       fixed;
+
+   sr = run.syn; run.syn = 0;                /* stop re-entry            */
+
+   if Mouse.Playing = 3 then do;
+      CALL MOUSE.PB.SET.ENABLE(0);         /* SET UP FOR MOUSE VOICE SHUT OFF */
+      CALL MOUSE.PB.UPDATE(0, 0, 0);       /* SHUT IF OFF */
+      Mouse.Playing = 0;                   /* mouse playback is turned off */
+   end;
+
+   /* Restore STM variables in case we are on the L page:                  */
+
+   Stm.Sample.Rate = Saved.Stm.Sample.Rate;
+   Stereo          = Saved.Stereo;
+   Tot.Time(0)     = Saved.Tot.Time(0);
+   Tot.Time(1)     = Saved.Tot.Time(1);
+   Tot.Time(2)     = Saved.Tot.Time(2);
+
+   run.syn = sr;
+
+end Stop.POLY.Scrubbing;

@@ -1,0 +1,622 @@
+/* TDSNSOUA $TITLE  Timbre Display Screen (TDS) Code (Part 2 of 2) */
+
+/*
+   2/20/87 - BSW - part of the Numeric Timbre Display Module, TDSNSOU
+*/
+
+   UPDATE.COMPARATIVE.DISPLAY:  proc swapable;
+      dcl (i,j,k,base) fixed;
+      dcl redraw.coefs fixed static;
+
+      PROCESS.COMP.CHANGES:  proc(pt#); /* looks at parms in partial and redraws if needed */
+         dcl pt#               fixed; /* process changes on this partial */
+         dcl snap.val          fixed;
+         dcl disp.val          fixed;
+         dcl (new.hgs,old.hgs) fixed;
+         dcl parm.wd           data (12,0,13,10,7,9,1,2,3,11,4,1,1,1,1,6,5,5);
+         dcl any.changes       fixed;
+         dcl (i,j,k)           fixed;
+
+         any.changes=0;
+         j=16+pt#*60;
+         snap.val=disp.val xor trd.ptr;  /* prevent wrap error bugs */
+
+         do i=0 to 11; /* update envelope parameters */
+            write(mam)=trd.ptr;   write(mal)=j; snap.val=read(md);
+            write(mam)=trd.ptr+1; write(mal)=j; disp.val=read(md);
+
+            if snap.val<>disp.val then do;                  /* MAYBE update this parameter */
+               any.changes=1;
+               snap.val=EXTRACT.COMP.PARM(trd.ptr  ,pt#,i); /* save val into snap shot temp */
+               disp.val=EXTRACT.COMP.PARM(trd.ptr+1,pt#,i); /* save val into display temp */
+               if snap.val<>disp.val then do;               /* update this parameter */
+                  call DISPLAY.COMP.PARM(pt#,i,snap.val);   /* redraw value on screen */
+               end;
+
+               else if (new.prm.info      = 0)
+               and     (new.ABLE.prm.info = 0) 
+               then call run.syn.loop;
+
+               if (new.timbre.info      <> 0)
+               or (new.ABLE.timbre.info <> 0)
+               then return;
+            end;
+
+            j=j+1;
+         end;
+
+         write(mam)=trd.ptr;   write(mal)=8;
+         k=read(md);                     /* get sampled HGS */
+
+         j=12+16+pt#*60+k*12;
+         if redraw.coefs<>0 then do;     /* compare to prev HGS */
+            write(mam)=trd.ptr+1; write(mal)=j;
+            do i=0 to 11; write(mdi)=(-1); end; /* put illegal values here to force redraw below */
+         end;
+
+         snap.val=disp.val xor trd.ptr;  /* prevent wrap error bugs !!!!! */
+
+         do i=12 to 23; /* update harmonic coefficients */
+            write(mam)=trd.ptr;   write(mal)=j; snap.val=read(md);
+            write(mam)=trd.ptr+1; write(mal)=j; disp.val=read(md);
+
+            if snap.val<>disp.val then do;                  /* MAYBE update this parameter */
+               any.changes=1;
+               snap.val=EXTRACT.COMP.PARM(trd.ptr  ,pt#,i); /* save val into snap shot temp */
+               disp.val=EXTRACT.COMP.PARM(trd.ptr+1,pt#,i); /* save val into display temp */
+               if snap.val<>disp.val then do;               /* update this parameter */
+                  call DISPLAY.COMP.PARM(pt#,i,snap.val);   /* redraw value on screen */
+               end;
+
+               else if (new.prm.info      = 0)
+               and     (new.ABLE.prm.info = 0) 
+               then call run.syn.loop;
+
+               if (new.timbre.info      <> 0)
+               or (new.ABLE.timbre.info <> 0)
+               then return;
+            end;
+
+            j=j+1;
+         end;
+
+         /* $PAGE */
+
+         j=36+16+pt#*60;
+         do i=24 to 41; /* loop over number of params displayed on screen for this partial */
+            k=j+parm.wd(i-24);
+            write(mam)=trd.ptr;   write(mal)=k; snap.val=read(md);
+            write(mam)=trd.ptr+1; write(mal)=k; disp.val=read(md);
+
+            if snap.val<>disp.val then do;                  /* MAYBE update this parameter */
+               any.changes=1;
+               snap.val=EXTRACT.COMP.PARM(trd.ptr  ,pt#,i); /* save val into snap shot temp */
+               disp.val=EXTRACT.COMP.PARM(trd.ptr+1,pt#,i); /* save val into display temp */
+               if (snap.val<>disp.val) and ((i<>24) and (i<>26)) then do; /* if values are not the same and not # of frames or pitch randomness */              /* update this parameter */
+                  call DISPLAY.COMP.PARM(pt#,i,snap.val);   /* redraw value on screen */
+               end;
+
+               else if (new.prm.info      = 0)
+               and     (new.ABLE.prm.info = 0) 
+               then call run.syn.loop;
+
+               if (new.timbre.info      <> 0)
+               or (new.ABLE.timbre.info <> 0)
+               then return;
+            end;
+         end;
+
+         /* copy values from snap.shot area to display area if anything changed */
+
+         if any.changes<>0 then do;
+            write(mam)=trd.ptr; write(mal)=16+pt#*60;
+            call copy.in(addr(misc.buf(0)),num.params+2);
+            write(mam)=trd.ptr+1; write(mal)=16+pt#*60;
+            call copy.out(addr(misc.buf(0)),num.params+2);
+         end;
+      end PROCESS.COMP.CHANGES;
+
+
+      if inc.tds=0 then return;
+
+      do while (next.event.info<>0)
+      and      (num.of.d50.in.chars=0);         /* stay here for consecutive knob changes if no character is typed */
+         redraw.coefs=0;                        /* reset each time through loop */
+         call comparative.snap.shot;            /* take picture of timbre right now */
+         call run.syn.loop; 
+
+         if (new.timbre.info      <> 0)
+         or (new.ABLE.timbre.info <> 0)
+         then return;
+
+         if (token(0)=0) and (tds.pt#<>-1) then do;      /* only look for button activity if not typing too */
+            k=active.parms(0);
+            if k<>0 then do;             /* some parameter is active/selected */
+               k=shr(active.parms(k),8);
+               if (k>=12) and (k<24) then k=k+hgs*12; /* adjust parm# for HGS */
+               if k<>last.parm# then do; /* different from last one */
+                  i=MAP.SYN.TO.COMP(k);
+                  if i<>-1 then do;      /* have a valid mapping */
+                     last.parm#=k;
+                     tds.parm#=i;
+                     token(0)=0;
+                     call SET.MAX.TLEN(s.tds.acomp);  /* set max token length for new field */
+                     call POS.COMPARATIVE.CURSOR; /* move cursor to new parm */
+                  end;
+               end;
+            end;
+            j=FIND.PARTIAL; /* look up first selected partial */
+            if j<>tds.pt# then do; /* if different from current */
+               tds.pt#=j; /* change */
+               token(0)=0;
+               call POS.COMPARATIVE.CURSOR; /* move cursor to reflect change */
+            end;
+         end;
+
+         write(mam)=trd.ptr;   write(mal)=8; j=read(md); /* look up snap shot HGS value */
+         write(mam)=trd.ptr+1; write(mal)=8;
+         if j<>read(md) then do;                /* compare to snap shot HGS */
+            write(md)=j;                        /* bring displayed HGS up to date */
+            call LABEL.HARMONICS;               /* update coef label on screen */
+            redraw.coefs=1;
+         end;
+
+         /* $PAGE */
+
+         do i=0 to 3;                             /* loop over partial timbres */
+            write(mam)=trd.ptr;   write(mal)=i+4; /* look up frame type for this partial */
+            j=read(md);
+            write(mam)=trd.ptr+1; write(mal)=i+4; /* look up frame type for this partial */
+
+            if read(md)<>j then do;             /* have some change in timbre frame type */
+               if (read(md)=pt.type) or (j=pt.type) then do; /* changing between synth and sampled partial */
+                  /* put illegal values into displayed harmonics to force complete redraw */
+                  write(mal)=12+16+i*60;        /* point at coefs */
+                  do k=0 to 23; write(mdi)=(-1); end; /* change all to illegal values */
+                  write(mal)=i+4;               /* restore to old ptr */
+               end;
+               write(md)=j;                     /* update frame type info */
+               call cpos(6+i*3,2);
+               if j=tf.type                     /* partial has timbre frames */
+               then call pc(asc.star);          /* print a star */
+               else call pc(sp);                /* remove any star */
+               call run.syn.loop;
+            end;
+
+            if (new.timbre.info      <> 0)
+            or (new.ABLE.timbre.info <> 0)
+            then return;
+
+            write(mam)=trd.ptr;   write(mal)=i; /* look up current partial state */
+            j=read(md);
+            write(mam)=trd.ptr+1; write(mal)=i; /* look up displayed partial state */
+
+            if (read(md)<>0) and (j=0) then do;
+               write(md)=0;                     /* mark partial as not displayed */
+               call remove.comp.partial(i);
+            end;
+            else if (read(md)=0) and (j<>0) then do;
+               write(md)=1;                     /* mark partial as displayed */
+               call display.comp.partial(i);
+            end;
+            else if (read(md)<>0) and ((next.event.info&bits(i))<>0)
+            then call process.comp.changes(i);    /* process changes in individual parms */
+
+            if (new.timbre.info      <> 0)
+            or (new.ABLE.timbre.info <> 0)
+            then return;
+         end;
+         next.event.info = new.ABLE.prm.info;
+         new.ABLE.prm.info = 0;
+      end;
+   end UPDATE.COMPARATIVE.DISPLAY;
+
+   /* $SUBTITLE  Comparative Parameter Deposit and Toggle Routines */
+
+   COMPARATIVE.DEPOSIT:  proc swapable; /* parses parameter value and updates timbre */
+      dcl (val,p#) fixed;
+
+      /* NOTE:  Routine changes value of parameter denoted by TDS.PT# and
+         TDS.PARM#.  */
+
+      call REMOVE.ERR;
+
+      if token(0)=0 then return;
+
+      p#=MAP.COMP.TO.SYN(tds.parm#); /* remap TDS parm to Synclavier parm number */
+
+      val=PARSE.SYNCLAVIER.PARM(0,p#); /* read a Synclavier parameter */
+
+      if ertyp=0 then do;     /* no errors -- do deposit */
+         call STORE.SYNCL.PARAM(tds.pt#,0,par.l+p#,val);
+         call UPDATE.COMP.PARM(trd.ptr  ,tds.pt#,tds.parm#,tds.value); /* put new value into snap shot area */
+         call UPDATE.COMP.PARM(trd.ptr+1,tds.pt#,tds.parm#,tds.value); /* and into display area */
+         call DISPLAY.COMP.PARM(tds.pt#,tds.parm#,tds.value); /* redraw value on screen */
+      end;
+      else do; /* restore original value */
+         val=EXTRACT.COMP.PARM(trd.ptr+1,tds.pt#,tds.parm#); /* get original value */
+         call DISPLAY.COMP.PARM(tds.pt#,tds.parm#,val);      /* and redisplay it */
+      end;
+      token(0)=0;             /* reset token to empty */
+   end COMPARATIVE.DEPOSIT;
+
+   COMPARATIVE.TOGGLE:  proc swapable; /* toggles or increments parameter value and updates timbre */
+      dcl (val,p#,i) fixed;
+
+      /* NOTE:  Routine changes value of parameter denoted by TDS.PT# and
+         TDS.PARM#.  */
+
+      call REMOVE.ERR;
+
+      if (new.timbre.info      <> 0)
+      or (new.ABLE.timbre.info <> 0)
+      then do;
+         token(0) = 0; return;
+      end;
+
+      if (tds.parm#=30) or ((tds.parm#>34) and (tds.parm#<38)) then do; /* VIBRATO Wave or I,Q,B bits */
+         if tds.parm#=30 then do;   /* if Vibrato wave */
+            p#=MAP.COMP.TO.SYN(tds.parm#);   /* remap TDS parm to Synclavier Parm */
+            val=EXTRACT.COMP.PARM(trd.ptr+1,tds.pt#,tds.parm#); /* get original value */
+            tds.value=val+1;         /* and new value */
+            if tds.value>=12 then tds.value=0; /* if greater than a random wave, wrap around to a sine wave */
+            call STORE.SYNCL.PARAM(tds.pt#,0,par.l+p#,tds.value);
+         end;
+         else do; /* VIBRATO I,Q,B bits */
+            i=p.lookup(TIM.HEAD.LOOKUP(0,tim.partial.pointers+tds.pt#)+p.vibwave);
+            tds.value=i xor shl("20",tds.parm#-35);    /* toggle the correct bit */
+            write(md)=tds.value;                       /* update timbre def */
+            if new.pan=0 then call DISPLAY.PAR;        /* redisplay vibrato wave with new bits */
+            call COMPUTE.TOGGLE.DISPLAY;               /* redisplay all toggle buttons */
+            tds.value=tds.value & shl("20",tds.parm#-35); /* keep only this bit */
+         end;
+         call UPDATE.COMP.PARM(trd.ptr  ,tds.pt#,tds.parm#,tds.value); /* put new value into snap shot area */
+         call UPDATE.COMP.PARM(trd.ptr+1,tds.pt#,tds.parm#,tds.value); /* and into display area */
+         call DISPLAY.COMP.PARM(tds.pt#,tds.parm#,tds.value); /* redraw value on screen */
+      end;
+      else do; /* space bar toggles the harmonic groups unless VIBRATO I,Q,B bits */
+         call misc.button(hgs1.l+1-hgs-misc.l,1,1); /* fake press of hgs1 or hgs2 */
+         call misc.button(hgs1.l+1-hgs-misc.l,0,1); /* fake release of button */
+      end;
+
+   end COMPARATIVE.TOGGLE;
+
+   /* $SUBTITLE  TDS Comparative Display Character Processing Routine */
+
+   COMPARATIVE.DISPLAY.INPUT:  proc(in.cmd,in.arg) swapable; /* handle char typed on TDS comparative display */
+      dcl (in.cmd,in.arg) fixed;  /* input command and argument */
+      dcl i               fixed;
+
+      call remove.err; /* erase any displayed error */
+      do case (in.cmd); /* do depending upon input command */
+         do;           /* 0:  Character Input */
+            if (lower.a<=in.arg) and (in.arg<=lower.z) then in.arg=in.arg-"40"; /* make uppercase */
+
+            if in.arg=ESC                         /* ESC:  Return to Main Menu */
+            then EXIT.MY.SCREEN=1;                /* return to Main Menu */
+
+            else if in.arg=cret then do;
+               if ((token(0)=0) and (tds.pt#=-1))  /* if nothing typed and on the menu selection line */
+               then call CHANGE.TDS.STATE(tds.choice,s.tds.acomp);
+               else do;                                 /* if something typed and carriage return */
+                  call COMPARATIVE.DEPOSIT;             /* enter new value */
+                  call POS.COMPARATIVE.CURSOR;          /* reposition cursor */
+               end;
+            end;                                        /* of if carriage return */
+            else if in.arg=sp then do;            /* SPACE:  toggle parameter value */
+               token(0)=0;                    /* ignore anything typed so far */
+               call COMPARATIVE.TOGGLE;
+               call POS.COMPARATIVE.CURSOR;
+            end;
+            else if (in.arg=del) or (in.arg="32") then do; /* DELETE or CTRL-Z: Erase last char */
+               if token(0)<>0 then do;             /* chars to delete */
+                  token(0)=token(0)-1;
+                  if token(0)=0 then do;           /* token now has zero length */
+                     in.arg=EXTRACT.COMP.PARM(trd.ptr+1,tds.pt#,tds.parm#); /* get original value */
+                     call DISPLAY.COMP.PARM(tds.pt#,tds.parm#,in.arg);      /* and redisplay it */
+                     call POS.COMPARATIVE.CURSOR;                       /* reposition cursor */
+                  end;
+                  else do;
+                     call POS.COMPARATIVE.CURSOR;                     /* reposition cursor */
+                     call pc(sp); call pc(bs);
+                  end;
+               end;
+            end;
+
+            /* $PAGE */
+
+            else if in.arg=l.arr then do;   /* LEFT ARROW: move cursor to left */
+               if tds.pt#=-1 then do;   /* if on menu selection line */
+                  tds.last.choice=tds.choice;
+                  tds.choice=tds.choice-1;
+                  if tds.choice<0 then tds.choice=0;
+                  call POS.CHOICE.CURSOR(2);
+               end;
+               else do;                 /* move around the display */
+                  call COMPARATIVE.DEPOSIT;
+
+                  if      tds.parm#=12 then tds.parm#= 5;
+                  else if tds.parm#=18 then tds.parm#=11;
+
+                  else if (tds.parm#=6) then tds.parm#=17;
+                  else if (tds.parm#=0) and (tds.pt#<>0) then do;
+                     tds.pt#=tds.pt#-1; tds.parm#=23;
+                  end;
+                  else if (tds.parm#=25) then do;
+                     if tds.pt#<>0 then do;
+                        tds.pt#=tds.pt#-1; tds.parm#=41;
+                     end;
+                     else do;
+                        tds.pt#=3; tds.parm#=23;
+                     end;
+                  end;
+
+                  else if (tds.parm#<>0) and (tds.parm#<>6)
+                  and     (tds.parm#<>25) then tds.parm#=tds.parm#-1;
+                  if tds.parm#=26 then tds.parm#=tds.parm#-1;  /* map to partial tuning, avoid pitch randomness */
+
+                  call SET.MAX.TLEN(s.tds.acomp);
+                  call POS.COMPARATIVE.CURSOR;
+                  call SELECT.COMPARATIVE.PARAMETER(tds.pt#,tds.parm#);
+               end;
+            end;
+            else if in.arg=r.arr then do;   /* RIGHT ARROW: move cursor to right */
+               if tds.pt#=-1 then do;   /* move around menu selection */
+                  tds.last.choice=tds.choice;
+                  tds.choice=tds.choice+1;
+                  if tds.choice>5 then tds.choice=5;
+                  call POS.CHOICE.CURSOR(2);
+               end;
+               else do;
+                  call COMPARATIVE.DEPOSIT;
+
+                  if      tds.parm#= 5 then tds.parm#=12; /* go to first group of six harmonics */
+                  else if tds.parm#=11 then tds.parm#=18; /* go second group of six harmonics */
+
+                  else if (tds.parm#=17) then tds.parm#=6; /* and go to harmonic envelope delay */
+                  else if (tds.parm#=23) then do;          /* at end of second group of six harmonics */
+                     if tds.pt#<>3 then do;
+                        tds.pt#=tds.pt#+1; tds.parm#=0;
+                     end;
+                     else do;
+                        tds.pt#=0; tds.parm#=25;
+                     end;
+                  end;
+                  else if (tds.parm#=41) and (tds.pt#<>3) then do;
+                     tds.pt#=tds.pt#+1; tds.parm#=25;
+                  end;
+
+                  else if (tds.parm#<>17) and (tds.parm#<>23)
+                  and     (tds.parm#<>41) then tds.parm#=tds.parm#+1;
+                  if tds.parm#=26 then tds.parm#=tds.parm#+1; /* map to partial volume, avoid pitch randomness */
+
+                  call SET.MAX.TLEN(s.tds.acomp);
+                  call POS.COMPARATIVE.CURSOR;
+                  call SELECT.COMPARATIVE.PARAMETER(tds.pt#,tds.parm#);
+               end;
+            end;
+
+            /* $PAGE */
+
+            else if in.arg=u.arr then do;   /* UP ARROW: move cursor up */
+               call COMPARATIVE.DEPOSIT;
+
+               if tds.parm#>23 then do;   /* if a parameter setting */
+                  if tds.pt#<>0 then tds.pt#=tds.pt#-1;
+                  else do;
+                     tds.pt#=3;
+                     if      tds.parm#<32 then tds.parm#=tds.parm#-25+6;
+                     else if tds.parm#<38 then tds.parm#=tds.parm#-32+18;
+                     else                      tds.parm#=23;
+                  end;
+               end;
+
+               else if ((tds.parm#> 5) and (tds.parm#<12)) /* if a harmonic envelope parameter */
+               or      ((tds.parm#>17) and (tds.parm#<24)) /* if lower level group of harmonics */
+               then tds.parm#=tds.parm#-6;
+
+               else if (((tds.parm#>=0) and (tds.parm#<6)) /* if a volume envelope parameter */
+               or      ((tds.parm#>11) and (tds.parm#<18)))/* if top-le4vel group of harmonics */
+               and (tds.pt#<>-1)
+               then do;
+                  tds.pt#=tds.pt#-1;
+                  if tds.pt#=-1 then call POS.CHOICE.CURSOR(2);
+                  else tds.parm#=tds.parm#+6;
+               end;
+
+               call SET.MAX.TLEN(s.tds.acomp);
+               call POS.COMPARATIVE.CURSOR;
+               call SELECT.COMPARATIVE.PARAMETER(tds.pt#,tds.parm#);
+            end;
+
+            else if in.arg=d.arr then do;   /* DOWN ARROW: move cursor down */
+               call COMPARATIVE.DEPOSIT;
+
+               if tds.pt#=-1 then tds.pt#=tds.pt#+1;
+
+               else if ((tds.parm#>=0) and (tds.parm#< 6)) /* if volume envelope parameters */
+               or ((tds.parm#>11) and (tds.parm#<18))      /* or if top level of harmonics */
+               then tds.parm#=tds.parm#+6;
+
+               else if ((tds.parm#> 5) and (tds.parm#<12)) /* if harmonic envelope parameters */
+               or      ((tds.parm#>17) and (tds.parm#<24)) /* or if lower level of harmonics */
+               then do;
+                  if tds.pt#<>3
+                  then do; tds.pt#=tds.pt#+1; tds.parm#=tds.parm#-6; end;
+                  else do;
+                     tds.pt#=0;
+                     if tds.parm#<12     /* if envelope parameter */
+                     then tds.parm#=tds.parm#- 6+25;
+                     else tds.parm#=tds.parm#-18+32;
+                     if tds.parm#=26 then tds.parm#=tds.parm#+1; /* if pitch randomness then map to next parameter */
+                  end;
+               end;
+               else if (tds.parm#>23) and (tds.pt#<>3)
+               then tds.pt#=tds.pt#+1;
+
+               call SET.MAX.TLEN(s.tds.acomp);
+               call POS.COMPARATIVE.CURSOR;
+               call SELECT.COMPARATIVE.PARAMETER(tds.pt#,tds.parm#);
+            end;
+
+            /* $page */
+
+            else if in.arg=home then do;    /* HOME:  reposition to top left */
+               call COMPARATIVE.DEPOSIT;
+               tds.pt#=0; tds.parm#=0;
+               call SET.MAX.TLEN(s.tds.acomp);
+               call POS.COMPARATIVE.CURSOR;
+               call SELECT.COMPARATIVE.PARAMETER(tds.pt#,tds.parm#);
+            end;
+            else if ((in.arg=asc.plus) or (in.arg=asc.min) or (in.arg=dot)
+            or      ((in.arg>=asc.0) and (in.arg<=asc.9)))
+            and     (token(0) ILT max.tlen) then do;   /* printing char and token not too long */
+               call pbyte(token,token(0),in.arg);
+               token(0)=token(0)+1;
+               call POS.COMPARATIVE.CURSOR;
+            end;
+            else call POS.COMPARATIVE.CURSOR;          /* reposition cursor in case error message erase */
+         end;                                          /* of Character input */
+
+         do;                                              /* 1: absolute select */
+            call COMPARATIVE.DEPOSIT;
+            tds.pt#=#ypos;
+            if tds.pt#=-1 then do;
+               tds.last.choice=tds.choice;                /* update last choice */
+               tds.choice=in.arg;
+               call CHANGE.TDS.STATE(tds.choice,s.tds.acomp);
+            end;
+            else do;
+               last.parm#=tds.parm#;
+               tds.parm#=shr(in.arg,8);
+
+               call SET.MAX.TLEN(s.tds.acomp);
+               call SELECT.COMPARATIVE.PARAMETER(tds.pt#,tds.parm#);
+            end;
+            call POS.COMPARATIVE.CURSOR;
+         end;                                     /* of if absolute select */
+         ;                                        /* 2: scroll down */
+         ;                                        /* 3: scroll up */
+         EXIT.MY.SCREEN=1;                        /* 4: return to previous screen */
+      end;                                        /* of do depending upon input command */
+   end COMPARATIVE.DISPLAY.INPUT;
+
+   /* $Subtitle Numeric Timbre Display Mouse Mapping */
+
+   COMPARATIVE.DISPLAY.MOUSE.POS:  proc(x,y) swapable;/* TDS Alpha Comparative Display Mouse Positioner */
+      /*
+      Considers the following TDS variables:
+         tds.parm#        -> current logical parm number 
+         tds.pt#          -> current partial number
+         last.parm#       -> last Synclavier parm to be selected
+         tds.choice       -> screen selected
+         tds.last.choice  -> last screen selected
+
+      */
+      dcl (x,y)             fixed;  /* mouse position in screen coordinates */
+      dcl i                 fixed;  /* index to look up table */
+
+      dcl selection.y       lit '2';
+      dcl tds.pt#.y         data (12,6,7,9,10,12,13,15,16,20,21,22,23);
+      dcl tds.env.parm#.x   data (7,5,11,17,23,29,35,44);
+      dcl tds.harm.parm#.x  data (7,44,50,56,62,68,74,79);
+      dcl comp.parm.x.coord data (19,0,3,0,11,17,24,31,36,42,48,54,59,60,61,63,68,73,77,79);
+
+
+      if inc.tds=0 then return;
+
+      if mouse.hole(x,y) then do;                    /* if mouse scurries to mouse hole */
+         call COMPARATIVE.DISPLAY.INPUT(in.rtps,0);  /* return to previous screen */
+         return;
+      end;
+
+      if err.displayed<>0 then do;
+         call REMOVE.ERR;             /* remove any error */
+         call PRINT.CCAT;             /* show current cat name */
+         call POS.COMPARATIVE.CURSOR; /* reposition cursor correctly on menu */
+      end;
+
+      /* convert pixel coordinates to screen coordinates */
+      x=CONVERT.MOUSE.X(x);      /* 0-79 */
+      y=CONVERT.MOUSE.Y(y);      /* 0-23 */
+
+      #ypos=previous.partial;    /* set ypos to current partial number */
+      if y=selection.y then do;  /* mouse points to the menu selection */
+         i=MOUSE.SELECT.TDS.SCREEN(x);
+         if i>=0 then do; 
+            #ypos=-1;            /* if on the menu selection line */
+            tds.last.choice=tds.choice;                /* update last choice */
+            tds.choice=i;
+            call CHANGE.TDS.STATE(tds.choice,s.tds.acomp);
+         end;
+      end;
+      else if (y>=tds.pt#.y(1)) and (y<=tds.pt#.y(tds.pt#.y(0))) then do; /* if mouse in the partial timbre area area */
+         i=1;                    /* see if on a specific partial timbre row */
+         do while (i<=tds.pt#.y(0)) and (y<>tds.pt#.y(i));
+            i=i+1;
+         end;
+
+         if y=tds.pt#.y(i) then do;      /* if on a specific partial timbre row */
+            if y<tds.pt#.y(9) then do;   /* if an envelope or harmonic parameter */
+               #ypos=shr((i-1),1);       /* set the tds.pt# */
+
+               i=1;
+               do while (i<=tds.env.parm#.x(0)) and (x>tds.env.parm#.x(i));
+                  i=i+1;
+               end;
+               if ((x<tds.env.parm#.x(i)-1) or
+               ((x=tds.env.parm#.x(i)) and (i<tds.env.parm#.x(0)))) then do; /* must be an envelope parameter */
+                  if x=tds.env.parm#.x(i)
+                  then i=i-1;
+                  else i=i-2;
+                  if i>=0 then do;            /* if valid */
+                     if (y mod 3=0)           /* if on the first row */
+                     then x=i;
+                     else x=i+6;
+                     call COMPARATIVE.DISPLAY.INPUT(in.abss,shl(x,8));       /* TDS Alpha Comparative Display */
+                  end;
+               end;
+               else if (i>=tds.env.parm#.x(0)) and (x>=tds.env.parm#.x(i)) then do;   /* must be a harmonic */
+                  i=1;
+                  do while (i<=tds.harm.parm#.x(0)) and (x>tds.harm.parm#.x(i));
+                     i=i+1;
+                  end;
+
+                  /* $page */
+
+                  if ((x<tds.harm.parm#.x(i)-1) or (x=tds.harm.parm#.x(i))
+                    or ((i=tds.harm.parm#.x(0)) and (x=tds.harm.parm#.x(i)-1))) then do;
+                     if ((x=tds.harm.parm#.x(i)) and (i<tds.env.parm#.x(0)))  /* if equal but not at end */
+                     then i=i-1;
+                     else i=i-2;
+                     if i>=0 then do;
+                        if (y mod 3=0)                 /* if on the first row */
+                        then x=i+12;
+                        else x=i+18;
+                        call COMPARATIVE.DISPLAY.INPUT(in.abss,shl(x,8));       /* TDS Alpha Comparative Display */
+                     end;
+                  end;
+               end;
+            end;                                   /* if within the partial timbre envelope parameter area */
+            else do;                               /* must be a partial, vibrato, or stereo parameter */
+               #ypos=tds.pt#.y(i)-tds.pt#.y(9);    /* map tds.pt# to the partial number */
+               i=1;
+               do while (i<=comp.parm.x.coord(0)) and (x>comp.parm.x.coord(i)); /* do while within the table limits */
+                  i=i+1;
+               end;
+               if ((x<comp.parm.x.coord(i)-1) or (x=comp.parm.x.coord(i))) then do;
+                  if ((x=comp.parm.x.coord(i)) and (i<>comp.parm.x.coord(0)))
+                  then i=i-1;
+                  else i=i-2;                 /* keep stereo pan within limits */
+                  if i<>0 then do;            /* if within partial tuning field or left margin*/
+                     if i=2 then i=1;               /* compensate for partial tuning */
+                     x=i+24;
+                     call COMPARATIVE.DISPLAY.INPUT(in.abss,shl(x,8));       /* TDS Alpha Comparative Display */
+                  end;
+               end;
+            end;
+         end;
+      end;
+   end COMPARATIVE.DISPLAY.MOUSE.POS;
+
+

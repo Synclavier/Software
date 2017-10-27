@@ -1,0 +1,594 @@
+/* SMG-REGN   $TITLE  Region Routines
+
+   Modified:
+   12/01/87 - MWH/TSS - Make regions default to return to previous object
+   11/05/87 - MWH - Fix return to previous object for GFX button table
+   11/04/87 - MWH - Add in Cameron's "graphics button table" code
+   10/01/87 - MWH - Better error return
+   09/25/87 - MWH - Use literals for suffix lengths
+   
+*/
+
+Define.Transparent.Region: proc(id,ULR,ULC,LRR,LRC) public swapable; /* set up structure for simplest rectangular graphics mode object */
+   dcl id        fixed; /* ID # for this region */
+   dcl (ULR,ULC) fixed; /* upper left  (r,c) coords in transparent units */
+   dcl (LRR,LRC) fixed; /* lower right (r,c) coords in transparent units */
+
+   Id = Allocate.Id(Id);   /* keep system info up to date, possibly auto allocate id */
+
+   if Allocate.New.Object(O#Hlen) then do; /* allocate storage for new object */
+      call Write.Object(Object.Ptr + O#Type, O$Graphics.Region);
+      call Write.Object(Object.Ptr + O#ULX,  gpos.x(ULC*100));
+      call Write.Object(Object.Ptr + O#ULY,  gpos.y(ULR*100)+gpix.y(100));
+      call Write.Object(Object.Ptr + O#LRX,  gpos.x(LRC*100)+gpix.x(100));
+      call Write.Object(Object.Ptr + O#LRY,  gpos.y(LRR*100));
+      call Write.Object(Object.Ptr + O#Id,   Id);
+      call Write.Object(Object.Ptr + O#Action,Default.Action | O#ACT.Prev.Obj);
+      call Write.Object(Object.Ptr + O#Attr,  Default.Attr);
+      Screen.Changed = true;
+      return Id;
+   end;
+   else return 0;
+end Define.Transparent.Region;
+
+Define.Graphics.Region: proc(id,ULX,ULY,LRX,LRY) public swapable; /* set up structure for simplest rectangular graphics mode object */
+   dcl id        fixed; /* ID # for this region */
+   dcl (ULX,ULY) fixed; /* upper left  (X,Y) coords in graphics units */
+   dcl (LRX,LRY) fixed; /* lower right (X,Y) coords in graphics units */
+
+   Id = Allocate.Id(Id);   /* keep system info up to date, possibly auto allocate id */
+
+   if Allocate.New.Object(O#Hlen) then do; /* allocate storage for new object */
+      call Write.Object(Object.Ptr + O#Type, O$Graphics.Region);
+      call Write.Object(Object.Ptr + O#ULX,  ULX);
+      call Write.Object(Object.Ptr + O#ULY,  ULY);
+      call Write.Object(Object.Ptr + O#LRX,  LRX);
+      call Write.Object(Object.Ptr + O#LRY,  LRY);
+      call Write.Object(Object.Ptr + O#Id,   Id);
+      call Write.Object(Object.Ptr + O#Action,Default.Action | O#ACT.Prev.Obj);
+      call Write.Object(Object.Ptr + O#Attr,  Default.Attr);
+      Screen.Changed = true;
+      return Id;
+   end;
+   else return 0;
+end Define.Graphics.Region;
+
+Set.Graphics.Region: proc (id,ULX,ULY,LRX,LRY) public swapable;
+   dcl id          fixed;
+   dcl (ULX,ULY)   fixed;
+   dcl (LRX,LRY)   fixed;
+   dcl (x,y)       fixed;
+
+   if Locate.Object(id) then do;
+      if Read.Object(Object.Ptr+O#Type) = O$Graphics.String then do;
+         x = Read.Object(Object.Ptr+O#ULX) + Read.Object(Object.Ptr+O#Suffix);
+         y = Read.Object(Object.Ptr+O#LRY) + Read.Object(Object.Ptr+O#Suffix+1);
+         call Write.Object(Object.Ptr+O#Suffix,  x-ULX);
+         call Write.Object(Object.Ptr+O#Suffix+1,y-LRY);
+      end;
+
+      call Write.Object(Object.Ptr+O#ULX,ULX);
+      write(mdi) = ULY;
+      write(mdi) = LRX;
+      write(mdi) = LRY;
+      return 1;
+   end;
+
+return 0;
+end Set.Graphics.Region;
+
+/* $page - routines for graphics button table */
+
+/* Define graphs button table defines a graphics region for use */
+/* as a  graphics button table.   These items are available     */
+/* only on the MG600 terminal                                   */
+
+/* The object is defined as a graphics region.                  */
+
+/* Mouse presses are mapped (by the user) to row/col            */
+/* using the Map Graphics Button Table Mouse Press routine      */
+/* below                                                        */
+
+/* NOTE:  table is defined using TRANSPARENT COORDINATES * 100  */
+
+/* the interior of the table can be filled with dividers        */
+/* if desired                                                   */
+
+/* ALL DRAWING IS DONE IN COMPLEMENT MODE ALL THE TIME          */
+
+
+Define.Graphics.Button.Table: proc(id,ULX,ULY,LRX,LRY, Cols, Rows, Bitinfo) public swapable; 
+   dcl id        fixed; /* ID # for this region */
+   dcl (ULX,ULY) fixed; /* upper left  (X,Y) coords in tchar*100 units */
+   dcl (LRX,LRY) fixed; /* lower right (X,Y) coords in tchar*100 units */
+   dcl (cols)    fixed; /* # of columns to create                      */
+   dcl (rows)    fixed; /* # of rows    to create                      */
+   dcl (bitinfo) fixed; /* control bits                                */
+
+   dcl (i,j)     fixed;
+   dcl (vpix)    fixed;
+   dcl (hpix)    fixed;
+
+   ULX = gpos.x(ULX);    /* map from transp coordinates to				*/
+   ULY = gpos.y(ULY);    /* pixel coordinates								*/
+   LRX = gpos.x(LRX);
+   LRY = gpos.y(LRY);
+
+   load lrx-ulx; div cols; hpix = res;	/*	compute vert + hor pixels	*/
+   load uly-lry; div rows; vpix = res;	/*	rounded down					*/
+
+   Id = Allocate.Id(Id);   /* keep system info up to date, possibly auto allocate id */
+
+   if Allocate.New.Object(O#Hlen + O#GBTAB.Size + cols*rows) then do; /* allocate storage for new object */
+      call Write.Object(Object.Ptr + O#Type, O$Graphics.Region);
+      call Write.Object(Object.Ptr + O#ULX,  ULX);
+      call Write.Object(Object.Ptr + O#ULY,  ULY);
+      call Write.Object(Object.Ptr + O#LRX,  LRX);
+      call Write.Object(Object.Ptr + O#LRY,  LRY);
+      call Write.Object(Object.Ptr + O#Id,   Id);
+      call Write.Object(Object.Ptr + O#Action,Default.Action | O#ACT.Prev.Obj);
+      call Write.Object(Object.Ptr + O#Attr,  Default.Attr);
+
+      /* Set up control information       */
+
+      call Write.Object(Object.Ptr + O#GBTAB.Cols     , Cols);
+      call Write.Object(Object.Ptr + O#GBTAB.Rows     , Rows);
+      call Write.Object(Object.Ptr + O#GBTAB.Hpix     , Hpix);
+      call Write.Object(Object.Ptr + O#GBTAB.Vpix     , Vpix);
+      call Write.Object(Object.Ptr + O#GBTAB.Bits     , Bitinfo);
+
+      /* Set up information for each cell */
+
+      do i = 0 to (rows*cols)-1;
+         call Write.Object(Object.Ptr + O#GBTAB.Cell.Info + i, 0);
+      end;
+
+      if (Bitinfo & O#GBTAB.Divide) <> 0   /* draw axes if desired */
+      then do;
+
+         VECTOR_MODE;               /* vector                    */
+         CALL DATA_LEVEL(2);        /* compl                     */
+
+         /* ULX,ULY = upper left corner */
+
+         /* fill in interior cross hatches */
+
+         do i = 1 to cols-1;                     /* vertical lines */
+            call CONNECT(ULX + i*Hpix, ULY - 1,  /* between cols   */
+                         ULX + i*Hpix, LRY + 1);
+         end;
+
+         do i = 1 to rows-1;       /* rows */
+            do j = 0 to cols-2;    /* cols */
+               call CONNECT(ULX + (j  )*Hpix + 1, ULY - i*Vpix,
+                            ULX + (j+1)*Hpix - 1, ULY - i*Vpix);
+            end;
+            /* connect final horiz line all the way to edge */
+            /* in case pixels aren't integral number        */
+            call CONNECT(ULX + (cols-1)*Hpix + 1, ULY - i*Vpix,
+                         LRX                 - 1, ULY - i*Vpix);
+         end;
+
+         call DATA_LEVEL(0);
+         TRANSPARENT_MODE;
+
+      end;
+
+      Screen.Changed = true;
+      return Id;
+   end;
+   else return 0;
+end Define.Graphics.Button.Table;
+
+/* $page - routine to handle graphics button table input */
+
+GET.REGION: proc(ptr) returns (fixed) swapable;
+   dcl ptr   fixed;
+   dcl event fixed;
+
+   if (Read.Object(ptr+O#Action)&O#ACT.Prev.Obj) <> 0  /* Return to previous object bit set */
+   then do;
+      Last.Event.Code = Get.Screen.Event;
+      Last.Event.Info = S#ObjectTerminate;      /* Nothing happened */
+      return Last.Event.Code;
+   end;
+
+   call Enable.Object.and.User.Gets(ptr);
+   if Screen.Changed <> false            /* See if some objects need updating */
+   then call Update.Screen;              /* Will return right away if events pending */
+   event = Get.Next.Event;
+   call Disable.Object.and.User.Gets(ptr);
+   return event;
+
+end GET.REGION;
+
+/* $page - more routines to handle graphics button tables */
+
+/* The following routines handle tables of graphics buttons */
+
+dcl Hor.Char.Field data public (7, 8, 12, 13);  /* horizontal character field size  */
+dcl Hor.Char.Gap   data public (2, 2,  5,  5);  /* spacing between upper case chars */
+dcl Ver.Char.Size  data public (7, 8, 12, 13);  /* height or chars above base line  */
+dcl Ver.Char.Desc  data public (3, 3,  5,  5);  /* descenders used (lc only)        */
+
+
+/* Deposit graphics button table label subroutine is a routine that */
+/* can be used to plot a 1 line or 2 line button label at any       */
+/* position on the screen.   It is normally not called directly     */
+/* by the user.   The user normally calls the main routine (below)  */
+
+/* NOTE:  copy all string constants to dynamic arrays before        */
+/* passing to this routine or they will end up in internal          */
+/* memory                                                           */
+
+/* 4 pericom graphics character sizes are available (0 is the       */
+/* smallest).   If the button desires a 1 line label, pass a null   */
+/* string (use an ARRAY, however) as the second string argument     */
+
+/* the button labels are correctly centered both vertically         */
+/* and horizontally                                                 */
+
+
+Deposit.Graphics.Button.Table.Label.Subroutine: proc (x, y, Row, Col, Vpix, Hpix, Size, Str1, Str2) swapable;
+   dcl (x,y)      fixed;    /* upper left x,y pixel coordinates       */
+   dcl (row)      fixed;    /* row of table (0 = top) to deposit into */
+   dcl (col)      fixed;    /* col of table (0 = lef) to deposit into */
+   dcl (Vpix)     fixed;    /* vertical pixel spacing of table        */
+   dcl (Hpix)     fixed;    /* horizontal pixel spacing of table      */
+   dcl (Size)     fixed;    /* character size to use                  */
+   dcl (Str1)     array;    /* string #1                              */
+   dcl (Str2)     array;    /* string #2                              */
+
+   dcl (i,j,k)  fixed;
+   dcl (vm)     fixed;
+
+
+   VECTOR_MODE;               /* vector                    */
+   CALL DATA_LEVEL(2);        /* compl                     */
+
+   alpha_mode;                /* Set char siz              */
+   call pc(ESC); 
+   call pc(scolon-size);      /* 0 = smallest              */
+
+   /* x,y = upper left corner */
+
+   if str2(0) = 0             /* if only 1 string, center  */
+   then do;                   /* it vertically             */
+
+      call MOVE_TO(x + (col * Hpix)
+                     + shr(Hpix+1, 1) 
+                     - shr(str1(0)*Hor.Char.Field(size) - Hor.Char.Gap(size),1),
+                   y - (row * Vpix)
+                     - shr(Vpix, 1)
+                     - shr(Ver.Char.Size(size),1));
+      alpha_mode;
+      call PS(STR1);
+   end;
+
+   else do;                   /* two rows                  */
+
+      /* compute vertical margin, accounting for two rows, 1 gap */
+      vm = shr(Vpix - shl(Ver.Char.Size(size),1) - Ver.Char.Desc(size) , 1);
+
+      call MOVE_TO(x + (col * Hpix)
+                     + shr(Hpix+1, 1) 
+                     - shr(str1(0)*Hor.Char.Field(size) - Hor.Char.Gap(size),1),
+                   y - (row * Vpix)
+                     - Vpix
+                     + vm + Ver.Char.Size(size) + Ver.Char.Desc(size));
+      alpha_mode;      
+      call PS(str1);
+
+      call MOVE_TO(x + (col * Hpix)
+                     + shr(Hpix+1, 1) 
+                     - shr(str2(0)*Hor.Char.Field(size) - Hor.Char.Gap(size),1),
+                   y - (row * Vpix)
+                     - Vpix
+                     + vm);
+      alpha_mode;      
+      call PS(str2);
+   end;
+
+   call DATA_LEVEL(0);
+   TRANSPARENT_MODE;
+
+end Deposit.Graphics.Button.Table.Label.Subroutine;
+
+/* $page - deposit a graphics string label in a graphics button table */
+
+
+/* This convenient routine constructs a 1 or 2 row button label */
+/* in 1 cell of a graphics button table.                        */
+
+/* BE SURE TO COPY THE STRINGS TO A DYNAMIC ARRAY BEFORE        */
+/* CALLING THIS ROUTINE                                         */
+
+
+Deposit.Graphics.Button.Table.Label: proc (Id, Row, Col, Size, Str1, Str2) PUBLIC swapable;
+   dcl (Id)       fixed;    /* Id in question                         */
+   dcl (row)      fixed;    /* row of table (0 = top) to deposit into */
+   dcl (col)      fixed;    /* col of table (0 = lef) to deposit into */
+   dcl (Size)     fixed;    /* character size to use, 0 (small) - 3   */
+   dcl (Str1)     array;    /* string #1                              */
+   dcl (Str2)     array;    /* string #2                              */
+
+   dcl (x,y)      fixed;    /* upper left x,y pixel coordinates       */
+   dcl (Vpix)     fixed;    /* vertical pixel spacing of table        */
+   dcl (Hpix)     fixed;    /* horizontal pixel spacing of table      */
+
+   if Locate.Object(Id) then do;
+      x = Read.Object(Object.Ptr + O#ULX);
+      y = Read.Object(Object.Ptr + O#ULY);
+      Vpix = Read.Object(Object.Ptr + O#GBTAB.Vpix);
+      Hpix = Read.Object(Object.Ptr + O#GBTAB.Hpix);
+
+      call Deposit.Graphics.Button.Table.Label.Subroutine
+      (x, y, Row, Col, Vpix, Hpix, Size, Str1, Str2);
+   end;
+end Deposit.Graphics.Button.Table.Label;
+
+/* $page - compute mouse position in graphics button table */
+
+
+/* maps mouse position (passed) into row, column of        */
+/* graphics button table                                   */
+
+/* This subroutine can be used to map any pixel position   */
+/* to a cell of a graphics button table.   Thus it can be  */
+/* used to map releases, movements or presses              */
+
+/* the user most commonly will call the higher level       */
+/* routine to get at a mouse press (below)                 */
+
+
+Map.Graphics.Button.Table.Mouse.Position.Subroutine: proc (mx, my, x, y, vpix, hpix, rows, cols, Colinfo) Swapable;
+   dcl (mx,my)   fixed;   /* mouse position of interest (press, current, release) */
+   dcl (x,y)     fixed;   /* graphics region upper left corder x,y                */
+   dcl (vpix)    fixed;   /* vertical pixels in button table cell                 */
+   dcl (hpix)    fixed;   /* horizontal pixels in button table cell               */
+   dcl (rows)    fixed;   /* # of rows in table                                   */
+   dcl (cols)    fixed;   /* # of columns in table                                */
+   dcl (Colinfo) array;   /* result col/row is stored here                        */
+
+   dcl (row,col) fixed;
+
+   if mx < x  then col = 0;
+   else if mx >= (x + (cols*hpix))
+   then col = cols - 1;
+   else do;
+      load mx-x; div hpix;
+      col = res;
+   end;
+
+   if my > y then row = 0;
+   else if my <= (y - rows*vpix)
+   then row = rows-1;
+   else do;
+      load (y - my); div vpix;
+      row = res;
+   end;
+
+   colinfo(0) = col;
+   colinfo(1) = row;
+
+end Map.Graphics.Button.Table.Mouse.Position.Subroutine;
+
+
+/* $page - map mouse press in button table */
+
+
+/* for convenience,  the following routine is provided */
+/* it maps the most recent mouse press into a row/col  */
+/* of a graphics button table                          */
+
+/* it is most comonly called when the object of the    */
+/* table is selected                                   */
+
+
+Map.Graphics.Button.Table.Mouse.Press: proc (Id,Colinfo) PUBLIC Swapable;
+   dcl (Id)      fixed;   /* ID of graphics button table region */
+   dcl (Colinfo) array;   /* col/row are stored here            */
+
+   dcl (mx,my)   fixed;   /* mouse position of interest (press, current, release) */
+
+   dcl (x,y)      fixed;  /* upper left x,y pixel coordinates       */
+   dcl (Vpix)     fixed;  /* vertical pixel spacing of table        */
+   dcl (Hpix)     fixed;  /* horizontal pixel spacing of table      */
+   dcl (rows)    fixed;   /* # of rows in table                                   */
+   dcl (cols)    fixed;   /* # of columns in table                                */
+
+   mx = Mouse(Press.X);   /* this routine gets cell # of            */
+   my = Mouse(Press.Y);   /* press x, y                             */
+
+   if Locate.Object(Id) then do;
+      x = Read.Object(Object.Ptr + O#ULX);
+      y = Read.Object(Object.Ptr + O#ULY);
+      Vpix = Read.Object(Object.Ptr + O#GBTAB.Vpix);
+      Hpix = Read.Object(Object.Ptr + O#GBTAB.Hpix);
+      Rows = Read.Object(Object.Ptr + O#GBTAB.Rows);
+      Cols = Read.Object(Object.Ptr + O#GBTAB.Cols);
+
+      call Map.Graphics.Button.Table.Mouse.Position.Subroutine 
+      (mx, my, x, y, vpix, hpix, rows, cols, colinfo);
+
+      return 1;
+   end;
+
+   return 0;
+
+end Map.Graphics.Button.Table.Mouse.Press;
+
+/* $page - routines to highlight or box a graphics region table */
+
+
+/* This routine is used to highlight or box an entry in a */
+/* graphics button table                                  */
+
+/* It can highlight a region (IE area fill in complement  */
+/* mode) or draw a box around a region (sub-highlight)    */
+
+/* it is passed a CODE word to indicate fill or box       */
+/* it is passed a STATE word to indicate 0 = unhighlighted*/
+
+/* The pixel gap is used to control the size of the       */
+/* highlighting box and is a gap between the edge of the  */
+/* cell and box/highlight area                            */
+
+
+Highlight.Graphics.Button.Table.Entry: proc (Id, Col, Row, State, Gap, Code) PUBLIC swapable;
+   dcl (Id )     fixed;     /* Pass id of interest                 */
+   dcl (Col)     fixed;     /* its column                          */
+   dcl (Row)     fixed;     /* and row                             */
+   dcl (State)   fixed;     /* 1 = highlight; 0 = normal           */
+   dcl (Gap)     fixed;     /* pixel gap to use                    */
+   dcl (Code)    fixed;     /* 0 = fill; 1 = box                   */
+
+   dcl (x,y)     fixed;     /*upper left corner of graphics region */
+   dcl (vpix)    fixed;     /* vert pixels in table cell           */
+   dcl (hpix)    fixed;     /* hor pixels in table cell            */
+   dcl (rows)    fixed;     /* # of rows in table                  */
+   dcl (cols)    fixed;     /* # of columns in table               */
+   dcl (old)     fixed;
+
+   if Locate.Object(Id) then do;
+      x = Read.Object(Object.Ptr + O#ULX);
+      y = Read.Object(Object.Ptr + O#ULY);
+      Vpix = Read.Object(Object.Ptr + O#GBTAB.Vpix);
+      Hpix = Read.Object(Object.Ptr + O#GBTAB.Hpix);
+      Rows = Read.Object(Object.Ptr + O#GBTAB.Rows);
+      Cols = Read.Object(Object.Ptr + O#GBTAB.Cols);
+
+      if (Row igt rows) or (Col igt cols) then return;
+
+      Old  = Read.Object(Object.ptr + O#GBTAB.Cell.Info + row*cols + col);
+
+      /* look for change in state */
+
+      if (old & shl(1,code)) <> state then do;
+         write(md) = read(md) xor shl(1,code);
+
+         y = y - Row*Vpix;  /* compute upper left corner */
+         x = x + Col*Hpix;  /* of table cell             */
+
+         VECTOR_MODE;
+         CALL DATA_LEVEL(2);        /* compl                     */
+
+         do case (code);
+            do;      /* fill */
+               call area.fill (x + gap,
+                               y - gap, 
+                               x + Hpix - gap,
+                               y - Vpix + gap, 2, 0);
+            end;
+
+            do;     /* box */
+               call CONNECT(x + Gap,         /* must use 4 lines to */
+                            y - Gap,         /* avoid complement    */
+                            x + Hpix - Gap,  /* bugs at the corners */
+                            y - Gap);
+               call CONNECT(x + Gap,
+                            y - Vpix + Gap,
+                            x + Hpix - Gap,
+                            y - Vpix + Gap);
+               call CONNECT(x + Gap,
+                            y - Gap - 1,
+                            x + Gap,
+                            y - Vpix + Gap + 1);
+               call CONNECT(x + Hpix - Gap,
+                            y - Gap - 1,
+                            x + Hpix - Gap,
+                            y - Vpix + Gap + 1);
+            end;
+
+         end;
+
+         call DATA_LEVEL(0);
+         TRANSPARENT_MODE;
+
+      end;
+   end;
+
+end Highlight.Graphics.Button.Table.Entry;
+
+Get.Graphics.Button.Table.Highlight: proc (Id, Col, Row) PUBLIC swapable;
+   dcl (Id )     fixed;     /* Pass id of interest                 */
+   dcl (Col)     fixed;     /* its column                          */
+   dcl (Row)     fixed;     /* and row                             */
+
+   dcl (x,y)     fixed;     /*upper left corner of graphics region */
+   dcl (rows)    fixed;     /* # of rows in table                  */
+   dcl (cols)    fixed;     /* # of columns in table               */
+
+   if Locate.Object(Id) then do;
+      x = Read.Object(Object.Ptr + O#ULX);
+      y = Read.Object(Object.Ptr + O#ULY);
+      Rows = Read.Object(Object.Ptr + O#GBTAB.Rows);
+      Cols = Read.Object(Object.Ptr + O#GBTAB.Cols);
+
+      if (Row igt rows) or (Col igt cols) then return 0;
+
+      return (Read.Object(Object.ptr + O#GBTAB.Cell.Info + row*cols + col));
+   end;
+   
+   return 0;
+   
+end Get.Graphics.Button.Table.Highlight;
+
+/* $page - highlight buttons based upon bits word */
+
+
+/* convenient routine to highlight up to 16 elements of a */
+/* graphics button table according to the passed          */
+/* bit pattern                                            */
+
+/* routine can HIGHLIGHT a cell (complement mode)  or     */
+/* it can draw an interior box                            */
+
+
+/* pass 1's in NEWBITS for every cell that should be      */
+/* highlighted or have a box.                             */
+
+
+Highlight.Graphics.Button.Table: proc (ID, newbits, gap, code) PUBLIC swapable;
+   dcl (Id)      fixed;   /* pass Id of graphics region of interest */
+   dcl (newbits) fixed;   /* 16 bits to highlight/box               */
+   dcl (gap)     fixed;   /* pixel gap to use                       */
+   dcl (code)    fixed;   /* 0 = fill;  1 = box                     */
+
+   dcl (Ptr)     fixed;
+   dcl (max)     fixed;
+   dcl (rows)    fixed;
+   dcl (cols)    fixed;
+   dcl (old)     fixed;
+
+   dcl (i) fixed;
+
+   if Locate.Object(Id) then do;
+
+      Ptr = Object.Ptr;
+      Rows = Read.Object(Ptr + O#GBTAB.Rows);
+      Cols = Read.Object(Ptr + O#GBTAB.Cols);
+      max  = rows * cols;
+      if max igt 16 then max = 16;
+
+      do i = 0 to max-1;
+
+         Old  = Read.Object(Ptr + O#GBTAB.Cell.Info + i);
+
+         if ((newbits xor shr(old,code)) & 1) <> 0
+         then do;
+            load i; div cols;
+
+            call Highlight.Graphics.Button.Table.Entry 
+            (Id, rem, res, newbits&1, gap, code);
+
+         end;
+
+         newbits = shr(newbits,1);
+
+      end;
+   end;
+
+end Highlight.Graphics.Button.Table;
+
+

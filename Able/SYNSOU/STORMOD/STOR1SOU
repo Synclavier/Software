@@ -1,0 +1,606 @@
+/*	:SYNSOU:STORMOD:STOR1SOU  $TITLE  Sound File Directory Screen Driver	*/
+
+/*
+Modified:
+2000/03/08 - TY  - Prevented long window titles from plotting over buttons
+2000/02/27 - TY  - Made changes to accommodate display of sound file loops
+1989/07/03 - SGS - moved initialization of SFDDlgGrp to Set.SFD.Misc
+1989/05/02 - TSS - Merged changes for Optical disk to DTD transfer project
+1988/12/01 - cj  - added biN button
+1988/02/26 - SGS - Added memory boxes and menu toggle button
+1988/01/14 - MWH - Add column to display second poly bin if there
+1987/12/22 - MWH - Update poly cache base to be a 32 bit pointer
+1987/10/29 - EEG - added poly memory delete and shuffle
+1987/10/28 - LSS - bug fixes for final Release N
+*/
+
+module STOR1MOD;
+
+dcl debug	lit '0';
+
+insert ':-xpl:catrout';
+insert ':-xpl:filerout';
+insert ':-xpl:scsicmds';
+insert ':-xpl:scsirout';
+insert ':-xpl:optical';
+insert ':-xpl:devutil';
+insert ':-xpl:intrprtr';
+
+insert ':synlits:comlits';		/*	get configuration and pdl size	*/
+insert ':synlits:asciilit';
+insert ':synlits:globlits';
+insert ':synlits:syslits';
+insert ':synlits:fcodlits';
+insert ':synlits:samplits';
+insert ':synlits:statelit';
+
+insert ':synmods:globdcl';
+insert ':synmods:giddcl';
+insert ':synmods:mathdcl';
+insert ':synmods:ttydcl';
+insert ':synmods:plotdcl';
+insert ':synmods:tformdcl';
+insert ':synmods:xmemdcl';
+insert ':synmods:polydcl';
+insert ':synmods:smgrdcl';
+insert ':synmods:mousedcl';
+insert ':synmods:getdcl';
+insert ':synmods:getvdcl';
+insert ':synmods:tprimdcl';
+insert ':synmods:errdcl';
+
+insert ':synmods:recrddcl';
+insert ':synmods:indexdcl';
+insert ':synmods:odiskdcl';
+
+dcl (Cache.Ptr,Cache.Secs)    fixed						external;
+dcl Num.Snds.In.Cache         fixed						external;
+dcl Find.Cache                proc	returns(fixed)	external;
+dcl Drive.Select.Active       fixed						external;
+dcl Restore.Level             fixed						external;
+dcl Active.Level              fixed						external;
+dcl Compute.DSel.Button       proc						external;
+dcl PS.Deallocate             proc(array)				external;
+dcl entered.new.dev           fixed						external;
+dcl bnk.len                   fixed						external;
+dcl get.trd.storage           proc(fixed)				external;
+dcl Get.SFD.Reserved.Sectors  proc                 external;
+
+insert ':synsou:stormod:globlits';		/*	global screen literals and constants	*/
+insert ':synsou:stormod:dir-lits';		/*	directory screen literals					*/
+
+dcl Clear.Mem.On			fixed;			/*	Flag to clear memory box	*/
+dcl W1.State				fixed public;	/*	current state of eject w1: button; 1 == ejected			*/
+dcl force_empty_display	fixed public;	/*	yukko: force empty display without disk read			*/
+
+insert ':synsou:stormod:dir-misc';		/*	sound file dir misc event handler		*/
+insert ':synsou:stormod:dir-tabl';		/*	sound file dir table event handler		*/
+insert ':synsou:stormod:dir-menu';		/*	menu code										*/
+
+/*	$SUBTITLE Startup Code	*/
+
+Init.Directory.Screen: proc swapable;
+	dcl i	fixed;
+
+	call Clear.Term;
+
+	call PRINT.CCAT;
+
+	call Initialize.Screen.Manager(Trd.Len-Get.SFD.Reserved.Sectors());
+	call Init.PID.GID.Area;		/*	zero out dynamic space	*/
+
+	call PID(WindowGrp,	-1);	/*	these screen areas have not	*/
+	call PID(MiscGrp,		-1);	/*	been defined yet					*/
+	call PID(DeviceGrp,	-1);
+	call PID(SortGrp,		-1);
+	call PID(FunctionGrp,-1);
+	call PID(InfoGrp,		-1);
+	call PID(MemGrp,		-1);
+
+	ActiveWindowId=(-1);			/*	no active window yet			*/
+	OpenWindowBits=0;				/*	reset - all windows closed	*/
+
+end Init.Directory.Screen;
+
+Open.Directory.Screen: proc swapable;
+	dcl Title (40)	fixed;
+	dcl (i,j,k)		fixed;
+	dcl Info			fixed;
+	dcl DevList		data (PolyCacheDev,LaserDev,PolyMemDev,1,6,7,2,3,4,5,-1);
+	dcl Dev			fixed;
+	dcl Id			fixed;
+	dcl GrpId		fixed;
+	dcl Buttons		fixed;		/*	which graphics buttons to include in window header	*/
+
+	Default.Activate.Optical.Control.Bits=O#AutoVolChange|O#UpdateDialog;
+
+	call Open.Misc.Objects;		/*	open mouse hole first	*/
+
+	call Set.SFD.Misc(GID(MiscGrp),ErrorRow,ErrorCol);	/*	link in objects to SFD	*/
+
+	call Open.DirScreen.Items;	/*	open screen title and menu toggle	*/
+	call Open.Menu(1,6);
+
+	dirdevice	 = gid(sfr.dirdevice);
+	usersort		 = gid(sfr.sortinfo );
+	functioninfo = gid(sfr.functioninfo);	//	NOTE: always enabled for recall
+	showinfo		 = gid(sfr.showinfo );
+	itemfilter	 = gid(sfr.itemfilter);
+
+	if GID(FullScreenMode)=0 then do;
+		call Set.SFD.Dialog.Row(7);	/*	dialogs go on the row just below the menu	*/
+
+		if dirdevice=0 then do;
+			dirdevice=GID(DevMenuButtons);	/*	get id of first device menu button	*/
+			dirdevice=Fetch.Object.Info(dirdevice,O#UserData);
+			usersort =SORT$Category;
+			showinfo =INFO$Filename;
+			itemfilter=FILTER$None;
+		end;
+		else do;
+			k=0;
+			do i=0 to gid(NumDevMenuButtons)-1;
+				j=Fetch.Object.Info(gid(DevMenuButtons+i),O#UserData);
+				if j=dirdevice then k=1;
+			end;
+			if k=0 then do;
+				dirdevice=GID(DevMenuButtons);	/*	get id of first device menu button	*/
+				dirdevice=Fetch.Object.Info(dirdevice,O#UserData);
+			end;
+		end;
+
+		call Set.Display.Format(dirdevice,usersort,functioninfo,showinfo,itemfilter);
+		call Display.Current.Menu.Settings;
+
+	end;
+	else do;	/*	full-screen mode - no menu displayed	*/
+		call Set.SFD.Dialog.Row(1);		/*	dialogs go on the first row	*/
+
+		if dirdevice = 0 then do;
+
+			do while (DirDevice <> -1)		/*	loop through possible devices	*/
+			and (Verify.Device(DevList(DirDevice))=0);
+				DirDevice = DirDevice+1;
+			end;
+
+			usersort =SORT$Category;
+			showinfo =INFO$Filename;
+			itemfilter=FILTER$None;
+		end;
+
+		call Set.Display.Format(dirdevice,usersort,FunctionInfo,showinfo,itemfilter);
+	end;
+
+	if Dirdevice=LaserDev then do;
+		if not Mount.Optical.Volume	/*	try to mount volume	*/
+		then O$Volume_Name(0)=0;		/*	nothing there		*/
+		else Optical.Disk.Ready=0;		/*	just reset global	*/
+	end;
+
+	call Open.Mem.Boxes(0,38);	/*	open memory boxes - dirdevice should be defined before calling this proc	*/
+
+	if ((ShowInfo)&(INFO$Second|INFO$Mbyte|INFO$Sector|INFO$Bin|INFO$Loops|INFO$Caption|INFO$Names))<>0	/*	if any of these INFO options are currently selected	*/
+	then call Build.Window.Title(ShowInfo,Title);	/*	show the INFO labels in the title area	*/
+	else call Get.Window.Title(dirdevice,Title);		/*	otherwise show the device name in the title window	*/
+
+	Buttons = (B#Search\B#Top\B#Print\B#Shuffle\B#RAM\B#Bin);
+
+	//	On the B-page, if the title exceeds CharWidth-7, it will plot over the buttons
+	if GID(FullScreenMode)=0 then
+		call Open.Directory.Window(0,Title,80-7,9,0,13,80,
+											O#ERAS.End.of.Line\O#ERAS.Null.Fill.On.Erase,
+											true,true,true,Buttons);
+	else			/*	full-screen mode	*/
+		call Open.Directory.Window(0,Title,80-7,2,0,20,80,
+											O#ERAS.End.of.Line\O#ERAS.Null.Fill.On.Erase,
+											true,true,true,Buttons);
+
+	Default.Activate.Optical.Control.Bits=O#VolChangeDialog|O#UpdateDialog;
+
+end Open.Directory.Screen;
+
+Get.First.Screen.Event: proc swapable;	/*	set up a harmless event to get things started	*/
+
+	if GID(WindowGrp)=(-1) then do;		/*	Screen is not set up yet	*/
+		if Debug
+		then call Quit;
+		else call Window.Not.Open(0);
+	end;
+
+	call Activate.Screen(GID(DirTable));	/*	and select the scrolling table	*/
+
+	Screen.Event.Group=GID(MiscGrp);			/*	make up null event to	*/
+	Screen.Event.Code	=Get.Screen.Event;	/*	get the ball rolling		*/
+	Screen.Event.Info	=S#NulEvent;
+	Screen.Event.Id	=GID(MouseHole);
+
+
+	/************* FOR DEBUGGING *****************/
+	/*********** ORDER IS IMPORTANT! *************/
+	/*	call Deposit.Switch(DebugSwitchId,Debug);	*/
+	/************* FOR DEBUGGING *****************/
+
+end Get.First.Screen.Event;
+
+/*	$SUBTITLE	*/
+
+Remap.Chars.To.Other.Events: proc swapable;
+	dcl Id					fixed;
+	dcl (Col,Row)			fixed;
+	dcl Name   (SFNAME#Arr_Len)	fixed;	/*	needed for delete	*/
+	dcl SFInfo (SFINFO#Arr_Len)	fixed;	/*	needed for delete	*/
+	dcl (Dev,Sort,Info)	fixed;	/*	used in case menu buttons are not defined	*/
+
+	if Screen.Event.Code=Get.In.Char then do;
+		Screen.Event.Info=UCase(Screen.Event.Info);	/*	map to uppercase	*/
+
+		if ((Screen.Event.Info>=ASC.1)
+		and (Screen.Event.Info<=ASC.9))
+		then do;	/*	map to device button event	*/
+			if GID(FullScreenMode)<>0 then do;	/*	process directly since buttons are not defined	*/
+				Dev=GID(DevMenuButtons+Screen.Event.Info-ASC.1);
+				if Dev<>0 then
+					call Change.Device(Dev);
+				call Get.Next.Optical.Event;
+			end;
+
+			else do;
+				Id=GID(DevMenuButtons+Screen.Event.Info-ASC.1);	/*	map to id	*/
+				if Id<>0 then do;
+					Screen.Event.Group=GID(DeviceGrp);
+					Screen.Event.Code	=Get.Screen.Event;
+					Screen.Event.Info	=S#MouseSelect;
+					Screen.Event.Id	=Id;
+				end;
+				else call Get.Next.Optical.Event;
+			end;
+		end;
+
+		else if ((Screen.Event.Info>=A.A)
+		and		(Screen.Event.Info<=A.C))
+		then do;
+			if GID(FullScreenMode)<>0 then do;	/*	process directly since buttons are not defined	*/
+				Sort=GID(SortMenuButtons+Screen.Event.Info-A.A);
+				call Change.UserSort(Sort);
+				call Get.Next.Optical.Event;
+			end;
+
+			else do;
+				Id=GID(SortMenuButtons+Screen.Event.Info-A.A);	/*	map to id	*/
+				if Id<>0 then do;
+					Screen.Event.Group=GID(SortGrp);
+					Screen.Event.Code	=Get.Screen.Event;
+					Screen.Event.Info	=S#MouseSelect;
+					Screen.Event.Id	=Id;
+				end;
+				else call Get.Next.Optical.Event;
+			end;
+		end;	/*	map to Sort button event	*/
+
+		else if ((Screen.Event.Info>=A.D)
+		and		(Screen.Event.Info<=A.I))
+		then do;	/*	map to Info button event	*/
+			if GID(FullScreenMode)<>0 then do;	/*	process directly since buttons are not defined	*/
+				Info=GID(InfoMenuButtons+Screen.Event.Info-A.D) xor (ShowInfo);
+				call Change.ShowInfo(Info);
+				call Get.Next.Optical.Event;
+			end;
+
+			else do;
+				Id=GID(InfoMenuButtons+Screen.Event.Info-A.D);	/*	map to id	*/
+				if Id<>0 then do;
+					Screen.Event.Group=GID(InfoGrp);
+					Screen.Event.Code	=Get.Screen.Event;
+					Screen.Event.Info	=S#MouseSelect;
+					Screen.Event.Id	=Id;
+				end;
+				else call Get.Next.Optical.Event;
+			end;
+		end;
+
+      else if (Screen.Event.Info==A.L)
+      then do;	/*	map to Info button event	*/
+         if GID(FullScreenMode)<>0 then do;	/*	process directly since buttons are not defined	*/
+            Info=GID(InfoMenuButtons+A.J-A.D) xor (ShowInfo);
+            call Change.ShowInfo(Info);
+            call Get.Next.Optical.Event;
+         end;
+            
+         else do;
+            Id=GID(InfoMenuButtons+A.J-A.D);	/*	map to id	*/
+            if Id<>0 then do;
+               Screen.Event.Group=GID(InfoGrp);
+               Screen.Event.Code	=Get.Screen.Event;
+               Screen.Event.Info	=S#MouseSelect;
+               Screen.Event.Id	=Id;
+            end;
+            else call Get.Next.Optical.Event;
+         end;
+      end;
+
+		else if (Screen.Event.Info == A.J) {	/*	map to Function button event	*/
+			if GID(FullScreenMode)<>0 then do;	/*	process directly since buttons are not defined	*/
+				Info = GID(FuncMenuButtons	/*	+Screen.Event.Info-A.J	*/	) xor FunctionInfo;
+				Change.Window.Function.Format(0,Info);	//	Note: this calls Set.Display.Format()
+				call Get.Next.Optical.Event;
+			end;
+
+			else do;
+				Id = GID(FuncMenuButtons	/*	+Screen.Event.Info-A.J	*/	);	/*	map to id	*/
+				if Id<>0 then do;
+					Screen.Event.Group=GID(FunctionGrp);
+					Screen.Event.Code	=Get.Screen.Event;
+					Screen.Event.Info	=S#MouseSelect;
+					Screen.Event.Id	=Id;
+				end;
+				else call Get.Next.Optical.Event;
+			end;
+		end;
+
+		else if (Screen.Event.Info=A.M)
+		and (GID(DirMiscGrp) <> -1)
+		then do;	/*	map to misc event	*/
+			Screen.Event.Group=GID(DirMiscGrp);
+			Screen.Event.Code	=Get.Screen.Event;
+			Screen.Event.Info	=S#MouseSelect;
+			Screen.Event.Id	=GID(MenuBarId);
+		end;
+
+		else if Screen.Event.Info=CRET then do;	/*	map carriage return to KEY ACTIVATE	*/
+			if Screen.Event.Id=GID(DirTable)
+			and (0)	/*	CRET generates a S#KeyActivate AND a get.char.in, so don't do twice	*/
+			then do;
+				Screen.Event.Group=GID(WindowGrp);
+				Screen.Event.Code	=Get.Screen.Event;
+				Screen.Event.Info	=S#KeyActivate;
+				call Fetch.Table.Cur.Cell(GID(DirTable),Loc(Addr(Col)));
+				Screen.Event.Table.Col=Col;
+				Screen.Event.Table.Row=Row;
+			end;
+			else call Get.Next.Optical.Event;
+		end;
+
+		else if (Screen.Event.Info = asc.quest	)
+		or		  (Screen.Event.Info = slash		)
+		then do;
+			if (Screen.Event.Info = slash) then	/*	continue search from last time	*/
+				call PID(FindNextMatch,1);
+			Screen.Event.Group=GID(WindowGrp);
+			Screen.Event.Code	=Get.Screen.Event;
+			Screen.Event.Id	=GID(DirTableSearch);
+			Screen.Event.Info	=S#KeyActivate;
+		end;
+
+		else if (Screen.Event.Info = asc.t		)
+		then do;
+			Screen.Event.Group=GID(WindowGrp);
+			Screen.Event.Code	=Get.Screen.Event;
+			Screen.Event.Id	=GID(DirTableTop);
+			Screen.Event.Info	=S#KeyActivate;
+		end;
+
+		else if (Screen.Event.Info = asc.r		)
+		then do;
+			Screen.Event.Group=GID(WindowGrp);
+			Screen.Event.Code	=Get.Screen.Event;
+			Screen.Event.Id	=GID(DirTableShuffle);
+			Screen.Event.Info	=S#KeyActivate;
+		end;
+
+		else if (Screen.Event.Info = asc.p		)
+		then do;
+			Screen.Event.Group=GID(WindowGrp);
+			Screen.Event.Code	=Get.Screen.Event;
+			Screen.Event.Id	=GID(DirTablePrint);
+			Screen.Event.Info	=S#KeyActivate;
+		end;
+
+		else if (Screen.Event.Info = asc.n		)
+		then do;
+			Screen.Event.Group=GID(WindowGrp);
+			Screen.Event.Code	=Get.Screen.Event;
+			Screen.Event.Id	=GID(DirTableBin);
+			Screen.Event.Info	=S#KeyActivate;
+		end;
+
+		else if (Screen.Event.Info = asc.x		)
+		and (GID(MemGrp) <> -1)
+		then do;
+			Screen.Event.Group=GID(MemGrp);
+			Screen.Event.Code	=Get.Screen.Event;
+			Screen.Event.Id	=GID(MemoryBox);
+			Screen.Event.Info	=S#MouseSelect;
+		end;
+
+		else if (Screen.Event.Info = asc.y		)
+		and (GID(MemGrp) <> -1)
+		then do;
+			Screen.Event.Group=GID(MemGrp);
+			Screen.Event.Code	=Get.Screen.Event;
+			Screen.Event.Id	=GID(MemoryBox+1);
+			Screen.Event.Info	=S#MouseSelect;
+		end;
+
+		else if (Screen.Event.Info = c.x			)
+		and (GID(MemGrp) <> -1)
+		then do;
+			/*	clear memory block X	*/
+			Clear.Mem.On = 1;
+			call Handle.Memory.Box(0);
+			Clear.Mem.On = 0;
+
+			call Get.Next.Optical.Event;
+		end;
+
+		else if (Screen.Event.Info = c.y			)
+		and (GID(MemGrp) <> -1)
+		then do;
+			/*	clear memory block Y	*/
+			Clear.Mem.On = 1;
+			call Handle.Memory.Box(1);
+			Clear.Mem.On = 0;
+
+			call Get.Next.Optical.Event;
+		end;
+
+		else if (Screen.Event.Info = a.delete	)	/*	delete	*/
+		then do;
+			if (DirDevice = PolyMemDev) then do;
+				if (Fetch.DirTable.Item.Type(Screen.Event.Table.Row,Screen.Event.Table.Col)=ITEM$Filename)
+				then do;
+					call Get.Current.Filename.And.Info(Name,SFInfo);
+               call Copy.String(Name, LnBuf);
+               if (name(0) <= 8) {
+                   call Copy.String(Name, FnBuf);
+                   while (FnBuf(0) < 8) {
+                      pbyte(FnBuf, FnBuf(0), 0);
+                      FnBuf(0) = FnBuf(0) + 1;
+                   }
+               }
+               else {
+                  name(0) = 8;
+                  call Copy.String(Name, FnBuf);
+               }
+					if fnbuf(0)<>0 then do;
+						if PS.SEARCH<>0 then do;
+							call Draw.Message('Deleting File from Poly Memory...');
+							call PS.DEALLOCATE(SFILE.BASE);
+							call Draw.Message('File Deleted from Poly Memory');
+							call Refresh.All.Display.Windows;
+						end;
+					end;
+				end;
+			end;
+			call Get.Next.Optical.Event;
+		end;
+
+		else call Get.Next.Optical.Event;
+	end;
+
+end Remap.Chars.To.Other.Events;
+
+/*	$SUBTITLE  Main Screen Event Handler	*/
+
+RECALL.SOUND.FILE.SCREEN.DRIVER: proc (par#,fra#,immed) public swapable;
+	dcl (par#,fra#,immed)	fixed;
+	dcl (code)					fixed;
+	dcl (i,x)					fixed;
+
+	DESTINATION.PARTIAL.# = par#;		/*	destination partial # (or 0)	*/
+	DESTINATION.FRAME.#	 = fra#;		/*	destination frame   # (or 0)	*/
+	RETURN.IMMEDIATELY	 = immed;	/*	nonzero - return after first sound file recall	*/
+
+	if  (inc.mono=0)			/*	if no mono	*/
+	and (inc.poly=0)			/*	and no poly	*/
+	then do;
+		call feature.not.available;	/*	error	*/
+		return -1;				/*	return -1 if screen was not modified	*/
+	end;
+
+	i = TRD.LEN;				/*	save initial value	*/
+
+	bnk.len = 0;
+	call Get.TRD.Storage(SFD.Trd.Storage.Needed);
+
+	SFD.PTR = TRD.PTR;
+	SFD.LEN = Get.SFD.Memory(SFD.PTR);
+	if SFD.LEN=0 then do;
+		call noroom.error;	/*	not enough external memory	*/
+		return -1;
+	end;
+
+	PUSH.SYSTEM.PDL;			/*	free up as much of the stack as we can	*/
+
+	call Init.Directory.Screen;	/*	set up some basic stuff	*/
+	call Open.Directory.Screen;	/*	and define the screen	*/
+
+	call PID(SFD.Initial.TRD.LEN,i);
+
+	call Get_Enable(GET.IN.CHAR);
+
+	Exit.My.Screen=0;					/*	init global vars	*/
+	Goto.This.Screen=0;
+
+	call Get.First.Screen.Event;	/*	get the first event to handle	*/
+
+	do while Exit.My.Screen=0;		/*	wait for exit condition	*/
+		if Screen.Event.Group=GID(WindowGrp)
+		then call Get.Next.Store.DirWindow.Event;	/*	process scroll bar, search, top, DirTable	*/
+
+		else if Screen.Event.Group=GID(DeviceGrp)
+		then call Get.Next.Device.Event;				/*	process DEVICE event & get next one	*/
+
+		else if Screen.Event.Group=GID(SortGrp)
+		then call Get.Next.Sort.Event;				/*	process SORT info & get next event	*/
+
+		else if Screen.Event.Group=GID(FunctionGrp)
+		then call Get.Next.Function.Event;			/*	process FUNC info & get next event	*/
+
+		else if Screen.Event.Group=GID(InfoGrp)
+		then call Get.Next.Info.Event;				/*	process SHOW info & get next event	*/
+
+		else if (Screen.Event.Group=GID(MemGrp))
+		then call Get.Next.Memory.Event;				/*	process memory switch & get next event	*/
+
+		else if Screen.Event.Group=GID(MiscGrp)
+		then call Get.Next.Misc.Event;				/*	process B-Page mouse hole, exit	*/
+
+		else if (Screen.Event.Group=0)
+		and	  (Screen.Event.Code =Get.In.Char)
+		then call Remap.Chars.To.Other.Events;
+
+		else if (Screen.Event.Group=GID(DirMiscGrp))
+		then call Get.Next.MenuToggle.Event;		/*	process menu hide/display	*/
+
+		else call Get.Next.Optical.Event;			/*	get the next event to handle	*/
+
+	end;
+
+	call SaveDisplayPos(DirDevice,0);
+
+	/*	DirDevice is saved in SaveDisplayPos	*/
+	call pid(sfr.sortinfo,		usersort );
+	call pid(sfr.functioninfo,	functioninfo);
+	call pid(sfr.showinfo,		showinfo );
+	call pid(sfr.itemfilter,	itemfilter);
+
+	call Get_Disable(GET.IN.CHAR);
+
+	Exit.My.Screen=0;				/*	clear flag after loop	*/
+
+	POP.SYSTEM.PDL;				/*	restore stack to original state	*/
+
+	call Get.TRD.Storage(GID(SFD.Initial.TRD.LEN));	/*	Reallocate to normal length	*/
+
+	return Goto.This.Screen;	/*	return state info	*/
+
+end RECALL.SOUND.FILE.SCREEN.DRIVER;
+
+end STOR1MOD;
+
+eof
+
+begin;	/*	debug	*/
+	dcl (i,j,k)	fixed;
+	dcl x			fixed;
+	dcl NewBase	fixed;
+
+	call cpos(0,0);
+
+	do j = 0 to sfr#NumDevs-1;
+		NewBase = sfr#MemBase + (sfr#NumMems*sfr#MemLen*j);
+		call ps('Device:'); call pnum(j,0); call pcr;
+		do i=0 to shr(sfr#NumMems*sfr#MemLen,1)-1;
+			call pnum(NewBase+(i*2),0); call ps(':  ');
+			call pnum(GID(NewBase+(i*2)),0); call ps(' ');
+			call pnum(GID(NewBase+(i*2)+1),0); call pcr;
+		end;
+	end;
+
+	do i=0 to shr((DC#TotalLength-1),1);
+		call pnum(DC#Base+(i*2),0); call ps(':  ');
+		call pnum(GID(DC#Base+(i*2)),0); call ps(' ');
+		call pnum(GID(DC#Base+(i*2)+1),0); call pcr;
+	end;
+
+end;

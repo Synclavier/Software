@@ -1,0 +1,1910 @@
+// 8/4/00 - CJ - Wait for overlapped SCSI I/O
+// 5/1/00 - CJ - Fixed bug writing to poly memory across page boundary
+
+/* $Title SCSI Drivers Library (code portion) */
+
+/***********************************************
+
+          S C S I   D R I V E R S
+
+                L I B R A R Y
+
+ ***********************************************/
+
+   configuration modelC, MULDIV;
+  
+   insert ':-xpl:literals';   	/* Get general literals */
+   insert ':-xpl:syslits';    	/* Get system literals */
+   insert ':-xpl:scsilits';   	/* Get SCSI interface literals */
+   insert ':-xpl:intrprtr';   	/* Interpreter interface */
+
+   /* Additional machine code definitions (there are some in LITERALS): */
+   dcl r1    lit '"301"'; /* Register one */
+   dcl r2    lit '"302"'; /* Register two */
+   dcl r3    lit '"303"'; /* Register three */
+   dcl r4    lit '"304"'; /* Register four */
+   dcl r5    lit '"305"'; /* Register five */
+	dcl or0	 lit '"230"'; /* or reg 0 */
+   dcl rpt   lit  '"10"'; /* repeat counter */
+
+   dcl d60   lit  '"60"'; /* external memory sector address */
+   dcl d61   lit  '"61"'; /* external memory word address */
+   dcl d62   lit  '"62"'; /* external memory */
+   dcl d63   lit  '"63"'; /* external memory then increment */
+
+   dcl d155  lit '"155"'; /* poly memory channel */
+   dcl d156  lit '"156"'; /* poly sampling command */
+   dcl d157  lit '"157"'; /* poly sampling data */
+
+   dcl repeat lit 'write(rpt)='; /* repeat macro */
+   dcl ModelC lit '1'; 	  /* TRUE if Model C or later processor */
+
+   dcl (PhySecMSW, PhySecLSW) fixed public; /* Physical sector */
+   dcl (RemSecMSW, RemSecLSW) fixed public; /* Remaining sectors */
+   dcl S$SenseKey             fixed public; /* Extended Sense Key */
+   dcl PendingAbort           boolean;      /* TRUE if an abort request is pending */
+   dcl AbortSequence          boolean;      /* TRUE if an abort has occurred */
+
+/*
+   SCSI RESET
+
+   This procedure is used to do a hard reset of the disk controller.
+   The reset is accomplished by asserting the RST line and waiting
+   until the controller has fully reset itself.
+*/
+
+   ScsiReset: proc public swappable;
+
+      dcl (i,j) fixed;
+
+      write(ScsiBus) = S$RST;		/* Assert RST for hard reset */
+
+      do i = 1 to 200;
+         interp_usleep(1);
+      end;                       /* Wait a Reset Hold Time (25  us) */
+
+      write(ScsiData) = 0;			/* Clear the data bus */
+      write(ScsiBus ) = 0; 		/* Clear the signal bus */
+
+      do i = 1 to 400;           /* Wait two seconds */
+			write(3) = 0;
+      end;
+
+   end ScsiReset;
+
+/* $subtitle Abort Current SCSI Command */
+
+/*
+   SCSI SIGNAL ABORT
+
+   This procedure is used to abort the SCSI operation currently being
+   executed on the Bus. It is designed to be called as part of an abort
+   interrupt, so only an abort flag PENDING ABORT is set. The actual abort
+   sequence is performed in the SCSI ABORT procedure, which is called in
+   certain procedures when the PENDING ABORT flag is set.
+*/
+
+   ScsiSignalAbort: proc public swappable;
+		// not implemented at this time
+   end ScsiSignalAbort;
+
+/*
+   SCSI ABORT
+
+   This procedure is used to abort the SCSI command in progress. It does
+   this by asserting the ATN line and sending the ABORT message in the
+   Message Out Phase. The routine must then wait until the controller
+   has completely aborted the command and released all data lines.
+*/
+
+   dcl atimer fixed;
+   dcl btimer fixed;
+
+   WaitForReq: proc swappable;
+      atimer = 0;
+      do while ( (read(ScsiBus) and (S$REQ | S$ACK)) != S$REQ );
+         // 50 microseconds quickly
+         do btimer = 0 to 50;
+            interp_usleep(1);
+         end;
+
+         atimer = atimer + 1;
+
+         if (atimer == 0)
+            stop(1);    // Failed; device is hung
+
+         // Start timesharing after a longer delay
+         if (atimer IGT 20)
+            interp_run_host_non_timer();
+      end;
+   end WaitForReq;
+
+   WaitForBusClear: proc swappable;
+      atimer = 0;
+      do while ((read(ScsiBus) and S$BusMask) <> 0);
+         // 50 microseconds quickly
+         do btimer = 0 to 50;
+            interp_usleep(1);
+         end;
+
+         atimer = atimer + 1;
+
+         if (atimer == 0)
+            stop(1);
+
+         // Start timesharing after a longer delay
+         if (atimer IGT 20)
+            interp_run_host_non_timer();
+      end;
+   end WaitForBusClear;
+
+   WaitForNoReq: proc swappable;
+      atimer = 0;
+      do while ( (read(ScsiBus) and S$REQ) <> 0 );
+         // 50 microseconds quickly
+         do btimer = 0 to 50;
+            interp_usleep(1);
+         end;
+
+         atimer = atimer + 1;
+
+         if (atimer == 0)
+            stop(1);
+         // Start timesharing after a longer delay
+         if (atimer IGT 20)
+            interp_run_host_non_timer();
+      end;
+   end WaitForNoReq;
+
+   ScsiAbort: proc public swappable; /* Abort any pending command on the SCSI bus */
+      dcl i fixed;
+
+      i = read(ScsiBus);
+
+      /* Do not abort if SCSI bus currently shows the Bus Free Phase */
+      if (read(ScsiBus) and S$BusFree) <> 0 then do;
+
+         write(ScsiBus) = (S$ACK or S$ATN); /* Assert ATN */
+         write(ScsiBus) = (S$ATN); /* Release ACK */
+         write(ScsiData) = 0; /* Release the data bus */
+
+         i = 20000; /* Wait up to 100 ms for Message Out Phase to appear */
+         do while (((read(ScsiBus) and S$SigMask) <> S$MessOut) and (i <> 0)); 
+            i = i - 1; /* Loop takes about 5 us on Model C processor */
+            interp_usleep(5);
+         end;
+
+         if i = 0 /* Target is confused */
+         then call ScsiReset; /* Reset the bus */
+         else do; /* Issue Abort */
+            WaitForReq();           /* Wait for REQ */
+            write(ScsiBus) = 0;     /* Release ATN */
+            write(ScsiByte) = S$AbortCmd;        /* Send abort command */
+
+            WaitForBusClear(); /* Wait for bus to clear */
+
+            i = 14000; /* Wait an additional 35 ms */
+            do while i <> 0; /* Loop takes 2.5 us on Model C processor */
+               i = i - 1;
+               interp_usleep(3);
+            end;
+         end; /* of Issue Abort */
+
+         AbortSequence = true; /* We are in an abort sequence */
+      end;
+
+      write(ScsiData) = 0; /* Release the data bus */
+
+      PendingAbort = false; /* There is no longer an abort pending */
+   end ScsiAbort;
+
+/* $subtitle Read From SCSI to Main Memory */
+
+/*
+   READMEM
+
+   This procedure reads LEN words of data from the SCSI bus into the
+   address given. The first n sectors of the data transfer can be
+   discarded, to allow block sizes greater than 256 words. The SCSI
+   Abort protocol is supported.
+*/
+
+   ReadMem: proc(Address, Len, LeadingSecs) swappable; /* Read from disk to main memory */
+      dcl Address     fixed; /* Address of memory pointer */
+      dcl Len         fixed; /* Number of words to read */
+      dcl LeadingSecs fixed; /* No. leading sectors to throw away */
+      dcl PrevAdr     fixed; /* Previous address */
+      dcl PrevLen     fixed; /* Previous length */
+      dcl I           fixed;
+
+      dcl rd1      lit 'write(mr0i) = read(ScsiWord)'; /* Read one word from the SCSI bus */
+      dcl read_17  lit 'rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1'; /* Read 17 words */
+      dcl fastread lit 'repeat 255-1; rd1';      /* Read 255 words in a hurry */
+
+      PrevAdr = Address; PrevLen = Len;          /* Store this address and length */
+      Address = Address; Len = Len; I = I; LeadingSecs = LeadingSecs;/* Load pointer reg w/address of LEN, I, MODELC */
+
+      WaitForReq();                              /* Wait for our hardware to release ACK, and target to assert REQ */
+
+      do while ( (read(ScsiBus) and S$SigMask) = S$DataIn ); /* Repeat until phase changes */
+			timeshare_with_host();
+
+         if LeadingSecs <> 0 then do;            /* Need to throw away this sector */
+            if ModelC then do;                   /* For the model C processor */
+               repeat 255 - 1; write(nop) = read(ScsiWord); /* Skip rest of sector */
+            end;
+            else do;                             /* Not model C processor */
+               do I = 1 to 256 - 1;              /* Skip rest of block */
+                  write(nop) = read(ScsiWord);
+               end;
+            end;                                 /* of Not model C */
+            write(nop) = read(ScsiByte);         /* Read second to last byte */
+      		WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(ScsiBus) = S$ACK;              /* Assert ACK for last byte */
+            LeadingSecs = LeadingSecs - 1;       /* another sector thrown away */
+         end;                                    /* of throwing away the first sectors */
+         else if Len ilt 256 then do;            /* If less than a sector left */
+            if ModelC then do;                   /* For the model C processor */
+               if Len <> 0 then do;              /* If more to read */
+                  write(r1) = Len - 1;           /* Get repeat count */
+                  write(r0) = Address;           /* Set up memory pointer */
+                  repeat read(r1); rd1;          /* Read LEN words */
+               end;
+               if Len <> 255 then do;            /* Be careful */
+                  repeat 256 - Len - 2; write(nop) = read(ScsiWord); /* Skip rest of sector */
+               end;
+            end;
+            else do;                             /* Not model C processor */
+               do I = 1 to Len;                  /* Read LEN more words */
+                  core(Address) = read(ScsiWord); /* Read a word */
+                  Address = Address + 1;         /* We've read one more word */
+               end;
+               do I = 1 to 256 - Len - 1;        /* Skip rest of block */
+                  write(nop) = read(ScsiWord);
+               end;
+            end;                                 /* of Not model C */
+            write(nop) = read(ScsiByte);         /* Read second to last byte */
+      		WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(ScsiBus) = S$ACK;              /* Assert ACK for last byte */
+            Len = 0;                             /* No more to read */
+         end;                                    /* of Less than a sector left */
+         else do;                                /* Read a sector at a time */
+            if ModelC then do;                   /* For the model C processor */
+               write(r0) = Address;              /* Set up memory pointer */
+               fastread;                         /* Read a sector minus one word */
+               Address = read(r0);               /* Save address */
+            end;
+            else do I = 1 to 15;                 /* Read a sector minus one word (15 x 17 = 255) */
+               write(r0) = Address;              /* Set up memory pointer */
+               read_17;                          /* Read 17 words */
+               Address = read(r0);               /* Save address */
+            end;
+            I = rot(read(ScsiByte), 8);          					/* Get second to last byte */
+            WaitForReq();                        /* Wait for REQ asserted */
+            core(Address) = I or (read(ScsiData) and "377");	/* Get last byte */
+            write(ScsiBus) = S$ACK;              /* Assert ACK for last byte */
+            Address = Address + 1;               /* We've read one more word */
+            Len = Len - 256;                     /* Received one more sector */
+         end;                                    /* of Read a sector at a time */
+
+         WaitForNoReq();                         /* Wait for REQ denied */
+
+         if PendingAbort then do;                /* If an abort was pending */
+            call ScsiAbort;                      /* Abort the command */
+            return;                              /* Give up here */
+         end;
+
+         write(ScsiBus) = 0;                      /* Release ACK for final byte */
+
+      	WaitForReq();                            /* Wait for our hardware to release ACK, and target to assert REQ */
+
+         if (read(ScsiBus) and S$SigMask) = S$MessIn then do; /* Message In Phase appeared? */
+            i = read(ScsiByte);                   /* Get message */
+
+            if i = S$SavePointer then do;         /* Save data pointer */
+               PrevAdr = Address; PrevLen = Len;
+            end;
+            else if i = S$RestorePointer then do; /* Restore data pointer */
+               Address = PrevAdr; Len = PrevLen;
+            end;
+    		  	WaitForReq();                         /* Wait for our hardware to release ACK, and target to assert REQ */
+         end;                                     /* of Message In phase */
+      end;                                        /* of Repeat until phase changes */
+   end ReadMem;
+
+/* $subtitle Read From SCSI To Polyphonic Sampling Memory */
+
+/*
+   READPOLY
+
+   This procedure reads SECTORS sectors and WORDS words of data from the
+   SCSI bus into polyphonic sampling memory starting at sector address
+   SECTOR and word address WORD. The first n sectors of the data transfer
+   can be discarded, to allow block sizes greater than 256 words. The SCSI
+   Abort protocol is supported.
+*/
+
+   ReadPoly: proc(Sector, PageWord, Sectors, Words, LeadingSecs) swappable; /* Read from disk to poly memory */
+      dcl Sector      fixed; /* Starting sector in poly memory */
+      dcl PageWord    fixed; /* Page (upper) and word (lower)  */
+      dcl Sectors     fixed; /* Number of sectors to read */
+      dcl Words       fixed; /* Number of words beyond last sector to read */
+      dcl LeadingSecs fixed; /* No. leading sectors to throw away */
+      dcl I           fixed;
+		dcl state       fixed;
+
+      dcl rd1      lit 'write(d157) = read(ScsiWord)'; /* Read one word from the SCSI bus */
+      dcl read_17  lit 'rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1'; /* Read 17 words */
+      dcl fastread lit 'repeat 255-1; rd1';      /* Read 255 words in a hurry */
+
+		State = read(r14);						/* get processor state				*/
+		disable;										/* disable interrupts				*/
+
+      write(d156) = "20";                            /* Issue "write to poly memory" command */
+      write(d157) = Sector; write(d157) = PageWord;  /* And emit starting address */
+
+		write(r14) = state;						/* restore interrupts				*/
+		write(pcw) = state;
+
+      Sectors = Sectors; Words = Words; I = I; /* Load pointer reg w/address of SECTORS, WORDS, I, MODELC */
+
+      WaitForReq();                       /* Wait for our hardware to release ACK, and target to assert REQ */
+
+      do while ( (read(ScsiBus) and S$SigMask) = S$DataIn ); /* Repeat until phase changes */
+         timeshare_with_host();
+
+         if LeadingSecs <> 0 then do;            /* Need to throw away this sector */
+            if ModelC then do;                   /* For the model C processor */
+               repeat 255 - 1; write(nop) = read(ScsiWord); /* Skip rest of sector */
+            end;
+            else do;                             /* Not model C processor */
+               do I = 1 to 256 - 1;              /* Skip rest of block */
+                  write(nop) = read(ScsiWord);
+               end;
+            end;                                 /* of Not model C */
+            write(nop) = read(ScsiByte);         /* Read second to last byte */
+            WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(ScsiBus) = S$ACK;              /* Assert ACK for last byte */
+            LeadingSecs = LeadingSecs - 1;       /* another sector thrown away */
+         end;                                    /* of throwing away the first sectors */
+         else if Sectors = 0 then do;            /* If less than a sector left */
+            if ModelC then do;                   /* For the model C processor */
+               if Words <> 0 then do;            /* If more to read */
+                  write(r0) = Words - 1;         /* Get repeat count */
+                  repeat read(r0); rd1;          /* Read WORDS words */
+               end;
+               if Words <> 255 then do;            /* Be careful */
+                  repeat 256 - Words - 2; write(nop) = read(ScsiWord); /* Skip rest of sector */
+               end;
+            end;
+            else do;                             /* Not model C processor */
+               do I = 1 to Words;                /* Read WORDS more words */
+                  rd1;                           /* Read a word */
+               end;
+               do I = 1 to 256 - Words - 1;      /* Skip rest of block */
+                  write(nop) = read(ScsiWord);
+               end;
+            end;                                 /* of Not model C */
+            write(nop) = read(ScsiByte);         /* Read second to last byte */
+            WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(ScsiBus) = S$ACK;              /* Assert ACK for last byte */
+            Words = 0;                           /* No more to read */
+         end;                                    /* of Less than a sector left */
+         else do;                                /* Read a sector at a time */
+            if ModelC then do;                   /* For the model C processor */
+               fastread;                         /* Read a sector minus one word */
+            end;
+            else do I = 1 to 15;                 /* Read a sector minus one word (15 x 17 = 255) */
+               read_17;                          /* Read 17 words */
+            end;
+            I = rot(read(ScsiByte), 8);          /* Get second to last byte */
+            WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(d157) = I or (read(ScsiData) and "377"); /* Get last byte */
+            write(ScsiBus) = S$ACK;              /* Assert ACK for last byte */
+            Sectors = Sectors - 1;               /* Received one more sector */
+         end;                                    /* of Read a sector at a time */
+
+         WaitForNoReq();                         /* Wait for REQ denied */
+
+         if PendingAbort then do;                /* If an abort was pending */
+            call ScsiAbort;                      /* Abort the command */
+            return;                              /* Give up here */
+         end;
+
+         write(ScsiBus) = 0;                     /* Release ACK for final byte */
+
+         WaitForReq();                           /* Wait for our hardware to release ACK, and target to assert REQ */
+      end;                                       /* of Repeat until phase changes */
+   end ReadPoly;
+
+/* $subtitle Read From SCSI To External Memory */
+
+/*
+   READEXT
+
+   This procedure reads SECTORS sectors and WORDS words of data from the
+   SCSI bus into external memory starting at sector address SECTOR and
+   word address WORD. The first n sectors of the data transfer can be
+   discarded, to allow block sizes greater than 256 words. The SCSI
+   Abort protocol is supported.
+*/
+
+   ReadExt: proc(Sector, Word, Sectors, Words, LeadingSecs) swappable; /* Read from disk to external memory */
+      dcl Sector      fixed; /* Starting sector in external memory */
+      dcl Word        fixed; /* Starting word in that sector in poly memory */
+      dcl Sectors     fixed; /* Number of sectors to read */
+      dcl Words       fixed; /* Number of words beyond last sector to read */
+      dcl LeadingSecs fixed; /* No. leading sectors to throw away */
+      dcl I           fixed;
+
+      dcl rd1      lit 'write(d63) = read(ScsiWord)'; /* Read one word from the SCSI bus */
+      dcl read_17  lit 'rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1;rd1'; /* Read 17 words */
+      dcl fastread lit 'repeat 255-1; rd1';      /* Read 255 words in a hurry */
+
+      write(d60) = Sector; write(d61) = Word;    /* Emit starting address */
+      Sectors = Sectors; Words = Words; I = I; LeadingSecs = LeadingSecs; /* Load pointer reg w/address of SECTORS, WORDS, I, MODELC */
+
+      WaitForReq();                              /* Wait for our hardware to release ACK, and target to assert REQ */
+
+      do while ( (read(ScsiBus) and S$SigMask) = S$DataIn ); /* Repeat until phase changes */
+			timeshare_with_host();
+
+         if LeadingSecs <> 0 then do;            /* Need to throw away this sector */
+            if ModelC then do;                   /* For the model C processor */
+               repeat 255 - 1; write(nop) = read(ScsiWord); /* Skip rest of sector */
+            end;
+            else do;                             /* Not model C processor */
+               do I = 1 to 256 - 1;              /* Skip rest of block */
+                  write(nop) = read(ScsiWord);
+               end;
+            end;                                 /* of Not model C */
+            write(nop) = read(ScsiByte);         /* Read second to last byte */
+      		WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(ScsiBus) = S$ACK;              /* Assert ACK for last byte */
+            LeadingSecs = LeadingSecs - 1;       /* another sector thrown away */
+         end;                                    /* of throwing away the first sectors */
+         else if Sectors = 0 then do;                 /* If less than a sector left */
+            if ModelC then do;                   /* For the model C processor */
+               if Words <> 0 then do;            /* If more to read */
+                  write(r0) = Words - 1;         /* Get repeat count */
+                  repeat read(r0); rd1;          /* Read WORDS words */
+               end;
+               if Words <> 255 then do;            /* Be careful */
+                  repeat 256 - Words - 2; write(nop) = read(ScsiWord); /* Skip rest of sector */
+               end;
+            end;
+            else do;                             /* Not model C processor */
+               do I = 1 to Words;                /* Read WORDS more words */
+                  rd1;                           /* Read a word */
+               end;
+               do I = 1 to 256 - Words - 1;      /* Skip rest of block */
+                  write(nop) = read(ScsiWord);
+               end;
+            end;                                 /* of Not model C */
+            write(nop) = read(ScsiByte);         /* Read second to last byte */
+      		WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(ScsiBus) = S$ACK;              /* Assert ACK for last byte */
+            Words = 0;                           /* No more to read */
+         end;                                    /* of Less than a sector left */
+         else do;                                /* Read a sector at a time */
+            if ModelC then do;                   /* For the model C processor */
+               fastread;                         /* Read a sector minus one word */
+            end;
+            else do I = 1 to 15;                 /* Read a sector minus one word (15 x 17 = 255) */
+               read_17;                          /* Read 17 words */
+            end;
+            I = rot(read(ScsiByte), 8);          /* Get second to last byte */
+      		WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(d63) = I or (read(ScsiData) and "377"); /* Get last byte */
+            write(ScsiBus) = S$ACK;              /* Assert ACK for last byte */
+            Sectors = Sectors - 1;               /* Received one more sector */
+         end;                                    /* of Read a sector at a time */
+
+         WaitForNoReq();                         /* Wait for REQ denied */
+
+         if PendingAbort then do;                /* If an abort was pending */
+            call ScsiAbort;                      /* Abort the command */
+            return;                              /* Give up here */
+         end;
+
+         write(ScsiBus) = 0;                     /* Release ACK for final byte */
+
+      	WaitForReq();                           /* Wait for our hardware to release ACK, and target to assert REQ */
+      end;                                       /* of Repeat until phase changes */
+   end ReadExt;
+
+/* $subtitle Write To SCSI From Main Memory */
+
+/*
+   WRITEMEM
+
+   This procedure writes LEN words of data to the SCSI bus from the
+   address given. The SCSI Abort protocol is supported.
+*/
+
+   WriteMem: proc(Address, Len) swappable; /* Write from main memory to disk */
+      dcl Address fixed; /* Address of memory pointer */
+      dcl Len     fixed; /* Number of words to write */
+      dcl PrevAdr fixed; /* Previous address */
+      dcl PrevLen fixed; /* Previous length */
+      dcl I       fixed;
+
+      dcl wt1       lit 'write(ScsiWord) = read(mr0i)'; /* Write one word to SCSI bus */
+      dcl write_17  lit 'wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1'; /* Write 17 words */
+      dcl fastwrite lit 'repeat 255-1; wt1'; /* Write 255 words in a hurry */
+
+      PrevAdr = Address; PrevLen = Len;                     /* Store this address and length */
+      Address = Address; Len = Len; I = I; /* Load pointer register w/address of LEN, I, MODELC */
+
+      WaitForReq();                              /* Wait for our hardware to release ACK, and target to assert REQ */
+
+      do while ( (read(ScsiBus) and S$SigMask) = S$DataOut ); /* Repeat until phase changes */
+
+			timeshare_with_host();
+
+         if Len ilt 256 then do;                 /* If less than a sector left */
+            if ModelC then do;                   /* For the model C processor */
+               if Len <> 0 then do;              /* If more to write */
+                  write(r1) = Len - 1;           /* Get repeat count */
+                  write(r0) = Address;           /* Set up memory pointer */
+                  repeat read(r1); wt1;          /* Write LEN words */
+               end;
+               if Len <> 255 then do;            /* Be careful */
+                  repeat 256 - Len - 2; write(ScsiWord) = 0; /* Pad rest of sector with zeroes */
+               end;
+            end;
+            else do;                             /* Not model C processor */
+               do I = 1 to Len;                  /* Write LEN more words */
+                  write(ScsiWord) = core(Address); /* Write a word */
+                  Address = Address + 1;         /* We've written one more word */
+               end;
+               do I = 1 to 256 - Len - 1;        /* Skip rest of block */
+                  write(ScsiWord) = 0;           /* Pad with zeroes */
+               end;
+            end;                                 /* of Not model C */
+            WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(ScsiByte) = 0;                 /* Write second to last byte */
+      		WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(ScsiData) = 0; write(ScsiBus) = S$ACK; /* Assert ACK for last byte */
+            Len = 0;                             /* No more to write */
+         end;                                    /* of Less than a sector left */
+         else do;                                /* Write a sector at a time */
+            if ModelC then do;                   /* For the model C processor */
+               write(r0) = Address;              /* Set up memory pointer */
+               fastwrite;                        /* Write a sector minus one word */
+               Address = read(r0);               /* Save address */
+            end;
+            else do I = 1 to 15;                 /* Write a sector minus one word (15 x 17 = 255) */
+               write(r0) = Address;              /* Set up memory pointer */
+               write_17;                         /* Write 17 words */
+               Address = read(r0);               /* Save address */
+            end;
+            WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(ScsiByte) = rot(core(Address), 8); /* Write second to last byte */
+      		WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(ScsiData) = (core(Address) and "377"); write(ScsiBus) = S$ACK; /* Assert ACK for last byte */
+            Address = Address + 1;               /* We've written one more word */
+            Len = Len - 256;                     /* Transferred one more sector */
+         end;                                    /* of Read a sector at a time */
+
+         WaitForNoReq();                         /* Wait for REQ denied */
+
+         if PendingAbort then do;                /* If an abort was pending */
+            call ScsiAbort;                      /* Abort the command */
+            return;                              /* Give up here */
+         end;
+
+         write(ScsiBus) = 0;                     /* Release ACK for last byte */
+
+			// Wait for possible overlapped SCSI write to complete
+			while (interp_check_scsi_io(0) != 0)
+				interp_run_host_non_timer();
+			
+         write(ScsiData) = 0;                    /* Release the data bus */
+
+      	WaitForReq();                           /* Wait for our hardware to release ACK, and target to assert REQ */
+
+         if (read(ScsiBus) and S$SigMask) = S$MessIn then do; /* Message In Phase appeared? */
+            i = read(ScsiByte);                  /* Get message */
+
+            if i = S$SavePointer then do;         /* Save data pointer */
+               PrevAdr = Address; PrevLen = Len;
+            end;
+            else if i = S$RestorePointer then do; /* Restore data pointer */
+               Address = PrevAdr; Len = PrevLen;
+            end;
+      		WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+         end;                                    /* of Message In phase */
+      end;                                       /* of Repeat until phase change */
+   end WriteMem;
+
+/* $subtitle Write To SCSI From Polyphonic Sampling Memory */
+
+/*
+   WRITEPOLY
+
+   This procedure writes SECTORS sectors and WORDS words of data to the
+   SCSI bus from polyphonic sampling memory starting at sector address
+   SECTOR and word address WORD.  The SCSI Abort protocol is supported.
+*/
+
+   WritePoly: proc(Sector, PageWord, Sectors, Words) swappable; /* Write from poly memory to disk */
+      dcl Sector     fixed; /* Starting sector in poly memory */
+      dcl PageWord   fixed; /* page and word                  */
+      dcl Sectors    fixed; /* Number of sectors to read */
+      dcl Words      fixed; /* Number of words beyond last sector to read */
+      dcl I          fixed;
+		dcl state		fixed;
+		
+      dcl wt1       lit 'write(ScsiWord) = read(d157)'; /* Write one word to SCSI bus */
+      dcl write_17  lit 'wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1'; /* Write 17 words */
+      dcl fastwrite lit 'repeat 255-1; wt1'; /* Write 255 words in a hurry */
+
+		State = read(r14);						/* get processor state				*/
+		disable;										/* disable interrupts				*/
+
+      write(d156) = "24";                            /* Issue "read from poly memory" command */
+      write(d157) = Sector; write(d157) = PageWord;  /* And emit starting address */
+
+		write(r14) = state;						/* restore interrupts				*/
+		write(pcw) = state;
+
+      Sectors = Sectors; Words = Words; I = I;   /* Load pointer reg w/address of SECTORS, WORDS, I, MODELC */
+
+      WaitForReq();                              /* Wait for our hardware to release ACK, and target to assert REQ */
+
+      do while ( (read(ScsiBus) and S$SigMask) = S$DataOut ); /* Repeat until phase changes */
+
+			timeshare_with_host();
+
+         if Sectors = 0 then do;                 /* If less than a sector left */
+            if ModelC then do;                   /* For the model C processor */
+               if Words <> 0 then do;            /* If more to write */
+                  write(r0) = Words - 1;         /* Get repeat count */
+                  repeat read(r0); wt1;          /* Write WORDS words */
+               end;
+               if Words <> 255 then do;            /* Be careful */
+                  repeat 256 - Words - 2; write(ScsiWord) = 0; /* Pad rest of sector with zeroes */
+               end;
+            end;
+            else do;                             /* Not model C processor */
+               do I = 1 to Words;                /* Write WORDS more words */
+                  wt1;                           /* Write a word */
+               end;
+               do I = 1 to 256 - Words - 1;      /* Skip rest of block */
+                  write(ScsiWord) = 0;           /* Pad with zeroes */
+               end;
+            end;                                 /* of Not model C */
+            WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(ScsiByte) = 0;                 /* Write second to last byte */
+      		WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(ScsiData) = 0; write(ScsiBus) = S$ACK; /* Assert ACK for last byte */
+            Words = 0;                             /* No more to write */
+         end;                                    /* of Less than a sector left */
+         else do;                                /* Write a sector at a time */
+            if ModelC then do;                   /* For the model C processor */
+               fastwrite;                        /* Write a sector minus one word */
+            end;
+            else do I = 1 to 15;                 /* Write a sector minus one word (15 x 17 = 255) */
+               write_17;                         /* Write 17 words */
+            end;
+            I = read(d157);                      /* Get last word */
+            WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(ScsiByte) = rot(I, 8);         /* Write second to last byte */
+      		WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(ScsiData) = (I and "377"); write(ScsiBus) = S$ACK; /* Assert ACK for last byte */
+            Sectors = Sectors - 1;               /* Transferred one more sector */
+         end;                                    /* of Read a sector at a time */
+
+         WaitForNoReq();                         /* Wait for REQ denied */
+
+         if PendingAbort then do;                /* If an abort was pending */
+            call ScsiAbort;                      /* Abort the command */
+            return;                              /* Give up here */
+         end;
+
+         write(ScsiBus) = 0;                     /* Release ACK for last byte */
+
+			// Wait for possible overlapped SCSI write to complete
+			while (interp_check_scsi_io(0) != 0)
+				interp_run_host_non_timer();
+			
+         write(ScsiData) = 0;                    /* Release the data bus */
+
+      	WaitForReq();                           /* Wait for our hardware to release ACK, and target to assert REQ */
+      end;                                       /* of Repeat until phase change */
+   end WritePoly;
+
+   /* $subtitle Write To SCSI From External Memory */
+
+/*
+   WRITEEXT
+
+   This procedure writes SECTORS sectors and WORDS words of data to the
+   SCSI bus from external memory starting at sector address SECTOR and
+   word address WORD.  The SCSI Abort protocol is supported.
+*/
+
+   WriteExt: proc(Sector, Word, Sectors, Words) swappable; /* Write external poly memory to disk */
+      dcl Sector  fixed; /* Starting sector in external memory */
+      dcl Word    fixed; /* Starting word in that sector in poly memory */
+      dcl Sectors fixed; /* Number of sectors to read */
+      dcl Words   fixed; /* Number of words beyond last sector to read */
+      dcl I       fixed;
+
+      dcl wt1       lit 'write(ScsiWord) = read(d63)'; /* Write one word to SCSI bus */
+      dcl write_17  lit 'wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1;wt1'; /* Write 17 words */
+      dcl fastwrite lit 'repeat 255-1; wt1'; /* Write 255 words in a hurry */
+
+      write(d60) = Sector; write(d61) = Word;    /* And emit starting address */
+      Sectors = Sectors; Words = Words; I = I;   /* Load pointer reg w/address of SECTORS, WORDS, I, MODELC */
+
+      WaitForReq();                              /* Wait for our hardware to release ACK, and target to assert REQ */
+
+      do while ( (read(ScsiBus) and S$SigMask) = S$DataOut ); /* Repeat until phase changes */
+
+			timeshare_with_host();
+
+         if Sectors = 0 then do;                 /* If less than a sector left */
+            if ModelC then do;                   /* For the model C processor */
+               if Words <> 0 then do;            /* If more to write */
+                  write(r0) = Words - 1;         /* Get repeat count */
+                  repeat read(r0); wt1;          /* Write WORDS words */
+               end;
+               if Words <> 255 then do;            /* Be careful */
+                  repeat 256 - Words - 2; write(ScsiWord) = 0; /* Pad rest of sector with zeroes */
+               end;
+            end;
+            else do;                             /* Not model C processor */
+               do I = 1 to Words;                /* Write WORDS more words */
+                  wt1;                           /* Write a word */
+               end;
+               do I = 1 to 256 - Words - 1;      /* Skip rest of block */
+                  write(ScsiWord) = 0;           /* Pad with zeroes */
+               end;
+            end;                                 /* of Not model C */
+            WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(ScsiByte) = 0;                 /* Write second to last byte */
+      		WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(ScsiData) = 0; write(ScsiBus) = S$ACK; /* Assert ACK for last byte */
+            Words = 0;                             /* No more to write */
+         end;                                    /* of Less than a sector left */
+         else do;                                /* Write a sector at a time */
+            if ModelC then do;                   /* For the model C processor */
+               fastwrite;                        /* Write a sector minus one word */
+            end;
+            else do I = 1 to 15;                 /* Write a sector minus one word (15 x 17 = 255) */
+               write_17;                         /* Write 17 words */
+            end;
+            I = read(d63);                       /* Get last word */
+            WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(ScsiByte) = rot(I, 8);         /* Write second to last byte */
+      		WaitForReq();                        /* Wait for our hardware to release ACK, and target to assert REQ */
+            write(ScsiData) = (I and "377"); write(ScsiBus) = S$ACK; /* Assert ACK for last byte */
+            Sectors = Sectors - 1;               /* Transferred one more sector */
+         end;                                    /* of Read a sector at a time */
+
+         WaitForNoReq();                         /* Wait for REQ denied */
+
+         if PendingAbort then do;                /* If an abort was pending */
+            call ScsiAbort;                      /* Abort the command */
+            return;                              /* Give up here */
+         end;
+
+         write(ScsiBus) = 0;                     /* Release ACK for last byte */
+
+			// Wait for possible overlapped SCSI write to complete
+			while (interp_check_scsi_io(0) != 0)
+				interp_run_host_non_timer();
+			
+         write(ScsiData) = 0;                    /* Release the data bus */
+
+      	WaitForReq();                           /* Wait for our hardware to release ACK, and target to assert REQ */
+      end;                                       /* of Repeat until phase change */
+   end WriteExt;
+
+/* $subtitle Map Logical to Physical Sectors */
+
+/*
+   MAPSECTOR
+
+   This procedure converts the logical sector number passed into a 
+   physical sector number on a disk drive, which it returns in the global
+   variables "PhySecMSW" and "PhySecLSW". The remaining sectors on this
+   device are returned in the global variables "RemSecMSW" and "RemSecLSW".
+*/
+
+   MapSector: proc(MSW,LSW,Device) returns (fixed) public swappable;
+      dcl (MSW,LSW)   fixed; /* Starting logical sector number */
+      dcl Device      fixed; /* Number of device to use */
+      dcl ConfigPtr   fixed; /* Pointer into config. table */
+      dcl DevType     fixed; /* Type of peripheral device */
+      dcl SecCyl      fixed; /* Sectors per cylinder on a device */
+      dcl Cylinder    fixed; /* Physical cylinder */
+      dcl Sector      fixed; /* Physical sector */
+
+      ConfigPtr = Find_Device(Device);        /* Get pointer into config. table 		*/
+      if ConfigPtr = 0 then return (0);       /* init to device not found 				*/
+
+      DevType = (core(ConfigPtr + s#devtyp) and "377");  /* get devtype handly		*/
+     
+	   Cylinder = -1;									 /* init cylinder to force loop entry	*/
+     
+	   write("5") = LSW;                       /* Store logical sector number in 		*/
+      write("4") = MSW;								 /* mul/div unit								*/
+
+      /*
+        Scan down the configuration table until you find the device this
+        logical sector maps to or you come to a different device type, which
+        means the logical sector is too large to map to a physical sector. */
+		  
+      do while ( Cylinder ige core(ConfigPtr + s#totcyl) ) and ( (core(ConfigPtr + s#devtyp) and "377") = DevType );
+
+         SecCyl = core(ConfigPtr + s#seccyl); /* Get sectors/cylinder handyi			*/
+
+         write("7") = SecCyl;                 /* divide by secs/cyl ...					*/
+        
+		   Cylinder = read("5");                /* to get cylinder #						*/
+         Sector   = read("4");                /* and sector on that cylinder			*/
+
+			/* note: all code requires drive to have an integer number of 					*/
+			/* cylinders.  Subtract the number of cylinders on this device					*/
+			/* and move on to the next concatenated device if the sector we  are			*/
+			/* looking for is off the end of this device											*/
+			
+         if Cylinder ige core(ConfigPtr + s#totcyl) then do; /* Does this cylinder number fit on this device? 		*/
+            Cylinder = Cylinder - core(ConfigPtr + s#totcyl); /* No, so subtract all the cylinders on this device */
+            ConfigPtr = ConfigPtr + s#blklen; /* Move on to next device */
+         end;
+
+         write("5") = Cylinder;               /* compute logical sector number		*/
+         write("4") = Sector;						 /* and this device							*/
+         write("6") = SecCyl;
+      end;
+
+      /* Fatal error if this logical sector number is too large to map to any physical device */
+      if (core(ConfigPtr + s#devtyp) and "377") <> DevType then return(0);
+
+      PhySecLSW = read("5");                  /* Physical Sector on this device */
+      PhySecMSW = read("4");
+
+      Cylinder = core(ConfigPtr + s#totcyl) - Cylinder; /* Set to no. cylinders remaining on disk */
+
+      /*
+         Compute number of sectors remaining on disk by multiplying
+         cylinder number by sectors/cylinder */
+			
+      write("5") = Cylinder;
+      write("6") = core(ConfigPtr + s#seccyl);
+      RemSecLSW = read("5");                 /* No. Sectors remaining */
+      RemSecMSW = read("4");
+      if RemSecLSW ilt sector then RemSecMSW = RemSecMSW - 1;
+      RemSecLSW = RemSecLSW - sector;        /* Subtract sector we're starting with on this disk */
+
+      return(ConfigPtr);
+   end MapSector;
+
+/* $subtitle Connect to D24 and the SCSI bus */
+
+/*
+   SCSICONNECT
+
+   This procedure is used to connect the initiator to the target. It calls
+   ARBITRATE, SELECT, and IDENTIFY in the proper order.
+*/
+
+/* General plan for scsi status codes:									*/
+/* "Modern" routines shall:												*/
+/*		1)	Retrun a 0 if the command completed successfully - S$Good	*/
+/*		2)	Return a negative status number if BusConnect fails; e.g.	*/
+/*			see S$ArbFailed through S$BadInitiator						*/
+/*		3)  Return a sense key in the lower half if the scsi status		*/
+/*			code was check condition									*/
+/*		4)	Return the scsi status in the upper half in other case.		*/
+
+/* That is:																*/
+/*		1)	return value == S$Good or S$GoodConnect ==> OK				*/
+/*		2)  return value < 0 ==> connect failure						*/
+/*		3)	return value >= 256 ==> S$Busy or S$Reserved in upper half	*/
+/*		4)  return value <  256 ==> a Sense Code						*/
+
+   ScsiConnect: proc(D24ID, Initiator, Target, Lun) returns (fixed) public swappable;
+      dcl D24ID         fixed; /* D24 id number */
+      dcl Initiator     fixed; /* SCSI Initiator ID number */
+      dcl Target        fixed; /* SCSI Target ID number */
+      dcl Lun           fixed; /* SCSI Logical Unit number */
+      dcl i             fixed;
+		dcl GotBus			fixed;
+		dcl Count1			fixed;
+		dcl Count2			fixed;
+		dcl State			fixed;
+		dcl arb_bit			fixed;
+
+      dcl Bit data (1, 2, 4, 8, 16, 32, 64, 128); /* Binary to Bit mapping */
+
+      call Abort.Scsi;                        /* Tell synclav to disconnect from DTD...	*/
+
+      PendingAbort  = false;                  /* Initialize abort mechanism */
+      AbortSequence = false;
+
+      /*** Select the D24 SCSI Host Adapter ***/
+
+      if (read("51") and ScsiBoard) = 0 then return(S$D24NotThere); /* No D24 board in computer at all */
+
+	   interp_set_scsi_id(interp_set_scsi_id_device, D24ID, Target);
+
+      // Get the real hardware target to use
+      target = interp_alt_scsi_id(target);
+
+      i = shl(Bit(D24ID), 8);
+      write(ScsiSel) = S$SelectEnable or i;   /* Enable D24 number one */
+      
+		if (read(ScsiSel) and S$SelMask) <> i   /* Board selected is not there */
+      then return(S$D24NotThere);             /* Return this as status information */
+      
+		write(ScsiData) = 0;                    /* Clear data bus */
+		write(ScsiBus ) = 0;							 /* Clear scsi bus */
+		
+      /*** Arbitration Phase ***/
+
+		GotBus  = false;								 /* init to not done					*/
+		Count1  = 0;
+		Count2  = 0;
+		arb_bit = Bit(Initiator);				    /* bit to arbitrate with        */
+			
+		
+		/* Arbitrate for and latch on to SCSI bus: */
+		
+		do while (GotBus == false);				 /* wait here till we get buss	*/
+			
+			/* Wait for bus free state: */
+			
+			State = read(r14);						/* get processor state				*/
+			disable;										/* disable interrupts				*/
+			
+			interp_start_scsi_timer();
+			
+			do while ((read(ScsiBus) & S$BusMask) != 0);
+   			write(r14) = state;					/* restore interrupts				*/
+				write(pcw) = state;
+				
+				// Wait for 5 seconds for bus free condition on Mac.
+				if (interp_is_running != 0)
+				{
+					if (interp_get_scsi_timer(0) >= 5000)
+						return (S$BadBusState);		 /* must be bad buss state			*/
+					else
+						interp_run_host_non_timer();
+				}
+
+				// User processor time on real hardware
+				else
+				{
+					Count1 = Count1 + 1;
+					if (Count1 == 0)
+					{
+						Count2 = Count2 + 1;
+						
+						if (Count2 == 10)
+							return (S$BadBusState);	/* must be bad buss state			*/
+					}
+				}
+				
+				State = read(r14);					 /* get processor state				*/
+				disable;									 /* disable interrupts				*/
+			end;
+			
+			/* Bus is free; try to grab it: */
+			
+			write(ScsiBus ) = S$BSY;				 /* start arbitration - set busy */
+			write(ScsiData) = arb_bit;  			 /* arbitrate with desired bit   */
+			write(r0)       = 0;						 /* initialize r0 to 0			   */
+			repeat 10;									 /* repeat for 2.5 microsec		*/
+			write(or0)      = read(ScsiData);	 /* sample data bus					*/
+			
+			if ((read(r0) & S$DataMask) < shl(arb_bit, 1))	    /* if no higher arbiter seen	   */
+			{
+				GotBus = true;							 /* then we got bus; keep bsy 	*/
+				
+				do while ((GotBus == true)
+				&&        (((read(ScsiData) and S$DataMask) <> arb_bit)			/* wait for lower priority ID's to be removed */
+				||         ((read(ScsiBus ) and S$BusMask ) <> S$BSY  )));		/* or detect someone else grabbing bus        */
+					if (((read(ScsiBus ) and S$BusMask ) <> S$BSY          )		/* if someone else grabs bus						 */
+					||  ((read(ScsiData) and S$DataMask) >= shl(arb_bit, 1)))	/* or higher host starts to arbitrate			 */
+					{
+						write(ScsiBus ) = 0;
+						write(ScsiData) = 0;
+						GotBus = false;
+					}
+				end;
+			}
+			else do;										 /* else we lost arb; release	   */
+				write(ScsiBus ) = 0;					 /* our busy and stand clear     */
+				write(ScsiData) = 0;
+			end;
+			
+			write(r14) = State;						/* restore interrupts				*/
+			write(pcw) = State;
+		end;
+
+      /* We won arbitration (at least, we believe so!) */
+		
+      write(ScsiData) = (Bit (Initiator) or Bit (Target));	/* Set Initiator and Target IDs on data bus	*/
+      write(ScsiBus ) = (S$BSY or S$ATN); 						/* Assert ATN											*/
+
+	   /*** Selection Phase ***/
+
+      write(ScsiBus) = (S$BSY or S$ATN or S$SEL);				/* Assert SEL											*/
+      write(ScsiBus) = (         S$ATN or S$SEL);				/* Release BSY											*/
+
+      /* Wait until Target asserts BSY or a Selection Timeout Delay (250 ms) goes by */
+      i = 62500;                              /* Wait 250 ms */
+		interp_start_scsi_timer();
+      do while (((read(ScsiBus) and S$BSY) = 0) and (i <> 0)); /* Loop takes about 4 us on a Model C processor */
+			if (interp_is_running != 0)
+			{
+				if (interp_get_scsi_timer(0) >= 250)
+					i = 0;
+			}
+			else
+	         i = i - 1;
+      end;
+
+      write(ScsiData) = 0;                    /* Release data bus */
+
+      if i = 0 then do;                       /* No device there */
+         write(ScsiBus) = 0;                  /* Release signal bus */
+         return (S$SelFailed);                /* Selection failed */
+      end;
+
+      write(ScsiBus) = (S$ATN);               /* Release SEL */
+
+      /*** IDENTIFY ***/
+
+      WaitForReq();                           /* Wait for our hardware to release ACK, and target to assert REQ */
+
+      i = (read(ScsiBus) and S$SigMask);		 /* store bus at this point */
+      write(ScsiBus) = 0;                     /* Release ATN */
+
+      write(ScsiByte) = ("H80" or LUN);       /* Send Identify Message with no disconnect priviledges */
+
+      if i <> S$MessOut then return(S$IdentFailed); /* return if message out phase never appeared (kludge for live overdub) */
+
+      WaitForReq();                           /* Wait for our hardware to release ACK, and target to assert REQ */
+
+      if ((read(ScsiBus) and S$SigMask) == S$Command)		/* if command phase, done...	*/
+			return (S$GoodConnect);
+		
+      if ((read(ScsiBus) and S$SigMask) == S$Status)		/* could be status phase here if busy...	*/
+		{
+			i = shr(read(ScsiWord), 8);			 /* get scsi status byte & toss message byte				*/
+			
+			if (i != S$Good)							 /* if nonzero, most likely busy or reserved				*/		
+				return (shl(i, 8));
+			
+      	return (shl(S$Busy, 8));             /* simulate busy if directly to status phase 			*/
+		}
+     
+		ScsiReset();									 /* reset if some other phase; we don't handle it yet	*/
+		
+		return(S$SelFailed);
+
+   end ScsiConnect;
+   
+/*
+   BUSCONNECT
+
+   This procedure is used to connect to the given device on the SCSI
+   bus. It simply calls ScsiConnect until the connection is made or
+   a fatal error occurs. The connection status is returned.
+*/
+  
+/* General plan for scsi status codes:									*/
+/* "Modern" routines shall:												*/
+/*		1)	Retrun a 0 if the command completed successfully - S$Good	*/
+/*		2)	Return a negative status number if BusConnect fails; e.g.	*/
+/*			see S$ArbFailed through S$BadInitiator						*/
+/*		3)  Return a sense key in the lower half if the scsi status		*/
+/*			code was check condition									*/
+/*		4)	Return the scsi status in the upper half in other case.		*/
+
+/* That is:																*/
+/*		1)	return value == S$Good or S$GoodConnect ==> OK				*/
+/*		2)  return value < 0 ==> connect failure						*/
+/*		3)	return value >= 256 ==> S$Busy or S$Reserved in upper half	*/
+/*		4)  return value <  256 ==> a Sense Code						*/
+
+	dcl S$BusConnectLUN fixed public;
+	
+   BusConnect: proc(DAdr) returns (fixed) public swappable;
+      dcl DAdr  	  fixed; /* Device address */
+      dcl (i,j) 	  fixed;
+		dcl d24id 	  fixed;
+		dcl initiator fixed;
+		dcl target    fixed;
+		dcl lun       fixed;
+     
+	   i = S$DeviceBusy;                       /* Let it into loop once */
+	
+		d24id     = shr(DAdr,4) and "HF";
+		initiator = S.Initiator;
+		target    = DAdr        and "HF";
+		lun       = shr(DAdr,8) and "HF";
+		
+		if ((d24id == 1) && (lun != 0))			 /* if board 1, use lun as initiator */
+		{													 /* and lun as host ID               */
+			initiator = lun;
+			lun       = 0;
+		}
+		
+		S$BusConnectLUN = shl(lun,5);				 /* publish extracted LUN */
+		
+		do while ((i == S$DeviceBusy    )
+		||        (i == S$DeviceReserved)
+		||        (i == S$ArbFailed     )
+		||        (i == S$BadBusState   ));	    /* Repeat until connected or fatal error occurs */
+         i = ScsiConnect(d24id, initiator, target, lun);
+         
+			if i = S$BadBusState then do;        /* Clear bus if it is out of whack */
+            write("50") = 7;                  /* Ring bell once */
+            call ScsiAbort;                   /* Abort anything on bus */
+         end;
+        
+		   else if ((i == S$DeviceBusy    )   	 /* Device is busy - delay for a while */
+			||       (i == S$DeviceReserved))
+			{
+            do j = 1 to 200;
+               write(d03) = 0;
+            end;
+         }
+      end;
+
+      return(i);                              /* Return connect status */
+   end BusConnect;
+
+
+/* Intermediate level scsi ops */
+
+   DataIn: proc(buf) public swappable;			/* get data as long as Data In phase is on bus */
+      dcl buf fixed array;							/* buffer for data */
+
+		do while ((read(ScsiBus) and (S$REQ | S$ATN)) != S$REQ);
+         interp_run_host_non_timer();
+      end; /* Wait for prior atn to be released and new REQ to be asserted */
+
+      buf(0) = 0;										/* no data received yet */
+      do while ((read(ScsiBus) and S$SigMask) = S$DataIn); /* get data bytes */
+         call pbyte(buf,buf(0),read(ScsiByte)); /* get byte of data */
+         buf(0) = buf(0) + 1;
+
+   		do while ((read(ScsiBus) and (S$REQ | S$ATN)) != S$REQ);
+            interp_run_host_non_timer();
+         end; /* Wait for prior atn to be released and new REQ to be asserted */
+      end;
+   end DataIn;
+
+   DataOut: proc(buf) public swappable;		/* send data as long as Data In phase is on bus */
+      dcl buf fixed array;							/* buffer for data */
+      dcl i   fixed;
+
+		do while ((read(ScsiBus) and (S$REQ | S$ATN)) != S$REQ);
+         interp_run_host_non_timer();
+      end; /* Wait for prior atn to be released and new REQ to be asserted */
+
+      i = 0;
+      do while ((read(ScsiBus) and S$SigMask) = S$DataOut); /* send data bytes */
+         write(ScsiByte) = byte(buf,i);		/* send byte of data */
+         i = i + 1;
+
+			do while ((read(ScsiBus) and (S$REQ | S$ATN)) != S$REQ);
+            interp_run_host_non_timer();
+         end; /* Wait for prior atn to be released and new REQ to be asserted */
+      end;
+   end DataOut;
+
+
+	/* General plan for scsi status codes:									*/
+	/* "Modern" routines shall:												*/
+	/*		1)	Retrun a 0 if the command completed successfully - S$Good	*/
+	/*		2)	Return a negative status number if BusConnect fails; e.g.	*/
+	/*			see S$ArbFailed through S$BadInitiator						*/
+	/*		3)  Return a sense key in the lower half if the scsi status		*/
+	/*			code was check condition									*/
+	/*		4)	Return the scsi status in the upper half in other case.		*/
+	
+	/* That is:																*/
+	/*		1)	return value == S$Good or S$GoodConnect ==> OK				*/
+	/*		2)  return value < 0 ==> connect failure						*/
+	/*		3)	return value >= 256 ==> S$Busy or S$Reserved in upper half	*/
+	/*		4)  return value <  256 ==> a Sense Code						*/
+
+   dcl GlobalSenseBuffer     (8) fixed PUBLIC;		/* published for error recovery					*/
+	dcl DeviceBlockSize      (32) fixed PUBLIC;		/* holds block size for 4 boards * 8 devices */
+	dcl UnitAttentionOccured (32) fixed PUBLIC;		/* set upon unit attention							*/
+	
+	ComputeSCSIIndex:proc (DevAdr) returns (fixed) public swappable;
+		dcl DevAdr fixed;
+		
+		return (shr(DevAdr & "h0030", 1) + (DevAdr & 7));	/* board * 8 + target */
+	end ComputeSCSIIndex;
+
+	ScsiDelay: proc recursive;				/* handy one second delay invoked on various retries...	*/
+		dcl i fixed;
+		
+		do i = 0 to 200;
+			write(3) = 0;
+		end;
+	end ScsiDelay;
+		
+   RequestSense: proc(DevAdr,Length,Buffer) returns (fixed) public swappable; /* get sense key */
+      dcl DevAdr fixed; /* Device address to get sense key from */
+      dcl Length fixed; /* No. bytes to request */
+      dcl Buffer fixed array; /* Buffer for sense data */
+      dcl Stat   fixed;
+
+      Stat = BusConnect(DevAdr);        		/* Connect Initiator to Target on SCSI Bus */
+
+      if (Stat != S$GoodConnect)					/* Connection error */
+			return(Stat);
+
+      /*** Send Request Sense command ***/
+      write(ScsiByte) = S$RequestSense;    	/* Command code */
+      write(ScsiByte) = S$BusConnectLUN; 		/* Logical unit number */
+      write(ScsiWord) = 0;                 	/* Reserved */
+      write(ScsiByte) = Length;            	/* No. extended sense bytes */
+      write(ScsiByte) = 0;                 	/* Control byte - no link */
+
+		// Wait for possible overlapped SCSI I/O to complete
+		while (interp_check_scsi_io(0) != 0)
+			interp_run_host_non_timer();
+		
+      call DataIn(Buffer);						 	/* get sense data */
+
+      Stat = shr(read(ScsiWord), 8);			/* get status word */
+
+      if (Stat = S$Good) and (Buffer(0) ige 3) then do; /* got good status and proper no. bytes */
+         Stat = (byte(Buffer,2) and "HF");	/* get sense key */
+      end;
+		else Stat = shl(Stat, 8);					/* else likely busy or reserved... */
+
+		if (Stat == S$UnitAttention)				/* publish unit attention */
+			UnitAttentionOccured( ComputeSCSIIndex(DevAdr) ) = true;
+			
+      return (Stat);                       	/* Return modern status code definition */
+   end RequestSense;
+
+   GetStatus: proc(DevAdr) returns (fixed) public swappable; /* get status of command */
+      dcl DevAdr fixed; /* SCSI device address */
+      dcl Stat   fixed; /* status word */
+
+      // We run host here because this is used for very long commands like start/stop
+      do while ( (read(ScsiBus) and (S$REQ | S$ACK)) != S$REQ );		// wait for req to be asserted after simple commands
+			interp_run_host_non_timer();
+		end;
+
+      Stat = shr(read(ScsiWord) ,8);			/* Get status word */
+
+      if (Stat == S$CheckCondition)				/* check condition */
+			Stat = RequestSense(DevAdr,16,GlobalSenseBuffer); /* get sense key */
+
+		else if (Stat == (S$SelFailed & 0xFF))	/* we see this from interpreter if device is not there */
+			Stat = S$SelFailed;
+
+		else
+			Stat = shl(Stat, 8);						/* else return S$Good, S$Busy (etc.) in upper half */
+		
+		interp_set_scsi_done();				// Done with scsi command
+		
+      return (Stat);                       	/* Return modern status code definition */
+   end GetStatus;
+
+   StartStopUnit: proc(DevAdr, Info, Immed) returns (fixed) public swappable; /* issue start/stop */
+      dcl DevAdr fixed; /* SCSI device address */
+	   dcl Info   fixed; /* control bits */
+		dcl Immed  fixed;
+      dcl Stat   fixed; /* status */
+
+		Stat = S$UnitAttention;
+		
+		while (Stat == S$UnitAttention)				 /* handle unit attention at this level */
+		{
+			Stat = BusConnect(DevAdr);        		 /* Connect to SCSI bus */
+			if Stat <> S$GoodConnect then return (Stat); /* return connection error */
+	
+			/*** Send Test Unit Ready command ***/
+			write(ScsiByte) = S$StartStop;          /* Operation Code */
+			write(ScsiByte) = S$BusConnectLUN | Immed; /* Target LUN, plus immediate bit */
+			write(ScsiWord) = 0;                    /* Reserved */
+			write(ScsiByte) = Info;                 /* function code */
+			write(ScsiByte) = 0;                    /* Control byte */
+	
+			// Wait for possible overlapped SCSI I/O to complete
+			while (interp_check_scsi_io(0) != 0)
+				interp_run_host_non_timer();
+			
+			Stat = GetStatus(DevAdr);               /* Return status of command */
+		}
+		
+		if ((Stat == S$Good) && (Info == 2))		 /* inform powerpc of media eject */
+			interp_eject_media(DevAdr);
+
+		return (Stat);
+   end StartStopUnit;
+
+   TestUnitReady: proc(DevAdr) returns (fixed) public swappable; /* see if unit is ready */
+      dcl DevAdr fixed;								 	 /* SCSI device address */
+      dcl Stat   fixed;								 	 /* status */
+
+		Stat = S$UnitAttention;
+		
+		while (Stat == S$UnitAttention)				 /* handle unit attention at this level */
+		{
+			Stat = BusConnect(DevAdr);        		 /* Connect to SCSI bus */
+			if Stat <> S$GoodConnect then return (Stat); /* return connection error */
+	
+			/*** Send Test Unit Ready command ***/
+			write(ScsiByte) = S$TestUnitReady;      /* Operation Code */
+			write(ScsiByte) = S$BusConnectLUN; 		 /* Target LUN */
+			write(ScsiWord) = 0;                    /* Reserved */
+			write(ScsiByte) = 0;                    /* Allocation Length */
+			write(ScsiByte) = 0;                    /* Control byte */
+
+			// Wait for possible overlapped SCSI I/O to complete
+			while (interp_check_scsi_io(0) != 0)
+				interp_run_host_non_timer();
+			
+			Stat = GetStatus(DevAdr);               /* Return status of command */
+		}
+		
+		return (Stat);
+   end TestUnitReady;
+
+   ReadCapacity: proc(DevAdr,Buffer) returns (fixed) public swappable; /* get capacity information */
+      dcl DevAdr fixed;									 /* device address of file */
+      dcl Buffer fixed array;							 /* buffer for capacity data */
+      dcl Stat   fixed;     							 /* status */
+
+		Stat = S$UnitAttention;
+		
+		while (Stat == S$UnitAttention)				 /* handle unit attention at this level */
+		{
+			Stat = BusConnect(DevAdr);        		 /* Connect to SCSI bus */
+			if Stat <> S$GoodConnect then return (Stat); /* return connection error */
+	
+			/*** Read Capacity Command ***/
+			write(ScsiByte) = S$ReadCapacity; 		 /* Operation Code */
+			write(ScsiByte) = S$BusConnectLUN;      /* Target LUN */
+			write(ScsiWord) = 0;              		 /* Reserved */
+			write(ScsiWord) = 0;              		 /* Reserved */
+			write(ScsiWord) = 0;              		 /* Reserved */
+			write(ScsiByte) = 0;              		 /* Reserved */
+			write(ScsiByte) = 0;              		 /* Control Byte */
+	
+			// Wait for possible overlapped SCSI I/O to complete
+			while (interp_check_scsi_io(0) != 0)
+				interp_run_host_non_timer();
+			
+			call DataIn(Buffer);              		 /* Get capacity data */
+
+			Stat = GetStatus(DevAdr);               /* Return status of command */
+		}
+		
+		return (Stat);
+   end ReadCapacity;
+
+	GetCachedBlockSize: proc(DevAdr) returns (fixed) public swappable; /* Quickly get block size for device */
+		dcl DevAdr    fixed;
+		dcl CapBuf(4) fixed;
+		dcl j	        fixed;
+		dcl Retries   fixed;
+		
+		j = ComputeSCSIIndex(DevAdr);						/* index into DeviceBlockSize array		*/
+
+		if (DeviceBlockSize(j) == 0)				      /* find out block size first time		*/
+		{
+			S$SenseKey = ReadCapacity(DevAdr,CapBuf);	/* find capacity								*/
+			
+			if (S$SenseKey == S$NotReady)					/* if not ready, startup and try again */
+			{
+				S$SenseKey = StartStopUnit(DevAdr, 1, 0);
+				
+				if (S$SenseKey != S$Good)
+				{
+					invoke DiskError;                   /* Invoke Disk Error interrupt 			*/
+	
+					if (core(0) == (-3))						/* return if diskerror allows return 	*/
+						return (0);
+				}
+				
+				S$SenseKey = TestUnitReady(DevAdr);
+				
+				do while (S$SenseKey != S$Good);
+					invoke DiskError;                   /* Invoke Disk Error interrupt 			*/
+	
+					if (core(0) == (-3))						/* return if diskerror allows return 	*/
+						return (0);
+					
+					write("50") = 7;                     /* Ring bell: serious system error */
+					
+					ScsiDelay();
+					
+					S$SenseKey = TestUnitReady(DevAdr);
+				end;
+				
+				S$SenseKey = ReadCapacity(DevAdr,CapBuf);			/* read capacity								*/
+			}
+			
+			if (S$SenseKey == S$Good && CapBuf(0) == 8)
+				DeviceBlockSize(j) = shl(byte(CapBuf, 6), 8) + byte(CapBuf, 7);
+				
+			else
+			{
+				invoke DiskError;                   	/* Invoke Disk Error interrupt 			*/
+
+				if (core(0) == (-3))							/* return if diskerror allows return 	*/
+					return (0);
+			}
+		}
+		
+		return (DeviceBlockSize(j));						/* return 0 if can't read it...			*/
+	end GetCachedBlockSize;
+	
+				
+/* $subtitle SCSI Read or Write */
+
+/*
+   SCSIIO
+
+   This procedure will execute a SCSI Read or Write command, normal
+   or extended, depending on the value in the variable OP. Poly memory,
+   external memory or an internal buffer may be used. Extended read and
+   write are meant to be used for direct-access devices only. All other
+   device should use normal read and write.
+
+   The parameters passed have the following definitions:
+
+   MSW:
+    Bits 0-7       Upper 8 bits of starting sector
+    Bits 8-15      Device Number
+
+   LSW:            Lower 16 bits of starting sector
+
+   BUFPTR:         Pointer to data buffer
+
+   LENGTH:         Number of words to read/write
+
+   OP:             SCSI op code for Extended Read or Extended Write
+
+   If LENGTH = -1 (use poly memory)
+   or LENGTH = -2 (use external memory) then:
+
+   BUFPTR:         Number of sectors to read/write
+
+   STARTSECTOR:    Starting sector in poly/external memory
+
+   STARTWORD:
+    Bits 0-7       Starting word in poly/external memory
+    Bits 8-15      External Memory Only - No. words beyond last sector 
+                                          to read/write in ext memory
+                   Poly     Memory Only - poly memory page #
+*/
+
+	dcl BUSY_RETRY_MAX 	lit '10';		/* retry limit before invoking disk error on busy... 		*/
+	dcl READY_RETRY_MAX	lit '10';		/* retry limit for not ready statuus							*/
+	dcl MEDERR_RETRY_MAX	lit ' 5';		/* media error retry limit											*/
+
+   ScsiIO: proc(MSW, LSW, Bufptr, Length, StartSector, StartWord, Op) public swappable; /* Perform SCSI I/O */
+      dcl (MSW, LSW)   fixed; /* Sector number to use */
+      dcl BufPtr       fixed; /* Buffer pointer */
+      dcl Length       fixed; /* Number of words to read/write */
+      dcl StartSector  fixed; /* Starting sector in poly/ext memory */
+      dcl StartWord    fixed; /* Starting word in poly/ext memory */
+      dcl Op           fixed; /* SCSI operation code */
+      dcl NumBlocks    fixed; /* Total number of logical blocks to read/write */
+      dcl NumWords     fixed; /* No. words beyond last sector in poly/ext memory */
+      dcl Sectors      fixed; /* Number of sectors to use in one command */
+      dcl Words        fixed; /* Number of excess words */
+      dcl Device       fixed; /* Device Number */
+      dcl DevAdr       fixed; /* Device address parameters */
+      dcl DevTyp       fixed; /* Device type */
+		dcl DevBlockSize fixed; /* Device block size */
+      dcl DiscardSecs  fixed; /* No. leading sectors to discard */
+		dcl LocalRetries fixed; /* No. of local retries attempted */
+      dcl (i,j)        fixed;
+
+      Device = shr(MSW,8);                    /* Get Device Number from MSB */
+      MSW    = MSW and "HFF";                 /* Zero MSB */
+
+		LocalRetries = 0;
+		
+      if (Length = -1) or (Length = -2) then do; /* Use poly/ext memory */
+         NumBlocks = BufPtr;                  /* No. sectors in poly/ext memory */
+         if Length = -1 then do;              /* poly memory only       */
+            NumWords = 0;                     /* read whole sectors     */
+            											 /* leave page # in upper half */
+         end;
+         else do;
+            NumWords = shr(StartWord,8);      /* No. words beyond last sector in poly/ext memory */
+            StartWord = StartWord and "HFF";  /* Get rid of MSB */
+          end;
+      end;
+      else do;                                /* Use buffer passed to procedure */
+         NumBlocks = shr(Length,8);           /* Get number of blocks to transfer */
+         NumWords = Length - shl(NumBlocks,8); /* Number of left over words to transfer */
+      end;
+
+      do while ( (NumBlocks <> 0) or (NumWords <> 0) ); /* Repeat until all blocks AND all words have been transferred */
+
+         S$SenseKey = S$BadDevice;               /* Assume any error will be a Bad Device Error */
+         DiscardSecs = 0;                        /* Assume no leading sectors need to be discarded */
+
+         i = Find_Device(Device);                /* Look for device */
+			
+			DevBlockSize = 512;							 /* assume standard 512-byte media */
+         
+			if i <> 0 then do;                      /* Device was found */
+            DevTyp = core(i + s#devtyp) & "17";  /* get SCSI device type    handy */
+
+            if DevTyp = 1 then do;               /* Winchester */
+               i = MapSector(MSW, LSW, Device);  /* Map logical sector to a physical sector on a device */
+					
+					if (i != 0)
+               	DevAdr = core(i + s#devadr);   /* get SCSI device address handy */
+            end;
+           
+			   else if DevTyp = 3 then do;          /* Tape */
+               RemSecMSW = -1;                   /* No remaining sectors for this device, so set flag */
+               RemSecLSW = -1;
+               DevAdr = core(i + s#devadr);      /* get SCSI device address handy */
+            end;
+           
+			   else if DevTyp = 4 then do;          /* Optical Disk */
+      			PhySecMSW = MSW;                  /* optical disk: use this device.  skip block limit	*/
+			      PhySecLSW = LSW;						 /* check since capacity may differ from configured	*/
+               RemSecMSW = -1;                   /* No remaining sectors for this device, so set flag */
+               RemSecLSW = -1;
+
+               DevAdr = core(i + s#devadr);      /* get SCSI device address handy */
+
+					DevBlockSize = GetCachedBlockSize(DevAdr);
+					
+					if (DevBlockSize == 0 && core(0) == (-3))	/* return on when diskerror failure */
+						return;
+
+               if (DevBlockSize != 512)			 /* for 1024 byte media, may have to discard first 256 words */
+					{
+						if (PhySecLSW and "1") <> 0 then do; /* Odd sector */
+							if Op = S$ExtendedWrite then do; /* cannot write to odd sectors */
+								S$SenseKey = S$IllegalRequest; /* This is an illegal request */
+								i = 0;                      /* Cause bells to ring forever */
+							end;
+							else DiscardSecs = 1;          /* discard the first sector */
+						end;
+		     		}
+            end;
+            
+				else i = 0;                          /* Unknown device type, so die here */
+         end;
+
+         /* Device not found or this logical block cannot be mapped to a
+            physical sector (because its too large or invalid) */
+         
+			if i = 0 then do forever;
+				invoke DiskError;                    /* Invoke Disk Error interrupt */
+
+				if (core(0) == (-3))						 /* return if diskerror allows return */
+					return;									 /* status at this point is most likely S$BadDevice */
+
+            write("50") = 7;                     /* Ring bell: serious system error */
+            
+				ScsiDelay();
+         end;
+
+         if ((RemSecMSW = 0)							 /* if running into physical end of media */
+			and (RemSecLSW ilt (NumBlocks + (NumWords <> 0)) ))
+			then do;
+            Sectors = RemSecLSW;                 /* Limit command to physical end of media */
+            Words = 0;                           /* Transfer no extra words */
+
+				if ((Length  ==  -1  )					 /* if reading to poly memory, limit to 512 sectors since */
+				&&  (Sectors IGT 512))					 /* we may have to pre-fetch the data...				   	 */
+					Sectors = 512;
+         end;
+		
+			else if ((DiscardSecs != 0)				 /* Else if tossing first sector and then reading */
+			and     (NumBlocks    != 0))				 /* more whole sectors */
+			then do;
+            Sectors = 1;                 			 /* Then read & toss leading sector followed by only 1 more */
+            Words   = 0;                  		 /* but leave extra words for its own command */
+			end;
+			
+			else if (NumBlocks != 0)					 /* Else if full blocks to read, do so */
+			then do;
+            Sectors = NumBlocks;                 /* Transfer all blocks */
+				
+				if ((Length  ==  -1  )					 /* if reading to poly memory, limit to 512 sectors since */
+				&&  (Sectors IGT 512))					 /* we must pre-fetch the data...								 */
+					Sectors = 512;
+				
+				if (DevBlockSize == 512)				 // for 512-byte media, save partial sector for its own command in all cases
+					Words = 0;
+					
+				else if (Sectors IGE 2)					 // else for 1024-byte opticals, if 2 or more sectors, transfer even number of fill sectors first
+				{
+					Sectors = Sectors & 0xFFFE;	 	 // transfer even number of full sectors.  That is, save possible odd sector
+					Words   = 0;							 // for it's own command, along with any possible partial sectors
+				}
+				
+				else											 // else for 1024 byte media, transfer odd block and partial words in final command
+					Words = NumWords;
+			end;			
+        
+		   else do;
+            Sectors = 0; 			                /* Else just transfer extra words. could include leading sectors as well */
+            Words   = NumWords;
+         end;
+
+			if (Length = -1)								 /* Poly memory */
+				interp_set_pmem_addr(StartSector, StartWord);
+			else if (length = -2)						 /* Ext memory */
+				interp_set_xmem_addr(StartSector, StartWord);
+			else												 /* Int memory */
+				interp_set_imem_addr(Bufptr);
+
+         S$SenseKey = BusConnect(DevAdr);        /* Connect to SCSI bus */
+
+         while (S$SenseKey != S$GoodConnect)  	 /* Crash if connection fails */
+			{
+			   invoke DiskError;                    /* Invoke Disk Error interrupt */
+
+  				if (core(0) == (-3))						 /* return if diskerror allows return */
+					return;
+	
+            write("50") = 7;                     /* Ring bell */
+           
+				ScsiDelay();
+	        
+			   S$SenseKey = BusConnect(DevAdr);     /* might as well retry... */
+         }
+
+         /* Send SCSI Command */
+         if DevTyp = 1 then do;                  /* Send Winchester Command */
+            write(ScsiByte) = Op;                /* SCSI Operation Code */
+            write(ScsiByte) = S$BusConnectLUN;   /* Target LUN */
+            write(ScsiWord) = PhySecMSW;         /* Logical Block Address (MSW) */
+            write(ScsiWord) = PhySecLSW;         /* Logical Block Address (LSW) */
+            write(ScsiByte) = 0;                 /* Reserved */
+            write(ScsiWord) = Sectors + (Words <> 0); /* No. Sectors to transfer */
+            write(ScsiByte) = 0;                 /* Control byte */
+         end;
+         else if DevTyp = 3 then do;             /* Send Tape Command */
+            write(ScsiByte) = Op;                /* SCSI Operation Code */
+            write(ScsiByte) = S$BusConnectLUN or 1; /* Target LUN with fixed bit set */
+            write(ScsiByte) = 0;                 /* Transfer Length (MSW) */
+            write(ScsiWord) = shr(Sectors + (Words <> 0) + 15,4); /* No. 8192 byte blocks to transfer */
+            write(ScsiByte) = 0;                 /* Control byte */
+         end;
+         else if DevTyp = 4 then do;             /* Send Optical Disk Command */
+            write(ScsiByte) = Op;                /* SCSI Operation Code */
+            write(ScsiByte) = S$BusConnectLUN;   /* Target LUN */
+				
+				if (DevBlockSize != 512)				 /* if not 512 bytes, assume is 1024 byte media... */
+				{
+					write(ScsiWord) = shr(PhySecMSW,1);  /* Logical Block Address (MSW) */
+					write(ScsiWord) = shl(PhySecMSW,15) or shr(PhySecLSW,1); /* Logical Block Address (LSW) */
+					write(ScsiByte) = 0;                 /* Reserved */
+					write(ScsiWord) = shr(Sectors + (Words <> 0) + (DiscardSecs <> 0) + 1,1); /* No. Sectors to transfer */
+					write(ScsiByte) = 0;                 /* Control byte */
+				}
+				else												 /* handle 512 byte optical media */
+				{
+            	write(ScsiWord) = PhySecMSW;         /* Logical Block Address (MSW) */
+            	write(ScsiWord) = PhySecLSW;         /* Logical Block Address (LSW) */
+					write(ScsiByte) = 0;                 /* Reserved */
+					write(ScsiWord) = Sectors + (Words <> 0); /* No. Sectors to transfer */
+					write(ScsiByte) = 0;                 /* Control byte */
+				}
+         end;
+
+			// Wait for possible overlapped SCSI I/O to complete
+			while (interp_check_scsi_io(0) != 0)
+				interp_run_host_non_timer();
+			
+			// Transfer data
+         if length = -1 then do;                 /* Use Poly Memory */
+            if PolyExt then do;                  /* Only include if we should */
+               if (Op = S$ExtendedRead) or (Op = S$Read)
+               then call ReadPoly(StartSector,StartWord,Sectors,Words,DiscardSecs);
+               else call WritePoly(StartSector,StartWord,Sectors,Words);
+            end;
+            else do forever;                     /* No poly drivers */
+               call ScsiAbort;                   /* Abort this command (may reset bus) */
+               write("50") = 7;                  /* Ring bell */
+            end;
+         end;                                    /* of Use Poly Memory */
+         else if length = -2 then do;            /* Use External Memory */
+            if PolyExt then do;                  /* Only include if we should */
+               if (Op = S$ExtendedRead) or (Op = S$Read)
+               then call ReadExt(StartSector,StartWord,Sectors,Words,DiscardSecs);
+               else call WriteExt(StartSector,StartWord,Sectors,Words);
+            end;
+            else do forever;                     /* No external drivers */
+               call ScsiAbort;                   /* Abort this command (may reset bus) */
+               write("50") = 7;                  /* Ring bell */
+            end;
+         end;                                    /* of Use External Memory */
+         else do;                                /* Use buffer passed */
+            j = shl(Sectors,8) + Words;          /* No. words to read */
+            if (Op = S$ExtendedRead) or (Op = S$Read)
+            then call ReadMem(BufPtr,j,DiscardSecs);
+            else call WriteMem(BufPtr,j);
+         end;
+
+         if AbortSequence then do;               /* If command was aborted  */
+            NumBlocks = 0;                       /* Cause while loop to end */
+            NumWords  = 0;
+         end;
+        
+		   else do;                                /* Command wasn't aborted */
+				
+				S$SenseKey = GetStatus(DevAdr);		 /* get status; do request sense on check condition	*/
+				
+				if (S$SenseKey == S$DeviceBusy)		 /* Busy status: Retry ourselves once or twice			*/
+				{
+					LocalRetries = LocalRetries + 1;
+					
+					if (LocalRetries >= BUSY_RETRY_MAX) /* wait for device to become ready a while ourselves	*/
+					{											 	/* before giving up completely...							*/
+               	invoke DiskError;              	/* Invoke Disk Error interrupt, if one 					*/
+					
+						if (core(0) == (-3))				 	/* return if diskerror allows return 						*/
+							return;
+           		 	
+						write("50") = 7;                 /* Ring bell */
+					}
+					
+					ScsiDelay();
+				}
+				
+				else if (S$SenseKey == S$DeviceReserved)	 /* else if reserved, doesn't look good...				*/
+				{
+               invoke DiskError;                 		 /* Invoke Disk Error interrupt, if one 					*/
+					
+					if (core(0) == (-3))					 		 /* return if diskerror allows return 						*/
+						return;
+					
+					write("50") = 7;                  		 /* Ring bell */
+					
+					ScsiDelay();
+				}
+				
+				else if (S$SenseKey == S$UnitAttention)	 /* unit attention */
+				{
+               if ((Op = S$ExtendedWrite) or (Op = S$Write))		/* die an ugly death upon write to	*/
+					{																	/* a newly changed media...			*/
+						invoke DiskError;              		/* Invoke Disk Error interrupt, if one 					*/
+						
+						if (core(0) == (-3))				 		/* return if diskerror allows return 						*/
+							return;
+						
+						do while 1;							 		/* die irrevocably if unit attention occurs on		   */
+							write("50") = 7;				 		/* write.  Likely means someone changed media			*/
+						end;									 		/* between the read of a catalog and the write...		*/
+					}
+					
+					/* Note: don't invoke disk error for unit attention conditions on read... 					*/
+				}
+				
+				else if (S$SenseKey == S$NotReady)			/* if not ready, spin up */
+				{
+					S$SenseKey = StartStopUnit(DevAdr, 1, 0);		/* spin up you bastard */
+					
+					if (S$SenseKey != S$Good)					/* oops; didn't like our start command... Hmmm....	*/
+					{
+						invoke DiskError;           			/* Invoke Disk Error interrupt, if one 				*/
+					
+						if (core(0) == (-3))			 			/* return if diskerror allows return 					*/
+							return;
+					}
+
+					ScsiDelay();
+					S$SenseKey = TestUnitReady(DevAdr);		 /* hungry yet? */
+
+					if (S$SenseKey != S$Good)					 /* retry several times at our level before				*/
+					{											 		 /* reporting failure...										*/
+						LocalRetries = LocalRetries + 1;
+						
+						if (LocalRetries >= READY_RETRY_MAX)	/* wait for device to become ready a while ourselves	*/
+						{										 			/* before giving up completely...							*/
+							invoke DiskError;           			/* Invoke Disk Error interrupt, if one 					*/
+						
+							if (core(0) == (-3))			 			/* return if diskerror allows return 						*/
+								return;
+							
+							write("50") = 7;                 	/* Ring bell */
+						}
+					}					
+				}
+						
+				else if (S$SenseKey == S$MediumError)		 /* else if medium error */
+				{
+					LocalRetries = LocalRetries + 1;
+					
+					if (LocalRetries >= MEDERR_RETRY_MAX)	/* wait for device to become ready a while ourselves	*/
+					{										 			/* before giving up completely...							*/
+						invoke DiskError;              	 	/* Invoke Disk Error interrupt, if one						*/
+						
+						if (core(0) == (-3))				 	 	/* return if diskerror allows return						*/
+							return;
+					}
+					
+					write("50") = 7;                  		/* Ring bell 														*/
+					
+					ScsiDelay();
+				}
+
+
+				else if ((S$SenseKey == S$Good          )	 /* good status or recovered error */
+				||       (S$SenseKey == S$RecoveredError))
+				{
+					// Increment BufPtr by sector and word length read in case reading/writing internal memory:
+					BufPtr = BufPtr + shl(Sectors,8) + Words; /* Update buffer pointer */
+
+					// Increment starting sector address on disk:
+					LSW = LSW + Sectors;                 /* Update Logical Blocks */
+					if LSW ilt Sectors then MSW = MSW + 1; /* Deal with overflow */
+
+					// Decrement cound of sectors and words to process:
+					NumBlocks = NumBlocks - Sectors;     /* Update no. sectors transferred thus far */
+					NumWords = NumWords - Words;         /* Update no. words transferred thus far */
+
+					// Increment possible sector address in poly memory.  Increment page field if wrap to next 32-meg page:
+					StartSector = StartSector + Sectors; /* Update starting sector */
+					if StartSector ilt Sectors then StartWord = StartWord + 256;
+					
+					S$SenseKey = S$Good;
+				}
+				
+				else do forever;							 /* else unkown scsi status byte or sense code 	*/
+					invoke DiskError;                 /* Invoke Disk Error interrupt 						*/
+					
+					if (core(0) == (-3))				 	 /* return if diskerror allows return 				*/
+						return;
+               
+					write("50") = 7;                  /* Ring bell 												*/
+					
+					ScsiDelay();
+            end;
+
+         end;                                    /* of Not aborted command */
+      end;                                       /* While loop */
+
+   end ScsiIO;
+
+
+/*
+   WIN1READ
+
+   This procedure uses the SCSI Extended Read command to read data
+   from the disk into a buffer, poly memory or external memory.
+*/
+
+   Win1Read: proc public;
+
+      call ScsiIO(read(r0),read(r1),read(r2),read(r3),read(r4),read(r5),S$ExtendedRead);
+
+   end Win1Read;
+
+
+/*
+   WIN1WRITE
+
+   This procedure uses the SCSI Extended Write command to write data
+   to the disk from a buffer, poly memory or external memory.
+*/
+
+   Win1Write: proc public;
+
+      call ScsiIO(read(r0),read(r1),read(r2),read(r3),read(r4),read(r5),S$ExtendedWrite);
+
+   end Win1Write;

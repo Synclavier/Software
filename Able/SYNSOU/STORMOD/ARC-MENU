@@ -1,0 +1,767 @@
+/*	:SYNSOU:STORMOD:ARC-MENU  $TITLE  Menu Routines for Archiving Screen
+
+Modified:
+2000/02/27 - TY  - Changed Stuff.Sound.File.Into.Menu() to indirectly accommodate display of sound file loops
+1989/05/02 - TSS - Merged changes for Optical disk to DTD transfer project
+1987/12/21 - MWH - Use Get.Next.Optical.Event directly
+1987/11/01 - LSS - screen bug fixes for final Release N
+*/
+
+Open.Menu: proc (TopRow) swapable;	/*	opens main menu box	*/
+	dcl TopRow			fixed;	/*	row of top of table	*/
+	dcl (FirstId,Id)	fixed;
+	dcl Title	(16)	fixed;
+	dcl XCol1	lit '00'; dcl XCol2	lit '11';
+	dcl XCol3	lit '21'; dcl XCol4	lit '29';
+
+	Define.New.String.Field: proc (PidLoc,Row,LabelCol,Str,DataCol,Width,Border);
+		dcl PidLoc		fixed;
+		dcl Row			fixed;
+		dcl LabelCol	fixed;
+		dcl Str			array;
+		dcl DataCol		fixed;
+		dcl Width		fixed;
+		dcl Border		boolean;	/*	true for border, false for no border	*/
+		dcl TStr (16)	fixed;
+		dcl (Id1,Id2)	fixed;
+
+		TStr(0)=0; call Append.To.Str(TStr,Str);
+		Id1=Define.Label(s#aa,Row,LabelCol,TStr(0),TStr);
+		call Set.Object.Mouse.Access(Id1,0);	/*	no Mouse access allowed	*/
+		Id2=Define.String(s#aa,Row,DataCol,Width,O#STR.General);
+		call Deposit.Object.Info(Id2,O#UserData,Id1);	/*	save id of label with real object	*/
+		/*	call Set.Object.Action(Id2,O#ACT.Drag.Enabled,true);	*/
+		if Border then call Draw.Gbox.Around.Object(Id2,#dots.comp,0,-1,-1);
+		call PID(PidLoc,Id2);
+	end Define.New.String.Field;
+
+	Define.Backup.String.Field: proc (PidLoc,Row,Col,Width);
+		dcl PidLoc		fixed;
+		dcl (Row,Col)	fixed;
+		dcl Width		fixed;
+		dcl Id			fixed;
+
+		Id=Define.String(s#aa,Row,Col,Width,O#STR.General);
+		call PID(PidLoc,Id);
+	end Define.Backup.String.Field;
+
+	/*	$PAGE	*/
+
+	call Set.Auto.Allocation.Id(OBJ$Menu);	/*	reset id #	*/
+
+	call Copy.String('OPTICAL DISK STORAGE',Title);
+
+	/*	puts title in box on TOP LEFT of menu	*/
+	FirstId=Define.Graphics.Label(s#aa,(TopRow-1)*100-30,50,Title);
+	call Define.Graphics.Box(s#aa,gpos.x(-25) ,gpos.y((TopRow-1)*100-95),
+											gpos.x(2225),gpos.y((TopRow-1)*100- 5),0);
+
+	call Define.Graphics.Box(s#aa,gpos.x(-25) ,gpos.y((TopRow-1)*100-5),
+											gpos.x(8000),gpos.y((TopRow+5)*100),0);
+
+	call Define.New.String.Field(SFName  ,TopRow,XCol1,'Sound File:',XCol2,32,true);
+	call PID(SFNameLabel,Fetch.Object.Info(GID(SFName),O#UserData));	/*	save id of label	*/
+	call Define.New.String.Field(Caption ,TopRow+1,XCol1,'Caption:' ,XCol2,64,true);
+
+	call Define.New.String.Field(CatTable.Type.Obj,TopRow+2,XCol1,'Categories:',XCol2,CategoryStringLength,false);
+
+	call PID(CatTable,Define.Table(s#aa,2,4,GID(CatTable.Type.Obj)));
+	call Draw.Gbox.Around.Object(GID(CatTable),#dots.comp,0,-1,-1);
+
+	/*	  Set.Object.Arrow.Links(				ID,		  above,			 below,		  left,			right);	*/
+	call Set.Object.Arrow.Links(GID(SFName  ),			  -1,GID(Caption) ,			 -1,GID(SaveName));
+	call Set.Object.Arrow.Links(GID(SaveName),			  -1,GID(Caption) ,GID(SFName),				-1);
+	call Set.Object.Arrow.Links(GID(Caption ),GID(SFName)  ,GID(CatTable),			 -1,				-1);
+	call Set.Object.Arrow.Links(GID(CatTable),GID(Caption) ,				 -1,			 -1,				-1);
+
+	Id=Define.Grid.Icon(s#aa,TopRow+2,XCol2,2,4,32);
+
+	/*	define display of free bytes available for Caption or Categories	*/
+	Id=Define.Label(s#aa,TopRow+5,0,5,'Free:');	/*	label for free bytes display	*/
+	call Set.Object.Mouse.Access(Id,0);	/*	no Mouse access allowed	*/
+	Id=Define.Fixed.Point(s#aa,TopRow+5,6,3,0,cf#unsigned|cf#right|cf#spfill);
+	call Set.Object.Mouse.Access(Id,0);	/*	no Mouse access allowed	*/
+	call Deposit.Fixed.Point(Id,256);	/*	init to all free	*/
+	call PID(FreeMem,Id);
+
+	Id=Group.Objects(GRP$Menu,FirstId,Id,Get#Screen.Event);
+	call PID(MenuGrp,Id);
+
+	call Activate.Group.Objects(GID(MenuGrp));
+	call Update.Group.Objects	(GID(MenuGrp));
+
+	/*	Define a bunch of objects which are only used to	*/
+	/*	hold a backup copy of the current menu values.		*/
+	/*	These objects should always stay disabled.			*/
+
+	call Define.Backup.String.Field(SavedSFName	,TopRow	,XCol2,32);
+/*	call Define.Backup.String.Field(SavedSaveName,TopRow	,XCol4,08);	*/
+	call Define.Backup.String.Field(SavedCaption	,TopRow+1,XCol2,64);
+	call Define.Backup.String.Field(SavedCatTable.Type.Obj,TopRow+2,XCol2,CategoryStringLength);
+	call PID(SavedCatTable,Define.Table(s#aa,2,4,GID(SavedCatTable.Type.Obj)));
+
+	call PID(MenuModified,false);	/*	starts out not modified	*/
+end Open.Menu;
+
+Close.Menu: proc swapable;
+
+	call Erase.Group.Objects	(GID(MenuGrp));
+	call Undefine.Group.Objects(GID(MenuGrp));
+	call Ungroup.Objects			(GID(MenuGrp));
+
+	call PID(MenuGrp,-1);		/*	no longer defined	*/
+end Close.Menu;
+
+/*	$SUBTITLE	*/
+
+Room.For.New.Category: proc (Col,Row,NewCategory) boolean swapable;	/*	see if category will fit	*/
+	dcl (Col,Row)		fixed;	/*	category table item to replace	*/
+	dcl NewCategory	array;	/*	new category string	*/
+	dcl CurLen			fixed;
+	dcl NewLen			fixed;
+
+	call Fetch.Table(GID(CatTable),Col,Row);	/*	load current category string	*/
+
+	CurLen=Fetch.Object.Info(GID(CatTable.Type.Obj),O#STR.String);	/*	look up byte len of current category	*/
+
+	CurLen=shl(shr(CurLen		  +1,1)+1,1);	/*	round up bytes and add byte count word	*/
+	NewLen=shl(shr(NewCategory(0)+1,1)+1,1);	/*	for both current and new category strings	*/
+
+	if (Fetch.Fixed.Point(GID(FreeMem))+CurLen-NewLen)>=0
+	then return true;									/*	new category will fit	*/
+	else return false;								/*	won't fit	*/
+
+end Room.For.New.Category;
+
+Category.Exists: proc (Str,Cell,MatchCell) boolean swapable;	/*	see if this category already exists elsewhere in header	*/
+	dcl Str			array;	/*	category string to look for	*/
+	dcl Cell			array;	/*	COL & ROW in CatTable cell from which new category came (don't test this cell)	*/
+	dcl MatchCell	array;	/*	output cell of matching entry if one found	*/
+	dcl I				fixed;
+	dcl Str1 (shr(CategoryStringLength+1,1))	fixed;
+
+	do I=0 to 7;
+		if ((I&1)<>Cell(0)) or (shr(I,1)<>Cell(1)) then do;	/*	compare categories	*/
+			call Fetch.Table (GID(CatTable),I&1,shr(I,1));
+			call Fetch.String(GID(CatTable.Type.Obj),Str1);
+
+			if Str1(0)<>0 then do;							/*	not an empty category	*/
+				if EqStr(Str,Str1)=0 then do;
+					MatchCell(0)=(I&1); MatchCell(1)=shr(I,1);	/*	save col & row match	*/
+					return true;	/*	categories are the same	*/
+				end;
+			end;
+		end;
+	end;
+
+	MatchCell(0)=(-1); MatchCell(1)=(-1);		/*	no match	*/
+
+	return false;	/*	no match found	*/
+end Category.Exists;
+
+Erase.Menu.Categories: proc swapable;	/*	clear out any existing categories	*/
+	dcl I	fixed;
+
+	Disable.Deposits=true;
+	do I=0 to 7;
+		call Fetch.Table	 (GID(CatTable),(I&1),shr(I,1));
+		call Deposit.String(GID(CatTable.Type.Obj),'');
+		call Deposit.Table (GID(CatTable),(I&1),shr(I,1));
+		call Deposit.String(GID(SavedCatTable.Type.Obj),'');
+		call Deposit.Table (GID(SavedCatTable),(I&1),shr(I,1));
+	end;
+	Disable.Deposits=false;
+
+	call PID(MenuModified,false);
+
+end Erase.Menu.Categories;
+
+/*	$SUBTITLE	*/
+
+Compute.Free.Header.Bytes: proc	fixed swapable;	/*	compute available header bytes after stuffing with current menu values	*/
+	dcl BytesUsed			fixed;
+	dcl (Row,Col)			fixed;
+	dcl (CatPtr,TypePtr)	fixed;
+	dcl I						fixed;
+
+	/*	first add up lengths of all used categories	*/
+
+	call Locate.Object(GID(CatTable));
+	CatPtr=Object.Ptr;
+	call Locate.Object(GID(CatTable.Type.Obj));
+	TypePtr=Object.Ptr;
+
+	do Col=0 to Read.Object(CatPtr+O#TABL.Across)-1;
+		do Row=0 to Read.Object(CatPtr+O#TABL.Down)-1;
+
+			call Fetch.Table(GID(CatTable),Col,Row);	/*	load current category string	*/
+
+			I=Read.Object(TypePtr+O#STR.String);		/*	look up byte len of current category	*/
+
+			if I<>0 then do;									/*	table cell has a non-null category		*/
+				I=shl(shr(I+1,1)+1,1);						/*	round up bytes and add byte count word	*/
+				BytesUsed=BytesUsed+I;
+			end;
+		end;
+	end;
+
+	/*	now add in length of caption	*/
+
+	call Locate.Object(GID(Caption));
+	I=Read.Object(Object.Ptr+O#STR.String);	/*	look up byte len of current caption	*/
+	I=shl(shr(I+1,1),1);								/*	round up bytes (don't add byte count word)	*/
+	BytesUsed=BytesUsed+I;							/*	total bytes used	*/
+
+	return 256-BytesUsed;							/*	return number of bytes left	*/
+end Compute.Free.Header.Bytes;
+
+Compute.Free.Bytes.Display: proc	fixed swapable;
+	dcl FreeBytes	fixed;
+
+	FreeBytes=Compute.Free.Header.Bytes;	/*	calculate bytes left in header after stuffing with menu values	*/
+
+	if FreeBytes>=0 then do;					/*	means we have enough room in header	*/
+		Disable.Deposits=true;
+			call Deposit.Fixed.Point(GID(FreeMem),FreeBytes);
+		Disable.Deposits=false;
+
+		call Update.Object(GID(FreeMem));
+	end;
+
+	return FreeBytes;
+end Compute.Free.Bytes.Display;
+
+/*	$SUBTITLE	*/
+
+Stuff.Category.Into.Menu: proc (Cat,Cell) boolean swapable;	/*	finds a spot in menu for category	*/
+	dcl Cat		array;
+	dcl Cell		array;	/*	output position	*/
+	dcl I			fixed;
+	dcl Str (shr(CategoryStringLength+1,1))	fixed;
+	dcl MaxLen	fixed;
+
+	MaxLen = Fetch.Object.Info(GID(CatTable.Type.Obj),O#STR.Max.Chars);
+	if Cat(0) igt MaxLen then Cat(0)=MaxLen;
+
+	do I=0 to 7;
+		call Fetch.Table(GID(CatTable),(I&1),shr(I,1));
+		call Fetch.String(GID(CatTable.Type.Obj),Str);
+
+		if Str(0)=0 then do;			/*	here is a blank spot to stuff new category into	*/
+			call Set.Table.Cur.Cell(GID(CatTable),I&1,shr(I,1));
+			Disable.Deposits=true;
+				call Deposit.String(GID(CatTable.Type.Obj),Cat);	/*	will cause subsequent DEPOSIT screen event	*/
+			Disable.Deposits=false;
+			call Deposit.Table(GID(CatTable),(I&1),shr(I,1));		/*	event which is processed below	*/
+
+			Cell(0)=I&1; Cell(1)=shr(I,1);
+
+			call PID(MenuModified,true);	/*	have made a change to menu	*/
+
+			return true;				/*	found a spot	*/
+		end;
+	end;
+
+	Cell(0)=(-1); Cell(1)=(-1);
+	return false;						/*	no room in menu	*/
+
+end Stuff.Category.Into.Menu;
+
+Stuff.Menu.Items: proc (Name,Buf,SFNameId,CaptionId,CatTable.Type.ObjID,CatTableId) swapable;
+	dcl Name						array;	/*	sound file name	*/
+	dcl Buf						array;	/*	sound file header buffer	*/
+	dcl SFNameId				fixed;
+	dcl CaptionId				fixed;
+	dcl CatTable.Type.ObjId	fixed;
+	dcl CatTableId				fixed;
+	dcl (NextCatPtr,I)		fixed;
+
+	Disable.Deposits=true;
+		call Deposit.String(SFNameId,Name);
+		call Deposit.String(CaptionId,Loc(Addr(Buf(SF.Id.Field.Bytes))));
+	Disable.Deposits=false;
+
+	/*	now look up the categories for this file	*/
+
+	NextCatPtr=Buf(SF.Index.Base);	/*	get ptr to start of category list	*/
+	if NextCatPtr=0 then NextCatPtr=256;	/*	null ptr -> no categories	*/
+
+	Disable.Deposits=true;
+		do I=0 to 7;	/*	stuff first 8 categories	*/
+			call Fetch.Table(CatTableId,(I&1),shr(I,1));
+
+			if NextCatPtr ILT 256 then do;
+				call Deposit.String(CatTable.Type.ObjId,Loc(Addr(Buf(NextCatPtr))));
+				NextCatPtr=NextCatPtr+1+shr(Buf(NextCatPtr)+1,1);
+				call Deposit.Table(CatTableId,(I&1),shr(I,1));
+			end;
+			else do;
+				/*	check for matching null string to speed up audition	*/
+				if Fetch.Object.Info(CatTable.Type.ObjId,O#STR.String)<>0
+				then do;
+					call Deposit.String(CatTable.Type.ObjId,'');
+					call Deposit.Table(CatTableId,(I&1),shr(I,1));
+				end;
+			end;
+		end;
+	Disable.Deposits=false;
+
+end Stuff.Menu.Items;
+
+/*	$SUBTITLE	*/
+
+Stuff.Sound.File.Into.Menu: proc (Name,Dev,FileAddr,FileLen) swapable;
+	dcl Name						array;	/*	file to archive	*/
+	dcl Dev						fixed;	/*	device to access	*/
+	dcl FileAddr				array;	/*	32-bit absolute device address of file start	*/
+	dcl FileLen					array;	/*	32-bit sector length of file	*/
+	dcl NullBase	(1)		fixed;
+	dcl WhichActionButtons	fixed;
+	dcl RecBuf (L#Rec_Length-1)	fixed;
+	dcl I							fixed;
+
+	/*	recompute file info for poly memory &	*/
+	/*	floppy devices in case things have moved	*/
+
+	if not Verify.File.Info(Dev,Name,FileAddr,FileLen)
+	then do;
+		call Copy.String(Name,FNBuf);	/*	set up for error call	*/
+		call Set.Optical.Error(ERR#FileNotFound);
+		return;
+	end;
+
+	if Name(0)=0 then do;							/*	nothing really entered	*/
+		call Deposit.String(GID(SFName),Name);	/*	will cause eventual clear of info panel	*/
+		return;
+	end;
+
+	if GID(MenuModified) then do;	/*	have made a change to menu	*/
+		call Open.Info.Panel.Dialog(DialogRow,DLG#MenuChange);
+		if not Get.Dialog.Response then return;
+		call PID(MenuModified,false);	/*	reset flag	*/
+	end;
+
+	Disable.Deposits=true;	/*	make sure menu label is correct	*/
+		call Deposit.Label (GID(SFNameLabel),'Sound File:');
+	Disable.Deposits=false;
+
+	call PID(FileOnOptical,false);	/*	assume file not on Optical disk	*/
+
+	if (OpenWindowBits&Bits(OptWindowId))<>0 then do;
+		if Activate.Optical(O#UpdateDialog|O#VolChangeDialog) then do;	/*	everything up to date	*/
+			Optical.Disk.Ready=0;		/*	reset flag	*/
+
+			if (Activate.Operations.Performed&ACT#VolChange)<>0	/*	volume changed - have a new disk	*/
+			then call Refresh.OptWindow.Title(OptWindowId);
+
+			if Index_Locate(Name,RecBuf,Laserdev)
+			then call PID(FileOnOptical,true);
+			else do;
+				if (S$SenseKey<>S$Good) and (C#Status<>E#No_File)	/*	suppress file not found message	*/
+				then call Generate.Optical.Error.Message;				/*	but allow others to be displayed	*/
+				call PID(FileOnOptical,false);
+			end;
+		end;
+	end;
+
+	if Dev=LaserDev
+	then call PID(FileOnSource,GID(FileOnOptical));
+	else call PID(FileOnSource,true);
+
+	/*	$PAGE	*/
+
+	if GID(FileOnSource) then do;
+		call PID(FileDevice ,Dev);			/*	device from which sound comes	*/
+		call PID(FileType   ,T#Sound);	/*	sound file type	*/
+		call PID(FileAddress,FileAddr(0)); write(md)=FileAddr(1);	/*	save abs addr of file	*/
+		call PID(FileLength ,FileLen (0)); write(md)=FileLen (1);	/*	and length	*/
+
+		if (Dev ilt 8) or (Dev=PolyCacheDev) then do;	/*	a real disk drive	*/
+			call Readdata(FileAddr(0),FileAddr(1),Misc.Buf,256);
+			WhichActionButtons=SFMode;
+		end;
+
+		else if Dev=PolyMemDev then do;	/*	poly memory	*/
+			call Psmread(FileAddr,0,0);	/*	set up to read SF header	*/
+			call Poly.In(Addr(Misc.Buf(0)),256);
+			WhichActionButtons=SFMode;
+		end;
+
+		else if Dev=LaserDev then do;		/*	the optical disk	*/
+			if ReadEntry(RecBuf(L$Dir_Entry),LaserDev)=S$Good then do;
+				if O$BufMed=1 then do;		/*	optical buffer is in external memory	*/
+					write(mam)=O$BufPtr+shr(E$Header,8);
+					write(mal)=E$Header;
+					call Copy.In(Addr(Misc.Buf(0)),256);
+				end;
+				else do;	/*	optical buffer is in internal memory	*/
+					do I=0 to 255;
+						Misc.Buf(I)=core(O$BufPtr+E$Header+I);
+					end;
+				end;
+			end;
+			else do;
+				do i=0 to 255; misc.buf(i)=0; end;	/*	??? - null out	*/
+			end;
+			WhichActionButtons=LaserEditMode;
+		end;
+	end;
+	else do i=0 to 255; misc.buf(i)=0; end;		/*	can't read header - null out	*/
+
+	call Stuff.Menu.Items(Name,Misc.Buf,GID(SFName),GID(Caption),GID(CatTable.Type.Obj),GID(CatTable));
+	call Stuff.Menu.Items(Name,Misc.Buf,GID(SavedSFName),GID(SavedCaption),GID(SavedCatTable.Type.Obj),GID(SavedCatTable));
+
+	call Compute.Free.Bytes.Display;
+
+	call Update.Group.Objects(GID(MenuGrp));
+	call Open.Action.Buttons(WhichActionButtons);		/*	turn on activity buttons	*/
+
+	if (FunctionInfo&(INFO$Audition|INFO$Recall))<>0 then do;
+		call Recall.Sound.File(Name,Dev,FileAddr,FileLen,(FunctionInfo&INFO$AUDITION)<>0,0);	/*	load info into menu	*/
+		call Set.Term.Attr(ATTR#Normal);
+		call PRINT.CCAT;
+	end;
+
+end Stuff.Sound.File.Into.Menu;
+
+/*	$SUBTITLE	*/
+
+Set.Device.Switch: proc (Device) swapable;
+	dcl Device	fixed;	/*	device to set switch position to	*/
+	dcl I			fixed;
+
+	I=(Fetch.Object.Info(GID(DeviceSwitchId),O#SWCH.Info)&255)-1;	/*	get max switch position	*/
+
+	do I=0 to I;													/*	loop through all switch positions	*/
+		if GID(DeviceSwitchTable+I)=Device then do;		/*	device at this position matches	*/
+			Disable.Deposits = true;
+			call Deposit.Switch(GID(DeviceSwitchId),I);	/*	select it	*/
+			Disable.Deposits = false;
+			return;													/*	all done	*/
+		end;
+	end;
+
+end Set.Device.Switch;
+
+Update.Device.Switch: proc (CurDev,MS_Cat,LS_Cat) swapable;
+	dcl CurDev				fixed;	/*	current logical device	*/
+	dcl (MS_Cat,LS_Cat)	fixed;	/*	address of new catalog	*/
+	dcl NewDev				fixed;
+	dcl InSubCat			boolean;
+
+	NewDev=shr(MS_Cat,8);	/*	new device entered	*/
+	InSubCat=((MS_Cat&255)|LS_Cat)<>0;
+
+	call ReDefine.Device.Switch;	/*	rebuild list of available devices	*/
+
+	if (CurDev<>PolyCacheDev) then do;
+		if InSubCat then NewDev=1;	/*	select current catalog	*/
+		call Set.Device.Switch(NewDev);	/*	change switch setting	*/
+		call print.ccat;	/*	update current catalog display at bottom of screen	*/
+	end;
+	else do;
+		if need.to.clean.up then do;
+			/*	you should scroll to correct spot in polycache	*/
+		end;
+		/*	do this for now	*/
+		if InSubCat then NewDev=1;	/*	select current catalog	*/
+		call Set.Device.Switch(NewDev);
+	end;
+
+	return NewDev;
+end Update.Device.Switch;
+
+/*	$SUBTITLE	*/
+
+Handle.New.Caption.Deposit: proc swapable;	/*	processes new caption deposit	*/
+	dcl Str (40)	fixed;
+	dcl Left			fixed;
+	dcl LineNumber	fixed;
+
+	call PID(MenuModified,true);					/*	have made a change to menu	*/
+
+	call Fetch.String(GID(Caption),Str);		/*	get user's string	*/
+	call Strip.Leading.Spaces(Str,Str);			/*	remove leading blanks	*/
+
+	Disable.Deposits=true;
+		call Deposit.String(GID(Caption),Str);	/*	put massaged string back	*/
+	Disable.Deposits=false;
+
+	Left=Compute.Free.Header.Bytes;	/*	how many header bytes left after stuffing new caption	*/
+
+	if Left<0 then do;					/*	no room for this caption	*/
+		call Set.Optical.Error(ERR#NoRoomForCaption);	/*	give out of header room message	*/
+
+		call Fetch.String(GID(SavedCaption),Str);	/*	restore prior value from saved backup	*/
+
+		Disable.Deposits=true;
+			call Deposit.String(GID(Caption),Str);
+		Disable.Deposits=false;
+	end;
+	else do;							/*	deposit new value into backup string	*/
+		Disable.Deposits=true;
+			call Deposit.String(GID(SavedCaption),Str);
+		Disable.Deposits=false;
+	end;
+
+end Handle.New.Caption.Deposit;
+
+/*	$SUBTITLE	*/
+
+Handle.New.Category.Deposit: proc (Col,Row) swapable;	/*	processes new category deposit	*/
+	dcl (Col,Row)		fixed;
+	dcl MatchCell (1)	fixed;
+	dcl Str		 (40)	fixed;
+	dcl Left				fixed;
+
+	call PID(MenuModified,true);	/*	have made a change to menu	*/
+
+	call Fetch.Table (GID(CatTable),Col,Row);	/*	get user's category string	*/
+	call Fetch.String(GID(CatTable.Type.Obj),Str);	/*	get user's string	*/
+	call Clean.Category.Strings(Str,Str);
+	call UpperCase.String		(Str,Str);
+
+	Disable.Deposits=true;
+		call Deposit.String(GID(CatTable.Type.Obj),Str);	/*	put massaged string back	*/
+		call Deposit.Table (GID(CatTable),Col,Row);
+	Disable.Deposits=false;
+
+	Left=Compute.Free.Header.Bytes;	/*	how many header bytes left after stuffing new caption	*/
+
+	if (Left<0)							/*	no room in sound file header for this category	*/
+	or Category.Exists(Str,Loc(Addr(Col)),MatchCell)	/*	already have this category in header elsewhere	*/
+	then do;								/*	revert to prior value	*/
+
+		if Left<0
+		then call Set.Optical.Error(ERR#NoRoomForCategory);	/*	give out of header room message	*/
+		else do;
+			call Set.DirTable.Position(-1,-1);
+			call Select.New.Cur.Obj(GID(CatTable),MatchCell(0),MatchCell(1));	/*	select cell which matches	*/
+			call Set.Optical.Error(ERR#CategoryExists);	/*	category already exists	*/
+		end;
+
+		call Fetch.Table (GID(SavedCatTable),Col,Row);	/*	get prior version of category	*/
+		call Fetch.String(GID(SavedCatTable.Type.Obj),Str);
+
+		call Fetch.Table(GID(CatTable),Col,Row);
+		Disable.Deposits=true;
+			call Deposit.String(GID(CatTable.Type.Obj),Str);
+			call Deposit.Table (GID(CatTable),Col,Row);
+		Disable.Deposits=false;
+	end;
+	else do;								/*	deposit new value into backup string	*/
+		call Fetch.Table(GID(SavedCatTable),Col,Row);
+		Disable.Deposits=true;
+			call Deposit.String(GID(SavedCatTable.Type.Obj),Str);
+			call Deposit.Table (GID(SavedCatTable),Col,Row);
+		Disable.Deposits=false;
+	end;
+
+end Handle.New.Category.Deposit;
+
+/*	$SUBTITLE	*/
+
+Do.Synclavier.Enter.Stuff: proc swapable;
+	if (drive.select.active<>0)
+	then restore.level = 1;
+	else do;
+		active.level = 1;
+		call compute.dsel.button;
+	end;
+	entered.new.dev = 1;				/*	denotes we have changed subcats	*/
+end Do.Synclavier.Enter.Stuff;
+
+/*	$SUBTITLE	*/
+
+Update.After.Cat.Enter: proc (TreeName,Device,SubcType) public swapable;
+	dcl TreeName				array;
+	dcl (SubcType,Device)	fixed;
+	dcl NewDev					fixed;
+
+	call Do.Synclavier.Enter.Stuff;	/*	do some misc stuff to keep real-time code happy	*/
+
+	call PID(FileOnSource,true);			/*	catalog exists	*/
+	call PID(FileType		,SubcType);		/*	save type of current object	*/
+	call PID(FileDevice	,Device);		/*	device when enter happened		*/
+	call PID(FileAddress	,C#MS_Sector); write(md)=C#LS_Sector;	/*	save abs addr of catalog	*/
+	call PID(FileLength	,C#MS_Length); write(md)=C#LS_Length;	/*	and length of catalog		*/
+
+	if byte(Treename,0)=a.sp then do;	/*	catalog is top level of new device	*/
+		call Get.Device.Name(Device,Treename);
+	end;
+
+	Disable.Deposits=true;
+		call Deposit.String(GID(SFName),TreeName);
+		call Deposit.Label (GID(SFNameLabel),'Subcatalog:');
+	Disable.Deposits=false;
+
+	NewDev = Update.Device.Switch(Device,C#MS_Sector,C#LS_Sector);
+	call Select.New.Window.Device(DirWindowId,NewDev);
+	call Open.Action.Buttons(CatalogMode);			/*	display STORE CATALOG button	*/
+end Update.After.Cat.Enter;
+
+Handle.New.Treename.Deposit: proc swapable;
+	dcl Tree		 (40)	fixed;
+	dcl Path		 (40)	fixed;
+	dcl Filename  (4)	fixed;
+	dcl FTyp				fixed;
+	dcl Flen		  (1)	fixed;
+	dcl Faddr	  (1)	fixed;
+	dcl OurDev			fixed;
+	dcl RevertFlag		boolean;
+
+	if GID(MenuModified) then do;		/*	have made a change to menu	*/
+		call Open.Info.Panel.Dialog(DialogRow,DLG#MenuChange);
+		if not Get.Dialog.Response then return;
+		call PID(MenuModified,false);	/*	reset flag	*/
+	end;
+
+	call Fetch.String(GID(SFName),Tree);	/*	get new name	*/
+	call Strip.Leading.Spaces(Tree,Tree);	/*	dump leading spaces	*/
+	call UpperCase.String	 (Tree,Tree);	/*	convert to uppercase	*/
+
+	call PID(FileOnSource,false);				/*	clear this flag to start	*/
+
+	if Tree(0)=0 then do;						/*	nothing really entered	*/
+		Disable.Deposits=true;
+			call Deposit.String(GID(SavedSFName),Tree);	/*	stuff null string into backup copy	*/
+		Disable.Deposits=false;
+		call Open.Action.Buttons(NullMode);	/*	turn off all action buttons	*/
+		return;
+	end;
+
+	if ActiveWindowId<>DirWindowId					/*	make dir window active so we can			*/
+	then call Select.Active.Window(DirWindowId);	/*	find out what default device should be	*/
+
+	OurDev=DirDevice;										/*	save in local temp	*/
+
+	call Parse.Treename.String(Tree,Path,Filename);	/*	break treename into path tree and filename	*/
+
+	if (OurDev=PolyMemDev) then do;	/*	when poly mem is displayed	*/
+		OurDev = 1;	/*	map to current catalog for now	*/
+		if need.to.clean.up then do; end;
+	end;
+	else if (EqStr(Path,'P0:')=0) then do;	/*	handle poly memory	*/
+		if need.to.clean.up then do;
+			/*	handle situation where name is either P0:	*/
+			/*	or a file stored in poly memory				*/
+		end;
+		GOTO REVERT.CHECK;
+	end;
+
+	else if (OurDev=LaserDev)
+	or (EqStr(Path,'L0:')=0) then do;	/*	handle laser disk	*/
+		if need.to.clean.up then do;
+			/*	a file stored on laser disk	*/
+		end;
+		GOTO REVERT.CHECK;
+	end;
+
+	else if (OurDev=PolyCacheDev) then do;	/*	handle poly cache	*/
+		OurDev=1;	/*	map to current cat for now	*/
+		if need.to.clean.up then do; end;
+	end;
+
+	/*	$PAGE	*/
+
+	if Locate(Tree,OurDev) then do;	/*	this is a file of some sort	*/
+		FTyp=F#Type;	/*	save current file type	*/
+
+		if (FTyp=T#Subc) or (FTyp=T#LSubc) then do;
+			if Enter_Catalog(Tree,OurDev) then do;	/*	go ahead and enter the catalog	*/
+				call Update.After.Cat.Enter(Tree,OurDev,FTyp);
+			end;
+			else RevertFlag=true;	/*	should not ever get here (System Error if we do)	*/
+		end;
+		else if FTyp=T#Sound then do;
+			FAddr(0)=F#MS_Sector; FAddr(1)=F#LS_Sector;
+			FLen (0)=F#MS_Length; FLen (1)=F#LS_Length;
+
+			if Path(0)<>0 then do;	/*	might need to do a catalog enter	*/
+				if Enter_Catalog(Path,1) then do;
+					call Do.Synclavier.Enter.Stuff;	/*	do some misc stuff to keep real-time code happy	*/
+					OurDev=Update.Device.Switch(OurDev,C#MS_Sector,C#LS_Sector);
+					call Select.New.Window.Device(DirWindowId,OurDev);
+				end;
+				else RevertFlag=true;	/*	should never get here (System Error if we do)	*/
+			end;
+
+			if not RevertFlag then do;
+				call PID(FileType,FTyp);	/*	save type of current object	*/
+
+				Disable.Deposits=true;
+					call Deposit.String(GID(SFName),Tree);
+				Disable.Deposits=false;
+
+				call Stuff.Sound.File.Into.Menu(Tree,OurDev,FAddr,FLen);
+			end;
+		end;
+		else do;
+			call Set.Optical.Error(Err#FileNotCatOrSound);	/*	not a catalog or a sound file	*/
+			RevertFlag=true;
+		end;
+	end;
+	else do;	/*	might still be a valid ENTER_CATALOG string	*/
+		if Enter_Catalog(Tree,OurDev) then do;	/*	go ahead and try an enter	*/
+			if C#Dir_Size=256		/*	need to set FTYP	*/
+			then FTyp=T#Subc;
+			else FTyp=T#LSubc;
+			call Update.After.Cat.Enter(Tree,OurDev,FTyp);
+		end;
+		else do;
+			call Set.Optical.Error(Err#BadTreenameFormat);	/*	could not parse string into valid treename	*/
+			RevertFlag=true;
+		end;
+	end;
+
+	REVERT.CHECK:
+
+	if RevertFlag then do;	/*	revert to previous value	*/
+		call Fetch.String (GID(SavedSFName),Tree);
+		Disable.Deposits=true;
+			call Deposit.String(GID(SFName),Tree);
+		Disable.Deposits=false;
+	end;
+
+end Handle.New.Treename.Deposit;
+
+/*	$SUBTITLE	*/
+
+Get.Next.Menu.Event: proc swapable;
+	dcl Str	(40)	fixed;	/*	temp string	*/
+	dcl Left			fixed;
+
+	do while Exit.My.Screen=0;				/*	wait for exit condition	*/
+
+		if Screen.Event.Group<>GID(MenuGrp) then return;
+
+		if Screen.Event.Code=Get.Screen.Event then do;
+
+			if (Screen.Event.Info=S#MouseSelect)
+			or (Screen.Event.Info=S#MouseActivate)
+			then do;
+			end;
+
+			else if Screen.Event.Info=S#Deposit
+			then do;	/*	new value entered	*/
+				if Screen.Event.Id=GID(Caption) then do;
+					call Handle.New.Caption.Deposit;
+					call Compute.Free.Bytes.Display;
+				end;
+				else if Screen.Event.Id=GID(CatTable) then do;
+					call Handle.New.Category.Deposit(Screen.Event.Table.Col,Screen.Event.Table.Row);
+					call Compute.Free.Bytes.Display;
+				end;
+				else if Screen.Event.Id=GID(SFName) then do;
+					call Handle.New.Treename.Deposit;
+				end;
+			end;
+
+			call Get.Next.Optical.Event;			/*	not interested, just get a new event	*/
+		end;
+
+		else call Get.Next.Optical.Event;		/*	get the next event to handle	*/
+
+	end;
+
+end Get.Next.Menu.Event;

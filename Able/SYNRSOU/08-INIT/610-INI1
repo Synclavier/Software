@@ -1,0 +1,263 @@
+/* 610-INI1  $TITLE  BASIC PROGRAM INITIALIZATION
+
+   Modified:
+   06/05/89 - TSS - Added code to KEYBOARD.CHECK to locate Kbd Mapping file
+   04/27/89 - MWH - Support for multiple D115 boards & channels; timeouts
+   03/14/89 - PF - Removed RS422.Packets.There
+   01/06/89 - LSS/MWH - Moved some code from 600-init
+   10/06/86 - KJO - updated for -7 catalog structure
+    5/15/86 - "official" creation of release-M modules
+*/
+
+/* NOTE: THIS ROUTINE PRESUMES THAT A D115 BOARD EXISTS AND HAS BEEN
+   SELECTED VIA THE (CPSEL) REGISTER BEFORE CALLING
+*/
+
+LOAD.D115: PROC SWAPABLE;       /* LOAD MICROCODE INTO RS422 COMMUNICATIONS PROCESSOR */
+   DCL PROGRAM_NAME (64) FIXED;
+   DCL LOADER        FILE;  /* 68K LOADER PROGRAM */
+   DCL PROGRAM       FILE;  /* PROGRAM TO RUN */
+   DCL LEN           FIXED; /* LENGTH OF PROGRAM */
+
+   DOWNLOAD: PROC(PROGRAM,LEN); /* DOWNLOAD 68K CODE FROM OPEN FILE */
+      DCL PROGRAM FILE; /* CODE TO DOWNLOAD */
+      DCL LEN FIXED;
+
+      DO WHILE ((LEN IGT 0) AND (NOT FEOF (PROGRAM))); /* LOOP TO FEED WORDS TO 68K */
+         WRITE(CPDATA) = GETW (PROGRAM);
+         LEN = LEN - 2;
+      END;
+   END DOWNLOAD;
+
+   IF GET.NODENAME(DD#LOAD,PROGRAM_NAME) = 0
+   THEN RETURN(0);
+
+   LOADER = FOPEN (PROGRAM_NAME,'R'); /* OPEN LOADER */
+
+   IF LOADER = NULLF THEN DO;         /* NO SUCH FILE */
+      RETURN 0;                       /* FAILURE */
+   END;
+   ELSE CALL SETBUF(LOADER,ADDR(MISC.BUF(0)),0,256);
+
+   WRITE(CPCMD) = CP#DISABLE;
+   WRITE(CPCMD) = CP#RESET_68K;       /* SET UP 68K TO ACCEPT LOADER PROGRAM */
+   WRITE(CPCMD) = CP#RESET_FIFO;
+   WRITE(CPCMD) = CP#UNRESET_FIFO;
+
+   IF GETW (LOADER) <> 0 THEN DO;     /* SKIP MS LEN - D115D ONLY HAS 64 KBYTES */
+      CALL FCLOSE (LOADER);
+      RETURN 0;                       /* FAILURE */
+   END;
+
+   LEN = GETW (LOADER);               /* PICK UP BYTE LENGTH */
+   CALL GETW (LOADER);                /* THROW AWAY DOWNLOAD ADDRESS */
+   CALL GETW (LOADER);
+   CALL GETW (LOADER);                /* AND ENTRY POINT OFFSET */
+   CALL GETW (LOADER);
+   CALL DOWNLOAD (LOADER, LEN);       /* DOWNLOAD THE LOADER PROGRAM */
+   CALL FCLOSE (LOADER);              /* DONE WITH IT NOW */
+
+   IF GET.NODENAME(DD#MAIN,PROGRAM_NAME) = 0
+   THEN RETURN(0);
+
+   PROGRAM = FOPEN (PROGRAM_NAME,'R');
+
+   IF PROGRAM = NULLF THEN DO;        /* NO SUCH FILE */
+      RETURN 0;                       /* FAILURE */
+   END;
+   ELSE CALL SETBUF(PROGRAM,ADDR(MISC.BUF(0)),0,256);
+
+   IF GETW (PROGRAM) <> 0 THEN DO;    /* SKIP MS LEN - D115D ONLY HAS 64 KBYTES */
+      CALL FCLOSE (PROGRAM);
+      RETURN 0;                       /* FAILURE */
+   END;
+   WRITE(CPDATA) = 0;                 /* WRITE OUT MS LENGTH */
+
+   LEN = GETW (PROGRAM);              /* GET LENGTH */
+   WRITE(CPDATA) = LEN;
+   WRITE(CPDATA) = GETW (PROGRAM);    /* GET DOWNLOAD ADDRESS */
+   WRITE(CPDATA) = GETW (PROGRAM);
+   WRITE(CPDATA) = GETW (PROGRAM);    /* AND ENTRY POINT OFFSET */
+   WRITE(CPDATA) = GETW (PROGRAM);
+
+   WRITE(CPCMD) = CP#UNRESET_68K;     /* SET 68K RUNNING (AFTER HEADER TO MAKE LIFE EASY ON 68K LOADER) */
+
+   CALL DOWNLOAD (PROGRAM, LEN);      /* DOWNLOAD THE USER PROGRAM */
+   CALL FCLOSE (PROGRAM);             /* DONE WITH IT NOW */
+
+   RETURN 1;                          /* SUCCESSFUL LOAD */
+END LOAD.D115;
+
+INIT.D115: PROC PUBLIC SWAPABLE;    /* INITIALIZE RS422 COMMUNICATIONS PROCESSOR */
+
+   DCL D51           LIT   '"51"';      /* REGISTER TO READ FOR EXISTENCE OF D57 */
+   DCL D57_OK        LIT   '"100000"';  /* D57 MAY BE READ BIT */
+   DCL D57           LIT   '"57"';      /* REGISTER TO READ FOR EXISTENCE CHECK */
+   DCL D115_EXISTS   LIT   '"20"';      /* ANY D115D'S EXIST BIT */
+
+   NUM.D115D.BDS = 0;                          /* INITIALIZE */
+
+   IF (READ(D51) & D57_OK) = 0                 /* D57 THERE? */
+   THEN RETURN;                                /* NO */
+
+   IF (READ(D57) & D115_EXISTS) = 0            /* ANY D115D'S? */
+   THEN RETURN;                                /* NO */
+
+   /* NOTE: THIS CODE DEPENDS UPON FILEIO AND STRINGS ROUTINES CONTINUING */
+   /*       TO PRESERVE THE INTERRUPT STATE !!                            */
+
+   DISABLE;
+
+	WRITE(CPSEL) = CP#SEL_GROUP_20 | 0;      /* FIRST GROUP OF BOARDS, BOARD "I" */
+	IF READ(CPSEL) <> 0                      /* SEE IF BOARD SELECTS */
+	THEN DO;
+		IF LOAD.D115 <> 0 THEN DO;            /* TRY TO LOAD MICROCODE */
+			NUM.D115D.BDS = NUM.D115D.BDS + 1; /* ALL OK, COUNT THIS BOARD */
+			WRITE(CPCMD) = CP#ENABLE_RX_A;     /* ENABLE INTERRUPTS WHEN PACKETS ARE RECEIVED */
+		END;
+	END;
+	
+	if (NUM.D115D.BDS != 0)
+		d115d.ints.enabled = true;
+	
+	ENABLE;
+
+END INIT.D115;
+
+KEYBOARD.CHECK: PROC SWAPABLE;  				/* CHECK FOR CORRECT KEYBOARD ATTACHED */
+	DCL (V1,V2)    	FIXED;
+	DCL THE_NAME(5) 	FIXED;
+	
+	COPY.STRING(MapFileName, THE_NAME);		/* TO ALLOW INFOFILE TO STAY IN EXT MEMORY  */
+
+  /* uses negative logic check as of 8/4/84 */
+
+  IF INC.KBD.MAPS THEN DO;     /* WE WANT TO USE MAPS IN FILE ON DISK */
+      IF FILE.SEARCH(THE_NAME,3,-2,0,1)<>0 THEN DO; /* MAPPING FILE THERE */
+         MAP.THERE = 1;
+         MAPDEV = F#MS_SECTOR; MAPSEC = F#LS_SECTOR;
+      END;
+  END;
+
+  IF (INC.CREG && NEW.PAN) {     /* VK BUILD */
+     WRITE(CREG)="105";          /* SET UP ADDRESS WITH READ BIT */
+     IF (READ(DREG) == 1)        /* READ OF 1 HERE MEANS ORK     */
+        NEW.ORK = 1;
+     WRITE(CREG)="005";          /* REMOVE READ BIT              */
+  }
+
+  IF INC.CREG AND NEW.PAN AND (NEW.ORK == 0) THEN DO; /* VELOCITY KEYBOARD */
+     DISABLE;                   /* MAKE SURE INTERRUPTS OFF HERE */
+
+     // WRITE(CREG)="105";         /* SET UP ADDRESS WITH READ BIT */
+     // IF READ(DREG)=1 THEN DO;   /* OOPS - WRONG KEYBOARD CONNECTED */
+     //    ENABLE;                 /* FOR OUTPUT */
+     //    CALL PCR;               /* CRLF */
+     //    CALL PSR ('System Error - must Connect Velocity Keyboard for this software.');
+     //    CALL PCR;               /* CRLF */
+     //    CALL TTY_WAIT;          /* WAIT FOR OUTPUT IF INTERRUPT DRIVEN */
+     //    CALL TERMINATE;         /* RETURN TO MONITOR */
+     // END;
+
+     WRITE(3)=0; WRITE(3)=0;                /* FIRST CLEAR THE CHANGE REGISTER */
+     WRITE(CREG)=0; WRITE(CREG)="40"\0;     /* EX WRITE IN MODE 0 */
+     WRITE(CREG)=0; WRITE(CREG)="100"\0;    /* EX READ  IN MODE 0 */
+     WRITE(CREG)=0;                         /* REMOVE READ        */
+     WRITE(3)=0; WRITE(3)=0;                /* THEN READ IT */
+     WRITE(CREG)=0; WRITE(CREG)="40"\0;     /* EX WRITE IN MODE 0 */
+     WRITE(CREG)=0; WRITE(CREG)="100"\0;    /* EX READ  IN MODE 0 - READ TWICE IN CASE IT REALLY WAS ALL ZEROES */
+     V1=READ(DREG);                         /* GET KEYBOARD CHANGE REG - LOOK FOR POWER ON BIT */
+     WRITE(CREG)=0;                         /* REMOVE READ        */
+
+     ENABLE;
+
+     IF  (V1="077777")                      /* POWER ON - MARK IS SUCH */
+     THEN CALL RESTORE.POWER;               /* VK PLUGGED IN AND TURNED ON */
+
+     ELSE IF (INC.AXE=0)                    /* NON-GUITAR COMPILATION      */
+     AND     (INC.NOKBD=0)                  /* AND NOT A NO KEYBOARD COMPILATION */
+     THEN DO;                               /* WAIT HERE FOR NON-GUITAR COMPS */
+        CALL PCR;
+        CALL PSR (' Please Check Cable and Power to Velocity Keyboard');
+        CALL TTY_WAIT;
+        DISABLE;
+        V1=0;
+        DO WHILE V1<200;                        /* WAIT FOR 200 GOOD READS */
+           WRITE(3)=0;                          /* WAIT 5 MS */
+           WRITE(CREG)=0; WRITE(CREG)="40"\0;   /* EX WRITE IN MODE 0 */
+           WRITE(CREG)=0; WRITE(CREG)="100"\0;  /* EX READ  IN MODE 0 */
+           IF READ(DREG)="077777" THEN V1=V1+1; /* COUNT A GOOD READ */
+           WRITE(CREG)=0;                       /* REMOVE READ        */
+           IF (READ("51")&2)<>0 THEN DO;        /* CHECK FOR CHARACTER TYPED */
+              V1=READ("50")&"177";              /* GET IT */
+              IF (V1=0)\(V1="123")\(V1="163") THEN DO; /* S OR BREAK */
+                 ENABLE;                        /* INTERRUPTS FOR OUTPUT */
+                 CALL CLEAR.TERM;
+                 CALL TERMINATE;                /* RETURN TO MONITOR ON SCRIPT S OR BREAK */
+              END;
+           END;
+        END;
+        ENABLE;                                 /* FOR PRINTOUT */
+        CALL CLEAR.TERM;                        /* ERASE MESSAGE */
+        CALL RESTORE.POWER;                     /* POWER OFF=0, INIT VALUES */
+     END;
+  END;
+
+  ELSE IF INC.CREG AND (NEW.ORK == 1) THEN DO;  /* ORIGINAL KEYBOARD */
+
+     // IF INC.AXE=0 THEN DO;            /* CHECK ONLY IF NOT GUITAR COMP */
+     //    DISABLE;                      /* FOR KEYBOARD SCAN - IN CASE TURNED ON BY TTY ROTUINES */
+     //    WRITE(CREG)="105";            /* SET UP ADDRESS WITH READ BIT*/
+     //    IF READ(DREG)<>1 THEN DO;     /* OOPS - WRONG KEYBOARD CONNECTED */
+     //       ENABLE;                    /* FOR PRINTOUT */
+     //       CALL PCR;                  /* CRLF */
+     //       CALL PSR ('System Error - must Connect Original Synclavier Keyboard for this software.');
+     //       CALL PCR;                  /* CRLF */
+     //       CALL TTY_WAIT;             /* WAIT FOR OUTPUT IF INTERRUPT DRIVEN */
+     //       CALL TERMINATE;            /* RETURN TO MONITOR */
+     //    END;
+     //    ENABLE;
+     // END;
+
+     CALL RESTORE.POWER;
+
+  END;
+
+END KEYBOARD.CHECK;
+
+
+/* THE PROCEDURE 'INITIALIZATION' CONTAINS ALL THE CODE   */
+/* THAT IS REQUIRED FOR INITIALIZATION.                   */
+
+/* THIS IS THE FIRST LINE OF SYNCLAVIER CODE TO           */
+/* BE EXECUTED:                                           */
+
+INITIALIZATION:PROC PUBLIC SWAPABLE;
+
+   call zero.pdl;   /* ZERO OUT PUSH DOWN LIST SO WE CAN MEASURE IT LATER */
+	
+/* LOOK UP MEMORY SIZE */
+
+/* INITIALIZE QUES BEFORE */
+/* ENABLING INTERRUPTS    */
+
+ELPQF = ADDR(ELPQF); ELPQB=ELPQF;     /* MUST BE DONE BEFORE INTERRUPTS */
+FLPQF = ADDR(FLPQF); FLPQB=FLPQF;
+
+EDLQF = ADDR(EDLQF); EDLQB=EDLQF;
+FDLQF = ADDR(FDLQF); FDLQB=FDLQF;
+
+EKBQF = ADDR(EKBQF); EKBQB=EKBQF;
+IKBQF = ADDR(IKBQF); IKBQB=IKBQF;
+
+EATQF = ADDR(EATQF); EATQB=EATQF;
+IATQF = ADDR(IATQF); IATQB=IATQF;
+FINQF = ADDR(FINQF); FINQB=FINQF;
+
+BEGIN;
+   DCL TIMER.PHASE FIXED;
+   DO TIMER.PHASE=0 TO 8 BY 2;
+      EPKQF = ADDR(EPKQF); EPKQB=EPKQF;
+      IPKQF = ADDR(IPKQF); IPKQB=IPKQF;
+   END;
+END;

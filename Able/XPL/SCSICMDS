@@ -1,0 +1,276 @@
+/******************************************
+
+       S C S I   C O M M A N D S
+
+ ******************************************/
+/*
+   08/08/00 - CWJ - Wait for overlapped SCSI I/O
+   12/05/90 - LSS - added DriveTemp routine for Tahiti drive series
+   08/27/90 - LSS - bug in ModeSelect (sending page code as in ModeSense)
+   03/07/89 - cj - added Global Sense Buffer
+*/
+
+module ScsiCmds;
+
+   configuration modelC, MulDiv;							/* use Model C code & mul/div hardware 			*/
+   dcl swappable lit 'recursive';						/* could use swap if needed...						*/
+  																	/* but problems with winboot & moitor if so...	*/
+																	
+   insert ':-xpl:scsirout';								/* bring in low level scsi routines					*/
+   insert ':-xpl:intrprtr';
+
+	begin;
+	
+   Inquiry: proc(DevAdr,Length,Buffer) returns (fixed) public swappable; /* get inquiry data */
+      dcl DevAdr fixed; /* device address of file */
+      dcl Length fixed; /* no. bytes to get */
+      dcl Buffer fixed array; /* buffer for inquiry data */
+      dcl Stat   fixed; /* status */
+
+		Stat = S$UnitAttention;
+		
+		while (Stat == S$UnitAttention)
+		{
+			Stat = BusConnect(DevAdr);        		 /* Connect to SCSI bus */
+			if Stat <> S$GoodConnect then return (Stat); /* return connection error */
+	
+			/*** Send Inquiry command ***/
+			write(ScsiByte) = S$Inquiry;            /* Operation Code */
+			write(ScsiByte) = S$BusConnectLUN;      /* Target LUN */
+			write(ScsiWord) = 0;                    /* Reserved */
+			write(ScsiByte) = Length;               /* Allocation Length */
+			write(ScsiByte) = 0;                    /* Control byte */
+	
+			// Wait for possible overlapped SCSI I/O to complete
+			while (interp_check_scsi_io(0) != 0)
+				interp_run_host_non_timer();
+				
+			call DataIn(Buffer);                    /* Get mode sense data */
+	
+      	Stat = GetStatus(DevAdr);               /* Get status of command */
+		}
+		
+      return (Stat);             					 /* Return status of command */
+   end Inquiry;
+
+   ModeSelect: proc(DevAdr,Page,Length,Buffer) returns (fixed) public swappable; /* Send Mode Sense Data */
+      dcl DevAdr fixed; /* Device to send sense to */
+      dcl Page   fixed; /* Page code to use */
+      dcl Length fixed; /* no. bytes to send */
+      dcl Buffer fixed array; /* Buffer for sense data */
+      dcl Stat   fixed;
+
+		Stat = S$UnitAttention;
+		
+		while (Stat == S$UnitAttention)
+		{
+			Stat = BusConnect(DevAdr);                   /* Connect to SCSI bus */
+			if Stat <> S$GoodConnect then return (Stat); /* return connection error */
+	
+			/*** Mode Select Command ***/
+			write(ScsiByte) = S$ModeSelect;         /* Operation Code */
+			write(ScsiByte) = S$BusConnectLUN;      /* Target LUN */
+			write(ScsiByte) = 0;                    /* Reserved */
+			write(ScsiByte) = 0;                    /* Reserved */
+			write(ScsiByte) = Length;               /* Allocation Length */
+			write(ScsiByte) = 0;                    /* Control */
+	
+			call DataOut(Buffer);                   /* Send mode sense data */
+	
+			// Wait for possible overlapped SCSI I/O to complete
+			while (interp_check_scsi_io(0) != 0)
+				interp_run_host_non_timer();
+				
+      	Stat = GetStatus(DevAdr);               /* Get status of command */
+		}
+		
+      return (Stat);             					 /* Return status of command */
+   end ModeSelect;
+
+   ModeSense: proc(DevAdr,Page,Length,Buffer) returns (fixed) public swappable; /* Get Mode Sense Data */
+      dcl DevAdr fixed; /* Device to get sense from */
+      dcl Page   fixed; /* Page code to use */
+      dcl Length fixed; /* Max no. bytes to get */
+      dcl Buffer fixed array; /* Buffer for sense data */
+      dcl Stat   fixed;
+
+		Stat = S$UnitAttention;
+		
+		while (Stat == S$UnitAttention)
+		{
+			Stat = BusConnect(DevAdr);                   /* Connect to SCSI bus */
+			if Stat <> S$GoodConnect then return (Stat); /* return connection error */
+	
+			/*** Mode Sense Command ***/
+			write(ScsiByte) = S$ModeSense;          /* Operation Code */
+			write(ScsiByte) = S$BusConnectLUN;      /* Target LUN */
+			write(ScsiByte) = Page;                 /* Page code */
+			write(ScsiByte) = 0;                    /* Reserved */
+			write(ScsiByte) = Length;               /* Allocation Length */
+			write(ScsiByte) = 0;                    /* Control */
+	
+			// Wait for possible overlapped SCSI I/O to complete
+			while (interp_check_scsi_io(0) != 0)
+				interp_run_host_non_timer();
+				
+			call DataIn(Buffer);                    /* Get mode sense data */
+      	
+			Stat = GetStatus(DevAdr);               /* Get status of command */
+		}
+		
+      return (Stat);             					 /* Return status of command */
+   end ModeSense;
+
+   DriveTemp: proc(DevAdr,Buffer) returns (fixed) public swappable; /* get internal temperature of Tahiti drive */
+      dcl DevAdr fixed; /* device address */
+      dcl Buffer fixed array; /* buffer for temperature data */
+      dcl Stat   fixed; /* status */
+
+		Stat = S$UnitAttention;
+		
+		while (Stat == S$UnitAttention)
+		{
+			Stat = BusConnect(DevAdr);        		 /* Connect to SCSI bus */
+			if Stat <> S$GoodConnect then return (Stat); /* return connection error */
+	
+			/*** Command to get internal operating temperature ***/
+			write(ScsiByte) = S$DriveTemp; 
+			write(ScsiByte) = S$BusConnectLUN;
+			write(ScsiByte) = "H22"; 
+			write(ScsiByte) = 0;   
+			write(ScsiWord) = 0;   
+			write(ScsiWord) = 0;   
+			write(ScsiWord) = 0;   
+	
+			// Wait for possible overlapped SCSI I/O to complete
+			while (interp_check_scsi_io(0) != 0)
+				interp_run_host_non_timer();
+				
+			call DataIn(Buffer);              		 /* Get temperature */
+	
+			Stat = GetStatus(DevAdr);               /* Get status of command */
+		}
+		
+      return (Stat);             					 /* Return status of command */
+   end DriveTemp;
+
+   PreventAllow: proc(DevAdr, Info) returns (fixed) public swappable; /* control media removal */
+      dcl DevAdr fixed; 	/* device address of file */
+      dcl Info   fixed; 	/* prevent bits */
+      dcl Stat   fixed;		/* status */
+
+		Stat = S$UnitAttention;
+		
+		while (Stat == S$UnitAttention)
+		{
+			Stat = BusConnect(DevAdr);        		 /* Connect to SCSI bus */
+			if Stat <> S$GoodConnect then return (Stat); /* return connection error */
+	
+			/*** Send Prevent Allow command ***/
+			write(ScsiByte) = S$PreventAllow;       /* Operation Code */
+			write(ScsiByte) = S$BusConnectLUN;      /* Target LUN */
+			write(ScsiWord) = 0;                    /* Reserved */
+			write(ScsiByte) = Info;                 /* Do it to me Louie */
+			write(ScsiByte) = 0;                    /* Control byte */
+
+			// Wait for possible overlapped SCSI I/O to complete
+			while (interp_check_scsi_io(0) != 0)
+				interp_run_host_non_timer();
+				
+			Stat = GetStatus(DevAdr);               /* Get status of command */
+		}
+		
+		if (Stat == S$Good)
+			interp_set_media_lock(DevAdr, Info);
+		
+      return (Stat);             					 /* Return status of command */
+   end PreventAllow;
+
+   IssueFormat: proc(DevAdr) returns (fixed) public swappable; /* issue format */
+      dcl DevAdr fixed; 								/* device address of file */
+		dcl Stat   fixed;
+		dcl Buf(4) fixed;
+		dcl i		  fixed;
+		
+		Stat = Inquiry(DevAdr, 4, buf);				/* best be able to inquire! */
+		
+		if (Stat != S$Good)
+			return (Stat);
+			
+		if ((byte(buf, 2) & 0x07) == 2)				/* if is SCSI-2, try long format */
+		{
+			Stat = S$UnitAttention;
+			
+			buf(0) = 4;
+			pbyte(buf, 0, 0);
+			pbyte(buf, 1, 2);								/* set immediate return bit */
+			pbyte(buf, 2, 0);
+			pbyte(buf, 3, 0);
+			
+			while (Stat == S$UnitAttention)
+			{
+				Stat = BusConnect(DevAdr);        		 		/* Connect to SCSI bus */
+				if Stat <> S$GoodConnect then return (Stat); /* return connection error */
+		
+				/*** Send Format command ***/
+				write(ScsiByte) = S$FormatUnit;       			/* Operation Code */
+				write(ScsiByte) = S$BusConnectLUN | 0x10;	   /* fmt data included */
+				write(ScsiWord) = 0;                       	/* Reserved */
+				write(ScsiWord) = 0;                       	/* Interleave and control byte */
+	
+				call DataOut(buf);                    			/* Send immediate bit */
+				
+				// Wait for possible overlapped SCSI I/O to complete
+				while (interp_check_scsi_io(0) != 0)
+					interp_run_host_non_timer();
+					
+				Stat = GetStatus(DevAdr);               	 	/* Get status of command */
+			}
+			
+			if (Stat == S$Good)										/* if it liked our format command */
+			{
+				Stat = S$NotReady;									/* wait for format to complete */
+				
+				while (Stat == S$NotReady || Stat == S$UnitAttention)
+				{
+					do i = 0 to 200;
+						write(3) = i;
+						interp_run_host_non_timer();
+					end;
+					
+					Stat = TestUnitReady(DevAdr);					/* poll... */
+				}
+				
+				return (Stat);
+			}
+		}
+		
+		/* else if not SCSI 2, or fails (many don't support immediate...) tie up	*/
+		/* scsi bus...																					*/
+		
+		Stat = S$UnitAttention;
+		
+		while (Stat == S$UnitAttention)
+		{
+			Stat = BusConnect(DevAdr);        		 		/* Connect to SCSI bus */
+			if Stat <> S$GoodConnect then return (Stat); /* return connection error */
+	
+			/*** Send Format command ***/
+			write(ScsiByte) = S$FormatUnit;       			/* Operation Code */
+			write(ScsiByte) = S$BusConnectLUN;           /* Target LUN */
+			write(ScsiWord) = 0;                       	/* Reserved */
+			write(ScsiWord) = 0;                       	/* Interleave and control byte */
+
+			// Wait for possible overlapped SCSI I/O to complete
+			while (interp_check_scsi_io(0) != 0)
+				interp_run_host_non_timer();
+				
+			Stat = GetStatus(DevAdr);               	 	/* Get status of command */
+		}
+		
+      return (Stat);             					 /* Return status of command */
+   end IssueFormat;
+
+	end;
+	
+end ScsiCmds;

@@ -1,0 +1,1193 @@
+/* :SYNSOU:SMGRMOD:SMG-SMAN  $TITLE  Screen Manager Routines */
+
+/*
+Modified:
+2001/02/06 - TY  - Changed declaration of Zero.Zero from fixed array to data for "const"ness
+1998/05/20 - TY  - Fixed a bug in DEPOSIT.TOKEN that caused durations to be
+						 interpreted incorrectly when using a Live Click Track.
+					  - Removed unnecessary variable BPM from DEPOSIT.TOKEN.
+1990/07/10 - PF  - Perform Meter Mapping on time fields
+1989/10/04 - cj  - mapped real time to sequence time on input
+					  - added Zero.Zero
+1988/10/03 - cj  - added support for O#MSEC.Remap
+1988/08/08 - cj  - looked up stored display offset and footage offset
+						 in SAMPLE.SYNCL.SMGR.GLOBALS
+1988/06/18 - cj  - fixed erase.object always erase tables
+1988/03/29 - eeg - Made Sample.Syncl.Smgr.Globals NOT zero out S$FMODE & S$FOffset
+1988/01/12 - MWH - Fix token.change so NAME KEYBOARD TIMBRE works properly
+1987/12/05 - cj  - Speeded up order of object update on arrow key selection
+1987/12/03 - cj  - Added O#MSEC.Alt.Offset
+1987/11/30 - MWH - Allow null strings to be entered in appropriate objects
+1987/11/19 - MWH - Fix object dragging
+1987/11/17 - MWH - Split into 2 libraries; SMGR is too big
+1987/11/10 - MWH - Merge Tim's changes for labels and strings (keep in XMEM)
+1987/11/09 - MWH - Be sure we're out of graphics mode before updating objects
+1987/11/05 - MWH - Fix return to previous object for GFX button table
+1987/10/19 - MWH - Screen.Changed, Update, Exhibit, Enable USED CONSISTENTLY
+1987/10/15 - MWH - Split file (creating SMG-PROC event processing)
+1987/10/15 - MWH - Add word to object exit info; update current object LAST
+1987/10/14 - MWH - Use new mouse button event literals
+1987/10/09 - MWH - Add wrap bit for tables
+1987/10/05 - MWH - Make unreferenced procedures NON-public
+1987/09/28 - MWH - Fix graphics strings (never worked before)
+1987/09/24 - MWH - New literals
+*/
+
+/* DECLARE REAL TIME VARIABLES EXTERNAL HERE */
+/* USER MUST INSERT 'SYNCLDCL' OR 'SYNDUMMY' */
+
+DCL (SAMP.SPEED)               FIXED EXTERNAL;
+DCL (SAMP.CLICK.RATE)          FIXED EXTERNAL;
+DCL (SAMP.CRM)                 FIXED EXTERNAL;
+DCL (SAMP.BPM)                 FIXED EXTERNAL;
+
+DCL (SM.HRS,SM.MIN,SM.SEC)     FIXED EXTERNAL;   /* SAMPLED INFO                 */
+DCL (SM.FRA,SM.BIT,SM.MODE)    FIXED EXTERNAL;   /* FOR USE BY INTERRUPT ROUTINE */
+
+DCL (BAS.PTR)                  FIXED EXTERNAL;
+
+DCL CLICK.TRACK.MODE           FIXED EXTERNAL;
+DCL REMAP.WITH.LIVE.CLICK      PROC (FIXED,FIXED,FIXED,FIXED,FIXED) EXTERNAL;
+DCL REMAPPED.TIME.MSB          FIXED EXTERNAL;
+DCL REMAPPED.TIME.LSB          FIXED EXTERNAL;
+DCL REMAPPED.DUR.MSB           FIXED EXTERNAL;
+DCL REMAPPED.DUR.LSB           FIXED EXTERNAL;
+
+/* Tempo and Meter Map Routines: */
+
+dcl Map.Sequence.Time.To.Real.Time         proc(array, array)        external;
+dcl Map.Sequence.Duration.To.Real.Duration proc(array, array, array) external;
+dcl Map.Real.Time.To.Sequence.Time         proc(array, array)        external;
+dcl Map.Real.Duration.To.Sequence.Duration proc(array, array, array) external;
+dcl Map.Sequence.Time.To.Beats             proc(array, array)        external;
+dcl Map.Beats.To.Sequence.Time             proc(array, array)        external;
+dcl Map.Sequence.Time.To.Measures.Beats    proc(array, array)        external;
+dcl Map.Sequence.Duration.To.Beats         proc(array, array, array) external;
+dcl Map.Beats.To.Sequence.Duration         proc(array, array, array) external;
+dcl Map.Sequence.Duration.To.Measures.Beats proc(array, array, array) external;
+dcl Lookup.Beats.Per.Measure               proc(array) returns (fixed) external;
+
+dcl line                 fixed;
+dcl Queue.Base           fixed public;  /* Abs Sector ptr to base of Event Queue info */
+dcl Queue.Max.Length     lit '256';     /* allow 1 sector for event queue */
+
+dcl Group.Base           fixed public;  /* Abs Sector ptr to base of group info */
+dcl Group.Ptr            fixed public;  /* ptr to next group to process */
+dcl New.Group.Ptr        fixed public;  /* ptr to groups defined while an event is still being processed */
+dcl Num.Object.Groups    fixed public;  /* current number of groups */
+dcl Max.Group.Id         fixed public;  /* current max allocated id */
+
+
+dcl Screen.Base          fixed public;  /* abs xmem sector ptr to start of object storage data */
+dcl Screen.Max.Length    fixed;         /* max length in words object data can grow to */
+dcl Screen.Length        fixed;         /* current word length of object data area */
+dcl Screen.Changed       fixed public;  /* When true a deposit has happened */
+dcl Screen.Shuffled      fixed;         /* Indicates screen memory shuffled when true */
+
+dcl Object.Exit.Code     fixed public;  /* Code returned by last object get routine */
+dcl Object.Exit.Info     fixed public;  /* Info returned by last object get routine */
+dcl Object.Exit.Id       fixed public;  /* ID   returned by last object get routine */
+
+/* THE FOLLOWING MUST BE DECLARED IN ORDER */
+dcl Screen.Event.Group     fixed public;  /* Group Id for last event */
+dcl Screen.Event.Code      fixed public;  /* Event Type Code */
+dcl Screen.Event.Info      fixed public;
+dcl Screen.Event.Id        fixed public;  /* Id of last event */
+dcl Screen.Event.Table.Col fixed public;  /* Table col when Id type is a table */
+dcl Screen.Event.Table.Row fixed public;  /* Table row when Id type is a table */
+
+dcl Screen.Event.Obj.Code  fixed public;  /* Object type when Info = S#ObjectEvent */
+dcl Screen.Event.Obj.Info  fixed public;  /* Object event code when Info = S#ObjectEvent */
+dcl Screen.Event.Obj.Col   fixed public;  /* Table col when Id type is a table */
+dcl Screen.Event.Obj.Row   fixed public;  /* Table row when Id type is a table */
+
+
+dcl Cur.Obj.Id           fixed public; /* Id name of picked object */
+dcl Prev.Obj.Id          fixed public;
+
+dcl Object.Ptr           fixed public; /* a global ptr set by some routines */
+
+dcl Default.Action       fixed public; /* Basic action */
+dcl Default.Attr         fixed public;
+
+dcl Animate.Screen.Enabled fixed public;
+dcl Dragging.Object      fixed public;
+dcl Dragging.Button      fixed public;
+dcl Disable.Attr.Reset   fixed public; /* non-zero to override resetting terminal to Normal mode after object updates */
+dcl Disable.Deposits     fixed public; /* non-zero to disable any deposits */
+dcl Any.RealTime.Objects fixed public; /* non-zero if any O#ACT.RealTime.Object bits set */
+
+dcl S$Click              fixed public;	/* Snapshots of Synclavier sequencer variables */
+dcl S$BPM                fixed public;
+dcl S$Speed              fixed public;
+dcl S$SMode              fixed public;
+dcl S$SOffset    (4)     fixed public;
+dcl S$FMode              fixed public;
+dcl S$FOffset    (2)     fixed public;
+dcl S$AltSoffset (4)     fixed public;
+dcl S$AltFOffset (2)     fixed public;
+
+dcl NulStr					data	public (''); /* Used to pass empty strings without using memory */
+dcl Zero.Zero				data	public (0, 0);
+dcl Zero.Zerotime			data	public (0, Zero.Time);
+dcl Max.Duration			data	public (3, 65472);		//	3<<16 | 65472 = 262.080 Sec
+
+dcl Locate.Object            proc (fixed) recursive;
+dcl Update.Object            proc (fixed) recursive;
+dcl Erase.Object.Range       proc (fixed,fixed) recursive;
+dcl Activate.Object.Range    proc (fixed,fixed) recursive;
+dcl Update.Object.Range      proc (fixed,fixed) recursive;
+dcl Select.New.Cur.Obj       proc (fixed,fixed,fixed) recursive;
+dcl Update.Screen            proc recursive;
+
+dcl Set.Object.Mouse.Access  proc (fixed,fixed) external;
+dcl Set.Object.Action        proc (fixed,fixed,fixed) external;
+dcl Set.Term.Obj.Attr        proc (fixed)       external;
+dcl Set.Object.Default.get   proc (fixed,fixed,fixed) external;
+dcl Set.Object.Attr.Set      proc (fixed,fixed) external;
+dcl Set.Default.Action       proc (fixed)       external;
+dcl Set.Default.Attr         proc (fixed,fixed) external;
+dcl Set.Object.Status        proc (fixed,fixed,fixed) external;
+dcl Fetch.Table              proc (fixed,fixed,fixed) external;
+dcl Deposit.Table            proc (fixed,fixed,fixed) external;
+dcl Publish.Table            proc (fixed,fixed,fixed) external;
+dcl Fetch.Table.Cur.Cell     proc (fixed,array) external;
+dcl Set.Table.Cell.Attr.Set  proc (fixed,fixed,fixed,fixed) external;
+dcl Map.Object.To.Table.Cell proc (fixed,fixed,array) external;
+dcl Get.Table                proc (fixed)       external;
+dcl Update.Table             proc (fixed)       external;
+dcl Reset.Table.Cell.Display.Status proc (fixed,fixed) external;
+dcl Erase.Table              proc (fixed)       external;
+dcl Set.Table.Cur.Cell       proc(fixed,fixed,fixed) external;
+dcl Map.Point.To.Table.Cell  proc(fixed,fixed,fixed,array) external;
+dcl Set.Table.Cell.Status    proc(fixed,fixed,fixed,fixed,fixed) external;
+
+Insert ':SYNSOU:SMGRMOD:SMG-SROT';  /* Low level Screen Routines */
+Insert ':SYNSOU:SMGRMOD:SMG-OBJ';   /* General Object routines   */
+
+dcl DEPOSIT.TOKEN  proc (fixed,array) recursive; /* Needed in the following inserts */
+
+insert ':SYNSOU:SMGRMOD:SMG-MISC';   /* Miscellaneous things         */
+insert ':SYNSOU:SMGRMOD:SMG-TOKN';   /* Simple token get routine     */
+insert ':SYNSOU:SMGRMOD:SMG-REGN';   /* Regions routines             */
+insert ':SYNSOU:SMGRMOD:SMG-ICON';   /* Graphics Icon Routines       */
+insert ':SYNSOU:SMGRMOD:SMG-FIXP';   /* Fixed Point Integer routines */
+insert ':SYNSOU:SMGRMOD:SMG-MSEC';   /* 32Bit Millisecond routines   */
+insert ':SYNSOU:SMGRMOD:SMG-SMPT';   /* SMPTE routines               */
+insert ':SYNSOU:SMGRMOD:SMG-SFIL';   /* Sound File Time routines     */
+insert ':SYNSOU:SMGRMOD:SMG-LABL';   /* Label routines               */
+insert ':SYNSOU:SMGRMOD:SMG-FRAM';   /* Frame routines               */
+insert ':SYNSOU:SMGRMOD:SMG-STR' ;   /* String routines              */
+insert ':SYNSOU:SMGRMOD:SMG-GSTR';   /* Graphics String routines     */
+insert ':SYNSOU:SMGRMOD:SMG-SBAR';   /* Scroll Bar routines          */
+insert ':SYNSOU:SMGRMOD:SMG-SWCH';   /* Switch Routines              */
+
+DEPOSIT.TOKEN: proc(id,token) public swapable;
+   dcl id          fixed;
+   dcl token       array;
+   dcl ptr         fixed;
+   dcl typ         fixed;
+   dcl (col,row)   fixed;  /**** Must be declared in order ****/
+   dcl tmp(4)      fixed;  /* storage for numeric entities */
+   dcl tmpa(4)     fixed;  /* more storage for numeric things */
+   dcl sert        fixed;
+   dcl format      fixed;
+   dcl type        fixed;
+
+   dcl msec   (1)  fixed;
+   dcl dur    (1)  fixed;
+   dcl seqtime(1)  fixed;
+           
+   sert  = ertyp;
+   ertyp = 0;
+
+   if Locate.Object(id) then do;
+      ptr = Object.Ptr;
+      typ = Read.Object(ptr+O#Type);
+
+      /* force refresh to redraw over input string */
+      /* in case user typed it in in a slightly    */
+      /* different format                          */
+
+      /* set bit here to simplify update on        */
+      /* deposit kind of items                     */
+
+      write(md) = (Read.Object(ptr+O#Status)\(O#STAT.Update));
+      Screen.Changed = true;
+
+      if (token(0) = 0)
+      AND (typ = O$Fixed.Point
+      OR   typ = O$32Bit.Msec
+      OR   typ = O$32Bit.SMPTE
+      OR   typ = O$Sound.File.Time)
+      then do;   
+         /* will be taken care of by refresh */
+      end;
+
+      else if typ = O$Fixed.Point then do;
+         tmp(0) = CONV.STR.TO.FIXED(token,
+                                    Read.Object(ptr+O#FIXP.DP),
+                                    (Read.Object(ptr+O#FIXP.Format)&CF#Signed)<>0);
+         if ertyp=0 then call Deposit.Fixed.Point(id,tmp(0));
+      end;
+
+      else if typ = O$32Bit.Msec then do;
+         format = Read.Object(ptr+O#MSEC.Format);
+         type   = Read.Object(ptr+O#MSEC.Type  );
+         msec(0)= Read.Object(ptr+O#MSEC.MSW   );   /* get original start */
+         msec(1)= Read.Object(ptr+O#MSEC.LSW   );   /* time handy.        */
+         dur (0)= Read.Object(ptr+O#MSEC.Dur   );   /* also original      */
+         dur (1)= Read.Object(ptr+O#MSEC.Dur+1 );   /* duration.          */
+
+         /* compute sequence start time of note as well                   */
+
+         if (format & O#MSEC.RealTime) <> 0
+         then call Map.Real.Time.To.Sequence.Time(msec, seqtime);
+         else call COPY32                        (msec, seqtime);
+
+         /* begin by converting the typed-in-string to a 32-bit msec */
+         /* format:                                                  */
+
+         do case (format&255);
+            do;
+               call CONV.STR.TO.SEC.MSEC(token,tmp);
+               call SEC.TO.MSEC  (tmp, type, tmpa);
+            end;
+            do;
+               call CONV.STR.TO.BEATS(token,type,Lookup.Beats.Per.Measure(seqtime),1,tmp);
+               if Click.Track.Mode igt 3
+               then call BEATS.TO.MSEC(tmp,
+                                       type,
+                                       1000,
+                                       tmpa);
+               else do;
+                  if type = CF#TIME         /* map endtime */
+                  then call Map.Beats.To.Sequence.Time(tmp,tmpa);
+                  else call Map.Beats.To.Sequence.Duration(seqtime,tmp,tmpa);
+               end;
+            end;
+            do;
+               call CONV.STR.TO.BEATS(token,type,Lookup.Beats.Per.Measure(seqtime),2,tmp);
+               if Click.Track.Mode igt 3
+               then call BEATS.TO.MSEC(tmp,
+                                       type,
+                                       1000,
+                                       tmpa);
+               else do;
+                  if type = CF#TIME         /* map endtime */
+                  then call Map.Beats.To.Sequence.Time(tmp,tmpa);
+                  else call Map.Beats.To.Sequence.Duration(seqtime,tmp,tmpa);
+               end;
+            end;
+            do;
+               call CONV.STR.TO.SMPTE(token,tmp);
+               if (format&O#MSEC.Alt.Offset) = 0
+               then call SMPTE.TO.MSEC(tmp,
+                                       type,
+                                       S$Speed,
+                                       S$SMode,
+                                       S$SOffset,
+                                       tmpa);
+               else call SMPTE.TO.MSEC(tmp,
+                                       type,
+                                       S$Speed,
+                                       S$SMode,
+                                       S$AltSOffset,
+                                       tmpa);
+            end;
+            do;
+               call CONV.STR.TO.FEET(token,tmp);
+               if (format&O#MSEC.Alt.Offset) = 0
+               then call FEET.TO.MSEC (tmp,
+                                       type,
+                                       S$Speed,
+                                       S$FMode,
+                                       S$FOffset,
+                                       tmpa);
+               else call FEET.TO.MSEC (tmp,
+                                       type,
+                                       S$Speed,
+                                       S$FMode,
+                                       S$AltFOffset,
+                                       tmpa);
+            end;
+            do;
+               call CONV.MIN.SEC.STR.TO.SEC.MSEC(token,tmp);
+               call SEC.TO.MSEC  (tmp,
+                                  type,
+                                  tmpa);
+            end;
+         end;
+
+         /* For measure & beat display,  get actual sequence time      */
+         /* from logical sequence time,  and get real time if that     */
+         /* is what is needed:                                         */
+
+         if ((format & 255) = O#MSEC.Beats         )  /* if display is beats */
+         or ((format & 255) = O#MSEC.Measures.Beats)  /* or measures:beats   */
+         then do;                                     /* then handle here.   */
+
+            /* get actual sequence time for live clicks */
+
+            if (Click.Track.Mode igt 3)            /* if live click track    */
+            then do;                               /* then map time.         */
+               if type = CF#TIME
+               then do;
+                  call Remap.With.Live.Click(tmpa(0), tmpa(1), 0, 0, 0);
+                  tmpa(0) = Remapped.Time.Msb;
+                  tmpa(1) = Remapped.Time.Lsb;
+               end;
+               else do;
+						call REMAP.WITH.LIVE.CLICK(seqtime(0), seqtime(1), tmpa(0), tmpa(1), 2);
+                  tmpa(0) = Remapped.Dur.Msb;
+                  tmpa(1) = Remapped.Dur.Lsb;
+               end;
+            end;
+
+            /* get real time from sequence time if needed: */
+
+            if (format & O#MSEC.RealTime) <> 0     /* first map real times   */
+            then do;                               /* to sequence times      */
+               if type = CF#TIME
+               then call Map.Sequence.Time.To.Real.Time(tmpa, msec);
+               else call Map.Sequence.Duration.To.Real.Duration(seqtime, tmpa, dur);
+            end;
+            else do;                               /* else we can use        */
+               if type = CF#TIME
+               then call COPY32(tmpa, msec);
+               else call COPY32(tmpa, dur );
+            end;
+         end;
+
+         /* Else for seconds, smpte, feet, mins:seconds, get real time       */
+         /* if needed:                                                       */
+
+         else do;
+            if (format & O#MSEC.RealTime) = 0  /* if sequence time needed */
+            then do;                           /* then compute them       */
+               if type = CF#TIME
+               then call Map.Real.Time.To.Sequence.Time(tmpa, msec);
+               else call Map.Real.Duration.To.Sequence.Duration(msec, tmpa, dur);
+            end;
+            else do;          
+               if type = CF#TIME
+               then call COPY32(tmpa, msec);
+               else call COPY32(tmpa, dur );
+            end;
+         end;
+
+         if ertyp=0 then call Deposit.32Bit.Msec(id,msec,dur);
+      end;
+
+      else if typ = O$32Bit.SMPTE then do;
+         call CONV.STR.TO.SMPTE(token,tmp);
+         call SMPTE.TO.SBITS(tmp,S$SMode,tmpa);
+         if ertyp=0 then call Deposit.32Bit.SMPTE(id,tmpa);
+      end;
+
+      else if typ = O$Sound.File.Time then do;
+         call CONV.STR.TO.SFTIME(token,tmp);
+         if ertyp=0 then call Deposit.Sound.File.Time(id,tmp);
+      end;
+
+      else if typ = O$Label then do;
+         if ertyp=0 then call Deposit.Label(id,token);
+      end;
+
+      else if typ = O$String then do;
+         if ertyp=0 then call Deposit.String(id,token);
+      end;
+
+      else if typ = O$Graphics.String then do;
+         if ertyp=0 then call Deposit.Graphics.String(id,token);
+      end;
+
+      else if typ = O$Table then do;
+         call Fetch.Table.Cur.Cell(id,loc(addr(col)));
+         call Fetch.Table(id,col,row);
+         if Locate.Object(Fetch.Object.Info(Id,O#TABL.Cell.Type.Id)) then do;
+            call Deposit.Token(Read.Object(Object.Ptr+O#Id),token);
+            call Deposit.Table(id,col,row);
+         end;
+      end;
+   end;
+
+   if sert<>0 then ertyp  = sert; /* give priority to prior message */
+
+end DEPOSIT.TOKEN;
+
+GET.OBJECT: proc (id) public swapable;
+   dcl id   fixed;   /* Id of object to get */
+   dcl ret  fixed;   /* holds return event from specific gets */
+   dcl ptr  fixed;   /* Pointer to object */
+   dcl obj  fixed;
+
+   do while 1;
+
+      if Locate.Object(Id) then do;              /* Make sure object exists */
+
+         if (Any.RealTime.Objects<>0) then call Run.Syn.Loop;
+
+         if (Read.Object(Object.Ptr+O#Action)&O#ACT.Get.Disabled)<>0
+         then do;
+            if (Read.Object(Object.Ptr+O#Action)&O#ACT.Prev.Obj)<>0
+            then do;
+               Last.Event.Code=Get.Screen.Event;  /* will cause return  */
+               Last.Event.Info=S#ObjectTerminate; /* to previous object */
+               return Last.Event.Code;
+            end;
+            else return Get.Next.Event;
+         end;
+         obj = Read.Object(Object.Ptr+O#Type);
+
+         /* If object is disabled then just get next event */
+         if (Read.Object(Object.Ptr+O#Status)&O#STAT.Enable) = 0
+         then ret = Get.Next.Event;
+
+         else if obj = O$Graphics.Region then ret = Get.Region(Object.Ptr);
+         else if obj = O$Fixed.Point     then ret = Get.Fixed.Point(Object.Ptr);
+         else if obj = O$32Bit.MSEC      then ret = Get.32Bit.Msec(Object.Ptr);
+         else if obj = O$32Bit.SMPTE     then ret = Get.32Bit.SMPTE(Object.Ptr);
+         else if obj = O$Sound.File.Time then ret = Get.Sound.File.Time(Object.Ptr);
+         else if obj = O$String          then ret = Get.String(Object.Ptr);
+         else if obj = O$Graphics.String then ret = Get.Graphics.String(Object.Ptr);
+         else if obj = O$Switch          then ret = Get.Switch(Object.Ptr);
+         else if obj = O$Scroll.Bar      then ret = Get.Scroll.Bar(Object.Ptr);
+         else if obj = O$Table           then ret = Get.Table(Object.Ptr);
+         else if obj = O$Label           then ret = Get.Label(Object.Ptr);
+         else if obj = O$Frame           then ret = Get.Next.Event;
+         else if obj = O$Graphics.Box    then ret = Get.Next.Event;
+         else if obj = O$Graphics.Icon   then ret = Get.Graphics.Icon(Object.Ptr);
+
+         Object.Exit.Code = Last.Event.Code;  /* Save what caused object exit */
+         Object.Exit.Info = Last.Event.Info;
+         Object.Exit.Id   = Cur.Obj.Id;
+
+         if (Any.RealTime.Objects<>0) then call Run.Syn.Loop;
+
+         return ret;                 /* Return code to caller */
+      end;
+      else return Get.Next.Event;    /* Assume Null object */
+   end;
+end GET.OBJECT;
+
+UPDATE.OBJECT: proc(Id) public swapable; /* redraws an object if needed */
+   dcl id       fixed;  /* ID # of object to refresh */
+   dcl typ      fixed;  /* Object type--looked up */
+   dcl cur.ptr  fixed;
+   dcl Status   fixed;
+   dcl RT       boolean;   /* true if object is more real-time */
+
+   if Locate.Object(id) then do;
+      Cur.Ptr = Object.Ptr;
+      Typ     = Read.Object(Cur.Ptr+O#Type);
+      RT      = (Read.Object(Cur.Ptr+O#Action)&O#ACT.RealTime.Object)\Play;
+      status = Read.Object(Cur.Ptr+O#Status);   /* read object status bits */
+
+      if RT<>0 then call Run.Syn.Loop; /* keep real time code going */
+
+      if  (typ < 0)   /* Graphics object */
+      and (shr(status&O#STAT.Disp.Attr.Set,1)<>(status&O#STAT.Attr.Set))
+      then do;
+         call Write.Object(cur.ptr+O#Status,     /* Make the attribute set the same so it won't update */
+                           Status&not(O#STAT.Disp.Attr.Set)
+                           \shl(Status&O#STAT.Attr.Set,1));  
+      end;   
+
+      if ((status&O#STAT.Enable)=0)         /* object is disabled */
+      or (((status&O#STAT.Exhibit)<>0)      /* object is already displayed */
+      and ((status&O#STAT.Update)=0)        /* but doesn't need refreshing */
+      and (shr(status&O#STAT.Disp.Attr.Set,1)=(status&O#STAT.Attr.Set)))
+      then return;                          /* nothing to do */
+
+      if      Typ = O$Fixed.Point     then call Update.Fixed.Point(Cur.Ptr);
+      else if Typ = O$32Bit.MSEC      then call Update.32Bit.MSEC(Cur.Ptr);
+      else if Typ = O$32Bit.SMPTE     then call Update.32Bit.SMPTE(Cur.Ptr);
+      else if Typ = O$Sound.File.Time then call Update.Sound.File.Time(Cur.Ptr);
+      else if Typ = O$String          then call Update.String(Cur.Ptr);
+      else if Typ = O$Graphics.String then call Update.Graphics.String(Cur.Ptr);
+      else if Typ = O$Switch          then call Update.Switch(Cur.Ptr);
+      else if Typ = O$Table           then call Update.Table(Cur.Ptr);
+      else if Typ = O$Scroll.Bar      then call Update.Scroll.Bar(Cur.Ptr);
+      else if Typ = O$Label           then call Update.Label(Cur.Ptr);
+      else if Typ = O$Frame           then call Update.Frame(Cur.Ptr);
+      else if Typ = O$Graphics.Box    then call Update.Graphics.Box(Cur.Ptr);
+      else if Typ = O$Graphics.Icon   then call Update.Graphics.Icon(Cur.Ptr);
+
+      if RT<>0 then call Run.Syn.Loop; /* keep real time code going */
+
+   end;
+end UPDATE.OBJECT;
+
+UPDATE.OBJECT.RANGE: proc (lowid,highid) public swapable;
+   dcl (id,lowid,highid) fixed;
+
+   do id=lowid to highid;
+      call Update.Object(id);
+   end;
+
+end UPDATE.OBJECT.RANGE;
+
+ERASE.TRANSPARENT.OBJECT.QUICKLY:  proc(ptr,erasebits) swapable; /* does real fast erase of object */
+   dcl ptr       fixed; /* abs ptr to object to erase */
+   dcl erasebits fixed; /* bits which tell how to quickly erase object */
+   dcl type      fixed; /* object type code */
+   dcl (x,y)     fixed; /* (x,y) coords of upper left hand corner of object */
+   dcl width     fixed;
+   dcl height    fixed;
+   dcl erase.x   fixed;
+   dcl erase.y   fixed;
+   dcl Cur.Ptr   fixed;
+   dcl Next.Ptr  fixed;
+
+   type=Read.Object(Ptr+O#Type);
+
+   x     =Read.Object(Ptr+O#Trans.Col);   /* look up (x,y) coords and field width for object */
+   y     =Read.Object(Ptr+O#Trans.Row);
+   width =Read.Object(Ptr+O#Trans.Width);
+   height=1;                              /* assume only one row used */
+
+   if type=O$Table then do;               /* compute entire table width */
+      width=width*Read.Object(Ptr+O#TABL.Across);
+      height=Read.Object(Ptr+O#TABL.Down); /* uses this many vertical rows */
+   end;
+
+   if (erasebits&(O#ERAS.End.of.Screen\O#ERAS.Start.of.Screen\O#ERAS.Whole.Screen))<>0
+   then do;                                /* do a large block erase */
+
+      if (erasebits&O#ERAS.Whole.Screen)<>0 then do; /* erase entire screen */
+         erase.x=0; erase.y=0;
+         call cpos(0,0);
+         call erase.to.end.of.screen;
+      end;
+      else if (erasebits&O#ERAS.End.of.Screen)<>0 then do; /* erase to end of line */
+         erase.x=x; erase.y=y;
+         call cpos(erase.y,erase.x);
+         call erase.to.end.of.screen;
+      end;
+      else if (erasebits&O#ERAS.Start.of.Screen)<>0 then do; /* erase to start of screen */
+         erase.y=y+height-1; erase.x=x+width-1;
+         call cpos(erase.y,erase.x);
+         call erase.to.start.of.screen;
+      end;
+
+      /* now loop over all objects and set display bits correctly */
+      Next.Ptr=0; Cur.Ptr=0;
+
+      do while Read.Object(Next.Ptr) <> O#Len.End;   /* Traverse entire list */
+         Cur.Ptr   = Next.Ptr;
+         Next.Ptr  = Next.Ptr + read(md);
+
+         if Cur.Ptr<>Ptr then do;    /* not looking at passed object */
+            type=Read.Object(Cur.Ptr+O#Type);
+
+            if type>0                           /* object is transparent mode */
+            then do;                            /* may have been erased above */
+               x     =Read.Object(Cur.Ptr+O#Trans.Col);
+               y     =Read.Object(Cur.Ptr+O#Trans.Row);
+               width =Read.Object(Cur.Ptr+O#Trans.Width);
+               height=1;                              /* assume only one row used */
+
+               if type=O$Table then do;               /* compute entire table width */
+                  height=      Read.Object(Cur.Ptr+O#TABL.Down); /* uses this many vertical rows */
+                  width =width*Read.Object(Cur.Ptr+O#TABL.Across);
+               end;
+
+               if (erasebits&O#ERAS.Whole.Screen)<>0 then do; /* erase entire screen */
+                  write(md)=Read.Object(Cur.Ptr+O#Status)&(not O#STAT.Exhibit)\(O#STAT.Update); /* turn off displayed bit */
+                  if type=O$Table then call Reset.Table.Cell.Display.Status(Cur.Ptr,0);
+               end;
+               else if (erasebits&O#ERAS.End.of.Screen)<>0 then do; /* erase to end of line */
+                  y=y+height-1;                        /* bottom row of object */
+                  x=x+width-1;                         /* rightmost col of object */
+                  if  (y>erase.y)                      /* object in lower row */
+                  or  ((y=erase.y) and (x>=erase.x))    /* same row but to the right */
+                  then do;
+                     write(md)=Read.Object(Cur.Ptr+O#Status)&(not O#STAT.Exhibit)\(O#STAT.Update); /* turn off displayed bit */
+                     if type=O$Table then call Reset.Table.Cell.Display.Status(Cur.Ptr,0);
+                  end;
+               end;
+               else if (erasebits&O#ERAS.Start.of.Screen)<>0 then do; /* erase to start of screen */
+                  if  (y<erase.y)                      /* object in higher row */
+                  or  ((y=erase.y) and (x<=erase.x))   /* same row but to the left */
+                  then do;
+                     write(md)=Read.Object(Cur.Ptr+O#Status)&(not O#STAT.Exhibit)\(O#STAT.Update); /* turn off displayed bit */
+                     if type=O$Table then call Reset.Table.Cell.Display.Status(Cur.Ptr,0);
+                  end;
+               end;
+            end;                           /* of object is transparent type */
+         end;                              /* of not looking at passed object */
+      end;                                 /* of loop over all objects */
+   end;                                    /* of doing screen block erase */
+
+   if (erasebits&(O#ERAS.End.of.Line\O#ERAS.Start.of.Line\O#ERAS.Whole.Line))<>0
+   then do;
+
+      if      (erasebits&O#ERAS.Whole.Line) <>0 then erase.x=0;       /* whole line */
+      else if (erasebits&O#ERAS.End.of.Line)<>0 then erase.x=x;       /* erase to end */
+      else                                           erase.x=x+width-1; /* erase to start */
+
+      do erase.y=y to y+height-1;               /* erase object row by row */
+
+         call cpos(erase.y,erase.x);            /* position at next line to erase */
+
+         if      (erasebits&O#ERAS.Whole.Line)   <>0 then call erase.to.end.of.line;
+         else if (erasebits&O#ERAS.End.of.Line)  <>0 then call erase.to.end.of.line;
+         else if (erasebits&O#ERAS.Start.of.Line)<>0 then call erase.to.start.of.line;
+
+         /* now loop over all objects and set display bits correctly */
+         Next.Ptr=0; Cur.Ptr=0;
+
+         do while Read.Object(Next.Ptr) <> O#Len.End;   /* Traverse entire list */
+            Cur.Ptr   = Next.Ptr;
+            Next.Ptr  = Next.Ptr + read(md);
+
+            if  (Cur.Ptr<>Ptr)                   /* not looking at object we were passed */
+            and ((Read.Object(Cur.Ptr+O#Status)&O#STAT.Exhibit)<>0) /* not already erased */
+            then do;
+
+               type=Read.Object(Cur.Ptr+O#Type);
+
+               if type>0 then do;                  /* object is transparent mode */
+                  x     =Read.Object(Cur.Ptr+O#Trans.Col);
+                  y     =Read.Object(Cur.Ptr+O#Trans.Row);
+                  width =Read.Object(Cur.Ptr+O#Trans.Width);
+                  height=1;                              /* assume only one row used */
+
+                  if type=O$Table then do;               /* compute entire table width */
+                     width =width*Read.Object(Cur.Ptr+O#TABL.Across);
+                     height=      Read.Object(Cur.Ptr+O#TABL.Down); /* uses this many vertical rows */
+                  end;
+
+                  if (erase.y>=y) and (erase.y<(y+height)) /* object is on this line */
+                  then do;
+
+                     if ((erasebits&O#ERAS.Whole.Line)<>0)     /* erase entire line */
+                     or (((erasebits&O#ERAS.End.of.Line)<>0)   /* erase to end of line */
+                     and (x>=erase.x))
+                     or (((erasebits&O#ERAS.Start.of.Line)<>0) /* erase to start of line */
+                     and ((x+width)<erase.x))
+                     then do;
+                        write(md)=Read.Object(Cur.Ptr+O#Status)&(not O#STAT.Exhibit)\(O#STAT.Update); /* turn off displayed bit */
+                        if type=O$Table then call Reset.Table.Cell.Display.Status(Cur.Ptr,0);
+                     end;
+
+                  end;
+               end;               /* transparent mode object  */
+            end;                  /* of not looking at object we were passed */
+         end;                     /* loop over objects        */
+      end;                        /* of loop over rows to erase */
+   end;                           /* erase objects row by row */
+
+   write(md)=Read.Object(Ptr+O#Status)&(not O#STAT.Exhibit)\(O#STAT.Update); /* turn off displayed bit on passed object */
+   Screen.Changed = true;
+
+end ERASE.TRANSPARENT.OBJECT.QUICKLY;
+
+ERASE.OBJECT: proc (id) public swapable;
+   dcl id   fixed;
+   dcl ptr  fixed;
+   dcl typ  fixed;
+   dcl meth fixed;
+   dcl ttyp fixed;
+   dcl status fixed;
+   dcl set.changed fixed;
+
+   if Locate.Object(id) then do;
+      ptr = Object.Ptr;
+      Typ = Read.Object(ptr+O#Type);
+      Meth= Read.Object(ptr+O#EraseMethod);
+      status = Read.Object(ptr + O#Status);
+      set.changed = false;
+
+      if ((status and O#STAT.Exhibit) <> 0) /* erase only if exhibited */
+      or (typ = O$Table)                    /* but always for tables   */
+      then do;                              /* since we have not kept  */
+                                            /* track of update.on.dep  */
+                                            /* table entries!!         */
+         call Set.Term.Attr(ATTR#Normal);
+         if  (Typ>0)                                        /* object is not a graphics object */
+         and ((Meth&(not(O#ERAS.Null.Fill.On.Erase)))<>0)   /* object enabled for special quick erase commands */
+         then call Erase.Transparent.Object.Quickly(ptr,Meth); /* use fast terminal commands to do erase */
+
+         else if Typ = O$Fixed.Point     then call Erase.Transparent.Object(id);
+         else if Typ = O$32Bit.MSEC      then call Erase.Transparent.Object(id);
+         else if Typ = O$32Bit.SMPTE     then call Erase.Transparent.Object(id);
+         else if Typ = O$Sound.File.Time then call Erase.Transparent.Object(id);
+         else if Typ = O$String          then call Erase.Transparent.Object(id);
+         else if Typ = O$Graphics.String then call Erase.Graphics.String   (id);
+         else if Typ = O$Switch          then call Erase.Transparent.Object(id);
+         else if Typ = O$Table           then call Erase.Table             (id);
+         else if Typ = O$Scroll.Bar      then call Erase.Scroll.Bar        (id);
+         else if Typ = O$Label           then call Erase.Transparent.Object(id);
+         else if Typ = O$Frame           then call Erase.Frame             (id);
+         else if Typ = O$Graphics.Box    then call Erase.Graphics.Box      (id);
+         else if Typ = O$Graphics.Icon   then call Erase.Graphics.Icon     (id);
+
+         call Set.Object.Status(id,O#STAT.Exhibit,false); /* assume object no longer displayed */
+         call Set.Object.Status(id,O#STAT.Update,true);
+
+         if (Meth&O#ERAS.Null.Fill.On.Erase)<>0           /* see if null string stuff of string or label table */
+         then do;                                         /* is desired               */
+            if Typ = O$String then do;
+               write(md) = (Read.Object(ptr+O#Status)      /* set status bit   */
+                         & (not(O#STAT.Update)))           /* so no refresh    */
+                         \ O#STAT.Exhibit;                 /* null string      */
+               call Write.Object(ptr+O#STR.String,0);      /* store null str   */
+            end;
+            else if Typ = O$Label then do;
+               write(md) = (Read.Object(ptr+O#Status)      /* set status bit   */
+                         & (not(O#STAT.Update)))           /* so no refresh    */
+                         \ O#STAT.Exhibit;                 /* null string      */
+               call Write.Object(ptr+O#LABL.Label,0);      /* stor null label  */
+            end;
+            else if Typ = O$Table then do;       /* if this object is a table */
+               Ttyp = Fetch.Object.Info(Read.Object(ptr+O#TABL.Cell.Type.Id),O#Type);
+               if ttyp = O$String then do;
+                  call Reset.Table.Cell.Display.Status(ptr,1);
+                  write(md) = (Read.Object(ptr+O#Status)      /* set status bit   */
+                            & (not(O#STAT.Update)))           /* so no refresh    */
+                            \ O#STAT.Exhibit;                 /* null string      */
+               end;
+               else if ttyp = O$Label then do;
+                  call Reset.Table.Cell.Display.Status(ptr,2);
+                  write(md) = (Read.Object(ptr+O#Status)      /* set status bit   */
+                            & (not(O#STAT.Update)))           /* so no refresh    */
+                            \ O#STAT.Exhibit;                 /* null string      */
+               end;
+            end;
+         end;
+         call locate.object(cur.obj.id);
+         call Set.Term.Obj.Attr(Object.Ptr);
+      end;
+   end;
+end ERASE.OBJECT;
+
+ERASE.OBJECT.RANGE: proc (LowId,HighId) public swapable;
+   dcl LowId    fixed;
+   dcl HighId   fixed;
+   dcl Cur.Ptr  fixed;
+   dcl Next.Ptr fixed;
+   dcl Test.Id  fixed;
+
+   Next.Ptr = 0;
+   Cur.Ptr = 0;
+
+   do while Read.Object(Next.Ptr) <> O#Len.End;   /* Traverse entire list */
+      Cur.Ptr   = Next.Ptr;
+      Next.Ptr  = Next.Ptr + read(md);
+
+      Test.id = Read.Object(Cur.Ptr+O#Id);
+
+      if (Test.Id >= LowId)
+      &  (Test.Id <= HighId)
+      then call Erase.Object(Test.id);
+   end;
+end ERASE.OBJECT.RANGE;
+
+UPDATE.SCREEN: proc public swapable;
+   dcl Next.Ptr    fixed;
+   dcl Cur.Ptr     fixed;
+   dcl status      fixed;
+   dcl count       fixed;
+   dcl cur.id      fixed;    /* Currently selected object (or zero) */
+   dcl id          fixed;
+   dcl did.update  boolean;  /* Set true if some object was written */
+
+   if Screen.Changed = false then return;  /* Nothing to update */
+   Screen.Changed = false;
+   Disable.Attr.Reset=Disable.Attr.Reset+1;
+
+   call push.graphics.attributes;          /* Save state in case graphics */
+   transparent_mode;                       /* Must start here for updates */
+
+   do while Read.Object(Next.Ptr) <> O#Len.End;  /* Scan whole list */
+      Cur.Ptr  = Next.Ptr;                       /* Previous next.ptr is now cur.ptr */
+      Next.Ptr = Next.Ptr + read(mdi);           /* Add record length to get next.ptr */
+
+      status = Read.Object(Cur.Ptr+O#Status);    /* Read object status bits */
+
+      if ((status&O#STAT.Enable)=0)         /* Object is disabled */
+      or (((status&O#STAT.Exhibit)<>0)      /* Object is already displayed */
+      and ((status&O#STAT.Update)=0)        /* but doesn't need refreshing */
+      and (shr(status&O#STAT.Disp.Attr.Set,1)=(status&O#STAT.Attr.Set))) /* attributes changed */
+      then do;                              /* nothing to do */
+         if Any.Realtime.Objects<>0 then do;
+            count=count+1;
+            if count=20 then do;
+               count=0;
+               call Run.Syn.Loop;
+            end;
+         end;
+      end;
+      else do;
+         if Check.Next.Event <> 0 then do;
+            Screen.Changed = True;
+            if did.update <> false then call restore.cursor;
+            Disable.Attr.Reset=Disable.Attr.Reset-1;
+            if Disable.Attr.Reset=0 then call Set.Term.Attr(ATTR#Normal);
+            call pop.graphics.attributes;        /* Restore graphics state */
+
+            return;          /* If events pending, return early */
+         end;
+         id = Read.Object(Cur.Ptr+O#Id);
+         if id <> Cur.Obj.Id
+         then do;
+            if did.update = false           /* save cursor position first */
+            then call save.cursor;          /* time through               */
+            call Update.Object(id);         /* Update the object          */
+            did.update = true;
+         end;
+         else cur.id = id;                  /* Remember this ID to do last */
+      end;
+   end;   /* of scan whole list */
+
+   if cur.id <> 0                           /* If current object needed updating...       */
+   then do;
+      if did.update = false                 /* save cursor position first */
+      then call save.cursor;                /* time through               */
+      call Update.Object(cur.id);           /* ...do it now (last one to be done)         */
+      did.update = true;
+   end;
+
+   if did.update <> false                  /* Otherwise, if anything else was written... */
+   then call restore.cursor;               /* ...restore cursor to current object        */
+
+   Disable.Attr.Reset=Disable.Attr.Reset-1;
+   if Disable.Attr.Reset=0 then call Set.Term.Attr(ATTR#Normal);
+   call pop.graphics.attributes;            /* Restore graphics state */
+
+end UPDATE.SCREEN;
+
+MOVE.SCREEN.MANAGER.DATA:  proc (Dest.Sector) swapable;   /* Shuffles screen manager data to new location */
+   dcl Dest.Sector fixed;
+   dcl Dist        fixed;
+
+   call Copy.Ext.Mem(Group.Base ,0,
+                     Dest.Sector,0,
+                     Screen.Length+shl(shr(Group.Max.Length+255,8),8)+shl(shr(Queue.Max.Length+255,8),8));
+
+   Dist=Dest.Sector-Group.Base;
+
+   Group.Base  = Group.Base +Dist;  /* data moved to here */
+   Queue.Base  = Queue.Base +Dist;
+   Screen.Base = Screen.Base+Dist;
+
+end MOVE.SCREEN.MANAGER.DATA;
+
+SHUFFLE.SCREEN.MANAGER.UP:  proc swapable;   /* Shuffles screen manager data to top of TRD area */
+   dcl Dest.Sector fixed;
+
+   /* basically shortens space allocated for Screen Manager to */
+   /* smallest size that will work for currently allocated     */
+   /* objects, and then shuffles screen data up to top of      */
+   /* TRD area                                                 */
+
+   Screen.Max.Length = shl(shr(Screen.Length+255,8),8);
+
+   Dest.Sector=TRD.LEN-shr(Screen.Max.Length,8)-shr(Group.Max.Length+255,8)-shr(Queue.Max.Length+255,8); /* len available for other stuff */
+   Dest.Sector=TRD.PTR+Dest.Sector; /* place to put screen data */
+
+   call Move.Screen.Manager.Data(Dest.Sector); /* move the data */
+
+end SHUFFLE.SCREEN.MANAGER.UP;
+
+SAMPLE.SYNCL.SMGR.GLOBALS:proc public swapable;
+   dcl a(1) fixed;
+   dcl b(1) fixed;
+
+   S$Click =  SAMP.CLICK.RATE;   /* look up state of current global */
+   S$BPM   =  SAMP.BPM;          /* variables for click, bpm,       */
+   S$Speed =  SAMP.SPEED;        /* speed,  smpte in mode           */
+   S$SMode =  SM.MODE;
+
+   S$SOffset(0) = sm.hrs;        /* and look up current global      */
+   S$SOffset(1) = sm.min;        /* smpte offset (the one that is   */
+   S$SOffset(2) = sm.sec;        /* stored with the sequence)       */
+   S$SOffset(3) = sm.fra;
+   S$SOffset(4) = sm.bit;
+
+   S$AltSOffset(0) = 0;          /* initialize the alternate        */
+   S$AltSOffset(1) = 0;          /* smpte offset to zero            */
+   S$AltSOffset(2) = 0;
+   S$AltSOffset(3) = 0;
+   S$AltSOffset(4) = 0;
+
+   write(mam)   = BAS.PTR;       /* look up the current footage     */
+   write(mal)   = SEQ.FMODE;     /* mode and footage offset from    */
+                                 /* the information stored in       */
+   S$FMode      = read(mdi);     /* the sequence                    */
+
+   write(mal)   = SEQ.FOFFSET;
+   S$Foffset(0) = read(mdi);
+   S$Foffset(1) = read(mdi);
+   S$Foffset(2) = read(mdi);
+
+   S$AltFoffset(0) = 0;
+   S$AltFoffset(1) = 0;
+   S$AltFoffset(2) = 0;
+
+   /* now recompute smpte offset to take advantage */
+   /* of a display offset:                         */
+
+   call SMPTE.TO.SBITS(S$Soffset, S$Smode, A);
+   write(mam) = BAS.PTR;      /* look up display offset stored with seq */
+   write(mal) = SEQ.DOFFSET;  /* get smpte display offset               */
+   b(0)       = read(mdi);
+   b(1)       = read(mdi);
+
+   if read(mdi) = 0           /* if SEQ.DOFFDIS = 0,  then display      */
+   then call ADD32(A, B, A);  /* offset is enabled.   add it in.        */
+
+   call SBITS.TO.SMPTE(A, S$Smode, S$Soffset);
+
+end SAMPLE.SYNCL.SMGR.GLOBALS;
+
+
+INITIALIZE.SCREEN.MANAGER: proc (Max.Length) public swapable;
+   dcl Max.Length fixed; /* max sectors to allocate for Screen Manager stuff */
+   dcl Base       fixed; /* where to put data */
+   dcl I          fixed;
+
+   /* NOTE: Min length allowed is 3 sectors: */
+   /*       1 sector for event queue stuff   */
+   /*       1 sector for group stuff         */
+   /*       plus 1 sector for object list    */
+
+   if Max.Length IGT TRD.LEN then Max.Length = TRD.LEN; /* limit to length of TRD area */
+   if Max.Length IGT 256 then Max.Length=256;
+
+   Base = TRD.PTR + TRD.LEN - Max.Length; /* put data as high up in TRD area as possible */
+
+   Group.Base        = Base;        /* group info starts here */
+   Group.Ptr         = 0;           /* reset to start of object list */
+   New.Group.Ptr     = 0;           /* reset to start of object list */
+   Num.Object.Groups = 0;           /* reset object group count */
+   Max.Group.Id      = 0;           /* reset */
+
+   Queue.Base        = Group.Base+shr(Group.Max.Length+255,8);
+
+   Screen.Base       = Queue.Base+shr(Queue.Max.Length+255,8);
+   Screen.Max.Length = shl(Max.Length-(Screen.Base-Group.Base),8);
+   Screen.Length     = 0;          /* reset current length to zero */
+   Max.Object.Id     = 0;          /* reset */
+
+   if Max.Length ILT (1+shr(Group.Max.Length+255,8)+shr(Queue.Max.Length+255,8)) then do;  /* can't do anything */
+      Screen.Max.Length=0;
+      return false;                /* bomb out */
+   end;
+
+   call Write.Object(0,O#Len.End);    /* Put Nul ptr at top of list */
+
+   call Set.Default.Action(O#ACT.Middle.Press);
+   call Set.Default.Attr  (0,ATTR#normal);
+   call Set.Default.Attr  (1,ATTR#Reverse\ATTR#AltIntensity);
+
+   Any.RealTime.Objects=0;         /* no objects defined yet */
+   call Flush.Event.Queue;         /* Clear out event queue */
+
+   Cur.Obj.Id  = 0;                /* Zero Current and previous object id's */
+   Prev.Obj.Id = 0;
+   Screen.Changed  = true;         /* Force update first                    */
+   Screen.Shuffled = true;         /* Reset locate.objects history stack !! */
+
+   call SAMPLE.SYNCL.SMGR.GLOBALS;
+
+   /* set up terminal dependent definitions: */
+
+   SB.HWidth    = gpix.y(100); /* 1.00 characters high */
+   SB.VWidth    = gpix.x(233); /* 2.33 characters wide */
+   SB.HArrowpix = gpix.x(300); /* 3.00 characters wide */
+   SB.VArrowpix = gpix.y(116); /* 1.16 characters high */
+
+   call set.term.attr(ATTR#Normal);     /* so terminal state is knowwn */
+   call initialize.graphics.terminal;   /* so graphics come out ok     */
+   if MG600<>0 then do;                 /* reset charsize              */
+      vector_mode;                      /* just in case                */
+      alpha_mode;
+      call pc(27);
+      call ps('8');
+      transparent_mode;
+   end;
+
+   do i = 0 to 4;
+      S$AltSOffset(i) = 0;
+   end;
+
+   do i = 0 to 2;
+      S$AltFOffset(i) = 0;
+   end;
+
+   return true;
+end INITIALIZE.SCREEN.MANAGER;
+
+SELECT.NEW.CUR.OBJ: proc(id,ncol,nrow) returns (fixed) public swapable;
+   dcl id          fixed;
+   dcl ptr         fixed;
+   dcl new.type    fixed;
+   dcl old.type    fixed;
+   dcl (col,row)   fixed;  /* Declare in order */
+   dcl (ncol,nrow) fixed;
+   dcl (tcol,trow) fixed;  /* Declare in order */
+   dcl cell.ptr    fixed;
+   dcl old.changed fixed;
+
+   Prev.Obj.Id = Cur.Obj.Id;     /* Save current object id */
+
+   if Locate.Object(id) then do;  /* Found new object */
+      ptr = Object.Ptr;
+
+      new.type = Fetch.Object.Info(Id,O#Type);
+      old.type = Fetch.Object.Info(Prev.Obj.Id,O#Type);
+
+      /* Load col and row for objects which are tables */
+      /* If ncol or nrow are < 0 then substitute current value of table;
+         if new object is not a table then 0 will be substituted; it does not matter */
+
+      if old.type = O$Table then call Fetch.Table.Cur.Cell(Prev.Obj.Id,loc(addr(col)));
+      if new.type = O$Table then call Fetch.Table.Cur.Cell(Id,loc(addr(tcol)));
+      if ncol < 0 then ncol = tcol; 
+      if nrow < 0 then nrow = trow; 
+
+      /* Do not allow a non-repeating object to be selected
+         when id = prev id. Causes infinite loop!  */
+
+      if (id = Prev.Obj.Id)
+      &  ((Read.Object(ptr+O#Action)&O#ACT.Prev.Obj)<>0)
+      then return false;
+
+      Cur.Obj.Id = id;            /* Switch to new object */
+
+      if (Cur.Obj.Id <> Prev.Obj.Id)   /* if Object id changed */
+      or (ncol <> col)                 /* or Column changed    */
+      or (nrow <> row)                 /* or Row changed       */
+      then do;                         /* then unhighlight old and highlight new */
+
+         if token(0) <> 0     /* Something entered in token */
+         then do;
+            call Deposit.Token(Prev.Obj.Id,token);
+            token(0) = 0;   /* Clear token after deposit */
+         end;
+
+         old.changed = Screen.Changed;
+
+         if (mg600 and (old.type <= 0)) then do;  /* graphics            */
+            if old.type = O$Graphics.String       /* turn off box around */
+            then do;                              /* graphics string     */
+               if (Fetch.Object.Info(Prev.Obj.Id, O#Status)&O#STAT.Disp.Attr.Set) <> 0
+               then do;
+                  write(md) = read(md) and (not(O#STAT.Disp.Attr.Set\O#STAT.Attr.Set));
+                  if (Fetch.Object.Info(Prev.Obj.Id, O#GSTR.Char.Set) >= 2)
+                     call Draw.Gbox.Around.Object(Prev.Obj.Id,2,0,3,3);
+                  else
+                     call Draw.Gbox.Around.Object(Prev.Obj.Id,2,0,2,1);
+               end;
+               else write(md) = read(md) and (not(O#STAT.Attr.Set));
+            end;
+         end;
+
+         else if old.type = O$Table then do;
+            call Set.Table.Cur.Cell(Prev.Obj.Id,col,row);
+            call Set.Table.Cell.Attr.Set(Prev.Obj.Id,col,row,0);
+/*****************************************************************************************************************/
+/*          call locate.object(prev.obj.id);                                                                     */
+/*          if (Read.Object(object.ptr + O#Action)&O#ACT.POAct.Changed) <> 0 then do;                            */
+/*             call write.object(object.ptr+O#action,Read.Object(object.ptr+o#action)\O#act.prev.obj);           */
+/*             call write.object(object.ptr+O#Action,Read.Object(object.ptr+O#Action)&not(O#ACT.POAct.Changed)); */
+/*          end;                                                                                                 */
+/*****************************************************************************************************************/
+         end;
+
+         else call Set.Object.Attr.Set(Prev.Obj.Id,0); 
+
+         if  (old.changed  = false)   /* if screen is  up to date */
+         and (new.in.char  = 0    )   /* and no in chars waiting  */
+         and (new.mouse.button = 0)   /* and no mouse items       */
+         then do;
+            Screen.Changed = false;
+            call Update.Object(Prev.Obj.Id); /* but screen.changed could be set by update.table */
+         end;
+
+         /* now set highlighting in new object */
+
+         old.changed = Screen.Changed;
+
+         if (mg600 and (new.type <= 0)) then do;
+            if new.type = O$Graphics.String
+            then do;
+               if (Fetch.Object.Info(Cur.Obj.Id, O#Status)&O#STAT.Disp.Attr.Set) = 0
+               then do;
+                  write(md) = read(md) or (O#STAT.Disp.Attr.Set\O#STAT.Attr.Set);
+                  if (Fetch.Object.Info(Cur.Obj.Id, O#GSTR.Char.Set) >= 2)
+                     call Draw.Gbox.Around.Object(Cur.Obj.Id,2,0,3,3);
+                  else
+                     call Draw.Gbox.Around.Object(Cur.Obj.Id,2,0,2,1);
+               end;
+               else write(md) = read(md) or O#STAT.Attr.Set;
+            end;
+         end;
+
+         else if New.Type = O$Table then do;
+            call Set.Table.Cur.Cell(Cur.Obj.Id,ncol,nrow);
+            call Set.Table.Cell.Attr.Set(Cur.Obj.Id,ncol,nrow,1);
+/****************************************************************************************************/
+/*          if ((read.object(ptr + O#ACTION)&O#ACT.Prev.Obj)<>0)                                    */
+/*          and (Object.Exit.Code = Get.Arrow.Key)                                                  */
+/*          then do;                                                                                */
+/*             call write.object(ptr + O#ACTION,Read.Object(ptr + O#ACTION)&not(O#ACT.Prev.Obj));   */
+/*             call write.object(ptr + O#ACTION,Read.Object(ptr + O#ACTION)\(O#ACT.POAct.Changed)); */
+/*          end;                                                                                    */
+/****************************************************************************************************/
+         end;
+
+         else call Set.Object.Attr.Set(Cur.Obj.Id,1); 
+
+         if  (old.changed  = false)   /* if screen is  up to date */
+         and (new.in.char  = 0    )   /* and no in chars waiting  */
+         and (new.mouse.button = 0)   /* and no mouse items       */
+         then do;
+            Screen.Changed = false;
+            call Update.Object(Cur.Obj.Id); /* but screen.changed could be set by update.table */
+         end;
+
+         return true;  /* Object changed */
+      end;
+      else return false;
+   end;
+   return false;  /* Object did not change */
+end SELECT.NEW.CUR.OBJ;
+
+ACTIVATE.OBJECT.RANGE: proc (lowid,highid) public swapable;
+   dcl id        fixed;
+   dcl lowid     fixed;
+   dcl highid    fixed;
+   dcl Next.Ptr  fixed;
+   dcl Cur.Ptr   fixed;
+
+   call Enable.Object.Range(lowid,highid);
+
+   Next.Ptr = 0;
+   Cur.Ptr = 0;
+
+   do while Read.Object(Next.Ptr) <> O#Len.End;   /* Traverse entire list */
+      Cur.Ptr   = Next.Ptr;
+      Next.Ptr  = Next.Ptr + read(md);
+
+      id = Read.Object(Cur.Ptr+O#Id);
+      if (id >= lowid) & (id <= highid)
+      then do;
+         if Read.Object(Cur.Ptr+O#Type) = O$Table then do;
+            if Locate.Object(Read.Object(Cur.Ptr+O#TABL.Cell.Type.Id)) then do;
+               call Write.Object(Object.Ptr+O#Status,Read.Object(Object.Ptr+O#Status)&Not(O#STAT.Enable));
+            end;
+         end;
+      end;
+   end;
+end ACTIVATE.OBJECT.RANGE;
+
+ACTIVATE.SCREEN: proc (id) public swapable;
+   dcl id        fixed;
+
+   call Select.New.Cur.Obj(id,-1,-1); /* Do this here so object is not displayed prematurely */
+   call Activate.Object.Range(0,32767);
+end ACTIVATE.SCREEN;

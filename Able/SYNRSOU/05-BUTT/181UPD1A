@@ -1,0 +1,1644 @@
+/*	:SYNRSOU:05-BUTT:181UPD1A  $TITLE  MORE UPDATE PROCESSING CODE	*/
+
+/*
+Modified:
+2000/04/30 - TY  - Modified ADD.TO.TEMPO to incr/decr to whole eighths of a frame when holding the click rate
+						 button while dialing frames per beat tempos
+2000/04/25 - TY  - Replaced floating point math in ADD.TO.TEMPO with equivalent multiple-precision math
+						 which runs five times faster
+1999/04/12 - TY  - Made modifications to account for the independence of CLICK.DISP.MODE from CLICK.TRACK.MODE
+1998/07/08 - TY  - Rewrote ROUND.TIME (nested in ADD.TO.TIME) to work with click tracks.
+					  - Commented out code in ADJUST.TIME (nested in ADD.TO.TIME) that limits advancing
+						 past the last note on a click track.  This is no longer necessary since clicks
+						 beyond the last note on the click track are extrapolated using the last two notes.
+1998/06/24 - TY  - Changed expressions containing (CLICK.TRACK.MODE & 511) to account for the
+						 independence of CLICK.TRACK.MODE from CLICKON.
+1998/06/23 - TY  - In SLIDE.TRACKS, Changed 16-bit overflow check to 15-bit overflow check
+						 because when the knob was turned far enough, slide.dist was interpreted
+						 as a negative number.
+1998/05/21 - TY  - Rewrote the section of SLIDE.TRACKS that determines the slide duration.
+						 It didn't work correctly when using a click track.
+						 Also tracks containing only RTEs (or loops) wouldn't slide.
+					  - Removed an older chunk of code from the "NOW ACTUALLY PERFORM THE SLIDE" part
+						 of SLIDE.TRACKS that checked for sliding before zero.time.  It had been
+						 rendered dormant by more recently implemented checks in the "DETERMINE THE
+						 SLIDE DURATION" part.
+					  - Removed unneeded variables from SLIDE.TRACKS: J, K, TEMP(1).
+1998/05/15 - TY  - In SLIDE.TRACKS, substituted each call to FIND.FIRST.NOTE to a call to
+						 FIND.FIRST.NONREST.  This fixes the problem of tracks sliding out of sync
+						 relative to each other when being slid toward zero.
+					  - Modified SLIDE.TRACKS to only check tracks that are assignable to buttons.
+						 Also commented out a conditional test that would always yield the same result.
+1991/08/23 - PF  - Another fix to insert/delete length knob change
+1991/06/21 - CJ  - Fixed insert/delete length knob change bug
+1991/01/30 - MWH - Report which tracks have had new notes (more quickly)
+1991/01/19 - PF  - Increased Tempo resolution to microseconds per beat
+1991/01/10 - MWH - Report which tracks have had new notes
+1990/10/14 - PF  - Added ADD.TO.TEMPO routine for changing tempo map
+						 from VK panel
+1990/10/09 - PF  - Expanded TRACK.FORMAT to allow beats only display mode
+1990/07/16 - PF  - MAKE ADD.TO.TIME AND SLIDE.TRACKS WORK WITH METER MAP
+1988/09/30 - CJ  - MAKE SLIDE TRACKS MOVE TRACK BY WHOLE BEAT
+						 IF USING LIVE CLICK TRACK
+1988/05/25 - MWH - Make SMPTE times true 24 hours; allow jog below zero
+1987/11/17 - cj  - removed setting global variables from add.to.smpte
+1987/03/25 - TS  - FIXED SOME BUGS IN ADD.TO.TIME
+1987/03/24 - TS  - SPLIT FILE OFF FROM 181-UPD1
+*/
+
+/*	ROUTINE TO CHANGE 32-BIT TIME PARAMETERS (BOTH TIMES & DURATIONS/LENGTHS)	*/
+/*	CALLING SEQUENCES:
+
+	CHANGING MARK START (MARK.L-PAR.L,	 AMOUNT, #TIME)
+	CHANGING LOOP START (LOOP.L-PAR.L,	 AMOUNT, #TIME)
+	CHANGING LOOP END   (LOOP.L-PAR.L,	 AMOUNT, #TIME)
+	CHANGING LOOP DUR   (LOOP.L-PAR.L,	 AMOUNT, #DUR )
+	CHANGING INS  LEN   (INSERT.L-PAR.L, AMOUNT, #DUR )
+	CHANGING INS  END   (INSERT.L-PAR.L, AMOUNT, #DUR )
+	CHANGING DEL  LEN   (DELETE.L-PAR.L, AMOUNT, #DUR )
+	CHANGING DEL  END   (DELETE.L-PAR.L, AMOUNT, #DUR )
+*/
+
+ADD.TO.TIME:  PROC (PRM#,XAMOUNT,XFORMAT) SWAPABLE;
+	DCL PRM#		FIXED;	/*	PARAMETER TO CHANGE VALUE OF	*/
+	DCL XAMOUNT	FIXED;	/*	AMOUNT TO ADJUST PARM BY	*/
+	DCL XFORMAT	FIXED;	/*	0=>TIME PARAMETER, 1=>DURATION/LENGTH PARAMETER	*/
+	DCL AMOUNT	FIXED STATIC;	/*	AMOUNT TO ADJUST PARM BY	*/
+	DCL FORMAT	FIXED STATIC;	/*	0=>TIME PARAMETER, 1=>DURATION/LENGTH PARAMETER	*/
+	DCL TIME (1)	FIXED STATIC;
+	DCL (M,L)	FIXED;
+	DCL INCREMENT	FIXED STATIC;
+	DCL BEATS(1)	FIXED STATIC;
+	DCL TEMP(1)	FIXED;
+
+
+	SUB32:  PROC(M,L);	/*	SUBTRACT 32-BIT (M,L) FROM TIME() (LIMIT TO (0,0))	*/
+		DCL (M,L)	FIXED;
+
+		IF ((M IGT TIME(0)))		/*	WOULD CAUSE RESULT	*/
+		OR ((M  =  TIME(0))		/*	BEFORE TIME ZERO	*/
+		AND (L IGE TIME(1)))
+		THEN DO;						/*	LIMIT TIME TO ZERO	*/
+			TIME(0)=0; TIME(1)=0;
+		END;
+		ELSE DO;
+			TIME(0)=TIME(0)-M;
+			IF TIME(1) ILT L THEN TIME(0)=TIME(0)-1;
+			TIME(1)=TIME(1)-L;
+		END;
+
+	END SUB32;
+
+
+	ADD32:  PROC(M,L);	/*	ADD 32-BIT (M,L) TO TIME() (LIMIT TO (-1,-1))	*/
+		DCL (M,L)	FIXED;
+
+		TIME(0)=TIME(0)+M;
+		TIME(1)=TIME(1)+L;
+		IF TIME(1) ILT L THEN TIME(0)=TIME(0)+1;
+
+		IF ((TIME(0) ILT M))
+		OR ((TIME(0)  =  M)
+		AND (TIME(1) ILT L))
+		THEN DO;									/*	HAVE AN OVERFLOW	*/
+			TIME(0)=(-1); TIME(1)=(-1);	/*	LIMIT TO MAX	*/
+		END;
+
+	END ADD32;
+
+
+	ADJUST.TIME:  PROC(PRM#);	/*	ADD (AMOUNT*INCREMENT) MSEC TO 32-BIT TIME()	*/
+		DCL (PRM#)		FIXED;
+		DCL (M,L)		FIXED;
+		DCL (MARKMSB)	FIXED;
+		DCL (MARKLSB)	FIXED;
+		/*	DCL MAXTIME (1)	FIXED;	*/	/*	NO LONGER NEEDED	*/
+
+		/*	SINCE ALL CLICKS BEYOND THE LAST NOTE ON THE CLICK TRACK ARE EXTRAPOLATED USING THE LAST TWO NOTES,	*/
+		/*	THERE IS NO LONGER ANY NEED TO LIMIT ADVANCING TO THE END OF THE TRACK. - TY 1998/07/08					*/
+		/*	************************************ B E G I N   D E L E T I O N ************************************	*\
+		IF  (CLICK.TRACK.MODE igt 3)	\*	USING LIVE CLICK TRACK						*\
+		AND (INCREMENT=1)					\*	ADVANCING BY MSEC								*\
+		THEN DO;								\*	TRY TO LIMIT ADVANCING TO END OF TRK	*\
+
+			\*	BASIC STRATEGY IS TO COMPUTE THE TIME OF THE LAST NOTE		*\
+			\*	ON THE LIVE CLICK TRACK AND TO LIMIT TIME() TO THAT VALUE	*\
+
+			WRITE(MAM)=TRK.HEAD;
+			WRITE(MAL)=(CLICK.TRACK.MODE+NUM.KBD.TRACKS-4);
+
+			IF READ(MD)<>0 THEN DO;		\*	CLICK TRACK HAS A TRK HEAD	*\
+				WRITE(MAM)=READ(MD);		\*	POINT TO IT						*\
+				WRITE(MAL)=THD.ILP;		\*	SEE IF ANY ILP ON TRK		*\
+				IF READ(MD)=0 THEN DO;	\*	NO ILP ON TRK					*\
+					CALL REMAP.WITH.LIVE.CLICK(					-1,					-1,0,0,1);	\*	GET MAX CT MILLIBEAT TIME	*\
+					CALL REMAP.WITH.LIVE.CLICK(REMAPPED.TIME.MSB,REMAPPED.TIME.LSB,0,0,0);	\*	CONVERT BACK TO ABS MSEC	*\
+					MAXTIME(0)=REMAPPED.TIME.MSB;
+					MAXTIME(1)=REMAPPED.TIME.LSB;
+				END;
+				ELSE DO;						\*	ASSUME MAX TIME IS HUGE	*\
+					MAXTIME(0)=(-1);
+					MAXTIME(1)=(-1);
+				END;
+
+				IF FORMAT=#DUR THEN DO;	\*	COMPUTE MAX LENGTH RATHER THAN MAX TIME	*\
+					IF (PRM#=(LOOP.L-PAR.L)) THEN DO;	\*	LOOP LENGTH	*\
+						MARKMSB=LOOP.START.MSB; MARKLSB=LOOP.START.LSB;
+					END;
+					ELSE DO;	\*	INSERT/DELETE EDIT LENGTH	*\
+						MARKMSB=MARK.BUTTON.MSB; MARKLSB=MARK.BUTTON.LSB;
+						IF (MARKMSB=0) & (MARKLSB ILT ZERO.TIME) THEN MARKLSB=ZERO.TIME;
+					END;
+
+					\*	SUBTRACT START FROM MAX TIME (LIMITING TO ZERO)	*\
+					\*	TO GET MAX LENGTH											*\
+
+					IF ((MARKMSB IGT MAXTIME(0)))
+					OR ((MARKMSB  =  MAXTIME(0))
+					AND (MARKLSB IGE MAXTIME(1)))
+					THEN DO;
+						MAXTIME(0)=0; MAXTIME(1)=0;	\*	ALREADY TOO FAR	*\
+					END;
+					ELSE DO;									\*	SUBTRACT TIMES TO GET LENGTH	*\
+						MAXTIME(0)=MAXTIME(0)-MARKMSB;
+						IF MARKLSB IGT MAXTIME(1) THEN MAXTIME(0)=MAXTIME(0)-1;
+						MAXTIME(1)=MAXTIME(1)-MARKLSB;
+					END;
+				END;
+			END;
+			ELSE DO; MAXTIME(0)=0; MAXTIME(1)=0; END;	\*	NO TRK, CAN'T DIAL IN VALUE	*\
+		END;
+		\*	************************************** E N D   D E L E T I O N **************************************	*/
+
+		LOAD ABS(AMOUNT); MUL INCREMENT;	/*	COMPUTE LOGICAL MSEC TO ADJUST BY	*/
+		M=URES; L=RES;
+
+		IF  (CLICK.TRACK.MODE igt 3)	/*	USING LIVE CLICK TRACK	*/
+		AND (INCREMENT<>1)				/*	IN JUSTIFIED MODE			*/
+		THEN DO;								/*	HAVE TO DO SOME REMAPPING	*/
+			IF FORMAT=#TIME THEN DO;	/*	MARK, LOOP START, LOOP END	*/
+				CALL REMAP.WITH.LIVE.CLICK(TIME(0),TIME(1),0,0,1);	/*	CONVERT ABS TIME TO BEATS*1000 (RELATIVE TO LIVE CLICK TRK)	*/
+				TIME(0)=REMAPPED.TIME.MSB; TIME(1)=REMAPPED.TIME.LSB;
+			END;
+			ELSE DO;			/*	LOOP LEN, EDIT LEN	*/
+				IF (PRM#=(LOOP.L-PAR.L))
+				THEN CALL REMAP.WITH.LIVE.CLICK(LOOP.START.MSB,LOOP.START.LSB,TIME(0),TIME(1),1);	/*	CONVERT TO RELATIVE TIME	*/
+				ELSE DO;
+					MARKMSB=MARK.BUTTON.MSB; MARKLSB=MARK.BUTTON.LSB;
+					IF (MARKMSB=0) & (MARKLSB ILT ZERO.TIME) THEN MARKLSB=ZERO.TIME;
+					CALL REMAP.WITH.LIVE.CLICK(MARKMSB,MARKLSB,TIME(0),TIME(1),1);	/*	CONVERT SYNCLAVIER DURATION TO BEAT DURATION	*/
+				END;
+				TIME(0)=REMAPPED.DUR.MSB; TIME(1)=REMAPPED.DUR.LSB;
+			END;
+		END;
+
+		IF AMOUNT<0
+		THEN CALL SUB32(M,L);	/*	SUBTRACT (M,L) FROM TIME()	*/
+		ELSE CALL ADD32(M,L);	/*	ADD      (M,L) TO   TIME()	*/
+
+
+		/*	SINCE ALL CLICKS BEYOND THE LAST NOTE ON THE CLICK TRACK ARE EXTRAPOLATED USING THE LAST TWO NOTES,	*/
+		/*	THERE IS NO LONGER ANY NEED TO LIMIT ADVANCING TO THE END OF THE TRACK. - TY 1998/07/08					*/
+		/*	************************************ B E G I N   D E L E T I O N ************************************	*\
+		IF  (CLICK.TRACK.MODE igt 3)
+		THEN DO;
+			IF (INCREMENT=1) THEN DO;			\*	LIMIT TIME TO END OF TRK	*\
+				IF ((TIME(0) IGT MAXTIME(0)))	\*	NEW TIME IS TOO FAR OUT		*\
+				OR ((TIME(0)  =  MAXTIME(0))	\*	SO LIMIT IT TO END OF		*\
+				AND (TIME(1) IGT MAXTIME(1)))	\*	THE LIVE CLICK TRACK			*\
+				THEN DO;
+					TIME(0)=MAXTIME(0);
+					TIME(1)=MAXTIME(1);
+				END;
+			END;
+
+			ELSE DO;	\*	INCREMENT<>1	*\	\*	HAVE TO DO SOME REMAPPING	*\
+				IF FORMAT=#TIME THEN DO;
+					CALL REMAP.WITH.LIVE.CLICK(TIME(0),TIME(1),0,0,0);	\*	CONVERT TIME RELATIVE TO LIVE CLICK TRK BACK INTO ABS TIME	*\
+					TIME(0)=REMAPPED.TIME.MSB; TIME(1)=REMAPPED.TIME.LSB;
+				END;
+				ELSE DO;	\*	CONVERT TIME RELATIVE TO LIVE CLICK TRK BACK INTO ABS TIME	*\
+					CALL REMAP.WITH.LIVE.CLICK(REMAPPED.TIME.MSB,REMAPPED.TIME.LSB,TIME(0),TIME(1),0);
+					TIME(0)=REMAPPED.DUR.MSB; TIME(1)=REMAPPED.DUR.LSB;
+				END;
+			END;
+		END;
+		\*	************************************** E N D   D E L E T I O N **************************************	*/
+		//	********* REPLACED THE ABOVE WITH THE FOLLOWING *********
+		IF  (CLICK.TRACK.MODE igt 3)	/*	USING LIVE CLICK TRACK	*/
+		AND (INCREMENT<>1)				/*	IN JUSTIFIED MODE			*/
+		THEN DO;								/*	HAVE TO DO SOME REMAPPING	*/
+			IF FORMAT=#TIME THEN DO;
+				CALL REMAP.WITH.LIVE.CLICK(TIME(0),TIME(1),0,0,0);	/*	CONVERT TIME RELATIVE TO LIVE CLICK TRK BACK INTO ABS TIME	*/
+				TIME(0)=REMAPPED.TIME.MSB; TIME(1)=REMAPPED.TIME.LSB;
+			END;
+			ELSE DO;	/*	CONVERT TIME RELATIVE TO LIVE CLICK TRK BACK INTO ABS TIME	*/
+				CALL REMAP.WITH.LIVE.CLICK(REMAPPED.TIME.MSB,REMAPPED.TIME.LSB,TIME(0),TIME(1),0);
+				TIME(0)=REMAPPED.DUR.MSB; TIME(1)=REMAPPED.DUR.LSB;
+			END;
+		END;
+
+	END ADJUST.TIME;
+
+
+	ROUND.TIME: PROC(PRM#);	/*	CALLED IF RECD.JUST<>0  (I.E. INCREMENT <> 1)	*/
+		DCL (PRM#)		FIXED;
+		DCL (MARKMSB)	FIXED;
+		DCL (MARKLSB)	FIXED;
+
+		/*	MAKE LOCAL COPY OF MARK BUTTON AND LIMIT TO 0,ZERO.TIME	*/
+
+		MARKMSB=MARK.BUTTON.MSB; MARKLSB=MARK.BUTTON.LSB;
+		IF (MARKMSB=0) & (MARKLSB ILT ZERO.TIME)
+		THEN MARKLSB=ZERO.TIME;
+
+		IF CLICK.TRACK.MODE igt 3
+		THEN DO;								/*	CLICK TRACK	*/
+			IF FORMAT=#TIME THEN DO;	/*	MARK START, LOOP START, LOOP END	*/
+				CALL REMAP.WITH.LIVE.CLICK(TIME(0),TIME(1),0,0,1);		/*	CONVERT SEQ TIME TO CT MILLIBEATS	*/
+				call sub16(zero.time,loc(addr(REMAPPED.TIME.MSB)));	/*	MUST FIRST SUBTRACT ZERO.TIME WHEN FORMAT=#TIME	*/
+				load REMAPPED.TIME.LSB; uload REMAPPED.TIME.MSB;
+			END;
+			ELSE DO;							/*	LOOP DUR, INS LEN, INS END, DEL LEN, DEL END	*/
+				IF (PRM#=(LOOP.L-PAR.L))
+				THEN CALL REMAP.WITH.LIVE.CLICK(LOOP.START.MSB,LOOP.START.LSB,TIME(0),TIME(1),1);	/*	CONVERT SEQ DUR TO CT MILLIBEATS	*/
+				ELSE CALL REMAP.WITH.LIVE.CLICK(MARKMSB,MARKLSB,TIME(0),TIME(1),1);
+				load REMAPPED.DUR.LSB; uload REMAPPED.DUR.MSB;
+			END;
+			/*	THE 16 BIT QUOTIENT OF THE FOLLOWING D4567 DIVISION SHOULD			*/
+			/*	SUFFICE BECAUSE NO CLICK TRACK COULD CONTAIN MORE THAN 64K NOTES?	*/
+			div 1000; BEATS(0) = res; BEATS(1) = rem;
+		END;
+		ELSE DO;								/*	INT OR EXT CLICK	*/
+			IF FORMAT=#TIME
+			THEN CALL Map.Sequence.Time.To.Beats(TIME,BEATS);
+			ELSE DO;			/*	LOOP DUR, INS LEN, INS END, DEL LEN, DEL END	*/
+				IF (PRM#=(LOOP.L-PAR.L))
+				THEN CALL Map.Sequence.Duration.To.Beats(loc(addr(LOOP.START.MSB)),TIME,BEATS);
+				ELSE CALL Map.Sequence.Duration.To.Beats(loc(addr(MARKMSB)),TIME,BEATS);
+			END;
+		END;
+
+		IF BEATS(1)<>0 THEN DO;							/*	NOT ON A BEAT BOUNDARY	*/
+			IF AMOUNT>0 THEN BEATS(0)=BEATS(0)+1;	/*	ROUND UP					*/
+			BEATS(1)=0;										/*	ROUND DOWN (FRACTION)	*/
+
+			/*	recalculate time	*/
+
+			IF CLICK.TRACK.MODE igt 3
+			THEN DO;								/*	CLICK TRACK	*/
+				load BEATS(0); Mul 1000;
+				BEATS(0) = ures; BEATS(1) = res;
+				IF FORMAT=#TIME THEN DO;	/*	MARK START, LOOP START, LOOP END	*/
+					call add16(zero.time,BEATS);	/*	MUST FIRST ADD ZERO.TIME WHEN FORMAT=#TIME	*/
+					CALL REMAP.WITH.LIVE.CLICK(BEATS(0),BEATS(1),0,0,0);	/*	CONVERT CT MILLIBEATS TO SEQ TIME	*/
+					TIME(0)=REMAPPED.TIME.MSB; TIME(1)=REMAPPED.TIME.LSB;
+				END;
+				ELSE DO;	/*	LOOP LEN, INS AND DELETE	*/
+					CALL REMAP.WITH.LIVE.CLICK(REMAPPED.TIME.MSB,REMAPPED.TIME.LSB,BEATS(0),BEATS(1),0);	/*	CONVERT BACK TO ABS TIME	*/
+					TIME(0)=REMAPPED.DUR.MSB; TIME(1)=REMAPPED.DUR.LSB;
+				END;
+			END;
+			ELSE DO;							/*	INT OR EXT CLICK	*/
+				IF FORMAT=#TIME
+				THEN CALL Map.Beats.To.Sequence.Time(BEATS,TIME);
+				ELSE DO;			/*	LOOP DUR, INS LEN, INS END, DEL LEN, DEL END	*/
+					IF (PRM#=(LOOP.L-PAR.L))
+					THEN CALL Map.Beats.To.Sequence.Duration(loc(addr(LOOP.START.MSB)),BEATS,TIME);
+					ELSE CALL Map.Beats.To.Sequence.Duration(loc(addr(MARKMSB)),BEATS,TIME);
+				END;
+			END;
+			IF AMOUNT>0						/*	ACCOUNT FOR 1 UNIT MOVED	*/
+			THEN AMOUNT=AMOUNT-1;
+			ELSE AMOUNT=AMOUNT+1;
+		END;
+
+	END ROUND.TIME;
+
+	AMOUNT = XAMOUNT;						/*	SAVE IN LOCAL STATICS	*/
+	FORMAT = XFORMAT;
+
+	IF AMOUNT=0 THEN RETURN;			/*	JUST IN CASE	*/
+
+	/*	SET UP SOME DEFAULT VALUES FOR TIME INCREMENTS	*/
+
+	IF  (RECD.JUST<>0)					/*	JUSTIFIED RECORDING	*/
+	AND (CLICK.TRACK.MODE<>3)			/*	INTERNAL OR LIVE CLICK	*/
+	THEN DO;
+		IF (CLICK.TRACK.MODE == 0)		/*	INTERNAL CLICK - CHANGE BY BEATS	*/
+		THEN DO;
+			IF PRM#=(LOOP.L-PAR.L)
+			THEN CALL COPY32(LOC(ADDR(LOOP.START.MSB)),TEMP);
+			ELSE CALL COPY32(LOC(ADDR(MARK.BUTTON.MSB)),TEMP);
+			IF (AMOUNT<0)					/*	MOVING TOWARD ZERO	*/
+			&  ((TEMP(0) <> 0)
+			\   (TEMP(1) <> 0))
+			THEN DO;
+				IF TEMP(1)=0				/*	SUBTRACT ONE TICK FROM TEMP	*/
+				THEN TEMP(0)=TEMP(0)-1;	/*	FOR BEAT RATE LOOKUP BELOW	*/
+				TEMP(1)=TEMP(1)-1;
+			END;
+			IF (TEMP(0) = 0)&(TEMP(1) ILT ZERO.TIME)
+			THEN TEMP(1) = ZERO.TIME;
+			INCREMENT=LOOKUP.BEAT.RATE(TEMP);
+		END;
+		ELSE INCREMENT=1000;				/*	CHANGE REMAPPED TIMES BY BEATS	*/
+	END;
+	ELSE INCREMENT=1;						/*	USE MILLISECOND INCREMENT	*/
+
+	/*	FIRST GET CURRENT VALUE FROM SEQUENCE	*/
+
+	IF PRM#=(MARK.L-PAR.L) THEN DO;	/*	ADJUST MARK BUTTON VALUE	*/
+		TIME(0)=MARK.BUTTON.MSB; TIME(1)=MARK.BUTTON.LSB;
+	END;
+	ELSE IF PRM#=(LOOP.L-PAR.L) THEN DO;	/*	ADJUST ONE OF THE LOOP PARMS	*/
+		IF LAST.LOOP.PARM=0
+		THEN DO;								/*	LOOP START TIME	*/
+			TIME(0)=LOOP.START.MSB;
+			TIME(1)=LOOP.START.LSB;
+		END;
+		ELSE IF LAST.LOOP.PARM=1
+		THEN DO;								/*	LOOP END TIME	*/
+			TIME(0)=LOOP.END.MSB;
+			TIME(1)=LOOP.END.LSB;
+		END;
+		ELSE DO;								/*	LOOP LENGTH	*/
+			TIME(0)=LOOP.END.MSB;
+			TIME(1)=LOOP.END.LSB;
+			CALL SUB32(LOOP.START.MSB,LOOP.START.LSB);
+			/*	TIME() NOW CONTAINS THE CURRENT LOOP LEN IN ABS TIME UNITS	*/
+		END;
+	END;
+	ELSE IF (PRM#=(INSERT.L-PAR.L))
+	OR      (PRM#=(DELETE.L-PAR.L))
+	THEN DO;
+		TIME(0)=EDIT.LEN.MSB;
+		TIME(1)=EDIT.LEN.LSB;
+	END;
+
+	IF FORMAT=#TIME THEN DO;			/*	HANDLE CASES WHERE TIME IS WIERD (I.E., LESS THAN ZERO.TIME)	*/
+
+		/*	MARK START, LOOP START, LOOP END ONLY	*/
+
+		M=0; L=ZERO.TIME;
+		IF CLICK.TRACK.MODE igt 3 THEN DO;
+			CALL REMAP.WITH.LIVE.CLICK(M,L,0,0,0);	/*	CONVERT RELATIVE ZERO.TIME TO ABS TIME	*/
+			M=REMAPPED.TIME.MSB; L=REMAPPED.TIME.LSB;
+		END;
+
+		IF ((TIME(0) ILT M))	/*	OUR TIME IS BEFORE OUR LOGICAL ZERO.TIME	*/
+		OR ((TIME(0)  =  M)
+		AND (TIME(1) ILE L))
+		THEN DO;
+			IF (AMOUNT&"100000")<>0 THEN DO;		/*	NEGATIVE DIRECTION	*/
+				IF PRM#<>(MARK.L-PAR.L) THEN DO;
+					TIME(0)=M; TIME(1)=L;			/*	FORCE LOOP START/END TO LOGICAL ZERO.TIME	*/
+				END;
+				ELSE DO;									/*	CLEAR MARK BUTTON		*/
+					TIME(0)=0; TIME(1)=0;
+				END;
+				AMOUNT="100000";						/*	DISALLOW FURTHER CHANGES	*/
+			END;
+			ELSE DO;	/*	SET TO ZERO.TIME	*/
+				IF  (PRM#=(MARK.L-PAR.L)) THEN DO;
+					IF ((TIME(0) ILT M))	/*	OUR TIME IS BEFORE OUR LOGICAL ZERO.TIME	*/
+					OR ((TIME(0)  =  M)
+					AND (TIME(1) ILT L))
+					THEN AMOUNT=AMOUNT-1;
+				END;
+				TIME(0)=M; TIME(1)=L;
+			END;
+		END;
+	END;
+
+	IF  (AMOUNT<>"100000")
+	AND (AMOUNT<>0)
+	THEN DO;						/*	ACTUALLY ADJUST TIME()	*/
+		IF INCREMENT<>1 THEN CALL ROUND.TIME (PRM#);	/*	ROUND TIME TO NEXT BEAT	*/
+		IF AMOUNT	<>0 THEN CALL ADJUST.TIME(PRM#);	/*	NOW ADJUST BY DESIRED AMOUNT	*/
+	END;
+
+	IF  (FORMAT=#TIME)		/*	THIS IS A TIME PARAMETER	*/
+	THEN DO;						/*	LIMIT TIME PARMS TO ZERO.TIME	*/
+		IF ((TIME(0) ILT M))	/*	OUR TIME IS BEFORE OUR LOGICAL ZERO.TIME	*/
+		OR ((TIME(0)  =  M)
+		AND (TIME(1) ILT L))
+		THEN DO;
+			IF PRM#<>(MARK.L-PAR.L) THEN DO;
+				TIME(0)=M; TIME(1)=L;
+			END;
+			ELSE DO;	/*	HANDLE LIMIT FOR MARK BUTTON IN SPECIAL WAY	*/
+				TIME(0)=0; TIME(1)=0;
+			END;
+		END;
+	END;
+
+	/*	NOW STORE NEW VALUE BACK INTO PARAMETER	*/
+
+	IF PRM#=(MARK.L-PAR.L) THEN DO;	/*	STORE BACK IN SEQ HEADER	*/
+		MARK.BUTTON.MSB=TIME(0); MARK.BUTTON.LSB=TIME(1);	/*	UPDATE PARM	*/
+		WRITE(MAM)=BAS.PTR;
+		WRITE(MAL)=SEQ.MARK.MSB;		/*	AND RE-WRITE TO SEQUENCE AREA	*/
+		WRITE(MDI)=MARK.BUTTON.MSB;
+		WRITE(MD )=MARK.BUTTON.LSB;
+	END;
+	ELSE IF PRM#=(LOOP.L-PAR.L) THEN DO;	/*	ADJUST ONE OF THE LOOP PARMS	*/
+		IF LAST.LOOP.PARM=0
+		THEN DO;	/*	START TIME	*/
+			LOOP.START.MSB=TIME(0);
+			LOOP.START.LSB=TIME(1);
+		END;
+		ELSE IF LAST.LOOP.PARM=1
+		THEN DO;	/*	END TIME	*/
+			LOOP.END.MSB=TIME(0);
+			LOOP.END.LSB=TIME(1);
+		END;
+		ELSE DO;
+			CALL ADD32(LOOP.START.MSB,LOOP.START.LSB);	/*	ADD LEN TO START TO GET NEW END TIME	*/
+			LOOP.END.MSB=TIME(0);
+			LOOP.END.LSB=TIME(1);
+		END;
+	END;
+	ELSE IF (PRM#=(INSERT.L-PAR.L))
+	OR		  (PRM#=(DELETE.L-PAR.L))
+	THEN DO;
+		EDIT.LEN.MSB=TIME(0);
+		EDIT.LEN.LSB=TIME(1);
+	END;
+
+END ADD.TO.TIME;
+
+
+/*	$PAGE - ADJUST SMPTE START TIME	*/
+
+ADD.TO.SMPTE:PROC(AM) PUBLIC SWAPABLE;
+	DCL AM			FIXED;				/*	AMOUNT TO CHANGE SMPTE BY (+ OR -)	*/
+	DCL AMT			FIXED;				/*	ABSOLUTE VALUE OF AM	*/
+	DCL WAIT.MSEC	FIXED STATIC;		/*	TIME IN MILLISECONDS WHEN WAIT STARTED	*/
+	DCL WAITING		FIXED STATIC;		/*	DON'T CHANGE TIME IF <> 0	*/
+	DCL TBUF(4)		FIXED;				/*	THIS IS ZERO EXCEPT FOR FIELD CHANGING	*/
+
+	DCL HR	LIT 'MISC.BUF(0)';		/*	EXPAND HOURS   HERE	*/
+	DCL MI	LIT 'MISC.BUF(1)';		/*	EXPAND MINUTES HERE	*/
+	DCL SE	LIT 'MISC.BUF(2)';		/*	EXPAND SECONDS HERE	*/
+	DCL FR	LIT 'MISC.BUF(3)';		/*	EXPAND FRAMES  HERE	*/
+	DCL BS	LIT 'MISC.BUF(4)';		/*	EXPAND BITS    HERE	*/
+
+	IF WAITING <> 0 THEN DO;			/*	ARE WE WAITING?	*/
+		IF (REAL.MILLISECONDS - WAIT.MSEC) IGT 1000
+		THEN WAITING = 0;					/*	STOP WAITING AFTER 1 SECOND	*/
+		ELSE RETURN;						/*	KEEP WAITING	*/
+	END;
+
+	HR=SM.HRS;								/*	PUT SMPTE INFO INTO TEMPS	*/
+	MI=SM.MIN; SE=SM.SEC;
+	FR=SM.FRA; BS=SM.BIT;
+
+	IF AM < 0 THEN	AMT = -AM;
+	ELSE				AMT =  AM;
+
+	IF HELD.SMPTE.BUTTON=0					/*	NOT HELD				*/
+	THEN TBUF(4)=TBUF(4)+AMT;				/*	CHANGE BITS			*/
+	ELSE TBUF(2)=TBUF(2)+AMT;				/*	CHANGE SECONDS		*/
+	CALL NORMALIZE.SMPTE(TBUF,SM.MODE);	/*	SPREAD OUT CHANGE	*/
+
+	IF AM > 0 THEN	CALL ADD.SMPTE(MISC.BUF,TBUF,MISC.BUF,SM.MODE);
+	ELSE				CALL SUB.SMPTE(MISC.BUF,TBUF,MISC.BUF,SM.MODE);
+
+	/*	MAKE IT EASIER TO HIT ZERO	*/
+	IF ((HR = 0  AND SM.HRS = 23)			/*	IF WE JUST WRAPPED	*/
+	OR  (HR = 23 AND SM.HRS = 0 ))
+	THEN DO;
+		/*	IF WE WERE NOT ALREADY AT ZERO, LAND THERE EXACTLY	*/
+		IF (SM.HRS \ SM.MIN \ SM.SEC \ SM.FRA \ SM.BIT) <> 0
+		THEN DO;
+			HR=0; MI=0; SE=0; FR=0; BS=0;
+			WAIT.MSEC = REAL.MILLISECONDS;	/*	REMEMBER WHEN WE HIT ZERO	*/
+			WAITING = 1;							/*	WE'RE WAITING NOW		*/
+		END;
+	END;
+
+	WRITE(MAM)=BAS.PTR;							/*	SAVE IN EXT MEM FOR	*/
+	WRITE(MAL)=SEQ.SMBITS;						/*	SPEED.COMP			*/
+	WRITE(MDI)=BS;
+	WRITE(MDI)=FR\SHL(SE,8);
+	WRITE(MD )=MI\SHL(HR,8);
+
+END ADD.TO.SMPTE;
+
+
+/*	$PAGE - ADJUST TEMPO	*/
+
+ADD.TO.TEMPO:PROC(AM) PUBLIC SWAPABLE;
+	DCL AM			FIXED;	/*	AMOUNT TO CHANGE TEMPO BY (+ OR -)	*/
+	DCL TEMPO(1)	FIXED;	/*	MICROSECONDS PER BEAT	*/
+	DCL limit(1)	FIXED;	//	for min/max
+	DCL SIGN			FIXED;
+	DCL AM.MSB		FIXED;
+	DCL AM.LSB		FIXED;
+	dcl numerator			fixed;	//	constant based on frame rate
+	dcl denominator(1)	fixed;	//	constant based on frame rate
+
+	DCL scale32		lit 'denominator';
+
+	IF AM < 0 THEN DO;
+		SIGN = 1;
+		AM = -AM;
+	END;
+//	ELSE SIGN = 0;	//	initializes to 0 automatically
+
+	/*	GET CURRENT TEMPO	*/
+	CALL LOOKUP.TEMPO(LOC(ADDR(SAMPLED.ACTUAL.SEQUENCE.TIME.MSB)),TEMPO);
+
+	str32(0,25000,limit);	//	set limit to min = 25,000
+
+//	AM.MSB = 0;		//	initializes to 0 automatically
+	AM.LSB = AM;
+
+	IF (CLICK.DISP.MODE == 1) THEN DO;	/*	DISPLAYING IN USEC	*/
+		//	step 1: deal with held click rate button
+		IF HELD.CLIK.BUTTON<>0 THEN DO;	/*	IF HOLDING CLICK BUTTON	*/
+			LOAD AM;
+			MUL  1000;							/*	MOVE IN MSEC INCREMENTS	*/
+			AM.MSB = URES;
+			AM.LSB = RES;
+
+			LOAD	TEMPO(1);					/*	ROUND TEMPO DOWN TO EVEN MSEC	*/
+			ULOAD TEMPO(0);
+			DIV 1000;							/*	DIVIDE USEC BY 1000	*/
+			write("313") = REM;								/*	SAVE REMAINDER	*/
+			LOAD RES;
+			MUL 1000;							/*	MULTIPLY BACK UP	*/
+			TEMPO(0) = URES;
+			TEMPO(1) = RES;
+
+			IF SIGN = 0 THEN DO;				/*	INCREMENTING TEMPO	*/
+				IF (read("313") <> 0) THEN DO;			/*	VALUE WAS NOT AT EVEN MSEC - JUST BUMP UP ONE MSEC	*/
+					AM.MSB = 0;
+					AM.LSB = 1000;
+				END;
+			END;
+			ELSE IF (read("313") <> 0) THEN DO;		/*	SUBTRACTING AND THE VALUE WAS NOT AT EVEN MSEC YET, DON'T SUBTRACT ANY MORE HERE	*/
+				AM.MSB = 0;
+				AM.LSB = 0;
+			END;
+		END;
+
+		//	step 2: add or subtract
+		IF SIGN THEN DO;
+			IF (COM32(LOC(ADDR(AM.MSB)),TEMPO) = LW#IGT)
+			THEN CALL COPY32(limit,TEMPO);
+			ELSE CALL SUB32(TEMPO,LOC(ADDR(AM.MSB)),TEMPO);
+		END;
+		ELSE CALL ADD32(TEMPO,LOC(ADDR(AM.MSB)),TEMPO);
+	END;	/*	OF DISPLAYING USEC	*/
+
+	ELSE IF (CLICK.DISP.MODE == 0) THEN DO;	/*	DISPLAYING BEATS PER MINUTE	*/
+		//	step 1: get the current tempo expressed as it appears in the VK window
+		//	if microseconds per beat is less than 183109 then shift decimal to avoid result greater than (2^15)-1
+		if ((tempo(0) ilt 2) || ((tempo(0) == 2) && (tempo(1) ilt 52037))) scale32(1) =	10;
+		else																					 scale32(1) = 100;
+		disable;
+		mul_32by32(sixty_million,scale32);
+		div_64by32(tempo,tempo);
+		enable;
+
+		//	step 2: deal with held click rate button
+		IF (HELD.CLIK.BUTTON<>0) THEN DO;
+			// make the amount only alter the digits before the decimal point
+			LOAD AM;
+			MUL scale32(1);
+			AM.MSB = URES;
+			AM.LSB = RES;
+
+			// truncate any fractional part of the current beats/minute
+			LOAD  TEMPO(1);
+			ULOAD TEMPO(0);
+			DIV scale32(1);
+			write("313") = REM;
+			LOAD RES;
+			MUL scale32(1);
+			TEMPO(0) = URES;
+			TEMPO(1) = RES;
+
+			IF SIGN = 0 THEN DO;			/*	INCREMENTING TEMPO	*/
+				IF (read("313") <> 0) THEN DO;		/*	VALUE WAS NOT AT EVEN BPM - JUST BUMP UP ONE BPM	*/
+					AM.MSB = 0;
+					AM.LSB = scale32(1);
+				END;
+			END;
+			ELSE IF (read("313") <> 0) THEN DO;
+				AM.MSB = 0;
+				AM.LSB = 0;
+			END;
+		END;
+
+		//	step 3: add or subtract
+		IF SIGN THEN DO;
+			IF COM32(LOC(ADDR(AM.MSB)),TEMPO) = LW#IGT
+			THEN str32(0,3000,TEMPO);	//	minimum allowable value
+			ELSE CALL SUB32(TEMPO,LOC(ADDR(AM.MSB)),TEMPO);
+		END;
+		ELSE CALL ADD32(LOC(ADDR(AM.MSB)),TEMPO,TEMPO);
+
+		//	step 4: convert tempo back to microseconds per beat
+		disable;
+		mul_32by32(sixty_million,scale32);
+		div_64by32(tempo,tempo);
+		enable;
+	END;	/*	OF DISPLAYING BEATS PER MINUTE	*/
+
+	ELSE DO;									/*	DISPLAYING FRAMES PER BEAT	*/
+		if (samp.speed == 0) return;	//	avoid division by zero, no meaningful result can be obtained
+
+		//	step 1: get frame rate
+		write(mam) = bas.ptr;
+		if (CLICK.DISP.MODE == 2) {	//	using film frame rate
+			write(mal) = seq.fmode;
+			numerator = film.fps(read(md));	//	returns 30, 25 or 24
+		}
+		else {								//	using smpte frame rate
+			write(mal) = seq.smode;
+			if ((read(md) == 0) || (read(md) == 4)) {			//	if smpte mode is drop or ntsc 29.97
+				numerator = 2997;
+				load samp.speed; mul 125;
+				denominator(0) = ures; denominator(1) = res;
+			}
+			else numerator = frames.per.second(read(md));	//	returns 30, 25 or 24
+		}
+		//	step 2: set numerator and denominator based on frame rate
+		if		  (numerator == 24) {numerator = 96; load samp.speed; mul 5; denominator(1) = res;}
+		else if (numerator == 30) {numerator = 24; denominator(1) = samp.speed;}
+		else if (numerator == 25) {numerator = 20; denominator(1) = samp.speed;}
+
+		//	step 3: get the current tempo expressed as 800ths of a frame per beat
+		//	determine whether we must divide by a 32-bit or a 16-bit denominator
+		bitmsb = tempo(0); bitlsb = tempo(1);
+		if (denominator(0) == 0) {
+			ratio_multiply(numerator,denominator(1));	//	the result is in bitmsb,bitlsb
+			tempo(0) = bitmsb; tempo(1) = bitlsb;		//	put it back into tempo
+		}
+		else {
+			str32(0,numerator,tempo);			//	temporarily hold 32-bit version of numerator in tempo
+			disable;
+			mul_32by32(BitMsbArray,tempo);	//	(the interim 64-bit value is in MATHMOD's static array multiply.result)
+			div_64by32(denominator,tempo);	//	the result is in tempo
+			enable;
+		}
+
+		//	step 4: deal with held click rate button
+		IF (HELD.CLIK.BUTTON<>0) THEN DO;
+			// make the amount only alter the digits representing whole eighths of a frame
+			LOAD AM;
+			MUL 100;
+			AM.MSB = URES;
+			AM.LSB = RES;
+
+			// truncate any fractional part of the current eighths of a frame
+			LOAD  TEMPO(1);
+			ULOAD TEMPO(0);
+			DIV 100;
+			write("313") = REM;
+			LOAD RES;
+			MUL 100;
+			TEMPO(0) = URES;
+			TEMPO(1) = RES;
+
+			IF SIGN = 0 THEN DO;				/*	INCREMENTING TEMPO	*/
+				IF (read("313") <> 0) THEN DO;			/*	VALUE WAS NOT AT WHOLE EIGHTH - JUST BUMP UP ONE EIGHTH	*/
+					AM.MSB = 0;
+					AM.LSB = 100;
+				END;
+			END;
+			ELSE IF (read("313") <> 0) THEN DO;
+				AM.MSB = 0;
+				AM.LSB = 0;
+			END;
+		END;
+
+		//	step 5: add or subtract
+		IF SIGN THEN DO;
+			IF COM32(LOC(ADDR(AM.MSB)),TEMPO) = LW#IGT
+			THEN str32(0,48,TEMPO);	//	minimum possible value
+			ELSE CALL SUB32(TEMPO,LOC(ADDR(AM.MSB)),TEMPO);
+		END;
+		ELSE CALL ADD32(LOC(ADDR(AM.MSB)),TEMPO,TEMPO);
+
+		//	step 6: convert tempo back to microseconds per beat
+		//	determine whether we must divide by a 32-bit or a 16-bit denominator
+		bitmsb = tempo(0); bitlsb = tempo(1);
+		if (denominator(0) == 0) {
+			ratio_multiply(denominator(1),numerator);	//	the result is in bitmsb,bitlsb
+			tempo(0) = bitmsb; tempo(1) = bitlsb;		//	put it back into tempo
+		}
+		else {
+			str32(0,numerator,tempo);						//	temporarily hold 32-bit version of numerator in tempo
+			disable;
+			mul_32by32(BitMsbArray,denominator);		//	(the interim 64-bit value is in MATHMOD's static array multiply.result)
+			div_64by32(tempo,tempo);						//	the result is in tempo
+			enable;
+		}
+	END;	/*	OF DISPLAYING FRAMES PER BEAT	*/
+
+	/*	ENFORCE MIN/MAX	*/
+
+	//	limit is currently set to min = 25,000
+	IF COM32(TEMPO,limit) = LW#ILT THEN CALL COPY32(limit,TEMPO);
+	ELSE {
+		str32(30,33920,limit);	//	max = 2,000,000
+		IF COM32(TEMPO,limit) = LW#IGT THEN CALL COPY32(limit,TEMPO);
+	}
+
+	/*	NOW ACTUALLY SET NEW TEMPO	*/
+
+	CALL SET.TEMPO(LOC(ADDR(SAMPLED.ACTUAL.SEQUENCE.TIME.MSB)),TEMPO);
+
+END ADD.TO.TEMPO;
+
+
+/*	$PAGE - ADJUST 24 BIT SOUND FILE LOOP LENGTH	*/
+
+ADD.TO.LENGTH:PROC(I) PUBLIC SWAPABLE;		/*	PASS POINTER OFF OF PTPTR	*/
+	DCL (I,J,K,L)	FIXED;
+	DCL (STEREO	)	FIXED;
+	DCL (KHZ		)	FIXED;
+	DCL (SECS	)	FIXED;
+	DCL (MSECS	)	FIXED;
+	DCL (MCSECS	)	FIXED;
+
+	IF INC.POLY=0 THEN RETURN;
+
+	J=P.LOOKUP(PTPTR+I  );						/*	LOOK UP TOTAL LENGTH OR LOOP LENGTH	*/
+	K=P.LOOKUP(PTPTR+I+1);						/*	32-BIT SAMPLE #							*/
+
+	STEREO=P.LOOKUP(PTPTR+PT.STEREO);		/*	GET INFO FOR CURRENT (OR MOST	*/
+	KHZ	=P.LOOKUP(PTPTR+PT.KHZ	 );		/*	RECENT) FILE, OR ZEROES		*/
+	IF (STEREO<>0 ) and (STEREO<>1	) THEN STEREO=0;		/*	DEFAULT IS	*/
+	IF (KHZ ILT 10) OR  (KHZ IGT 2000) THEN KHZ	 =500;	/*	50 KHZ MONO	*/
+
+		IF AMOUNT<>"100000" THEN DO;			//	MUST CHANGE IT
+		L=ABS(AMOUNT);								//	ADD IN THIS MUCH
+		IF L>30 THEN DO;							//	MOVE FASTER
+			L=L+4*(L-30);							//	FOR LARGER KNOBS
+			IF AMOUNT<0 THEN L=-L;
+		END;
+		ELSE L=AMOUNT;								//	USE NORMAL AMOUNT
+
+		K=K+L;										//	ADD IN CHANGE L
+		IF (L>0)&(K ILT L) THEN J=J+1;		//	CARRY
+		IF (L<0)&(K IGE L) THEN DO;			//	BORROW
+			IF J=0 THEN K=0;						//	LIMIT TO ZERO
+			ELSE J=J-1;
+		END;
+
+		CALL P.LOOKUP(PTPTR+PT.TLEN);			//	LOOK UP EARLIER INFO.  Note that this includes user settings from the partial (such as
+		DO L=PT.TLEN TO PT.COPYL-1;			//	pt.tlen, pt.llen) plus information we earlier read from the sound file itself (via
+			MISC.BUF(L)=READ(MDI);				//	ps.extract).  If the sound file is not available now, accurate but stale information will be used.
+		END;
+
+		MISC.BUF(I  )=J;							//	STORE IN NEW TOTAL LENGTH OR LOOP LENGTH
+		MISC.BUF(I+1)=K;
+
+		CALL SETUP.POLY.INFO;					//	CHECK LIMITS, COMPUTE INFO
+
+		CALL P.LOOKUP(PTPTR+PT.WTABL);		//	STORE WAVE TABLE LENGTH
+		DO L=PT.WTABL TO PT.ONLOOP;			//	TO USE BY NOTE START
+			WRITE(MDI)=MISC.BUF(L);				//	(ALSO ON/LOOP BIT)
+		END;
+
+		CALL P.LOOKUP(PTPTR+PT.TLEN);			//	STORE POSSIBLY ALTERED
+		DO L=PT.TLEN TO PT.LLEN+1;				//	USER SETTINGS
+			WRITE(MDI)=MISC.BUF(L);
+		END;
+
+		J=MISC.BUF(I  );							//	LOOK UP VALUES AGAIN IN
+		K=MISC.BUF(I+1);							//	CASE LIMITED BY SETUP.POLY.INFO
+	END;
+
+	IF NEW.PAN=0 THEN CALL CLEAR.DISPLAY;	/*	ORIG PANEL	*/
+	ELSE DO;
+
+		IF (UPPER.DISP<>LOOPL.DISP)			/*	MUST CLEAR	*/
+		THEN DO;
+			CALL CLEAR.UPPER;						/*	CLEAR UPPER DISPLAY	*/
+			CALL EMIT.STRING(10,'SECOND');
+			UPPER.DISP=LOOPL.DISP;
+		END;
+
+		BITMSB=J; BITLSB=K;			/*	GET SAMPLE #		*/
+		CALL ratio_multiply(20*500,SHL(KHZ,STEREO));	/*	CORRECT FOR SAMPLING RATE,STEREO.  COMPUTE 32 BIT # OF MICROSECONDS	*/
+
+		LOAD BITLSB; ULOAD BITMSB;	/*	32 BIT # OF MICROSECONDS	*/	/*	THIS IS DONE THIS WAY TO PROVIDE NUMERIC					*/
+		DIV 10000;						/*	GET SECONDS*100	*/				/*	ABILITY FOR SOUND FILES UP TO 655 SECONDS IN LENGTH	*/
+
+		SECS=RES; MSECS=REM;			/*	ACTUALLY SECONDS * 100, MSECS*1000 FOR NOW	*/
+
+		LOAD MSECS; DIV 1000;
+		MSECS=RES; MCSECS=REM;		/*	GET MICROSECONDS	*/
+
+		LOAD SECS; DIV 100;			/*	NOW GET SECONDS	*/
+		SECS=RES;
+
+		MSECS=MSECS+(REM*10);		/*	AND MILLISECONDS	*/
+
+		IF SECS>99 THEN SECS=99;	/*	ONLY ROOM FOR 2 DIGITS	*/
+
+		IF SECS<10 THEN DO;			/*	LEADING SPACE		*/
+			CALL EMIT.STRING(0,' ');
+			CALL EMIT.NUMBER(1,SECS,0,LEFT.JUST);
+		END;
+		ELSE CALL EMIT.NUMBER(0,SECS,0,LEFT.JUST);
+
+		CALL EMIT.NUMBER(2,MSECS, 3,LEFT.JUST);	/*	MILLISECONDS	*/
+		CALL EMIT.NUMBER(6,MCSECS,3,LEFT.JUST);	/*	MICROSECONDS	*/
+		CALL CLEAR.DECIMAL.POINT(6);					/*	REMOVE FAULTY DP'S	*/
+	END;
+
+END  ADD.TO.LENGTH;
+
+
+/*	$SUBTITLE SLIDE.TRACKS - ROUTINE TO ADVANCE/RETARD TRACK START TIMES	*/
+
+SLIDE.TRACKS:  PROC (SLIDE.DIST) PUBLIC SWAPABLE;	/*	PROC TO RETARD/ADVANCE TRACK START TIMES	*/
+	DCL (SLIDE.DIST,DIST)	FIXED;
+	DCL (DISPLAY.TRK)			FIXED;
+	DCL I							FIXED;
+	DCL BEATS(1)				FIXED;
+	DCL SLIDE.BEATS(1)		FIXED;
+	DCL (OVERFLOW,JUSTIFY)	BOOLEAN;
+
+	DCL EARLIEST.TRK							FIXED;	/*	TRACK NUMBER FOR TRACK CONTAINING EARLIEST NON-REST	*/
+	DCL (EARLIEST.MSB,EARLIEST.LSB)		FIXED;	/*	MUST DECLARE IN ORDER	*/
+	DCL FIRSTNOTE.TRK							FIXED;	/*	TRACK NUMBER FOR TRACK CONTAINING EARLIEST SOUNDING NOTE	*/
+	DCL (FIRSTNOTE.MSB,FIRSTNOTE.LSB)	FIXED;	/*	MUST DECLARE IN ORDER	*/
+
+
+	POINT.AT.FIRST.NOTE:  PROC;		/*	INITS #SEC,#WRD TO BE AT FIRST NOTE	*/
+
+		INIT.#WRD:  PROC;					/*	LOOKS UP NLS.FP FOR #SEC	*/
+			WRITE(MAM)=NAH.PTR+#SEC;	/*	AND POINT TO IT			*/
+			WRITE(MAL)=NLS.FP;			/*	LOOK UP PTR TO 1ST WORD	*/
+			#WRD=READ(MD);
+			WRITE(MAL)=#WRD;				/*	AND POINT TO IT			*/
+		END INIT.#WRD;
+
+		WRITE(MAM)=#PTR;					/*	POINT AT TRK HEAD			*/
+		WRITE(MAL)=THD.FOR;				/*	LOOK FOR FIRST NLS		*/
+		#SEC=READ(MD);						/*	SAVE FORWARD PTR TO NLS	*/
+
+		IF #SEC<>0 THEN DO;				/*	WE HAVE A NOTE SEGMENT	*/
+
+			CALL INIT.#WRD;				/*	LOOK UP NLS.FP				*/
+
+			DO WHILE (READ(MD)=NLS.EOS)	/*	LOOP WHILE AT END OF NLS	*/
+				AND   (#SEC<>0);				/*	AND ANOTHER NLS AFTER US	*/
+
+				WRITE(MAL)=NLS.FOR;
+				#SEC=READ(MD);
+
+				IF #SEC<>0					/*	FOUND ANOTHER NLS			*/
+				THEN CALL INIT.#WRD;		/*	LOOK UP NLS.FP				*/
+
+			END;
+		END;
+
+	END POINT.AT.FIRST.NOTE;
+
+
+	RESET.#.INFO:  PROC;				/*	SETS UP # INFO FOR 1ST NOTE ON TRK	*/
+
+		CALL POINT.AT.FIRST.NOTE;
+		IF #SEC<>0 THEN DO;
+			CALL LOOK.UP.NOTE.INFO;
+			#NMSB=0;						/*	INIT # VARS FOR 1ST NOTE	*/
+			#NLSB=SHR(#W1,1)&1023;	/*	EXTRACT START TIME			*/
+			#LMSB=0;
+			#LLSB=0;
+			#ANYF=1;
+			#ANYR=0;
+		END;
+
+	END RESET.#.INFO;
+
+
+	/*	$SUBTITLE  SLIDE.TRACKS ROUTINE (ADJUST.THD.TIMES)	*/
+
+	ADJUST.THD.TIMES:  PROC (XSTART.DIST,XEXTRA.DIST);	/*	ADDS IN DIST TO TRK HEAD EVENT TIMES	*/
+		DCL XSTART.DIST	FIXED;		/*	AMOUNT START DELTA FIELD WAS ADJUSTED BY	*/
+		DCL XEXTRA.DIST	FIXED;		/*	AMOUNT EXTRA DELTA FIELD WAS ADJUSTED BY	*/
+		DCL START.DIST	FIXED STATIC;	/*	AMOUNT START DELTA FIELD WAS ADJUSTED BY	*/
+		DCL EXTRA.DIST	FIXED STATIC;	/*	AMOUNT EXTRA DELTA FIELD WAS ADJUSTED BY	*/
+		DCL DIST			FIXED STATIC;	/*	TOTAL AMOUNT TO ADJUST TRK HEAD TIMES BY	*/
+
+		SUBIT: PROC (P);	/*	SUBTRACTS DIST FROM TIME AT PTR 'P'	*/
+			DCL P	FIXED;	/*	P IS THD.NMSB, THD.LMSB, THD.LP.NMSB, THD.LP.LMSB, THD.COUNTIN.MSB	*/
+
+			WRITE(MAL)=P+1;						/*	POINT AT LSB		*/
+			IF READ(MD) ILT (-DIST) THEN DO;	/*	NEED TO BORROW		*/
+				WRITE(MAL)=P;						/*	POINT AT MSB		*/
+				WRITE(MDI)=READ(MD)-1;			/*	BORROW FROM IT		*/
+			END;
+			WRITE(MD)=READ(MD)+DIST;			/*	SUB DIST FROM LSB	*/
+
+		END SUBIT;
+
+		ADD: PROC (P);		/*	ADDS DIST TO TIME AT PTR 'P'	*/
+			DCL P	FIXED;	/*	P IS THD.NMSB, THD.LMSB, THD.LP.NMSB, THD.LP.LMSB, THD.COUNTIN.MSB	*/
+
+			WRITE(MAL)=P+1;						/*	POINT AT LSB		*/
+			WRITE(MD)=READ(MD)+DIST;			/*	ADD DIST TO LSB	*/
+			IF READ(MD) ILT DIST THEN DO;		/*	HAVE A CARRY		*/
+				WRITE(MAL)=P;						/*	POINT AT MSB		*/
+				WRITE(MD)=READ(MD)+1;			/*	ADD CARRY TO IT	*/
+			END;
+
+		END ADD;
+
+		ADJUST: PROC(PTR);					/*	KLUDGE PROC TO REDUCE DUPLICATION OF CODE	*/
+			DCL PTR	FIXED;					/*	PTR IS EITHER THD.NMSB OR THD.LP.NMSB		*/
+
+			WRITE(MAL)=PTR+4;
+
+			IF  (READ(MDI)=#WRD)			/*	IF TRK HEAD PTR IS EQUAL TO	*/
+			AND (READ(MD )=#SEC)			/*	OUR EDIT PTR						*/
+			THEN DO;							/*	BACK UP NMSB BY START DIST		*/
+				DIST=START.DIST;			/*	ONLY									*/
+				IF DIST<0
+				THEN CALL SUBIT(PTR);	/*	SUBTRACT FROM NMSB, NLSB		*/
+				ELSE CALL ADD  (PTR);	/*	ADD      TO   NMSB, NLSB		*/
+			END;
+
+			ELSE IF #ANYF<>0 THEN DO;	/*	IF ANY NOTE AFTER US, SEE IF WE POINT THERE	*/
+
+				CALL ADVANCE.TO.NEXT.NOTE;
+
+				WRITE(MAM)=#PTR;				/*	LOOK AT TRACK HEAD AGAIN		*/
+				WRITE(MAL)=PTR+4;
+				IF  (READ(MDI)=#WRD)			/*	IF TRK HEAD PTR IS EQUAL TO	*/
+				AND (READ(MD )=#SEC)			/*	OUR EDIT PTR						*/
+				THEN DO;
+					DIST=START.DIST;			/*	START DIST ONLY					*/
+					IF DIST<0
+					THEN CALL SUBIT(PTR+2);	/*	SUBTRACT FROM LMSB, LLSB		*/
+					ELSE CALL ADD  (PTR+2);	/*	ADD      TO   LMSB, LLSB		*/
+					DIST=START.DIST+EXTRA.DIST;
+					IF DIST<0
+					THEN CALL SUBIT(PTR);	/*	SUBTRACT FROM NMSB, NLSB		*/
+					ELSE CALL ADD  (PTR);	/*	ADD      TO   NMSB, NLSB		*/
+				END;
+				ELSE DO;
+					DIST=START.DIST+EXTRA.DIST;
+					IF DIST<0
+					THEN CALL SUBIT(PTR+2);	/*	SUBTRACT FROM LMSB, LLSB		*/
+					ELSE CALL ADD  (PTR+2);	/*	ADD		TO   LMSB, LLSB		*/
+					IF DIST<0
+					THEN CALL SUBIT(PTR);	/*	SUBTRACT FROM NMSB, NLSB		*/
+					ELSE CALL ADD  (PTR);	/*	ADD		TO   NMSB, NLSB		*/
+				END;
+				CALL BACKUP.TO.PRIOR.NOTE;
+				WRITE(MAM)=#PTR;				/*	RESTORE PTR TO TRACK HEAD		*/
+			END;
+
+		END ADJUST;
+
+		START.DIST = XSTART.DIST;	/*	SAVE IN LOCAL STATICS	*/
+		EXTRA.DIST = XEXTRA.DIST;
+
+		WRITE(MAM)=#PTR;				/*	RESTORE PTR TO TRACK HEAD		*/
+		CALL ADJUST(THD.NMSB);		/*	ADJUST PLAY TIMES					*/
+		CALL ADJUST(THD.LP.NMSB);	/*	ADJUST LOOP TIMES					*/
+
+		WRITE(MAL)=THD.ILP;			/*	SEE IF ILP ON TRK					*/
+		IF READ(MD)<>0 THEN DO;		/*	ADJUST ILP COUNTIN TIME			*/
+
+			WRITE(MAL)=THD.ILS.WRD;
+			IF (READ(MDI)=#WRD)		/*	IF EDIT POINT WAS ILS RECORD	*/
+			AND (READ(MD )=#SEC)
+			THEN DIST=START.DIST;	/*	ONLY ADJUST BY START DELTA AMT	*/
+			ELSE DIST=START.DIST+EXTRA.DIST;		/*	ADJUST BY TOTAL DIST	*/
+
+			IF DIST<0
+			THEN CALL SUBIT(THD.COUNTIN.MSB);	/*	SHORTEN ILP COUNTIN LEN		*/
+			ELSE CALL ADD  (THD.COUNTIN.MSB);	/*	LENGTHEN ILP COUNTIN LEN	*/
+
+		END;
+	END ADJUST.THD.TIMES;
+
+
+	/*	$SUBTITLE  SLIDE.TRACKS ROUTINE (BACKUP.NOTE)	*/
+
+	BACKUP.NOTE: PROC (DIST) FIXED;	/*	REMOVES UP TO DIST MSEC FROM NOTE TIME	*/
+		DCL DIST		FIXED;
+		DCL (I,J,K)	FIXED;
+
+		J=SHR(#W1,1)&1023;						/*	EXTRACT START DELTA FOR NOTE	*/
+
+		IF DIST IGT J								/*	DELTA IS NOT BIG ENOUGH	*/
+		THEN I=J;									/*	USE ALL OF IT				*/
+		ELSE I=DIST;								/*	JUST USE WHAT WE NEED	*/
+
+		K	  = I;
+		DIST = DIST	- I;
+		J	  = J		- I;
+		IF #NLSB ILT I THEN #NMSB=#NMSB-1;
+		#NLSB=#NLSB-I;
+
+		#W1=(#W1&"174001")\SHL(J,1);
+		WRITE(MAM)=NAH.PTR+#SEC;				/*	RESTORE PTR TO NLS	*/
+		WRITE(MAL)=#WRD;							/*	FIX UP NOTE ON TRK	*/
+		WRITE(MD )=#W1;
+
+		IF  ((#W1&"174001")="100001")			/*	NOTE IS LONG REST		*/
+		THEN DO;
+
+			IF (DIST<>0)							/*	AND MORE TO BACK UP	*/
+			THEN DO;									/*	SHORTEN EXTRA DELTA	*/
+
+				IF (#W2<>0) OR (#W3 IGT DIST)
+				THEN I=DIST;						/*	ALL THE WAY				*/
+				ELSE I=#W3;							/*	ONLY WHAT IS IN NOTE	*/
+
+				K	 =K	+I;
+				DIST=DIST-I;
+
+				WRITE(MAM)=NAH.PTR+#SEC;
+				WRITE(MAL)=#WRD+2;				/*	POINT AT LSB OF EXTRA DELTA FIELD	*/
+
+				IF #W3 ILT I THEN DO;
+					WRITE(MAL)=#WRD+1;
+					WRITE(MDI)=READ(MD)-1;		/*	BORROW FROM MSB	*/
+					#W2=#W2-1;
+				END;
+				WRITE(MD)=READ(MD)-I;
+				#W3=#W3-I;
+
+				CALL ADJUST.THD.TIMES(-(K-I),-I);	/*	CORRECT TRK TIMES	*/
+
+			END;
+			ELSE CALL ADJUST.THD.TIMES(-I,0);		/*	CORRECT TRK TIMES	*/
+
+			IF ((#W1&SHL(1023,1))=0)			/*	START DELTA = 0		*/
+			AND (#W2=0) AND (#W3=0)				/*	EXTRA DELTA = 0		*/
+			THEN CALL REMOVE.NOTE.RECORD;		/*	DELETE EMPTY REST		*/
+			ELSE CALL ADVANCE.TO.NEXT.NOTE;	/*	STEP TO NEXT FOR SUBSEQUENT CALLS	*/
+
+		END;											/*	OF POINTING AT LONG REST NOTE	*/
+		ELSE DO;										/*	NOT A LONG REST NOTE	*/
+
+			CALL ADJUST.THD.TIMES(-I,0);		/*	CORRECT TRK TIMES		*/
+
+			IF ((#W1&SHL(1023,1))=0)			/*	START DELTA = 0		*/
+			THEN CALL REMOVE.NOTE.RECORD;		/*	DELETE EMPTY REST		*/
+			ELSE CALL ADVANCE.TO.NEXT.NOTE;	/*	STEP TO NEXT FOR SUBSEQUENT CALLS	*/
+
+		END;
+
+		RETURN DIST;								/*	RETURN AMOUNT LEFT	*/
+
+	END BACKUP.NOTE;
+
+
+	/*	$SUBTITLE  SLIDE.TRACKS (ADVANCE.NOTE)	*/
+
+	ADVANCE.NOTE: PROC (XDIST)	FIXED;
+		DCL XDIST	FIXED;
+		DCL DIST		FIXED STATIC;
+
+		ADVANCE.START.DELTA: PROC;
+			DCL (I,J)	FIXED;
+
+			I=SHR(#W1,1)&1023;		/*	EXTRACT START DELTA	*/
+
+			IF DIST IGT (1023-I)
+			THEN J=1023-I;
+			ELSE J=DIST;
+
+			IF J<>0 THEN DO;			/*	WE CAN ADJUST START DELTA	*/
+
+				DIST=DIST-J;			/*	AMOUNT LEFT TO SLIDE TRK BY	*/
+
+				#W1=(#W1&"174001")\SHL(I+J,1);
+				#NLSB=#NLSB+J;
+				IF #NLSB ILT J THEN #NMSB=#NMSB+1;
+				WRITE(MAM)=NAH.PTR+#SEC;		/*	RESTORE PTR TO NLS	*/
+				WRITE(MAL)=#WRD;
+				WRITE(MD )=#W1;
+
+				CALL ADJUST.THD.TIMES(J,0);	/*	CORRECT TRK TIMES	*/
+
+			END;
+
+		END ADVANCE.START.DELTA;
+
+		DIST = XDIST;							/*	ASSIGN TO STATIC VARIABLE	*/
+		CALL ADVANCE.START.DELTA;			/*	USE UP START DELTA OF CURRENT NOTE	*/
+
+		IF DIST<>0 THEN DO;					/*	NEED TO ADVANCE TRK EVEN MORE	*/
+
+			IF ((#W1&"174001")<>"100001")	/*	1ST NOTE IS NOT LONG REST	*/
+			THEN DO;								/*	INSERT ONE AT FRONT OF TRK	*/
+				IF INSERT.REST.RECORD(4)=0	/*	RAN OUT OF MEMORY	*/
+				THEN RETURN;					/*	QUIT ON THIS TRK	*/
+
+				CALL RESET.#.INFO;			/*	POINT AT TRK START AGAIN	*/
+				CALL ADVANCE.START.DELTA;	/*	USE UP START DELTA FIELD FIRST	*/
+			END;
+
+			IF DIST<>0 THEN DO;				/*	MUST USE EXTRA DELTA FIELD	*/
+
+				WRITE(MAM)=NAH.PTR+#SEC;	/*	RESTORE PTR TO NLS	*/
+				WRITE(MAL)=#WRD+2;
+				WRITE(MD )=READ(MD)+DIST;
+				IF READ(MD) ILT DIST THEN DO;
+					WRITE(MAL)=#WRD+1;
+					WRITE(MD )=READ(MD)+1;
+				END;
+
+				CALL ADJUST.THD.TIMES(0,DIST);	/*	CORRECT TRK TIMES	*/
+
+			END;
+		END;
+
+	END ADVANCE.NOTE;
+
+
+	/*	$SUBTITLE  SLIDE.TRACKS (ADJUST.PTRS)	*/
+
+	ADJUST.PTRS: PROC (PTR,MSB,LSB);	/*	MOVES LOOP/PLAY PTRS AFTER SLIDING TRK	*/
+		DCL (PTR)		FIXED;	/*	PASSED EITHER THD.NMSB, OR THD.LP.NMSB	*/
+		DCL (MSB,LSB)	FIXED;	/*	CORRESPONDING TIME (ADVANCED TIME OR LOOP TIME)	*/
+
+		/*	NOTE: ROUTINE ASSUMES #TRK & #PTR HAVE ALREADY BEEN SET UP	*/
+
+		CALL LOAD.#.INFO(PTR);	/*	RELOAD # VARS	*/
+		WRITE(MAM)=NAH.PTR+#SEC;
+		WRITE(MAL)=#WRD;
+
+		DO WHILE ((READ(MD)&"174001")<>"110001")		/*	HAVE NOT HIT AN ILP END RECORD	*/
+			AND	(#ANYF<>0)									/*	LOOP WHILE MORE NOTES	*/
+			AND	( (#NMSB ILT MSB)	/*	AND WE SHOULD HAVE ALREADY PLAYED THIS NOTE	*/
+			OR		 ((#NMSB  =  MSB)
+			AND	  (#NLSB ILT LSB)));
+
+			CALL ADVANCE.TO.NEXT.NOTE;
+
+		END;
+
+		DO WHILE ((READ(MD)&"174001")<>"104001")		/*	HAVE NOT HIT AN ILP START RECORD	*/
+			AND	(#ANYR<>0)									/*	LOOP WHILE MORE NOTES	*/
+			AND	( (#LMSB IGT MSB)	/*	AND IT IS NOT TIME	*/
+			OR		 ((#LMSB  =  MSB)	/*	TO PLAY THIS NOTE YET	*/
+			AND	  (#LLSB IGT LSB)));
+
+			CALL BACKUP.TO.PRIOR.NOTE;
+
+		END;
+
+		CALL STORE.#.INFO(PTR);
+
+	END ADJUST.PTRS;
+
+	/*	$SUBTITLE  MAIN CODE TO SLIDE TRACKS	*/
+
+	/*	THE FOLLOWING LINE IS REMOVED BECAUSE THIS PROCEDURE IS NEVER CALLED IF SLIDE.DIST="100000"	*/
+	/*	IF (SLIDE.DIST="100000") THEN SLIDE.DIST=0;	*/	/*	MEANS DISPLAY CURRENT VALUE WITHOUT MODIFICATION	*/
+
+	IF SLIDE.DIST<>0 THEN DO;							/*	FORCE FULL PLAY.INITIALIZE AFTER SLIDE	*/
+		MARK.BUTTON.VALM=0;								/*	NO MARK IN EFFECT								*/
+		MARK.BUTTON.VALL=0;
+	END;
+
+/***********************************************************************************************************/
+/****************** S T A R T   O F   R E D E S I G N E D   S L I D E   P R O C E D U R E ******************/
+
+	/*------------------------------------------ S T E P   1 : ------------------------------------------*/
+	/*	IDENTIFY ALL HELD TRACK BUTTONS (INCLUDING UN-HELD GROUP MEMBERS WHO'S MASTER TRACK IS HELD)		  */
+
+	clear.grp.sel.bits();								/*	clear all grpsel bits	*/
+	ALLOW.TRACK.GROUP.DEFINE = FALSE;				/*	disable group define		*/
+
+	DO I=0 TO (NUM.TRACK.BUTTONS-1);					/*	CHECK ALL 32 BUTTONS		*/
+
+		WRITE(MAM)=TBUT.PTR;								/*	GET MAPPING OF BUTTON	*/
+		WRITE(MAL)=I;										/*	TO ABS TRACK NUMBER		*/
+
+		IF ((READ(MD)&B.HELD.TRK)<>0)					/*	IF BUTTON IS HELD			*/
+			recurs.track.group(read(md) & 0xFF);	/*	THEN SET THE GRPSEL BIT FOR THIS TRACK
+																	(AND ANY GROUP MEMBERS IF THIS TRACK IS A GROUP MASTER)	*/
+	END;
+
+	/*------------------------------------------ S T E P   2 : ------------------------------------------*/
+	/*	SCAN THROUGH ALL HELD TRACKS TO:																						  */
+	/*	VERIFY THAT ONE OF THE HELD TRACKS CONTAINS A NON-REST TO SLIDE,											  */
+	/*	PRESENT ERROR IF TRYING TO SLIDE A D-T-D TRACK,																	  */
+	/*	SAVE THE NUMBER OF THE TRACK CONTAINING THE EARLIEST NON-REST, AND THE TIME OF THAT NON-REST.	  */
+	/*	SAVE THE NUMBER OF THE TRACK CONTAINING THE FIRST SOUNDING NOTE, AND THE TIME OF THAT NOTE.		  */
+
+	EARLIEST.TRK = 0;								/*	TRACK NUMBER OF TRACK CONTAINING EARLIEST NON-REST	*/
+	EARLIEST.MSB = 0; EARLIEST.LSB = 0;		/*	TIME OF EARLIEST NOTE	*/
+	FIRSTNOTE.TRK = 0;							/*	TRACK NUMBER OF TRACK CONTAINING EARLIEST NOTE	*/
+	FIRSTNOTE.MSB = 0; FIRSTNOTE.LSB = 0;	/*	TIME OF EARLIEST NOTE	*/
+
+	DO I=NUM.KBD.TRACKS TO LAST.LOD.TRACK-1;	/*	ONLY CONCERNED WITH TRACKS THAT CAN BE ASSIGNED TO BUTTONS	*/
+		WRITE(MAM)=TBUT.PTR;							/*	GET MAPPING OF BUTTON	*/
+		WRITE(MAL)=I;									/*	TO ABS TRK NUMBER		*/
+
+		IF ((READ(MD)&b.grpsel.trk) != 0)		/*	DO IF THIS TRACK WAS IDENTIFIED AS "HELD"	*/
+		{
+			IF  (I ige FIRST.LOD.TRACK)	/*	TRYING TO SLIDE ONE OF THE		*/
+			AND (I ilt LAST.LOD.TRACK )	/*	DIRECT TO DISK TRACKS			*/
+			THEN DO;								/*	NOT ALLOWED							*/
+				CALL DISPLAY.ERR(46);		/*	'CAN NOT SLIDE LIVE TRACK'		*/
+				RETURN;							/*	QUIT WITHOUT SLIDING ANY TRKS	*/
+			END;
+
+			IF (FIND.FIRST.NONREST(I)<>0)	/*	TRACK HAS A NON-REST NOTE	*/
+			{
+				IF (EARLIEST.TRK == 0)
+					{EARLIEST.TRK = I; EARLIEST.MSB = TRACK.FIRST.TIME.MSB; EARLIEST.LSB = TRACK.FIRST.TIME.LSB;}
+
+				ELSE IF (( TRACK.FIRST.TIME.MSB ILT EARLIEST.MSB )
+				||			((TRACK.FIRST.TIME.MSB ==  EARLIEST.MSB)
+				&&			 (TRACK.FIRST.TIME.LSB ILT EARLIEST.LSB)))
+					{EARLIEST.TRK = I; EARLIEST.MSB = TRACK.FIRST.TIME.MSB; EARLIEST.LSB = TRACK.FIRST.TIME.LSB;}
+
+				IF (FIND.FIRST.NOTE(I)<>0)	/*	TRACK HAS A SOUNDING NOTE	*/
+				{
+					IF (FIRSTNOTE.TRK == 0)
+						{FIRSTNOTE.TRK = I; FIRSTNOTE.MSB = TRACK.FIRST.TIME.MSB; FIRSTNOTE.LSB = TRACK.FIRST.TIME.LSB;}
+
+					ELSE IF (( TRACK.FIRST.TIME.MSB ILT FIRSTNOTE.MSB )
+					||			((TRACK.FIRST.TIME.MSB ==  FIRSTNOTE.MSB)
+					&&			 (TRACK.FIRST.TIME.LSB ILT FIRSTNOTE.LSB)))
+						{FIRSTNOTE.TRK = I; FIRSTNOTE.MSB = TRACK.FIRST.TIME.MSB; FIRSTNOTE.LSB = TRACK.FIRST.TIME.LSB;}
+				}
+			}
+		}
+	END;
+
+	/*------------------------------------------ S T E P   3 : ------------------------------------------*/
+	/*	DETERMINE, BASED ON VARIOUS CRITEREA, IF:																			  */
+	/*	THIS PROCEDURE SHOULD BE ABORTED,																					  */
+	/*	THE SLIDE.DISTANCE SHOULD BE NULL (E.G., DISPLAY TIME WITHOUT SLIDING ANY TRACKS),					  */
+	/*	THE SLIDE SHOULD BE JUSTIFIED.																						  */
+	/*	ALSO, IF NO SOUNDING NOTE WAS FOUND IN STEP 2, THEN THESE VARIABLES SHOULD ASSUME THE VALUES		  */
+	/*	PERTAINING TO THE EARLIEST NON-REST.																				  */
+
+	/*	IF NO NON-REST WAS FOUND ON ANY TRACK THEN QUIT WITHOUT SLIDING ANY TRACKS.	*/
+	IF (EARLIEST.TRK == 0) THEN RETURN;
+
+	/*	IF SLIDING BACKWARDS, AND EARLIEST NON-REST ILE ZERO.TIME, THEN DISPLAY TIME WITHOUT SLIDING ANY TRACKS.	*/
+	IF ((SLIDE.DIST < 0) & (EARLIEST.MSB == 0) & (EARLIEST.LSB ILE ZERO.TIME))
+	THEN SLIDE.DIST = 0;
+
+	ELSE DO;	/*	(NO NEED TO PROCESS IF SLIDE.DIST IS ALREADY SET TO ZERO.)	*/
+
+		IF (FIRSTNOTE.TRK == 0)
+		THEN DO;
+			FIRSTNOTE.TRK = EARLIEST.TRK;
+			FIRSTNOTE.MSB = EARLIEST.MSB;
+			FIRSTNOTE.LSB = EARLIEST.LSB;
+		END;
+
+		/*	IF ((INTERNAL JUSTIFIED RECORDING) OR (ORIG KBD)) AND (NOT AN EXTERNAL CLICK)	THEN JUSTIFY=TRUE	*/
+		JUSTIFY = (((RECD.JUST<>0) OR (NEW.PAN=0)) AND (CLICK.TRACK.MODE<>3));
+
+		/*	IF TRYING TO SLIDE THE LIVE CLICK TRACK, THEN WE MUST SLIDE BY MILLISECONDS, NOT BEATS.	*/
+
+		/*	POINT TO THE CLICK TRACK'S BUTTON INFO	*/
+		WRITE(MAM)=TBUT.PTR;
+		WRITE(MAL)=(CLICK.TRACK.MODE+NUM.KBD.TRACKS-4);
+
+		/*	DO IF THE CLICK TRACK WAS IDENTIFIED AS "HELD"	*/
+		IF ((READ(MD)&b.grpsel.trk) != 0)
+		THEN DO;
+			IF (TRACK.FORMAT ile 1)	/*	IF SHOWING BEATS OR MEASURES/BEATS,				*/
+			THEN SLIDE.DIST = 0;		/*	THEN DISPLAY TIME WITHOUT SLIDING ANY TRACKS	*/
+											/*	BECAUSE THE DISPLAY WOULD NOT CHANGE.			*/
+
+			/*	OTHERWISE SLIDE BY MILLISECONDS.	*/
+			ELSE JUSTIFY=FALSE;
+		END;
+	END;
+
+	/*------------------------------------------ S T E P   5 : ------------------------------------------*/
+	/*	DETERMINE, BASED ON VARIOUS CRITEREA, THE SEQUENCE DURATION TO SLIDE ALL HELD TRACKS BY.			  */
+
+	/*	USE THE FOLLOWING STRUCTURE:
+
+	if justified then do;
+		overflow=true;	/ * assume overflow * /
+		do while overflow;
+			if referencing a click track then do;
+				if sliding later then do;
+					determine sq insert duration based on click track;
+					if overflow then bisect slide.dist and start over;
+				end;
+				else do; / * (sliding earlier) * /
+					determine limited sq delete duration based on click track;
+					if overflow then bisect slide.dist and start over;
+				end;
+			end;
+			else do;	/ * (not referencing a click track) * /
+				if sliding later then do;
+					determine sq insert duration based on tempo/meter map;
+					if overflow then bisect slide.dist and start over;
+				end;
+				else do; / * (sliding earlier) * /
+					determine limited sq delete duration based on tempo/meter map;
+					if overflow then bisect slide.dist and start over;
+				end;
+			end;
+		end;
+	end;
+	else do;	/ * (not justified) * /
+		use slide.dist as is (un-justified)
+		if sliding towards zero then limit such that earliest non-rest slides to zero.time;
+	end;
+
+	*/
+
+	IF SLIDE.DIST<>0 THEN DO;
+
+		/*	IF DOING A JUSTIFIED SLIDE, THEN INTERPRET THE SLIDE DISTANCE AS THE	*/
+		/*	NUMBER OF BEATS.  E.G., MULTIPLY SLIDE.DIST BY THE BEAT INTERVAL.		*/
+		IF JUSTIFY<>0 THEN DO;
+			OVERFLOW = TRUE;			/*	ASSUME OVERFLOW	*/
+
+			DO WHILE OVERFLOW<>0;
+
+				IF CLICK.TRACK.MODE igt 3	/*	IF REFERENCING A CLICK TRACK	*/
+				THEN DO;
+					/*	COMPUTE THE SEQUENCE DURATION OF SLIDE.DIST INTERPRETED AS	*/
+					/*	AN INTEGER NUMBER OF BEATS ACCORDING TO THE CLICK TRACK		*/
+
+					if SLIDE.DIST > 0 then do;	/*	SLIDING LATER	*/
+						/*	INTERPRET SLIDE.DIST AS INTEGER MULTIPLES OF 1000 CLICK TRACK MILLIBEATS IN UNSIGNED 32-BIT FORMAT	*/
+						load SLIDE.DIST;mul 1000;
+						/*	CONVERT THIS TO SEQUENCE DURATION FROM EARLIEST SOUNDING NOTE	*/
+						CALL REMAP.WITH.LIVE.CLICK(FIRSTNOTE.MSB,FIRSTNOTE.LSB,ures,res,2);
+
+						/*	IF OVERFLOW THEN BISECT SLIDE.DIST AND TRY AGAIN	*/
+						if REMAPPED.DUR.LSB<0 or REMAPPED.DUR.MSB<>0
+						then SLIDE.DIST=shr(SLIDE.DIST,1);
+						/*	ELSE THIS IS OUR FINAL VALUE	*/
+						else {SLIDE.DIST=REMAPPED.DUR.LSB;overflow=false;}
+					end;
+
+					else do;	/*	SLIDING EARLIER	*/
+						SLIDE.DIST=-SLIDE.DIST;
+
+						/*****  1: LIMIT SLIDE.BEATS RELATIVE TO THE EARLIEST NON-REST  *****/
+						/*	GET SEQUENCE DURATION FROM ZERO.TIME TO EARLIEST NON-REST	*/
+						call str32(Earliest.MSB,Earliest.LSB,slide.beats);
+						call sub16(zero.time,slide.beats);
+						/*	CONVERT THIS DURATION TO CLICK TRACK MILLIBEATS RELATIVE TO THE EARLIEST SOUNDING NOTE	*/
+						call sub32(loc(addr(FIRSTNOTE.MSB)),slide.beats,beats);
+						call REMAP.WITH.LIVE.CLICK(beats(0),beats(1),slide.beats(0),slide.beats(1),1);
+						/*	DISCARD THE FRACTIONAL PART	*/
+						load REMAPPED.DUR.LSB;uload REMAPPED.DUR.MSB;div 1000;	/*	WE KNOW THAT ures = 0 after "div 1000"	*/
+						/*	COMPARE AND LIMIT IF NECESSARY	*/
+						if SLIDE.DIST igt res then SLIDE.DIST = res;
+						/*	INTERPRET SLIDE.DIST AS INTEGER MULTIPLES OF 1000 CLICK TRACK MILLIBEATS IN UNSIGNED 32-BIT FORMAT	*/
+						load SLIDE.DIST;mul 1000;call str32(ures,res,slide.beats);
+
+						/*****  2: CONVERT SLIDE.BEATS BACK TO SEQUENCE DURATION RELATIVE TO THE EARLIEST SOUNDING NOTE  *****/
+						CALL REMAP.WITH.LIVE.CLICK(FIRSTNOTE.MSB,FIRSTNOTE.LSB,0,0,1);
+						call sub32(loc(addr(REMAPPED.TIME.MSB)),slide.beats,beats);
+						CALL REMAP.WITH.LIVE.CLICK(beats(0),beats(1),slide.beats(0),slide.beats(1),0);
+
+						/*	IF OVERFLOW THEN BISECT SLIDE.DIST AND TRY AGAIN	*/
+						if REMAPPED.DUR.LSB<0 or REMAPPED.DUR.MSB<>0
+						then SLIDE.DIST=-shr(SLIDE.DIST,1);
+						/*	ELSE THIS IS OUR FINAL VALUE	*/
+						else {SLIDE.DIST=-REMAPPED.DUR.LSB;overflow=false;}
+					end;
+				END;	/*	OF IF REFERENCING A CLICK TRACK	*/
+
+				ELSE DO;	/*	NOT REFERENCING A CLICK TRACK	*/
+
+					IF SLIDE.DIST>0 THEN DO;	/*	SLIDING LATER	*/
+						/*	COMPUTE SEQUENCE DURATION CORRESPONDING TO THE BEAT DISTANCE "SLIDE.BEATS" FROM THE EARLIEST SOUNDING NOTE	*/
+						call str32(SLIDE.DIST,0,SLIDE.BEATS);
+						call Map.Beats.To.Sequence.Duration(loc(addr(FIRSTNOTE.MSB)),SLIDE.BEATS,SLIDE.BEATS);
+
+						/*	IF OVERFLOW THEN BISECT SLIDE.DIST AND TRY AGAIN	*/
+						if SLIDE.BEATS(1)<0 or SLIDE.BEATS(0)<>0
+						then SLIDE.DIST=shr(SLIDE.DIST,1);
+						/*	ELSE THIS IS OUR FINAL VALUE	*/
+						else {SLIDE.DIST=SLIDE.BEATS(1);overflow=false;}
+					END;
+
+					ELSE DO;	/*	SLIDING EARLIER	*/
+						SLIDE.DIST=-SLIDE.DIST;
+
+						/*****  1: LIMIT SLIDE.BEATS RELATIVE TO THE EARLIEST NON-REST  *****/
+						/*	GET SEQUENCE DURATION FROM ZERO.TIME TO EARLIEST NON-REST	*/
+						call str32(Earliest.MSB,Earliest.LSB,slide.beats);
+						call sub16(zero.time,slide.beats);
+						/*	CONVERT THIS DURATION TO BEATS RELATIVE TO THE EARLIEST SOUNDING NOTE	*/
+						call sub32(loc(addr(FIRSTNOTE.MSB)),slide.beats,beats);
+						call Map.Sequence.Duration.To.Beats(beats,slide.beats,slide.beats);
+						/*	DISCARD THE FRACTIONAL PART	*/
+						slide.beats(1)=0;
+						/*	COMPARE AND LIMIT IF NECESSARY	*/
+						if slide.beats(0) igt SLIDE.DIST then slide.beats(0) = SLIDE.DIST;
+
+						/*****  2: CONVERT SLIDE.BEATS BACK TO SEQUENCE DURATION RELATIVE TO THE EARLIEST SOUNDING NOTE  *****/
+						CALL Map.Sequence.Time.To.Beats(loc(addr(FIRSTNOTE.MSB)),BEATS);
+						BEATS(0) = BEATS(0) - SLIDE.BEATS(0);	/*	COMPUTE DESTINATION OF SLIDE IN BEATS	*/
+						CALL Map.Beats.To.Sequence.Time(BEATS,BEATS);
+						CALL Map.Beats.To.Sequence.Duration(BEATS,SLIDE.BEATS,SLIDE.BEATS);
+
+						/*	IF OVERFLOW THEN BISECT SLIDE.DIST AND TRY AGAIN	*/
+						if SLIDE.BEATS(1)<0 or SLIDE.BEATS(0)<>0
+						then SLIDE.DIST=-shr(SLIDE.DIST,1);
+						/*	ELSE THIS IS OUR FINAL VALUE	*/
+						else {SLIDE.DIST=-SLIDE.BEATS(1);overflow=false;}
+					END;
+
+				END;	/*	OF NOT REFERENCING A CLICK TRACK	*/
+
+			END;	/*	OF DO WHILE OVERFLOW<>0	*/
+		END;	/*	OF IF DOING A JUSTIFIED SLIDE	*/
+
+		/*	ELSE (IF NOT DOING A JUSTIFIED SLIDE) THEN JUST SEE IF WE ARE SLIDING TOWARDS ZERO.	*/
+		/*	IF SO, THEN LIMIT THE SLIDE DISTANCE, IF NECESSARY, SUCH THAT THE EARLIEST NON-REST	*/
+		/*	WILL SLIDE TO ZERO.TIME.																				*/
+
+		ELSE IF SLIDE.DIST < 0
+		{	IF EARLIEST.MSB == 0
+			{	IF (EARLIEST.LSB - ZERO.TIME) ILT (-SLIDE.DIST)
+					SLIDE.DIST = ZERO.TIME - EARLIEST.LSB;
+			}
+		}
+
+	END;	/*	OF IF SLIDE.DIST<>0	*/
+
+/******************   E N D   O F   R E D E S I G N E D   S L I D E   P R O C E D U R E   ******************/
+/***********************************************************************************************************/
+
+	/*------------------------------------------ S T E P   6 : ------------------------------------------*/
+	/*	NOW ACTUALLY PERFORM THE SLIDE.																						  */
+
+	DISPLAY.TRK=(-1);									/*	INITIALIZE	*/
+
+	DO I=NUM.KBD.TRACKS TO FIRST.LOD.TRACK-1;	/*	SLIDE EACH TRACK			*/
+
+		WRITE(MAM)=TBUT.PTR;							/*	GET MAPPING OF BUTTON	*/
+		WRITE(MAL)=I;									/*	TO ABS TRK NUMBER			*/
+
+		IF (READ(MD)&b.grpsel.trk)<>0 THEN DO;	/*	SLIDE THIS TRACK			*/
+
+			#TRK=I;										/*	ABS TRK NUMBER TO SLIDE	*/
+			WRITE(MAM)=TRK.HEAD;
+			WRITE(MAL)=#TRK;
+			#PTR=READ(MD);								/*	AND SAVE ABS PTR TO TRK HEAD	*/
+
+			IF #PTR<>0 THEN DO;						/*	TRACK HAS A TRK HEAD		*/
+
+				CALL POINT.AT.FIRST.NOTE;			/*	SEE IF ANY NOTES ON TRK	*/
+
+				IF  (#SEC<>0)							/*	FOUND A NOTE TO SLIDE	*/
+				AND (SLIDE.DIST<>0) THEN DO;		/*	AND WANT TO SLIDE IT		*/
+
+					CALL CLEAR.PARAMETERS;			/*	BEST TO CLEAR PARAMETERS WHEN ACTUALLY CHANGING TRACK TIME	*/
+
+					/*	Create a system event if a track is slid:	*/
+
+					interp_seq_dirtyness(1);
+
+					NEW.SEQ.INFO = NEW.SEQ.INFO \ 4;
+					WRITE(MAM) = D115D.NOTE.CHANGE.TRACKS;
+					WRITE(MAL) = #TRK;				/*	REMEMBER TRACK # ON NEW.SEQ.INFO	*/
+					WRITE(MD) = "177777";			/*	"NEW NOTES" OR "NEW TIMBRE"		*/
+
+					/*	$PAGE	*/
+
+					IF SLIDE.DIST<0 THEN DO;		/*	MAKING TRK START EARLIER	*/
+
+						CALL RESET.#.INFO;			/*	POINT AT AND LOAD 1ST NOTE	*/
+
+						/*	COMPUTE THE TIME AT WHICH THE	*/
+						/*	FIRST NON-REST NOTE STARTS		*/
+
+						DO WHILE (#ANYF<>0)							/*	HAVE MORE NOTES	*/
+							AND	(((#W1&"174001")="100001")		/*	1ST NOTE IS LONG REST	*/
+							OR		  (((#W1&1)=0)						/*	A 2-WRD RECORD	*/
+							AND		((#W2&"77")=REST.NOTE)));	/*	WHICH IS A REST	*/
+
+							CALL ADVANCE.TO.NEXT.NOTE;		/*	STEP TO NEXT NOTE		*/
+							IF #ANYF<>0							/*	FOUND ANOTHER NOTE	*/
+							THEN CALL LOOK.UP.NOTE.INFO;	/*	AND LOAD INTO #W1-#W4	*/
+
+						END;
+
+						IF  (#ANYF<>0)			/*	WE HAVE A NON-REST NOTE TO SLIDE	*/
+						THEN DIST=-SLIDE.DIST;	/*	LOCAL UNSIGNED COPY	*/
+						ELSE DIST=0;
+
+						IF DIST<>0 THEN DO;					/*	STILL WANT TO MOVE TRK	*/
+
+							CALL RESET.#.INFO;				/*	POINT AT TRK START AGAIN	*/
+
+							DO WHILE (DIST<>0) AND (#ANYF<>0);	/*	LOOP UNTIL WE HAVE BACKED UP ALL THE WAY	*/
+
+								DIST=BACKUP.NOTE(DIST);		/*	TRY TO BACKUP	*/
+
+								IF  (DIST <>0)					/*	NEED TO BACK UP MORE		*/
+								AND (#ANYF<>0)					/*	AND HAVE ANOTHER NOTE	*/
+								THEN CALL LOOK.UP.NOTE.INFO;	/*	SET UP #W1-#W4			*/
+
+							END;						/*	OF BACKING UP START TIME OF TRK	*/
+						END;							/*	OF WANT TO BACK UP TRK START TIME	*/
+					END;								/*	OF MAKING TRK START EARLIER	*/
+
+					ELSE DO;							/*	RETARDING START OF TRK	*/
+
+						CALL RESET.#.INFO;		/*	SETS UP # INFO FOR 1ST NOTE ON TRK	*/
+						CALL ADVANCE.NOTE(SLIDE.DIST);	/*	DO IT	*/
+
+					END;								/*	OF RETARDING START OF TRK	*/
+
+					IF MOVE=0 THEN DO;			/*	TRY TO ADVANCE/BACKUP PLAY PTRS	*/
+
+						CALL ADJUST.PTRS(THD.NMSB	 ,ADVANCED.SEQ.TIME.MSB,ADVANCED.SEQ.TIME.LSB);
+						CALL ADJUST.PTRS(THD.LP.NMSB,LOOP.SEQ.TIME.MSB	  ,LOOP.SEQ.TIME.LSB);
+
+					END;								/*	OF TRY TO CORRECT PLAY PTRS	*/
+
+					IF DISPLAY.TRK<0
+					THEN DISPLAY.TRK=#TRK;		/*	SAVE FOR DISPLAY	*/
+
+				END;									/*	TRK HAS A NOTE AND SLIDE DIST<>0	*/
+
+			END;										/*	OF TRK HAS A HEADER	*/
+		END;											/*	OF IF THIS TRACK BEING HELD	*/
+	END;												/*	OF LOOP OVER TRACKS	*/
+
+	IF SLIDE.DIST<>0 THEN DO;					/*	WE PROBABLY SLID A TRACK	*/
+		CALL REBUILD.EVENT.QUEUE;				/*	RECONSTRUCT QUE AFTER TRK SLIDE	*/
+
+		IF DISPLAY.TRK>=0
+		THEN CALL COMPUTE.START.TIME.DISPLAY(DISPLAY.TRK);	/*	DISPLAY NEW START TIME FOR THIS TRACK	*/
+	END;
+
+END SLIDE.TRACKS;
+
+
+FRAME.SLIDE:PROC PUBLIC SWAPABLE;
+	DCL (I,J,K,L)	FIXED;
+	DCL (FNAME) (4)	FIXED;
+
+	IF (AMOUNT="100000") THEN AMOUNT=0;			/*	INDICATES DISPLAY OF FRAME NUMBER ONLY (NO CHANGE)	*/
+	I=0;J=1;
+
+	DO WHILE (I<NUM.PARTIALS);						/*	PROCESS EACH POSSIBLE BUTTON	*/
+		IF (HELD.PSEL.BUTTONS&J)<>0 THEN DO;	/*	BUTTON IS HELD	*/
+			IF TIM.HEAD.LOOKUP(0,TIM.SYNTH.TYP+I)<2
+			THEN DO;										/*	IF SYNTHESIZED TIMBRE, CHECK FRAME #	*/
+				L=C.FRAME(I);							/*	GET CURRENT FRAME #	*/
+				IF AMOUNT>0 THEN DO;					/*	INCREASE	*/
+					K=FIND.FRAME(I,C.FRAME(I)+1);	/*	FIND POINTER TO NEXT ONE	*/
+					IF P.LOOKUP(K)=MOR THEN C.FRAME(I)=C.FRAME(I)+1;	/*	GO TO IT IF IT EXISTS	*/
+				END;
+				IF (AMOUNT<0)&(C.FRAME(I)<>0) THEN DO;	/*	DECREASE	*/
+					C.FRAME(I)=C.FRAME(I)-1;
+				END;
+				FR.PTRS(I)=FIND.FRAME(I,C.FRAME(I));	/*	STORE POINTER TO SELECTED FRAME	*/
+				IF ((L=0)&(C.FRAME(I)<>0))
+				OR ((L<>0)&(C.FRAME(I)=0))
+				THEN CALL CLEAR.PARAMETERS;				/*	CLEAR PARAMETER BUTTONS WHEN CHANGING STATES	*/
+				CALL DISPLAY.FRAME.NUMBER(C.FRAME(I));	/*	DISPLAY SELECTIED FRAME #	*/
+				NEW.PRM.INFO=NEW.PRM.INFO\BITS(I);		/*	SET BIT TO INDICATE OVERALL CHANGE	*/
+			END;
+
+			ELSE IF AMOUNT<>0 THEN CALL DISPLAY.ERR(19);	/*	CAN NOT CHANGE FRAME #, ELSE IGNORE (REDISPLAY CALL)	*/
+
+			ELSE DO;								/*	PATCH LIST - SHOW FIRST FILE NAME	*/
+
+				CALL CLEAR.UPPER;				/*	PRESSING PARTIAL BUTTON WITH PATCH LIST TIMBRE	*/
+
+				PTPTR=TIM.HEAD.LOOKUP(0,TIM.PARTIAL.POINTERS+I);	/*	LOOK UP POINTER HERE FOR NEW FORMAT	*/
+				PTPTR=PTPTR+NUM.PARAMS;		/*	GET TO FIRST ENTRY	*/
+
+				IF  (NEW.PAN <>  0)			/*	NEW PANEL			*/
+				AND (P.LOOKUP(PTPTR)=MOR)	/*	TIMBRE FRAME		*/
+				AND (P.LOOKUP(PTPTR+TYPE)=PT.TYPE)	/*	TYPE: PATCH LIST	*/
+				THEN DO;							/*	PATCH FRAME - GET FILE NAME	*/
+					DO K=0 TO 3;
+						FNAME(K+1)=P.LOOKUP(PTPTR+PT.NAME+K);
+					END;
+					FNAME(0)=8;
+					DO K=0 TO 7;				/*	ZEROES TO SPACES	*/
+						IF BYTE(FNAME,K)=0 THEN CALL PBYTE(FNAME,K,SP);
+					END;
+					CALL EMIT.STRING(0,FNAME);
+					UPPER.DISP=FRAME.DISP;	/*	INDICATE FRAME # DISPLAYED (FOR REMOVAL)	*/
+				END;
+
+			END;
+		END;
+		I=I+1;J=SHL(J,1);
+	END;
+END FRAME.SLIDE;

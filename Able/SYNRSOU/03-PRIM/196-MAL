@@ -1,0 +1,374 @@
+/* 196-MAL  $TITLE  SUBROUTINES FOR MONO SAMPLING MEMORY MANAGEMENT */
+
+/*
+   07/14/87 - MWH - file.base -> sfile.base(lw#lsb)
+   07/02/87 - MWH - kbd lookup table literals; restructured for 32 bit poly
+   01/15/87 - cj - called no stereo
+   12/29/86 - cj - 32 bit math in ms.collect
+   08/15/86 - CJ - FIXED KBDTAB BUGS
+   07/28/86 - CJ,KC - RETURN 0 IN MS.EXTRACT
+   07/24/86 - KJC - expanded KBDTAB from two to three word entries
+   06/04/86 - CJ - changed ms.load for new sample rate format
+   05/15/86 - "official" creation of release-M modules
+*/
+
+/* THESE SUBROUTINES MANAGE ATTACK BUFFERS STORED IN EXTERNAL MEMORY */
+
+/* I THINK THEY WORK */
+/* IN FACT, I THINK THE WORK PRETTY WELL (maybe) */
+
+/* SEARCH THROUGH LIST OF ATTACK BUFFERS
+   TO SEE IF THIS FILE ALREADY IN MEMORY          */
+
+MS.SEARCH:PROC PUBLIC SWAPABLE;       /* SEE IF FILE NAME IS IN EXT MEMORY - USES GLOBAL FNBUF - ALSO CHECK BUFFER SIZE */
+   DCL (I,J,K) FIXED;
+
+   I=MSFIRST;                  /* START HERE */
+   DO WHILE I<>MSLAST;         /* SEARCH EVERY BLOCK */
+      WRITE(MAM)=I;
+      J=READ(MDI);             /* GET BLOCK LENGTH IN SECTORS */
+      WRITE(MAL)=BL.FNAME;
+      DO K=1 TO 4;
+         // Long file names not supported for mono sampling :)
+         IF FNBUF(K)<>READ(MDI) THEN GOTO NOT.IT;
+      END;
+      SFILE.BASE(LW#LSB)=I;    /* ELSE WE CAN USE IT */
+      RETURN 1;
+      NOT.IT:I=I+J;
+   END;
+   RETURN 0;
+END MS.SEARCH;
+
+/* $PAGE - GARBAGE COLLECTION - MONO SAMPLING ATTACK BUFFER MEMORY */
+
+/* THE EXTERNAL MEMORY CONTAINS A SERIES OF VARIABLE LENGTH BLOCKS.
+   EACH BLOCK IS AN ATTACK BUFFER FOR A FILE,  OR IS AN EMPTY
+   BLOCK LEFT OVER FROM SPLITTING UP A LARGE BLOCK */
+
+/* A BLOCK THAT CONTAINS VALID FILE DATA BUT HAS NO KEYS CURRENTLY
+   USING THAT FILE IS INCLUDED IN THE LENGTH OF FREE STORAGE.
+   THIS REDUCES THE NUMBER OF UNNECESSARY, TIME CONSUMING GARBAGE
+   COLLECTIONS. */
+
+/* MS.COLLECT - CALLED TO CLEAN UP EXTERNAL MEMORY TO FIND A LARGE
+   FREE BLOCK.   THE DESIRED BLOCK LENGTH IS PASSED.   COLLECTION
+   CONTINUES UNTIL A BLOCK THAT IS LARGE ENOUGH FOR THE FILE
+   IS FOUND. THIS TENDS TO PRESERVE MEMORY AS MUCH AS POSSIBLE */
+
+MS.UPDATE:PROC(OLD,NEW) PUBLIC SWAPABLE;        /* UPDATE FILE POINTERS IF BUFFER MOVED */
+   DCL (TB,PTL,P,OLD,NEW) FIXED;
+   DCL (TBP)              FIXED;
+
+   DO TB=0 TO MAX.TIMBRES-1;             /* CHECK EACH TIMBRE    */
+
+      WRITE(MAM)=TIM.HEAD;               /* POINT TO LOOK UP TBL */
+      WRITE(MAL)=TB;                     /* INDEX TO TIMBRE      */
+
+      IF READ(MD)<>0 THEN DO;            /* TIMBRE EXISTS        */
+
+         TBP=READ(MD);                   /* POINT TO TIMBRE HEAD */
+
+         DO PTL=0 TO NUM.PARTIALS-1;     /* CHECK EACH PARTIAL   */
+          
+            WRITE(MAM)=TBP;              /* POINT TO TIMBRE HEAD */
+            WRITE(MAL)=TIM.KBDTAB.PTR+PTL;
+            P         =READ(MD);         /* GET PTR TO KBD TABLE */
+
+            WRITE(MAL)=TIM.SYNTH.TYP+PTL;    /* ONLY REQD IF POLY;    */
+            IF READ(MD)<>TIM#MONO THEN P=0;  /* NOT FOR MONO          */
+
+            IF P<>0 THEN DO;             /* MUST CHECK KBD TABLE */
+
+               WRITE(MAM)=TIM.PTR+P-1;       /* POINT TO KBD LOOKUP TABLE                    */
+               DO P=0 TO NUM.KEYS-1;         /* CHECK EACH ENTRY                             */
+                  IF READ(MDI)<>0 THEN DO;   /* IF A KLT.PATCH.TIM.PTR FOR THIS KEY, THEN DO */
+                     WRITE("303")=READ(MDI); /* SKIP KLT.BASE.MSB                            */
+                     IF READ(MD)=OLD THEN DO;
+                        WRITE(MD)=NEW;       /* NEW BASE: MONO FITS IN KLT.BASE.LSB ONLY     */
+                     END;
+                  END;                       /* OF KBDTAB ENTRY NONZERO */
+                  ELSE WRITE("303")=READ(MDI);/* ADVANCE POINTER OVER STEREO */
+                  WRITE("303")=READ(MDI);    /* ADVANCE POINTER OVER FILE ENTRY */
+               END;                          /* OF LOOP OVER ACTIVE PART OF KBDTAB */
+
+               IF TB=0                       /* KEYBOARD TIMBRE */
+               THEN NEW.KBD.PRE=1;           /* THEN KEEP PRE-COMPUTED INFO UP TO DATE */
+
+            END;       /* OF A KBDTAB EXISTS        */
+         END;          /* OF LOOP OVER ALL PARTIALS */
+      END;             /* OF TIMBRE EXISTS          */
+   END;                /* OF LOOP OVER TIMBRES      */
+
+END MS.UPDATE;
+
+MS.COLLECT:PROC(MAX) PUBLIC SWAPABLE;  /* GARBAGE COLLECT EXTERNAL MEMORY */
+   DCL (MAX)           FIXED;   /* UNTIL BLOCK OF THIS SIZE IS CREATED */
+   DCL (I,J,K,L,M,NEW) FIXED;
+   DCL (MSB,LSB,DELTA) FIXED;
+
+   CALL STOP.DISK;              /* STOP OUTPUT SO WE CAN MOVE ATTACK BUFFERS WITH IMPUDENCE */
+   NEW=ABUF.DATA(ABUF.INDEX);   /* GET NEW SIZE OF ATTACK BUFFERS TO USE */
+
+   I=MSFIRST; J=MSFIRST;        /* INIT INPUT, OUTPUT POINTERS */
+   DO WHILE I<>MSLAST;          /* GARBAGE COLLECT EACH BLOCK UP THROUGH USED AREA */
+      WRITE(MAM)=I;             /* POINT TO BLOCK IN QUESTION */
+      K=READ(MDI);              /* GET BLOCK LENGTH */
+      L=READ(MDI);              /* GET USERS */
+      IF L<>0 THEN DO;          /* SOME USERS - MUST SAVE FILE */
+         M=K;                   /* ASSUME WHOLE BLOCK IS SAVED */
+         IF K IGT NEW THEN DO;  /* BUT ATTACK BUFFER BIGGER THAN NECESSARY - REDUCE IT */
+            M=NEW;                              /* ONLY THIS MUCH SAVED */
+            WRITE(MAM)=I;                       /* POINT TO BLOCK */
+            WRITE(MDI)=NEW;                     /* CHANGE BLOCK TO THIS LENGTH */
+            DELTA=K-NEW;                        /* CHANGED BY THIS AMOUNT */
+            IF READ(MD)<>0 THEN                 /* IF BLOCK CURRENTLY HAS SOME USERS */
+            MSFREE=MSFREE+DELTA;                /* ADDING TO FREE STORAGE IF TAKEN FROM USED BLOCK */
+            NEW.POLY.CONTENTS=NEW.POLY.CONTENTS\2; /* INFORM SCREEN CODE     */
+            WRITE(MAL)=BL.ABUFL;                /* POINT TO ATTACK BUFFER LENGTH */
+            WRITE(MDI)=READ(MD)-SHL(DELTA,8);   /* BL.ABUFL - LESS IN ATTACK BUFFER  */
+            MSB=READ(MDI); LSB=READ(MD);        /* BL.WDD, BL.WDS */
+            IF LSB ILT DELTA THEN MSB=MSB-1;
+            LSB=LSB-DELTA;
+            WRITE(MAL)=BL.WDD;                  /* BL.WDD - DISK CONTINUATION */
+            WRITE(MDI)=MSB;                     /* BL.WDD   - DEVICE          */
+            WRITE(MDI)=LSB;                     /* BL.WDS   - MUST START DISKREAD ON EARLIER SECTOR */
+            WRITE(MDI)=READ(MD)+DELTA;          /* BL.WDN   - AND MUST READ FOR MORE SECTORS */
+         END;
+         IF I<>J THEN DO;            /* DIFFERENT LOCATIONS - MOVE DATA, UPDATE POINTERS */
+            CALL COPY.EXT.MEM.SEC(I,J,M);
+            CALL MS.UPDATE(I,J);     /* UPDATE POINTERS */
+         END;                        /* OF ACTUALLY A DIFFERENT LOCATION */
+         J=J+M;                      /* STEP WRITE POINTER */
+      END;                           /* OF SOME USERS, MUST SAVE */
+      I=I+K;                         /* STEP READ POINTER */
+      IF I IGE J+MAX THEN DO;        /* WE HAVE CREATED LARGE ENOUGH BLOCK */
+         IF I<>J+MAX THEN DO;        /* LEAVE A HOLE IF EXTRA SPACE */
+            WRITE(MAM)=J+MAX;        /* SET UP POINTER */
+            WRITE(MDI)=I-(J+MAX);    /* LEAVE HOLE OF THIS SIZE */
+            WRITE(MDI)=0;            /* WITH NO USERS */
+            WRITE(MDI)=0;            /* AND NO FILE NAME */
+         END;
+         SFILE.BASE(LW#LSB)=J;       /* START NEW FILE HERE, FOR MAX */
+         RETURN;
+      END;
+   END;                   /* OF PROCESSING ALL BLOCKS */
+
+   SFILE.BASE(LW#LSB)=J;  /* START NEW BLOCK HERE */
+   MSLAST=J+MAX;          /* NEW LAST POINTER */
+
+END MS.COLLECT;
+
+/* $PAGE - LOAD A SOUND FILE INTO EXTERNAL MEMORY ATTACK BUFFER */
+
+/* ALLOCATE A SECTION FROM EXTERNAL MEMORY:
+      1. USE FREE MEMORY AT END OF USED SECTION IF POSSIBLE.
+      2. RETURN ERROR IF NOT ENOUGH MEMORY EVEN IF ALL GARBAGE
+         COLLECTION DONE.
+      3. SEARCH THROUGH LIST OF BLOCKS TO FIND A PERFECT FIT
+         OR A LARGER BLOCK THAT IS FREE.  RE-USE THAT BLOCK
+         IF SO TO SAVE GARBAGE COLLECTION.
+      4. IF NO LUCK SO FAR,  GARBAGE COLLECT MEMORY UNTIL A LARGE
+         ENOUGH HOLE IS CREATED. */
+
+/* FIRST, A SUBROUTINE TO CHANGE THE USER FIELD OF A BLOCK
+   WHILST DOING THE CORRECT FREE STORAGE ACCOUNTING */
+
+MS.USERS:PROC(FB,DELTA) PUBLIC;      /* UPDATE USER FIELD FOR FILE RECORD IN EXT MEM */
+   DCL (FB,DELTA,I) FIXED;
+
+   IF DELTA=0 THEN RETURN;    /* NO CHANGE IN USERS IF NOT USED */
+   WRITE(MAM)=FB;             /* POINT TO FILE BLOCK IN EXT MEMORY */
+   I=READ(MDI);               /* GET BLOCK LENGTH (SECTORS), ADVANCE TO USERS FIELD */
+   IF READ(MD)=0 THEN MSFREE=MSFREE-I;      /* LESS FREE STORAGE IF USING A BLOCK THAT HAD NO USERS */
+   WRITE(MD)=READ(MD)+DELTA;                /* CHANGE USER FIELD */
+   IF READ(MD)=0 THEN MSFREE=MSFREE+I;      /* MORE FREE STORAGE IF DECREMENTING USERS TO ZERO */
+   NEW.POLY.CONTENTS=NEW.POLY.CONTENTS \ 2; /* TELL SCREEN CODE AMOUT MSFREE CHANGE */
+END;
+
+/* LOAD A FILE INTO AN ATTACK BUFFER */
+/* BEGIN BY LOOKING UP FILE INFO    */
+
+MS.LOAD:PROC(DEV,SEC) PUBLIC SWAPABLE; /* LOAD A SOUND FILE ATTACK BUFFER. PASS DISK SECTOR */
+
+   DCL (DEV,SEC)      FIXED;
+   DCL (SRATE,PITCH,SSS,SSW,SES,SEW,KEYTC,VR,VD,VA) FIXED; /* HOLDS INFO FROM FILE */
+   DCL (NUMADD,TOFFS) FIXED;
+   DCL (SAVED.INDEX)  FIXED;
+   DCL (I,J,K,L)      FIXED;
+   DCL (MSB,LSB)      FIXED;
+   DCL (SSD)          FIXED;           /* STARTING SAMPLING DEVICE */
+
+   call readdata(DEV,SEC,misc.buf,256);    /* read first sector of sound file to get info */
+
+   if misc.buf(sf.stereo)<>0 then call no.stereo.play;
+
+   if misc.buf(0) IGE 3 then keytc=misc.buf(12);    /* look up keyboard decay in ms. */
+   else                      keytc=misc.buf(12)*5;  /* compute ms from clock ticks */
+
+   vr=misc.buf(14);                    /* vib rate */
+   vd=misc.buf(15);                    /* vib dep */
+   va=misc.buf(16);                    /* vib atk */
+
+   pitch=misc.buf(18);                 /* look up hertz*10 */
+   if  pitch<10 then pitch=4400;       /* handle old files */
+
+   srate=misc.buf(sf.sample.rate);        /* see if sample rate defined */
+   if srate=0 then do;                    /* handle old sfm files       */
+      srate=misc.buf(sf.period.index);    /* look up sampling period, 600=50 khz */
+      if  srate<600 then srate=600;       /* handle old files */
+      call period_time_to_index(misc.buf(23),misc.buf(24),misc.buf(25),srate);
+      ssd=dev;
+      sss=sec+(3+sector.numb);            /* starting sector on w. disk */
+      if sss ilt (3+sector.numb)
+      then ssd=ssd+1;
+      ssw=sector.offset;                  /* word of that sector */
+      call period_time_to_index(misc.buf(26),misc.buf(27),misc.buf(28),srate);
+      ses=sec+3+sector.numb;              /* ending sector */
+      sew=sector.offset;                  /* last word to play */
+      load 1000; mul 300; mwait; div srate;
+      if shl(rem,1)>=srate then srate=res+1;
+      else                      srate=res;
+   end;
+   else do;
+      call time_to_index(misc.buf(23),misc.buf(24),misc.buf(25),srate,misc.buf(41));
+      ssd=dev;
+      sss=sec+(3+sector.numb);            /* starting sector on w. disk */
+      if sss ilt (3+sector.numb)
+      then ssd=ssd+1;
+      ssw=sector.offset;                  /* word of that sector */
+      call time_to_index(misc.buf(26),misc.buf(27),misc.buf(28),srate,misc.buf(41));
+      ses=sec+3+sector.numb;              /* ending sector */
+      sew=sector.offset;                  /* last word to play */
+   end;
+
+   srate=log1000(500)-log1000(srate);  /* compute offset from 50 khz - syncl ii format */
+   pitch=log4400(pitch);               /* pitch correction, from a-440 */
+  
+   i=pitch+43; j=i&1023; i=i&"176000";        /* round up, compute octave & fractional octave */
+   load j; mul   12; j=res; div 1024; j=res;  /* compute key #, 0-11 */
+   load j; mul 1024; j=res; div   12; j=res;  /* compute 0,85,170,256... */
+   if read(4) ige 6 then j=j+1;               /* perform rounding to match syncl II */
+   toffs=(i+j)-pitch;                         /* get correction factor for transpositions */
+
+   /* $PAGE - FIND PLACE IN EXTERNAL MEMORY TO PUT BLOCK */
+
+   SAVED.INDEX=ABUF.INDEX;            /* SAVE CURRENT BUFFER SIZE */
+   RETRY.MAX:;                        /* RE-ENTER TO TRY FOR SMALLER BUFFER */
+   I=SES-SSS+2;                       /* load all of used data, + 1 sector for info */
+
+   NUMADD=0;                          /* ASSUME WHOLE FILE WILL FIT IN BUFFER */
+   IF I IGT ABUF.DATA(ABUF.INDEX) THEN DO;    /* FILE BIGGER THAN CURRENT BUFFER SIZE */
+      NUMADD=I-ABUF.DATA(ABUF.INDEX);         /* ADDITIONAL INTERRUPT DRIVEN READ SECTORS WILL BE REQUIRED */
+      I=ABUF.DATA(ABUF.INDEX);                /* LOAD ATTACK BUFFER PORTION ONLY INTO EX MEM */
+   END;                               /* ELSE LOAD WHOLE FILE (I) */
+
+   IF (MSMAX-MSLAST) ILT I THEN DO;   /* NOT ENOUGH ROOM AT END - LOOK FOR LARGE FREE BLOCK OR GARBAGE COLLECT */
+      J=MSFIRST; K=0;                 /* FIRST FIND OUT HOW MUCH EXTRA STUFF THERE IS IN USED BLOCKS */
+      DO WHILE J<>MSLAST;             /* BY CHECKING EVERY BLOCK */
+         WRITE(MAM)=J;                /* LOAD EX MEM PTR  */
+         L=READ(MDI);                 /* GET BLOCK LENGTH; ADVANCE TO USERS FIELD */
+         IF READ(MDI)<>0 THEN DO;     /* IF BLOCK IS USED - SEE IF FREE STORAGE IN IT (FREE BLOCKS ALREADY COUNTED IN MSFREE) */
+            IF L IGT ABUF.DATA(ABUF.INDEX)        /* THIS ATTACK BUFFER BIGGER THAN NEEDED NOW */
+            THEN K=K+(L-ABUF.DATA(ABUF.INDEX));   /* SUM UP AVAILABLE STORAGE */
+         END;
+         J=J+L;                       /* ADVANCE TO NEXT BLOCK */
+      END;
+      IF (MSFREE+K) ILT I THEN DO;    /* NOT ENOUGH ROOM EVEN AFTER GARBAGE COLLECTION */
+         ABUF.INDEX=ABUF.INDEX+1;     /* FIRST TRY SMALLER BUFFER */
+         NEW.POLY.CONTENTS = NEW.POLY.CONTENTS \ 2;  /* UPDATE SCREEN (MAYBE) */
+         IF ABUF.DATA(ABUF.INDEX)<>0 THEN DO;  /* USE SMALLER ATTACK BUFFERS, DOWN TO SMALLEST SIZE */
+            GOTO RETRY.MAX;                    /* TRY AGAIN WITH THIS BUFFER SIZE */
+         END;
+         ABUF.INDEX=SAVED.INDEX;      /* RESTORE TO CURRENT INDEX IF COMPLETE BOMB */
+         CALL NOROOM.ERROR;           /* SET FLAG TO PRINT ERROR MESSAGE */
+         RETURN 0;                    /* BUT LEAVE REST OF MEMORY INTACT */
+      END;                            /* ELSE WE KNOW IT WILL FIT, SOMEHOW */
+      J=MSFIRST; K=0;                 /* LOOK FOR MATCHING FREE BLOCK, OR BIGGER FREE ONE TO DIVIDE UP */
+      DO WHILE J<>MSLAST;             /* SEARCH LIST */
+         WRITE(MAM)=J;                /* SET UP POINTER TO THIS BLOCK IN EXT MEM */
+         L=READ(MDI);                 /* GET BLOCK LENGTH, ADVANCE POINTER */
+         IF READ(MDI)=0 THEN DO;      /* IF NO USERS IN THIS BLOCK, CHECK FOR MATCH OF EXACT LENGTH */
+            IF L=I THEN DO;           /* PERFECT LENGTH MATCH FOUND OF FREE BLOCK - USE IT */
+               SFILE.BASE(LW#LSB)=J;
+               GOTO LOAD.IT;
+            END;
+            IF (K=0)&(L IGT I) THEN DO; /* LARGER BLOCK FOUND - SAVE FIRST ONE */
+               K=1; SFILE.BASE(LW#LSB)=J;  /* SAVE INFO */
+            END;
+         END;                  
+         J=J+L;                   /* ADVANCE TO NEXT BLOCK */
+      END;
+      IF K<>0 THEN DO;            /* DIVIDE UP LARGER FREE BLOCK IF ONE WAS FOUND */
+         WRITE(MAM)=SFILE.BASE(LW#LSB);  /* LOAD POINTER TO IT */
+         J=READ(MD)-I;            /* GET LENGTH LEFT OVER */
+         WRITE(MAM)=SFILE.BASE(LW#LSB)+I;  /* GET END OF THIS OUR NEW BLOCK */
+         WRITE(MDI)=J;            /* SAVE EMPTY BLOCK OF THIS LENGTH, ADVANCE POINTER */
+         WRITE(MDI)=0;            /* WITH NO USERS */
+         WRITE(MDI)=0;            /* ZERO OUT FIRST WORD OF FILE NAME SO NO MATCH IS FOUND */
+      END;
+      ELSE CALL MS.COLLECT(I);    /* COLLECT FOR BLOCK THIS BIG. RETURN POINTER IN GLOBAL SFILE.BASE(LW#LSB) */
+   END;
+   ELSE DO;                       /* WILL FIT AT END OF MEMORY - USE IT */
+      SFILE.BASE(LW#LSB)=MSLAST;  /* START HERE */
+      MSLAST=MSLAST+I;            /* NOW USED UP TO HERE */
+   END;
+
+   /* $PAGE */
+
+   /* LOAD SOUND FILE BUFFER INTO ALLOCATED BLOCK OF EXTERNAL MEMORY */
+
+   LOAD.IT: WRITE(MAM)=SFILE.BASE(LW#LSB);    /* SET UP SECTOR */
+   WRITE(MDI)=I;                /* SAVE LENGTH OF BLOCK IN SECTORS */
+   WRITE(MDI)=0;                /* INITIALIZE TO NO USERS */
+   // Long file names not supported for mono sampling
+   DO J=1 TO 4;                 /* STORE FILE NAME IN BLOCK SO OTHERS CAN FIND IT */
+      WRITE(MDI)=FNBUF(J);      /* STORE FILE NAME */
+   END;
+   DO J=BL.FNAME+4 TO BL.MONO-1;
+      WRITE(MDI)=0;             /* INITIALIZE REST OF BLOCK TO ZERO */
+   END;
+
+   WRITE(MAM)=SFILE.BASE(LW#LSB);  /* STORE INFO FOR OTHER USERS OF THIS FILE */
+   WRITE(MAL)=BL.KEYTC;         /* SET UP INFO FOR MONO SAMPLING */
+
+   WRITE(MDI)=KEYTC;            /* BL.KEYTC - KBD TIME CONST FROM FILE */
+   WRITE(MDI)=VR;               /* BL.VRATE - VIB INFO       FROM FILE */
+   WRITE(MDI)=VD;               /* BL.VDEPTH- VIB INFO       FROM FILE */
+   WRITE(MDI)=VA;               /* BL.VAT   - VIB INFO       FROM FILE */
+
+   WRITE(MDI)=SRATE;            /* BL.SRATE - COMPUTED SRATE INFO      */
+   WRITE(MDI)=PITCH;            /* BL.PITCH - COMPUTED PITCH INFO      */
+   WRITE(MDI)=TOFFS;            /* BL.TOFFS - COMPUTED TRANSPOSE INFO  */
+
+   WRITE(MDI)=SSW;              /* BL.START - WORD OF DATA SECTOR TO START IN    */
+   WRITE(MDI)=SHL(I-1,8);       /* BL.ABUFL - ATTACK BUFFER LENGTH, WORDS (MIGHT NEED ZERO FILLING) */
+
+   msb=ssd; lsb=sss+(i-1);
+   if lsb ilt (i-1) then msb=msb+1;
+   WRITE(MDI)=msb;              /* BL.WDD   - DEVICE TO READ SAMPLE FROM */
+   WRITE(MDI)=lsb;              /* BL.WDS   - PICK UP WITH DISK READING AT THIS SECTOR (IF REQUIRED) */
+   WRITE(MDI)=NUMADD;           /* BL.WDN   - NUMBER OF ADDITIONAL SECTORS TO READ (0-X) */
+   WRITE(MDI)=SEW;              /* BL.FWRDS - INCLUSIVE END WORD IN LAST SECTOR */
+
+   CALL EXT.READDATA(ssd,sss,SFILE.BASE(LW#LSB)+1,0,I-1,0); /* DISKREAD DIRECTLY TO EXT MEM */
+
+   IF (NUMADD=0)&(SEW<>255)        /* ZERO FILL ATTACK BUFFER IF WHOLE FILE FITS IN (SIMPLIFIES INTERRUPT CODE) */
+   THEN DO;
+      WRITE(MAM)=SFILE.BASE(LW#LSB)+I-1;  /* GET POINTER TO LAST SECTOR */
+      WRITE(MAL)=SEW+1;          /* ZERO OUT UNUSED PORTION OF ATTACK BUFFER */
+      DO J=SEW+1 TO 255; WRITE(MDI)=0; END;
+   END;
+   WRITE(D66)=8;              /* INITIALIZE D66 REGISTER SO WE CAN READ IT WITHOUT CRASHING */
+   RETURN 1;                  /* LOADED INTO SFILE.BASE(LW#LSB) */
+END MS.LOAD;
+
+MS.EXTRACT:PROC FIXED PUBLIC;  /* GET FILE INFO INTO MISC.BUF FROM EXT MEM */
+   DCL I FIXED;
+
+   WRITE(MAM)=SFILE.BASE(LW#LSB);
+   WRITE(MAL)=BL.FNAME;        /* READ BL.FNAME THROUGH BL.MAX+1 */
+   DO I=BL.FNAME TO BL.COPYL-1;
+      MISC.BUF(I)=READ(MDI);
+   END;
+   RETURN 0;                   /* NON-STEREO SOUND FILE ALWAYS   */
+END MS.EXTRACT;

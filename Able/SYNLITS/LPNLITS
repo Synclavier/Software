@@ -1,0 +1,267 @@
+/* LPNLITS  $TITLE  Literals for Logical Parameter Numbers */
+
+/*
+2000/10/07 - TY  - added mod wheel proxy lpn
+1991/01/09 - pf  - added click value lpn
+1990/09/27 - cj  - added info for startup control button
+1986/09/10 - ts  - added literals for startloop,chain,insert,delete buttons,beats per measure&loop parms
+1986/05/15 - "official" creation of release-M modules
+*/
+
+/*
+.  A new method for handling the scanning and displaying of buttons and
+.lights has been implemented in the Synclavier II.  This new algorithm
+.is designed to more clearly separate the button panel harware
+.organization from the Synclavier II Software.   An important benefit
+.of this change is the ability to easily change the button panel layout
+.or the button panel hardware without having to dive into the Synclavier
+.Program itself.  Of course, the main Synclavier program will need to
+.be modified if new button features are added, or if some buttons want
+.to operate differently on the new panel.
+.
+.  Some new terms are used, as follows:
+.
+.     1.  "Physical Button Number"   - abrev. PBN - A Phycial Button Number
+.                                    is a 16-bit number that is used to
+.                                    identify a particular button on the
+.             *********              Synclavier II Panel.  Buttons are
+.             * PBN's *              numbered beginning in the upper
+.             *********              left hand corner, proceeding
+.                                    across and then down each panel,
+.                                    and then across the entire Synclavier
+.                                    II.  (0-127, or 0-159)
+.
+.     2.  "Logical Parameter Number" - abrev. LPN - A Logical Parameter
+.                                    number is a 16-bit number that is
+.                                    used by the software to identify
+.             *********              a certain software function.   
+.             * LPN's *              LPN's closely match the button layout
+.             *********              on the original Synclavier II button
+.                                    panel.
+.
+.   A look-up table is used to map physical buttons into logical parameters.
+.A second look-up table is used to map logical parameters back onto the
+.button panel so that the correct  button can be lit.   Normally the tables
+.are inverses of one another (so that pressing a button causes that button
+.to light), although this need not be the case.   Currently, the LPN.LOOKUP
+.is programmed in as a DATA array, while an initialization routine (PANEL.INIT)
+.constructs the inverse table (PBN.LOOKUP).   The inverse table (PBN.LOOKUP) is
+.also used to hold the current state of each logical parameter (on, off, blinking, etc.),
+.which saves an extra array of memory.
+.
+.   To change the location of a particular button on the panel, the LPN.LOOKUP
+.and the PBN.LOOKUP tables need to be modified.  The button will operate
+.exactly as before only from a different location on the panel.
+.
+.   To change the button hardware, different driver routines are needed.
+.Four routines interact with the panel hardware.  See following documentation
+.on PANEL.SCAN, ON, BLINK, and OFF.
+.
+.   To change how a particular button operates, code in the main synclavier
+.program will have to be modified.
+.
+. */
+
+
+/* $PAGE - Logical Parameter Number definitions */
+
+
+/* The following literals are available to help construct the LPN.LOOKUP */
+/* table.                                                                */
+
+dcl psel.l          lit '  1';      /*  4 partial select buttons */
+dcl par.l           lit '  5';      /* 64 basic parameters (for each partial) */
+dcl mpar.l          lit ' 69';      /* 64 misc parameter buttons - chorus, rate, overall stuff */
+dcl seq.l           lit '133';      /* 32 sequencer buttons (start, stop, etc.) */
+dcl trak.l          lit '165';      /* 32 track buttons */
+dcl rte.l           lit '197';      /* 32 rte buttons   */
+dcl bank.l          lit '229';      /*  8 bank select buttons */
+dcl timb.l          lit '237';      /*  8 timbre recall buttons */
+dcl seqr.l          lit '245';      /*  8 sequence recall buttons */
+dcl misc.l          lit '253';      /* 32 miscellaneous buttons   */
+
+dcl num.lpns        lit '285';      /* number of logical parameters - used to dimension inverse lookup table */
+
+/* literals provided for parameter buttons: */
+
+dcl ve.del.l        lit 'par.l+ 0';      /* volume envelope delay       lpn */
+dcl ve.atk.l        lit 'par.l+ 1';      /* volume envelope attack      lpn */
+dcl ve.idec.l       lit 'par.l+ 2';      /* volume envelope idecay      lpn */
+dcl ve.fdec.l       lit 'par.l+ 3';      /* volume envelope fdecay      lpn */
+dcl ve.peak.l       lit 'par.l+ 4';      /* volume envelope peak        lpn */
+dcl ve.sust.l       lit 'par.l+ 5';      /* volume envelope sustain     lpn */
+
+dcl he.del.l        lit 'par.l+ 6';      /* harmonic envelope delay     lpn */
+dcl he.atk.l        lit 'par.l+ 7';      /* harmonic envelope attack    lpn */
+dcl he.idec.l       lit 'par.l+ 8';      /* harmonic envelope idecay    lpn */
+dcl he.fdec.l       lit 'par.l+ 9';      /* harmonic envelope fdecay    lpn */
+dcl he.peak.l       lit 'par.l+10';      /* harmonic envelope peak      lpn */
+dcl he.sust.l       lit 'par.l+11';      /* harmonic envelope sustain   lpn */
+
+dcl coef.l          lit 'par.l+12';      /* coefficient                 lpns*/
+
+dcl ptun.l          lit 'par.l+36';      /* partial tuning              lpn */
+dcl vwave.l         lit 'par.l+37';      /* vibrato wave                lpn */
+dcl vrate.l         lit 'par.l+38';      /* vibrato rate                lpn */
+dcl vdepth.l        lit 'par.l+39';      /* vibrato depth               lpn */
+dcl vatk.l          lit 'par.l+40';      /* vibrato attack              lpn */
+dcl prate.l         lit 'par.l+42';      /* portamento rate             lpn */
+dcl ratio.l         lit 'par.l+43';      /* fm ratio                    lpn */
+dcl decay.l         lit 'par.l+44';      /* decay adjust                lpn */
+dcl pchorus.l       lit 'par.l+45';      /* partial chorus              lpn */
+dcl hadj.l          lit 'par.l+46';      /* harmonic adjust             lpn */
+dcl stcen.l         lit 'par.l+47';      /* stereo center               lpn */
+dcl stdepth.l       lit 'par.l+48';      /* stereo depth                lpn */
+dcl stmode.l        lit 'par.l+49';      /* stereo mode                 lpn */
+dcl strate.l        lit 'par.l+50';      /* stereo rate                 lpn */
+dcl kbdlkey.l       lit 'par.l+51';      /* keyboard envelope left key  lpn */
+dcl kbdrkey.l       lit 'par.l+52';      /* keyboard envelope right key lpn */
+dcl kbdlsl.l        lit 'par.l+53';      /* keyboard envelope left slop lpn */
+dcl kbdrsl.l        lit 'par.l+54';      /* keyboard envelope right slo lpn */
+dcl pvol.l          lit 'par.l+55';      /* partial volume                  */
+dcl moddep.l        lit 'par.l+56';      /* modulator depth                 */
+dcl dynenvl.l       lit 'par.l+57';      /* dyn env low                     */
+dcl dynenvh.l       lit 'par.l+58';      /* dyn env high                    */
+
+
+/* $PAGE - literals provided for miscellaneous parameter buttons, sequencer buttons: */
+
+/* POLY.L - RFIL.L:  OVERALL TIMBRE PARAMETER LPNS */
+
+dcl poly.l          lit 'mpar.l+ 0';     /* keyboard polyphony          lpn */
+dcl lpfc.l          lit 'mpar.l+ 1';     /* low pass cutoff             lpn */
+dcl hpfc.l          lit 'mpar.l+ 2';     /* high pass cutoff            lpn */
+dcl bpfc.l          lit 'mpar.l+ 3';     /* band pass cutoff            lpn */
+dcl bwdth.l         lit 'mpar.l+ 4';     /* bandwidth                   lpn */
+dcl rrate.l         lit 'mpar.l+ 5';     /* repeat rate                 lpn */
+dcl chorus.l        lit 'mpar.l+ 6';     /* chorus                      lpn */
+dcl tname.l         lit 'mpar.l+ 7';     /* timbre name                 lpn */
+dcl ttben.l         lit 'mpar.l+ 8';     /* tone bend depth for timbre  lpn */
+                                         /* leave room for possible kcv lpn */
+dcl pfil.l          lit 'mpar.l+11';     /* pressure filter t.c.        lpn */
+dcl rfil.l          lit 'mpar.l+12';     /* ribbon   filter t.c.        lpn */
+
+/* SCALE.L - MARK.L:  SEQUENCER PARAMETER LPNS SAVED WITH SEQUENCES */
+
+dcl scale.l         lit 'mpar.l+16';     /* sequencer scale adjust (12) lpn */
+dcl speed.l         lit 'mpar.l+28';     /* speed                       lpn */
+dcl click.l         lit 'mpar.l+29';     /* click rate                  lpn */
+dcl crm.l           lit 'mpar.l+30';     /* click rate multiplier       lpn */
+dcl smpte.l         lit 'mpar.l+31';     /* smpte (special case!!!)     lpn */
+dcl bpm.l           lit 'mpar.l+32';     /* beats per measure           lpn */
+dcl mark.l          lit 'mpar.l+33';     /* mark button (start time)    lpn */
+
+/* TBASE.L - VKXPOS.L:  MISC GLOBAL SYSTEM PARAMETER LPNS (NOT SAVED) */
+
+dcl tbase.l         lit 'mpar.l+34';     /* tuning base                 lpn */
+dcl oratio.l        lit 'mpar.l+35';     /* octave ratio                lpn */
+dcl tbdepth.l       lit 'mpar.l+36';     /* knob tone bend/depth        lpn */
+dcl smin.l          lit 'mpar.l+37';     /* sensitivity min             lpn */
+dcl scon.l          lit 'mpar.l+38';     /* sensitivity constant        lpn */
+dcl sdelay.l        lit 'mpar.l+39';     /* sync delay                  lpn */
+dcl nump.l          lit 'mpar.l+40';     /* numpoints for loop search   lpn */
+dcl startup.l       lit 'mpar.l+41';     /* startup control             lpn */
+dcl mwprox.l        lit 'mpar.l+42';     /* mod wheel proxy				lpn */
+dcl vkxpos.l        lit 'mpar.l+43';     /* keyboard transpose			lpn */
+
+/* PTTUN.L - LOOP.L:  SPECIAL CASE TIMBRE/SEQUENCE PARAMETER LPNS */
+
+dcl pttun.l         lit 'mpar.l+44';     /* patch list file tuning      lpn */
+dcl trrout.l        lit 'mpar.l+45';     /* track routing               lpn */
+dcl trvol.l         lit 'mpar.l+46';     /* track volume                lpn */
+dcl pttlen.l        lit 'mpar.l+47';     /* patch list total length     lpn */
+dcl ptllen.l        lit 'mpar.l+48';     /* patch list loop  length     lpn */
+dcl midi.l          lit 'mpar.l+49';     /* midi button             	lpn */
+dcl loop.l          lit 'mpar.l+50';     /* one of the loop/edit parms  lpn */
+dcl clickval.l      lit 'mpar.l+51';     /* click value                 lpn */
+dcl midixpos.l      lit 'mpar.l+52';     /* midi output transpose       lpn */
+
+/* sequencer functions: */
+
+dcl start.l         lit 'seq.l+ 0';       /* start                       lpn */
+dcl stop.l          lit 'seq.l+ 1';       /* stop                        lpn */
+dcl record.l        lit 'seq.l+ 2';       /* record                      lpn */
+dcl punch.l         lit 'seq.l+ 3';       /* punch                       lpn */
+dcl cont.l          lit 'seq.l+ 4';       /* continue                    lpn */
+dcl rew.l           lit 'seq.l+ 5';       /* rewind                      lpn */
+dcl ff.l            lit 'seq.l+ 6';       /* ff                          lpn */
+dcl erase.l         lit 'seq.l+ 7';       /* erase  *** out of order *** lpn */
+dcl eloop.l         lit 'seq.l+ 8';       /* end loop                    lpn */
+dcl transp.l        lit 'seq.l+ 9';       /* transp                      lpn */
+dcl bounce.l        lit 'seq.l+10';       /* bounce                      lpn */
+dcl smt.l           lit 'seq.l+11';       /* smt                         lpn */
+dcl skt.l           lit 'seq.l+12';       /* skt                         lpn */
+dcl ext.l           lit 'seq.l+13';       /* ext sync                    lpn */
+dcl just.l          lit 'seq.l+14';       /* justify                     lpn */
+dcl sloop.l         lit 'seq.l+15';       /* start loop                  lpn */
+dcl chain.l         lit 'seq.l+16';       /* chain                       lpn */
+dcl insert.l        lit 'seq.l+17';       /* insert                      lpn */
+dcl delete.l        lit 'seq.l+18';       /* delete                      lpn */
+dcl trackpan.l      lit 'seq.l+19';       /* track pan                   lpn */
+
+/* $PAGE - literals provided for Real Time Effects */
+
+/* ORIGINAL KEYBOARD ONLY: */
+
+dcl mem.l           lit 'rte.l+ 0';       /* memorize                    lpn */
+dcl pedal.l         lit 'rte.l+ 1';       /* rte pedal                   lpn */
+dcl vel.l           lit 'rte.l+ 2';       /* velocity                    lpn */
+dcl pp1.l           lit 'rte.l+ 3';       /* patch partial 1             lpn */
+dcl pp2.l           lit 'rte.l+ 4';       /* patch partial 2             lpn */
+dcl pp3.l           lit 'rte.l+ 5';       /* patch partial 3             lpn */
+dcl pp4.l           lit 'rte.l+ 6';       /* patch partial 4             lpn */
+dcl recrdr.l        lit 'rte.l+ 7';       /* recorder button             lpn */
+dcl rvatk.l         lit 'rte.l+ 8';       /* rte volume env attack       lpn */
+dcl rvdec.l         lit 'rte.l+ 9';       /* rte volume env decays       lpn */
+dcl rvpks.l         lit 'rte.l+10';       /* rte volume env peaks        lpn */
+dcl rhatk.l         lit 'rte.l+11';       /* rte harmonic env attack     lpn */
+dcl rhdec.l         lit 'rte.l+12';       /* rte harmonic env decay      lpn */
+dcl rhpeak.l        lit 'rte.l+13';       /* rte harmonic env peak       lpn */
+dcl rhsust.l        lit 'rte.l+14';       /* rte harmonic env sustain    lpn */
+dcl rprate.l        lit 'rte.l+15';       /* rte portamento rate         lpn */
+                          
+/* Velocity/Pressure Keyboard only: */
+
+dcl vkvel.l         lit 'rte.l+16';       /* vk - velocity button       */
+dcl vkpre.l         lit 'rte.l+17';       /* vk - pressure button       */
+dcl vkpe1.l         lit 'rte.l+18';       /* vk - pedal 1  button       */
+dcl vkpe2.l         lit 'rte.l+19';       /* vk - pedal 2  button       */
+dcl vkmod.l         lit 'rte.l+20';       /* vk - mod wh   button       */
+dcl vkrib.l         lit 'rte.l+21';       /* vk - ribbon   button       */
+dcl vkkcv.l         lit 'rte.l+22';       /* vk - kbd cv   button       */
+dcl vkbth.l         lit 'rte.l+23';       /* vk - breath c button       */
+
+dcl vkper.l         lit 'rte.l+24';       /* vk - perform  button       */
+dcl vkrec.l         lit 'rte.l+25';       /* vk - recorder button       */
+dcl vkove.l         lit 'rte.l+26';       /* vk - ovewrite button       */
+dcl vkclr.l         lit 'rte.l+27';       /* vk - clear    button       */
+
+/* $PAGE - literals provided for misc buttons */
+
+dcl ponoff.l        lit 'misc.l+ 0';       /* portamento on/off           lpn */
+dcl plogl.l         lit 'misc.l+ 1';       /* portamento log/lin          lpn */
+dcl invert.l        lit 'misc.l+ 2';       /* vibrato invert              lpn */
+dcl quant.l         lit 'misc.l+ 3';       /* vibrato quantize            lpn */
+dcl raise.l         lit 'misc.l+ 4';       /* vibrato raise               lpn */
+
+dcl lpt.l           lit 'misc.l+ 8';       /* low pass track              lpn */
+dcl hpt.l           lit 'misc.l+ 9';       /* high pass track             lpn */
+dcl bpt.l           lit 'misc.l+10';       /* band pass track             lpn */
+dcl repeat.l        lit 'misc.l+11';       /* repeat function             lpn */
+dcl arpeg.l         lit 'misc.l+12';       /* arpeggiate function         lpn */
+
+dcl hgs1.l          lit 'misc.l+16';       /* harmonic group select #1    lpn */
+dcl hgs2.l          lit 'misc.l+17';       /* harmonic group select #2    lpn */
+dcl hgs.l           lit 'misc.l+18';       /* combined harmonic group select button on new panel */
+dcl scale.a.l       lit 'misc.l+19';       /* scale adjust                lpn */
+
+dcl bankb.l         lit 'misc.l+20';       /* bank button                 lpn */
+dcl entryb.l        lit 'misc.l+21';       /* entry button                lpn */
+dcl seqb.l          lit 'misc.l+22';       /* sequence button             lpn */
+
+dcl bnkovwrt.l      lit 'misc.l+24';       /* bank overwrite              lpn */
+dcl entrywrt.l      lit 'misc.l+25';       /* entry    write              lpn */
+dcl dsel.l          lit 'misc.l+26';       /* drive select                lpn */
+dcl split.l         lit 'misc.l+27';       /* split                       lpn */
+dcl info.l          lit 'misc.l+28';       /* information button          lpn */
+dcl slib.l          lit 'misc.l+29';       /* sequence library button     lpn */

@@ -1,0 +1,334 @@
+/* TRAPCLAV  $TITLE  ROUTINES TO PROCESS CLAVIER EMULATION PROTOCOL PACKETS
+
+   Modified:
+   07/13/89 - TSS - Added code to handle RS-422 Clavier Emulation packets
+   05/18/89 - MWH - Remove old "dbug" literal (conflicted with EDITADCL)
+   03/14/89 - PF  - changed process packet processing logic
+   10/15/88 - TSS - Added Knob Jog Command. Cleaned up other stuff
+   10/04/88 - TSS - Fixed bug in Knob Emulation code
+   09/30/88 - TSS - Added Clavier Knob position update
+   09/25/88 - TSS - Fixed numerous other bugs, added new packet types
+   09/24/88 - TSS - Fixed bug in order of events in NEW.BUTTON.LIST 
+   09/21/88 - PF  - Moved clavier emulation routines to this file
+   09/15/88 - TSS - Created these routines in promod:prosou
+
+*/
+
+
+EMULATE.BUTTON: proc (lpn) swapable; /* routine to emulate one button operation */
+   dcl lpn fixed;
+	/* Note: high bit of lpn indicates pressed vs. released */
+	
+   if new.button.list(0) <> 0  /* process any real VK buttons that came in */
+   then call NEW.BUTTON;       /* while we were running MAIN.LOOP trying   */
+                               /* to get info note triggers to sound!!     */
+
+   new.button.list(0) = 1;     /* just one button                */
+   new.button.list(1) = lpn;   /* this is it                     */
+
+   call NEW.BUTTON;            /* process all new button presses */
+
+   /* In order to get INFO NOTE TRIGGERS to sound with a quick   */
+   /* press and release,  we must wait here for the press to     */
+   /* be processed by the main loop before we process the        */
+   /* release.   Do so only if in info mode:                     */
+
+   if INFO.MODE<>0 then do;
+      lpn = real.milliseconds;
+      do while (real.milliseconds - lpn) ILT 50;
+         call MAIN.LOOP;
+         interp_run_host_non_timer();
+      end;
+   end;
+
+end EMULATE.BUTTON;
+
+EMULATE.PRESS.AND.HOLD: proc (bnk,but) boolean swapable;
+   dcl (bnk,but,pbn,lpn) fixed;
+
+   if (bnk ilt 10) and (but ilt 16) then do; /* values in range */
+
+      pbn = shl(bnk,4) + but;                /* construct PBN */
+      lpn = lpn.lookup(pbn);                 /* map PBN to LPN number */
+
+      write(mam) = bstat.ptr;                /* clear bit in BSTAT.PTR array */
+      write(mal) = pbn;                      /* to denote button no longer held */
+      pbn = read(md);                        /* save original status */
+
+      if (pbn & b.held.button) <> 0          /* button is already held */
+      then do;                               /* release it first */
+         /* this means we got a new press for a button which was   */
+         /* still held down. so simulate a release just to be safe */
+         call EMULATE.BUTTON(lpn);           /* simulate the release we did not get */
+      end;
+      else do;                               /* set status for new held button */
+         write(md ) = read(md) | b.held.button; /* turn on held bit */
+         if pbn <> read(md)                  /* did we make a change */
+         then new.clavier.info = new.clavier.info | bits(bnk); /* set status for udpates */
+      end;
+
+      call EMULATE.BUTTON("100000" | lpn);   /* simulate press   */
+   end;
+
+   return(TRUE);
+
+end EMULATE.PRESS.AND.HOLD;
+
+EMULATE.PRESS.AND.RELEASE: proc (bnk,but) boolean swapable;
+   dcl (bnk,but,pbn,lpn) fixed;
+
+   if (bnk ilt 10) and (but ilt 16) then do; /* values in range */
+
+      pbn = shl(bnk,4) + but;                /* construct PBN */
+      lpn = lpn.lookup(pbn);                 /* map PBN to LPN number */
+
+      write(mam) = bstat.ptr;                /* clear bit in BSTAT.PTR array */
+      write(mal) = pbn;                      /* to denote button no longer held */
+      pbn = read(md);                        /* save original status */
+      write(md ) = read(md) & (not b.held.button);
+
+      if pbn <> read(md) then do;            /* did we make a change */
+         /* this means we got a new press for a button which was   */
+         /* still held down. so simulate a release just to be safe */
+         new.clavier.info = new.clavier.info | bits(bnk); /* set status for udpates */
+         call EMULATE.BUTTON(lpn);           /* simulate the release we did not get */
+      end;
+
+      call EMULATE.BUTTON("100000" | lpn);   /* simulate press   */
+      call EMULATE.BUTTON(           lpn);   /* simulate release */
+   end;
+
+   return(TRUE);
+
+end EMULATE.PRESS.AND.RELEASE;
+
+EMULATE.RELEASE: proc (bnk,but) boolean swapable;
+   dcl (bnk,but,pbn,lpn) fixed;
+
+   if (bnk ilt 10) and (but ilt 16) then do; /* values in range */
+
+      pbn = shl(bnk,4) + but;                /* construct PBN */
+      lpn = lpn.lookup(pbn);                 /* map PBN to LPN number */
+
+      write(mam) = bstat.ptr;                /* clear bit in BSTAT.PTR array */
+      write(mal) = pbn;                      /* to denote button no longer held */
+      pbn = read(md);                        /* save original status */
+      write(md ) = read(md) & (not b.held.button);
+
+      if pbn <> read(md)                     /* did we make a change */
+      then new.clavier.info = new.clavier.info | bits(bnk); /* set status for udpates */
+
+      call EMULATE.BUTTON(lpn);              /* simulate release */
+   end;
+
+   return (TRUE);
+
+end EMULATE.RELEASE;
+
+EMULATE.RELEASE.ALL: proc boolean swapable;
+   dcl (bnk,but,i)    fixed;
+
+   i = 0;
+   do while i < 160;                     /* loop over physical buttons on new clavier */
+      write(mam) = bstat.ptr;
+      write(mal) = i;
+
+      if (read(md) & b.held.button) <> 0 /* this button is held */
+      then do;                           /* try to release it   */
+         bnk = shr(i,4);
+         but = i & 15;
+
+         if EMULATE.RELEASE(bnk,but)     /* able to release it  */
+         then i = i + 1;                 /* step to next button */
+      end;
+      else i = i + 1;                    /* step to next button */
+   end;
+
+   return true;
+end EMULATE.RELEASE.ALL;
+
+EMULATE.CLAVIER.KNOB.JOG: proc (jog.amount) swapable;
+   dcl (jog.amount,i,j) fixed;
+
+   if (Active.Parms(0)<>0) then do; /* have active parameters */
+      i=(-1);
+      do j=0 to 3;                  /* get first selected parameter */
+         if (Selected.Partials&bits(j)) and (i<0)
+         then i = j;
+      end;
+      if i<0 then i=0;              /* none selected, use partial 0 */
+
+      if (((Active.Parms(1)&255) = (VE.ATK.L-PAR.L))  /* envelope attack */
+      and (C.Frame(i) = 0))                           /* and not frame attack parameter */
+      or ((Active.Parms(1)&255) = (HE.ATK.L-PAR.L))   /* index attack    */
+      then do;   /* do kludge to correct for ancient bug */
+         load 0; uload abs(jog.amount); div 36864;
+         i = res + (rem <> 0);
+         if jog.amount < 0 then i = (-i);
+         jog.amount = i;
+      end;
+   end;
+
+   if AMOUNT = "100000" 
+   then AMOUNT = jog.amount;
+   else AMOUNT = AMOUNT + jog.amount; /* add to global AMOUNT */
+
+   if AMOUNT = 0 then AMOUNT = "100000"; /* at least re-display parameter */
+
+   call Major.Update;                 /* use AMOUNT to change parameter value */
+
+end EMULATE.CLAVIER.KNOB.JOG;
+
+EMULATE.CLAVIER.KNOB: proc (pos) swapable;
+   dcl (pos,i) fixed;
+
+   i = abs(pos);                 /* get absolute position */
+
+   if i <> 0 then do;
+      
+      i = 12 + 14 * i / 63;      /* magic mapping formula */
+
+      if new.pm<>0               /* software expects bigger values */
+      then i = i * 3;            /* adjust by good factor          */
+   end;
+
+   if pos < 0 then i = (-i);     /* restore sign */
+
+   Clavier.Emulation.Knob.Delta = i; /* set global var to make things happen */
+end EMULATE.CLAVIER.KNOB;
+
+
+/* $SUBTITLE Routine to Handle Clavier Emulation Commands */
+
+/* NOTE: This is handling the temporary clavier commands coming in  */
+/* over RS232 through the termulator.  HANDLE.CLAVIER is the "real" */
+/* RS422 DAWN handler                                               */
+
+HANDLE.CLAVIER.EMULATION: proc swapable;
+   dcl subtype     fixed;
+   dcl (dat1,dat2) fixed;
+   dcl ret         fixed;
+
+   write(mam) = Packet.Ptr;
+   write(mal) = P#DATA;   
+   subtype = read(mdi);
+   dat1    = read(mdi);     /* read in a few data words */
+   dat2    = read(mdi);
+
+   ret = 1;            /* assume ok unless someone returns a specific error */
+
+   do case subtype;  /* branch on specific clavier emulation command */
+
+      do; /* 0:  Emulate PRESS & RELEASE */
+         ret = Emulate.Press.And.Release(dat1,dat2);
+      end;
+
+      do; /* 1:  Emulate PRESS & HOLD */
+         ret = Emulate.Press.And.Hold(dat1,dat2);
+      end;
+
+      do; /* 2:  Emulate RELEASE */
+         ret = Emulate.Release(dat1,dat2);
+      end;
+
+
+      do; /* 3: KNOB "AMOUNT" Jog Command */
+         /* jog amount high 7 bits in DAT1, low 7 bits in DAT2 */
+         /* range of jog = (-8192) to (+8191)                  */
+
+         dat1 = dat1 & "177";
+         dat2 = dat2 & "177";
+
+         dat1 = shl(dat1,7) | dat2;   /* construct 14-bit value */
+         if (dat1 & "020000") <> 0
+         then dat1 = dat1 | "140000"; /* sign extend negative value */
+
+         call Emulate.Clavier.Knob.Jog(dat1); /* simulate jog of value */
+      end;
+
+      do; /* 4: KNOB Position update */
+          /* new knob position is in DAT1 (-64 to +63 Byte value) */
+
+          if (dat1 & 64) <> 0           /* if msb is set, value is negative */
+          then dat1 = dat1 | "177600";  /* sign extend negative byte value */
+
+          call Emulate.Clavier.Knob(dat1); /* simulate knob movement */
+      end;
+
+      ; /* 5: Clavier Button LIT/BLINK/HELD status (ABLE to MAC Only) */
+
+      ; /* 6: NOT USED */
+
+      ; /* 7: NOT USED */
+
+      do; /* 8: Request All Clavier Status Info (REFRESH ALL STATUS) */
+         /* set update bits for all button banks and window sections */
+         new.clavier.info = "037777"; 
+      end;
+
+      do; /* 9: Emulate RELEASE of all held buttons */
+         ret = Emulate.Release.All;
+      end;
+   end;              /* of branch on specific clavier emulation command */
+
+   return(ret);             /* return processed status */
+
+end HANDLE.CLAVIER.EMULATION;
+
+/* $SUBTITLE  Dispatch to individual RS-422 handlers */
+
+HANDLE.CLAVIER: proc swapable;
+   dcl (len,des) fixed;
+   dcl subtype   fixed;
+   dcl data_wd   fixed;
+   dcl ret       fixed;
+
+   write(mam) = Packet.Ptr;
+
+   write(mal) = P#LEN;    len     = read(md);
+   write(mal) = P#SOURCE; des     = read(md);
+
+   write(mal) = P#TYPE;   
+   subtype    = read(md) & "377";
+
+   write(mal) = P#DATA;
+   data_wd    = read(mdi);
+
+   ret = 1;            /* assume ok unless someone returns a specific error */
+
+   do case subtype;    /* branch on specific sequence editing command */
+
+      do; /* 0:  Emulate PRESS & HOLD */
+         ret = Emulate.Press.And.Hold(shr(data_wd,8), data_wd&255);
+      end;
+
+      do; /* 1:  Emulate PRESS & RELEASE */
+         ret = Emulate.Press.And.Release(shr(data_wd,8), data_wd&255);
+      end;
+
+      do; /* 2:  Emulate RELEASE */
+         ret = Emulate.Release(shr(data_wd,8), data_wd&255);
+      end;
+
+      do; /* 3: Emulate RELEASE of all held buttons */
+         ret = Emulate.Release.All;
+      end;
+
+      do; /* 4: KNOB "AMOUNT" Jog Command */
+         call Emulate.Clavier.Knob.Jog(data_wd); /* simulate jog of value */
+      end;
+
+      do; /* 5: KNOB Position update */
+          /* new knob position is in DATA_WD (-64 to +63 word value) */
+          call Emulate.Clavier.Knob(data_wd); /* simulate knob movement */
+      end;
+
+      do; /* 6: Request All Clavier Status Info (REFRESH ALL STATUS) */
+         /* set update bits for all button banks and window sections */
+         new.clavier.info = "037777"; 
+      end;
+   end;
+
+   return(ret);             /* return processed status */
+
+end HANDLE.CLAVIER;

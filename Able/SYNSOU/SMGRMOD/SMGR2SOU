@@ -1,0 +1,120 @@
+/* SMGR2SOU   $TITLE  Second part of the Screen Manager Module
+
+   Modified:
+   05/25/88 - LSS - insert SYNLITS:SYSLITS
+   11/19/87 - MWH - Fix object dragging
+   11/17/87 - MWH - Split off from SMGRSOU
+   
+*/
+module smgr2mod;
+
+insert ':SYNLITS:COMLITS';    /* BLACK MAGIC */
+insert ':SYNLITS:GLOBLITS';   /* ???         */
+insert ':SYNLITS:ASCIILIT';   /* A,B,C,D,E,F,.... */
+insert ':SYNLITS:SYSLITS';    /* for terminal type checking */
+
+insert ':SYNAUXS:SMGRLITS';   /* FIND OUT ABOUT OURSELVES */
+
+insert ':SYNMODS:GLOBDCL';    /* GROOVY UNIVERSALS */
+insert ':SYNMODS:TTYDCL';     /* TERMINAL PRIMITIVES */
+insert ':SYNMODS:PLOTDCL';    /* PLOTTING PRIMITIVES */
+
+insert ':SYNMODS:GETDCL';     /* GET NEXT EVENT MODULE */
+insert ':SYNMODS:GETVDCL';    /* GET NEXT EVENT VARIABLES */
+insert ':SYNMODS:MOUSSDCL';   /* MOUSE USER FUNCTIONS--NOT REAL TIME */
+insert ':SYNMODS:MOUSRDCL';   /* MOUSE REAL TIME */
+insert ':SYNMODS:XMEMDCL';    /* COPY EXT MEM    */
+
+
+dcl Drag.Object              proc (fixed,fixed) recursive;
+dcl Process.Screen.Event     proc               recursive;
+dcl Process.Arrow.Key        proc               recursive;
+dcl Process.Mouse.Button     proc               recursive;
+
+/* Things that must be public between the parts of the screen manager */
+
+dcl Erase.Object.Range       proc (fixed,fixed) external;
+dcl Undefine.Object.Range    proc (fixed,fixed) external;
+dcl Disable.Object.Range     proc (fixed,fixed) external;
+dcl Activate.Object.Range    proc (fixed,fixed) external;
+dcl Update.Object.Range      proc (fixed,fixed) external;
+dcl Events.Pending           proc               external;
+dcl Read.Event.Queue         proc (fixed)       external;
+dcl Update.Screen            proc               external;
+dcl Get.Object               proc (fixed)       external;
+dcl Write.Event.Queue        proc (fixed,fixed,fixed) external;
+dcl Locate.Object            proc (fixed)       external; /* set up ptr to object with our Id # */
+dcl Read.Object              proc (fixed)       external;
+dcl Write.Object             proc (fixed,fixed) external;
+dcl Check.Update.On.Deposit  proc (fixed)       external; /* Called by most object's deposit routines */
+dcl Update.Object            proc (fixed)       external;
+dcl Allocate.Id              proc (fixed)       external;
+dcl Allocate.New.Object      proc (fixed)       external;
+dcl Fetch.Object.Info        proc (fixed,fixed) external;
+dcl Erase.Transparent.Object proc (fixed)       external;
+dcl Update.Fixed.Point       proc (fixed)       external;
+dcl Update.32Bit.Msec        proc (fixed)       external;
+dcl Update.32BIT.SMPTE       proc (fixed)       external;
+dcl Update.Sound.File.Time   proc (fixed)       external;
+dcl Update.Label             proc (fixed)       external;
+dcl Publish.Label            proc (fixed,fixed) external;
+dcl Update.String            proc (fixed)       external;
+dcl Update.Graphics.String   proc (fixed)       external;
+dcl Update.Switch            proc (fixed)       external;
+dcl Update.Scroll.Bar        proc (fixed)       external;
+dcl Get.Fixed.Point          proc (fixed)       external;
+dcl Get.32Bit.MSEC           proc (fixed)       external;
+dcl Get.32Bit.SMPTE          proc (fixed)       external;
+dcl Get.Sound.File.Time      proc (fixed)       external;
+dcl Get.Label                proc (fixed)       external;
+dcl Get.String               proc (fixed)       external;
+dcl Get.Graphics.String      proc (fixed)       external;
+dcl Get.Switch               proc (fixed)       external;
+dcl Get.Scroll.Bar           proc (fixed)       external;
+dcl Jog.Fixed.Point          proc (fixed,fixed,fixed) external;
+dcl Jog.32Bit.MSEC           proc (fixed,fixed,fixed) external;
+dcl Jog.Sound.File.Time      proc (fixed,fixed,fixed) external;
+dcl Jog.32Bit.SMPTE          proc (fixed,fixed,fixed) external;
+dcl Deposit.Token            proc (fixed,array) external;
+dcl Map.Point.To.Object      proc (fixed,fixed) external;
+dcl Point.In.Object          proc (fixed,fixed,fixed) external;
+dcl Select.New.Cur.Obj       proc (fixed,fixed,fixed) external;
+dcl Calculate.Closest.Object proc (fixed,fixed,fixed) external;
+
+dcl Screen.Event.Group     fixed external;  /* Group Id for last event */
+dcl Screen.Event.Code      fixed external;  /* Event Type Code */
+dcl Screen.Event.Info      fixed external;
+dcl Screen.Event.Id        fixed external;  /* Id of last event */
+dcl Screen.Event.Table.Col fixed external;  /* Table col when Id type is a table */
+dcl Screen.Event.Table.Row fixed external;  /* Table row when Id type is a table */
+dcl Any.RealTime.Objects   fixed external;  /* non-zero if any O#ACT.RealTime.Object bits set */
+dcl Cur.Obj.Id             fixed external;  /* Id name of picked object */
+dcl Prev.Obj.Id            fixed external;
+dcl Dragging.Object        fixed external;
+dcl Dragging.Button        fixed external;
+dcl Screen.Changed         fixed external;  /* When true a deposit has happened */
+dcl Object.Ptr             fixed external;  /* a global ptr set by some routines */
+dcl Default.Action         fixed external;  /* Basic action */
+dcl Default.Attr           fixed external;
+dcl Animate.Screen.Enabled fixed external;
+dcl Screen.Base            fixed external;  /* abs xmem sector ptr to start of object storage data */
+dcl Disable.Attr.Reset     fixed external;  /* non-zero to override resetting terminal to Normal mode after object updates */
+dcl In.Event               fixed external;  /* Input  pointer (WRITE)  */
+dcl Out.Event              fixed external;  /* Output pointer (READ)   */
+dcl Queue.Base             fixed external;  /* Abs Sector ptr to base of Event Queue info */
+dcl Screen.Event.Obj.Code  fixed external;  /* Object type when Info = S#ObjectEvent */
+dcl Screen.Event.Obj.Info  fixed external;  /* Object event code when Info = S#ObjectEvent */
+dcl Screen.Event.Obj.Col   fixed external;  /* Table col when Id type is a table */
+dcl Screen.Event.Obj.Row   fixed external;  /* Table row when Id type is a table */
+dcl Object.Exit.Code       fixed external;  /* Code returned by last object get routine */
+dcl Object.Exit.Info       fixed external;  /* Info returned by last object get routine */
+dcl Object.Exit.Id         fixed external;  /* ID   returned by last object get routine */
+
+insert ':SYNSOU:SMGRMOD:SMG-PANL';   /* Panel Manager                */
+insert ':SYNSOU:SMGRMOD:SMG-GRP';    /* Object Grouping routines     */
+insert ':SYNSOU:SMGRMOD:SMG-GET';    /* Get Event routines           */
+insert ':SYNSOU:SMGRMOD:SMG-OSET';   /* Object Set routines          */
+insert ':SYNSOU:SMGRMOD:SMG-TABL';   /* Table routines               */
+insert ':SYNSOU:SMGRMOD:SMG-PROC';   /* Event Processing routines    */
+
+end smgr2mod;

@@ -1,0 +1,1115 @@
+/* TDSNSOUB $Title  Timbre Frame Display */
+
+/*
+   2/20/87 - BSW This is part of the Numeric Timbre Display Module TDSNSOU
+*/
+
+   dcl first.frame fixed; /* first frame displayed */
+   dcl last.frame  fixed; /* last frame displayed */
+   dcl tds.harm#   fixed; /* harmonic number */
+
+   LAB.HARMS: proc swapable; /* labels the timbre frame harmonics depending upon HGS */
+      if hgs=0 then do;     /* if first group of harmonics */
+         call cpos(5,69);
+         call ps(' 1');
+         call cpos(5,72);
+         call ps('12');
+      end;
+      else do;              /* if second group of harmonics */
+         call cpos(5,69);
+         call ps('13');
+         call cpos(5,72);
+         call ps('24');
+      end;
+      tds.change=1;   /* note that the display screen has been changed */
+
+   end LAB.HARMS;
+
+   /* $page */
+
+   MAP.SYN.TO.FRAM: proc(prm) fixed swapable; /* maps a Synclavier parameter to a timbre frame parameter */
+      dcl prm fixed; /* parameter number */
+
+      if      (tds.frame#<>0) and (prm=2)  then prm=3;    /* splice shape */
+      else if (tds.frame#<>0) and (prm=10) then prm=5;    /* pitch offset */
+      else if (prm=0) or (prm=1) or (prm=4) then do;
+         if      prm=0 then prm=1;                   /* splice delay */
+         else if prm=1 then prm=2;                   /* splice time */
+         else    prm=4;                              /* peak level */
+      end;
+      else if (prm>=12) and (prm<36) then do;        /* harmonics */
+         tds.harm#=(prm-11)-(12*hgs);
+         prm=6;
+      end;
+      else prm=-1;
+      return prm;
+   end MAP.SYN.TO.FRAM;
+
+   MAP.FRAM.TO.SYN: proc(prm) fixed swapable; /* maps a timbre frame parameter to a Synclavier(R) parameter */
+      dcl prm fixed;
+      dcl i   fixed;
+
+      if                      prm=1  then prm=0;       /* splice delay time */
+      else if                 prm=2  then prm=1;       /* splice time */
+      else if (tds.frame#<>0) and (prm=3) then prm=2;  /* splice shape */
+      else if                 prm=4  then prm=4;       /* peak level */
+      else if (tds.frame#<>0) and (prm=5) then prm=10; /* pitch offset */
+      else if                 prm=6  then do;
+         write(mam)=trd.ptr+1; write(mal)=3; i=read(md); /* find the harmonic group selected */
+         prm=(tds.harm#+11)+(12*i); /* harmonics */
+      end;
+      else prm=-1;
+
+      return prm;
+   end MAP.FRAM.TO.SYN;
+
+   POS.ALPHA.FRAME.CURSOR: proc swapable; /* moves the cursor depending upon frame, parameter, and harmonic number */
+
+      if inc.tds=0 then return;
+
+      if tds.frame#<>-1 then do;
+         do case(tds.parm#);
+            ;                                            /* 0: frame number */
+            call cpos(8+(tds.frame#-first.frame)*3,8);   /* 1: splice delay */
+            call cpos(8+(tds.frame#-first.frame)*3,14);  /* 2: splice time */
+            call cpos(8+(tds.frame#-first.frame)*3,22);  /* 3: splice shape */
+            call cpos(8+(tds.frame#-first.frame)*3,29);  /* 4: peak level */
+            call cpos(8+(tds.frame#-first.frame)*3,35);  /* 5: pitch offset */
+            do;                                          /* 6: harmonics */
+               if tds.harm#<=6 then call cpos(8+(tds.frame#-first.frame)*3,37+6*tds.harm#);      /* first group of 6 harmonics */
+               else            call cpos(9+(tds.frame#-first.frame)*3,37+6*(tds.harm#-6));  /* second group of 6 harmonics */
+            end;
+         end;
+         if token(0)<>0 then call ps(token);             /* we have some characters to display */
+      end;
+      else call POS.CHOICE.CURSOR(3);
+
+   end POS.ALPHA.FRAME.CURSOR;
+
+   /* $Subtitle Routines to Manipulate the Timbre Frame Display */
+
+   TIMBRE.FRAME.SNAP.SHOT:  proc swapable; /* takes a picture of current timbre frame parms */
+      dcl pt#        fixed;  /* selected partial number */
+      dcl frame#     fixed;  /* currently selected frame number */
+      dcl base       fixed;
+      dcl (i,j)      fixed;
+      dcl num.frames fixed;  /* number of timbre frames */
+
+      /* SNAP SHOT AREA:
+         Whenever this routine is called a copy of timbre frame parameters
+         is written to external memory (all except Wave Table words).  45 basic numbers for each
+         timbre frame are saved.  Each timbre frame has been allocated 50 words
+         45 of which are accounted for by the above parameters.  In addition to these
+         parameters, 6 words have been reserved at the start of the snap
+         shot area to store other info about the timbre frames as defined below:
+
+            MISC INFO AREA
+            Word 0  --> Total Number of Frames
+            Word 1  --> First Timbre Frame displayed
+            Word 2  --> Last Timbre Frame displayed
+            Word 3  --> Sampled HGS Value
+            Words4-6--> Unused
+
+                       ---------------------------------
+                      |  6 wds of misc snap shot info  |
+             S        |---------------------------------|
+             N        |  45 wds of parms: timbre frame#0|
+             A        |   5 unused wds                  |
+             P  A      ---------------------------------
+                R     |  45 wds of parms: timbre frame#1|
+             S  E     |   5 unused wds                  |
+             H  A      ---------------------------------
+             O        |  45 wds of parms: timbre frame#2|
+             T        |   5 unused wds                  |
+                       ---------------------------------
+                      |  45 wds of parms: timbre frame#3|
+                      |   5 unused wds                  |
+                       --------------------------------- 
+                      |  45 wds of parms: timbre frame#4|
+                      |   5 unused wds                  |
+                       ---------------------------------   */
+      do i=0 to 255;                          /* initialize temporary buffer */
+         misc.buf(i)=0;
+      end;
+
+      /* $page */
+
+      pt#=FIND.PARTIAL;
+      if TIM.HEAD.LOOKUP(0,tim.synth.typ+pt#)<2 then do;        /* if a synthesized timbre */
+         num.frames=COUNT.TIMBRE.FRAMES(pt#);        /* find number of timbre frames in partial */
+         if last.frame>num.frames      /* keep last frame number displayed within boundaries */
+         then last.frame=num.frames;
+         first.frame=last.frame-4;     /* set default */
+         if first.frame<0 then first.frame=0;
+
+         frame#=C.FRAME(pt#);
+         if frame#>last.frame then do;  /* go to the dialed in frame number */
+            last.frame=frame#;          /* and set limits to scroll downwards */
+            first.frame=last.frame-4;
+            if first.frame<0 then first.frame=0;
+         end;
+         else if frame#<first.frame then do;
+            first.frame=frame#;          /* and set limits to scroll upwards */
+            last.frame =first.frame+4;
+            if last.frame>num.frames    /* keep last frame number displayed within boundaries */
+            then last.frame=num.frames;
+         end;
+         else do;
+            first.frame=last.frame-4;
+            if first.frame<0 then first.frame=0;
+            last.frame=first.frame+4;
+            if last.frame>num.frames    /* keep last frame number displayed within boundaries */
+            then last.frame=num.frames;
+         end;
+         misc.buf(0)=num.frames;           /* set the total number of frames */
+         misc.buf(1)=first.frame;          /* indicate first timbre frame displayed */
+         misc.buf(2)=last.frame;           /* indicate last timbre frame displayed */
+         misc.buf(3)=hgs;                  /* sampled HGS value */
+         do i=first.frame to last.frame;      /* do for active timbre frames */
+            base=6+(i-first.frame)*50;        /* determine base address for displayed timbre frame */
+            misc.buf(base)=i;                 /* indicate frame number */
+            call p.lookup(FIND.FRAME(pt#,i)); /* Set xmem ptr to timbre frame data */
+            call copy.in(addr(misc.buf(base+1)),44); /* copy timbre frame info to snapshot area */
+         end;                                        /* of do for active timbre frames */
+         if (last.frame-first.frame)<4               /* if timbre frame info does not occupy sector */
+         then do i=(last.frame-first.frame)+1 to 4;  /* force remainder of sector to -1 */
+            base=6+i*50;
+            do j=0 to 49;
+               misc.buf(base+j)=-1;
+            end;
+         end;
+      end;                                         /* of if a synthesized timbre */
+      write(mam)=trd.ptr;                          /* point to snapshot area */
+      call copy.out(addr(misc.buf(0)),256);        /* copy temp buffer to snap shot area */
+   end TIMBRE.FRAME.SNAP.SHOT;
+   /* $page */
+
+   EXTRACT.FRAME.PARM: proc (sec,frame,tds.parm#,harm) fixed swapable;
+      dcl sec      fixed;  /* xmem base sector */
+      dcl frame    fixed;  /* frame number */
+      dcl tds.parm# fixed; /* parameter number */
+      dcl harm     fixed;  /* harmonic coefficient */
+      dcl base     fixed;  /* base address */
+      dcl val      fixed;
+
+      write(mam)=sec;
+      base=6+(frame-first.frame)*50;       /* point to timbre frame */
+      if frame=0 then do case (tds.parm#); /* do for specified parameter if frame 0 */
+         return frame;                     /* 0: frame */
+         do;                               /* 1: splice delay time */
+            write(mal)=base+1+p.edelay;    
+            return read(md);
+         end;
+         do;                               /* 2: splice time */
+            write(mal)=base+1+p.eattack;
+            return read(md);
+         end;
+         return 0;                         /* 3: splice shape */
+         do;                               /* 4: peak level */
+            write(mal)=base+1+p.epeakl;
+            return read(md)&"1777";
+         end;
+         return 0;                         /* 5: pitch offset */
+         do;                               /* 6: harmonics */
+            write(mal)=base+p.coef.loc+harm;
+            return read(md)&"1777";
+         end;
+      end;                                 /* of do for specified parameter if frame 0 */
+      else do case (tds.parm#);            /* do for specified parameter if not frame 0 */
+         return frame;                     /* 0: frame */
+         do;                               /* 1: splice delay time */
+            write(mal)=base+1+p.e.seg.del;
+            return read(md);
+         end;
+         do;                               /* 2: splice time */
+            write(mal)=base+1+p.e.seg.atk;
+            return read(md);
+         end;
+         do;                               /* 3: splice shape */
+            write(mal)=base+1+p.e.seg.exp;
+            return read(md);                
+         end;
+         do;                               /* 4: peak level */
+            write(mal)=base+1+p.e.seg.pk;
+            return read(md)&"1777";
+         end;
+         do;                               /* 5: pitch offset */
+            write(mal)=base+1+p.e.seg.pdel;
+            return read(md);      
+         end;
+         do;
+            write(mal)=base+s.env.h+harm;   
+            return read(md)&"1777";
+         end;
+      end;                                 /* of do case if not frame 0 */
+
+   end EXTRACT.FRAME.PARM;
+
+   /* $page */
+
+   UPDATE.FRAME.PARM: proc (sec,frame,tds.parm#,harm,new.val) fixed swapable; /* puts new value in display area */
+      dcl sec       fixed; /* xmem base sector */
+      dcl frame     fixed; /* frame number */
+      dcl tds.parm# fixed; /* parameter number */
+      dcl harm      fixed; /* harmonic coefficient */
+      dcl new.val   fixed; /* updated value */
+      dcl base      fixed; /* base address */
+
+      write(mam)=sec;
+      base=6+(frame-first.frame)*50;
+      if frame=0 then do case (tds.parm#); /* do for specified parameter if frame 0 */
+         do;                               /* 0: frame */
+            write(mal)=base;      
+            write(md)=new.val;
+         end;
+         do;
+            write(mal)=base+1+p.edelay;    /* 1: splice delay time*/
+            write(md)=new.val;
+         end;
+         do;                               /* 2: splice time */
+            write(mal)=base+1+p.eattack;
+            write(md)=new.val;
+         end;
+         ;                                 /* 3: splice shape */
+         do;                               /* 4: peak level */
+            write(mal)=base+1+p.epeakl;
+            write(md)=read(md)&"176000"\new.val; /* lower 10 bits */
+         end;
+         ;                                 /* 5: pitch offset */
+         do;                               /* 6: harmonics */
+            write(mal)=base+p.coef.loc+harm;   /* harmonic coefficients */
+            write(md)=read(md)&"176000"\new.val; /* lower 10 bits */
+         end;
+      end;                                 /* of do for specified parameter if frame 0 */
+      else do case (tds.parm#);            /* do for specified parameter if not frame 0 */
+         do;                               /* 0: frame */
+            write(mal)=base;      
+            write(md)=new.val;
+         end;
+         do;
+            write(mal)=base+1+p.e.seg.del;   /* 1: splice delay time*/
+            write(md)=new.val;
+         end;
+         do;                               /* 2: splice time */
+            write(mal)=base+1+p.e.seg.atk;
+            write(md)=new.val;
+         end;
+         do;                               /* 3: splice shape */
+            write(mal)=base+1+p.e.seg.exp;
+            write(md)=new.val;            
+         end;
+         do;                               /* 4: peak level */
+            write(mal)=base+1+p.e.seg.pk;
+            write(md)=read(md)&"176000"\new.val; /* lower 10 bits */
+         end;
+         do;                               /* 5: pitch offset */
+            write(mal)=base+1+p.e.seg.pdel;
+            write(md)=new.val;   
+         end;
+         do;                               /* 6: harmonics */
+            write(mal)=base+s.env.h+harm;     
+            write(md)=read(md)&"176000"\new.val; /* lower 10 bits */
+         end;
+      end;                                 /* of do case if not frame 0 */
+
+   end UPDATE.FRAME.PARM;
+
+   /* $page */
+
+   DISP.ALPHA.FRAME.PARM: proc(frame,tds.parm#,harm,val) swapable;
+      dcl frame     fixed;   /* frame number */
+      dcl tds.parm# fixed;   /* parameter number */
+      dcl harm      fixed;   /* harmonic number */
+      dcl val       fixed;   /* parameter value */
+
+      tds.change=1;                         /* note that the display screen has been changed */
+      do case (tds.parm#);                  /* do for specified parameter*/
+         do;                                /* 0: frame number */
+            call cpos(8+(frame-first.frame)*3,1);       
+            call print.parm(frame,0,0,5,0);
+         end;
+         do;                                /* 1: splice delay */
+            call cpos(8+(frame-first.frame)*3,8);
+            call print.parm(val,0,0,5,0); 
+         end;
+         do;                                /* 2: splice time */
+            if frame=0 then do;
+               load val; mul 36864; val=read(4);
+            end;
+            call cpos(8+(frame-first.frame)*3,14);
+            call print.parm(val,0,0,5,0);
+         end;
+         do;                                /* 3: splice shape */
+            call cpos(8+(frame-first.frame)*3,22);
+            call print.parm(val,0,0,5,0);
+         end;
+         do;                                /* 4: peak level */
+            call cpos(8+(frame-first.frame)*3,29);  
+            call print.parm(val,0,0,5,1); 
+         end;
+         do;                                /* 5: pitch offset */
+            call cpos(8+(frame-first.frame)*3,35); 
+            if val>=0 then call print.parm(val,0,0,6,2);
+            else           call print.parm(val,0,1,6,2);
+         end;
+         do;                                /* 6: harmonic coefficients */
+            if harm<=6 then call cpos(8+(frame-first.frame)*3,37+6*harm);     
+            else            call cpos(9+(frame-first.frame)*3,37+6*(harm-6)); 
+            call print.parm(val,0,0,5,1);
+         end;
+      end;                               /* of do for specified parameter */
+   end DISP.ALPHA.FRAME.PARM;
+
+   DISP.ALPHA.FRAME: proc(frame) swapable;      /* displays timbre frame info for selected partial */
+      dcl frame    fixed;   /* frame number */
+      dcl val      fixed;   /* value */
+      dcl (i,j)    fixed;
+
+      do i=0 to 5;     /* do for all timbre frame settings */
+         val=EXTRACT.FRAME.PARM(trd.ptr+1,frame,i,0);
+         call DISP.ALPHA.FRAME.PARM(frame,i,0,val);    /* display the parameter value */
+      end;
+      write(mam)=trd.ptr+1;
+      write(mal)=3; j=read(md); /* get the current harmonic group in display area */
+      do i=1 to 12;             /* do for the harmonic group selected */
+         val=EXTRACT.FRAME.PARM(trd.ptr+1,frame,6,i+12*j);
+         call DISP.ALPHA.FRAME.PARM(frame,6,i,val);    /* display the harmonic value */
+      end;
+   end DISP.ALPHA.FRAME;
+
+   /* $page */
+
+   REMOVE.ALPHA.FRAME.PARM: proc(frame,tds.parm#,harm) swapable; /* Removes timbre frame parameters given a frame number less than five */
+      dcl frame     fixed;
+      dcl tds.parm# fixed;
+      dcl harm      fixed;
+
+      p.sp: proc(num);  /* prints the specified number of spaces */
+         dcl num fixed;
+         do num=1 to num;
+            call pc(sp);
+         end;
+      end p.sp;
+      
+      do case (tds.parm#);                      /* do for specified parameter*/
+         call cpos(8+(frame*3),1);  /* 0: timbre frame number */      
+         call cpos(8+(frame*3),8);  /* 1: splice delay */
+         call cpos(8+(frame*3),14); /* 2: splice time */
+         call cpos(8+(frame*3),22); /* 3: splice shape */
+         call cpos(8+(frame*3),29); /* 4: peak level */  
+         call cpos(8+(frame*3),35); /* 5: pitch offset */ 
+         do;                      /* 6: harmonic coefficients */
+            if harm<=6 then call cpos(8+(frame*3),37+6*harm);      /* first group of 6 harmonics */
+            else            call cpos(9+(frame*3),37+6*(harm-6));  /* second group of 6 harmonics */
+         end;
+      end;                                      /* of do for specified parameter */
+      if tds.parm#=5 then call p.sp(6);         /* pitch offset has a field length of 6 */
+      else call p.sp(5);
+      tds.change=1;
+   end REMOVE.ALPHA.FRAME.PARM;
+
+   REMOVE.ALPHA.FRAME: proc(frame) swapable;
+      dcl frame fixed;
+      dcl i     fixed;
+
+      do i=0 to 5;
+         call REMOVE.ALPHA.FRAME.PARM(frame,i,0);
+      end;
+      do i=1 to 12;             /* do for the harmonic group selected */
+         call REMOVE.ALPHA.FRAME.PARM(frame,6,i);    /* display the harmonic value */
+      end;
+   end REMOVE.ALPHA.FRAME;
+
+   /* $page */
+
+   PROCESS.FRAME.ALPHA.CHANGES: proc(frame) swapable; /* looks at parameters in frame and changes them if difference*/
+      dcl frame       fixed;  /* frame number */
+      dcl snap.val    fixed;
+      dcl disp.val    fixed;
+      dcl any.changes fixed;
+      dcl (i,j,k)     fixed;
+
+      any.changes=0;
+      i=6+(frame-first.frame)*50;   /* timbre frame parameters start here */
+
+      if frame=0 then do;
+         write(mam)=trd.ptr+1; write(mal)=i;   /* check frame currently displayed */
+         if read(md)<>0 then do;               /* if comparing frame 0 and a non-zero frame */
+            any.changes=1;
+            do j=0 to 5;                       /* update and display all of frame 0 */
+               write(mam)=trd.ptr; write(mal)=i;
+               if (j=0) or (j=1) or (j=2) then snap.val=read(md);/* if frame number, splice delay, or splice time */   
+               else if j=5 then snap.val=read(md)&"1777";        /* if peak level */
+               else snap.val=0;                                  /* otherwise splice shape or pitch offset is undefined */
+               if j=5 then k=4;                
+               else        k=j;                                  /* map the parameter */
+               call DISP.ALPHA.FRAME.PARM(frame,k,0,snap.val);
+               call UPDATE.FRAME.PARM(trd.ptr+1,frame,k,0,snap.val); /* update the parameter in the display area */
+               i=i+1;
+            end;
+            write(mam)=trd.ptr; write(mal)=3;    /* find the appropriate group of harmonics */
+            i=6+p.coef.loc+1+(read(md)*12);      /* point to harmonics */
+            do j=1 to 12;
+               write(mam)=trd.ptr;   write(mal)=i; snap.val=read(md)&"1777";
+               call DISP.ALPHA.FRAME.PARM(frame,6,j,snap.val);
+               call UPDATE.FRAME.PARM(trd.ptr+1,frame,6,j,snap.val); /* update the parameter in the display area */
+               i=i+1;
+            end;
+         end;                  /* of if comparing frame 0 in snapshot with a non-zero frame in display area */
+         else do;              /* if comparing frame 0 in snapshot area with frame 0 in display area */
+            do j=0 to 5;
+               write(mam)=trd.ptr;      write(mal)=i;
+               if (j=0) or (j=1) or (j=2) then do;/* if frame number, splice delay, or splice time */   
+                  snap.val=read(md);
+                  write(mam)=trd.ptr+1; write(mal)=i;
+                  disp.val=read(md);
+               end;
+               else if j=5 then do;               /* if peak level */
+                  snap.val=read(md)&"1777";
+                  write(mam)=trd.ptr+1; write(mal)=i;
+                  disp.val=read(md)&"1777";
+               end;
+               else do;                           /* otherwise splice shape or pitch offset is undefined */
+                  snap.val=0;
+                  disp.val=0;
+               end;
+               if snap.val<>disp.val then do;     /* if any differences */
+                  any.changes=1;
+                  if j=5 then k=4;                
+                  else        k=j;                /* map the parameter */
+                  call DISP.ALPHA.FRAME.PARM(frame,k,0,snap.val);
+                  call UPDATE.FRAME.PARM(trd.ptr+1,frame,k,0,snap.val); /* update the parameter in the display area */
+               end;
+               i=i+1;
+            end;
+            write(mam)=trd.ptr; write(mal)=3;    /* find the appropriate group of harmonics */
+            i=6+p.coef.loc+1+(read(md)*12);      /* point to harmonics */
+            do j=1 to 12;
+               write(mam)=trd.ptr;   write(mal)=i; snap.val=read(md)&"1777";
+               write(mam)=trd.ptr+1; write(mal)=i; disp.val=read(md)&"1777";
+               if snap.val<>disp.val then do;
+                  any.changes=1;
+                  call DISP.ALPHA.FRAME.PARM(frame,6,j,snap.val);
+                  call UPDATE.FRAME.PARM(trd.ptr+1,frame,6,j,snap.val); /* update the parameter in the display area */
+               end;
+               i=i+1;
+            end;
+         end;                                 /* of if comparing frame 0 in snapshot with frame 0 in display area */
+      end;
+
+      /* $page */
+
+      else do;                                /* if not frame 0 */
+         write(mam)=trd.ptr+1; write(mal)=i;  /* check if frame currently displayed is frame 0*/
+         if read(md)=0 then do;               /* if comparing a non-zero frame in snapshot with frame 0 in display*/
+            any.changes=1;                    /* update the entire frame */
+            do j=0 to 11;
+               if ((j>=0) and (j<=3)) or (j=11) then do; /* if frame, delay, splice time or pitch offset */
+                  write(mam)=trd.ptr;   write(mal)=i; snap.val=read(md);
+                  if j=0 then i=6+(frame-first.frame)*50+s.env.p;  /* 12 parameters start here */
+               end;
+               else if j=5 then snap.val=read(md)&"1777";
+               else snap.val=0;                         
+               if ((j>=0) and (j<=3)) or (j=5) or (j=11) then do;     /* if frame, delay, splice time or pitch offset */
+                  if      j=5  then k=4;                              /* if peak level   */
+                  else if j=11 then k=5;                              /* map parameter   */
+                  else              k=j;
+                  call DISP.ALPHA.FRAME.PARM(frame,k,0,snap.val);
+                  call UPDATE.FRAME.PARM(trd.ptr+1,frame,k,0,snap.val); /* update the parameter in the display area */
+               end;
+               i=i+1;
+            end;
+            write(mam)=trd.ptr; write(mal)=3; /* find the appropriate group of harmonics */
+            i=6+(frame-first.frame)*50+s.env.h+1+(read(md)*12);     /* point to harmonics */
+            do j=1 to 12;
+               write(mam)=trd.ptr;   write(mal)=i; snap.val=read(md)&"1777";
+               call DISP.ALPHA.FRAME.PARM(frame,6,j,snap.val);
+               call UPDATE.FRAME.PARM(trd.ptr+1,frame,6,j,snap.val); /* update the parameter in the display area */
+               i=i+1;
+            end;
+         end;         /* of if comparing a non-zero frame in snapshot with frame 0 in display */
+         else do;     /* if comparing two non-zero timbre frames */
+            do j=0 to 11;
+               if ((j>=0) and (j<=3)) or (j=11) then do; /* if frame, delay, splice time or pitch offset */
+                  write(mam)=trd.ptr;   write(mal)=i; snap.val=read(md);
+                  write(mam)=trd.ptr+1; write(mal)=i; disp.val=read(md);
+                  if j=0 then i=6+(frame-first.frame)*50+s.env.p;  /* 12 parameters start here */
+               end;
+               else if j=5 then do;
+                  write(mam)=trd.ptr;   write(mal)=i; snap.val=read(md)&"1777";
+                  write(mam)=trd.ptr+1; write(mal)=i; disp.val=read(md)&"1777";
+               end;
+               else do;                          /* otherwise, we do not care about differences */
+                  snap.val=0;
+                  disp.val=0;
+               end;
+
+               if snap.val<>disp.val then do;    /* if any differences */
+                  any.changes=1;
+                  if      j=5  then k=4;         /* if peak level   */
+                  else if j=11 then k=5;         /* if pitch offset */
+                  else k=j;                      /* map parameter   */
+                  call DISP.ALPHA.FRAME.PARM(frame,k,0,snap.val);
+                  call UPDATE.FRAME.PARM(trd.ptr+1,frame,k,0,snap.val); /* update the parameter in the display area */
+               end;
+               i=i+1;
+            end;
+            write(mam)=trd.ptr; write(mal)=3; /* find the appropriate group of harmonics */
+            i=6+(frame-first.frame)*50+s.env.h+1+(read(md)*12);     /* point to harmonics */
+            do j=1 to 12;
+               write(mam)=trd.ptr;   write(mal)=i; snap.val=read(md)&"1777";
+               write(mam)=trd.ptr+1; write(mal)=i; disp.val=read(md)&"1777";
+               if snap.val<>disp.val then do;
+                  any.changes=1;
+                  call DISP.ALPHA.FRAME.PARM(frame,6,j,snap.val);
+                  call UPDATE.FRAME.PARM(trd.ptr+1,frame,6,j,snap.val); /* update the parameter in the display area */
+               end;
+               i=i+1;
+            end;
+         end;    /* of if comparing two non-zero timbre frames */
+      end;       /* of if not frame 0 */
+
+      /* $page */
+
+      if any.changes<>0 then do;   /* if any changes update display area */
+         i=6+(frame-first.frame)*50;
+         write(mam)=trd.ptr;   write(mal)=i;   
+         call copy.in (addr(misc.buf(0)),50);
+         write(mam)=trd.ptr+1; write(mal)=i;
+         call copy.out(addr(misc.buf(0)),50);
+      end;
+
+   end PROCESS.FRAME.ALPHA.CHANGES;
+
+   /* $SubTitle Update Timbre Frame Display */
+
+   PRINT.PARTIAL.NUMBER:proc(par,x,y) swapable; /* print partial number */
+      dcl par    fixed;       /* partial */
+      dcl (x,y)  fixed;       /* starting location */
+
+      call cpos(x,y);
+      call pnum(par+1,0);    /* print partial timbre number */
+   end PRINT.PARTIAL.NUMBER;
+
+   UPDATE.FRAME.ALPHA.DISP: proc swapable; /* processes timbre frame changes */
+      dcl pt#          fixed; /* partial timbre number */
+      dcl val          fixed;
+      dcl (i,j,k)      fixed;
+
+      if inc.tds=0 then return;
+
+      do while (next.event.info<>0);   /* stay here for consecutive knob changes */
+
+         if (num.of.d50.in.chars<>0)   /* but if character typed,  then exit */
+         then do;
+            new.ABLE.prm.info=next.event.info;  /* force return */
+            return;
+         end;
+
+         call TIMBRE.FRAME.SNAP.SHOT;
+         call run.syn.loop;
+
+         if (new.timbre.info      <> 0)
+         or (new.ABLE.timbre.info <> 0)
+         then return;
+
+         write(mam)=trd.ptr;   write(mal)=3; k=read(md); /* look up snap shot Harmonic Group Select */
+         write(mam)=trd.ptr+1; write(mal)=3;             /* look up display value */
+         if k<>read(md) then do;                         /* if there is a difference between the two */
+            write(md)=k;                                 /* update HGS in display area */
+            call LAB.HARMS;                              /* update coefficient label on the screen */
+            do i=first.frame to last.frame;
+               do j=1 to 12;
+                  val=EXTRACT.FRAME.PARM(trd.ptr,i,6,j+12*k);
+                  call DISP.ALPHA.FRAME.PARM(i,6,j,val);
+               end;
+            end;
+         end;
+
+         pt#=FIND.PARTIAL;                         /* get selected partial */
+         if TIM.HEAD.LOOKUP(0,tim.synth.typ+pt#)<2 then do;        /* if a synthesized timbre */
+            if pt#<>previous.partial then do;
+               previous.partial=pt#;
+               call PRINT.PARTIAL.NUMBER(previous.partial,1,tf.part.num);  /* if new partial update the number*/
+               tds.change=1;                              /* note that the display screen has been changed */
+            end;
+
+            do i=first.frame to last.frame;
+               call PROCESS.FRAME.ALPHA.CHANGES(i); /* process any changes that may occur between snap and disp */
+            end;
+
+            write(mam)=trd.ptr; k=read(md);   /* compare total number of timbre frames in snapshot partial */
+            write(mam)=trd.ptr+1;
+            if k<>read(md) then do;           /* if there is a difference in the number of timbre frames */
+               write(md)=k;                   /* update # of timbre frames in display area */
+               if (last.frame-first.frame)<4  /* if current number of timbre frames less than total number of frames on screen */
+               then do i=(last.frame-first.frame)+1 to 4; /* do for all frames on the screen */
+                  call REMOVE.ALPHA.FRAME(i);             /* remove the remaining timbre frames */
+                  j=6+i*50;
+                  write(mam)=trd.ptr;   write(mal)=j;     /* copy snapshot area into display area */  
+                  call copy.in (addr(misc.buf(0)),50);
+                  write(mam)=trd.ptr+1; write(mal)=j;
+                  call copy.out(addr(misc.buf(0)),50);
+               end;
+            end;
+            write(mam)=trd.ptr;   write(mal)=1; /* see if there is a differrence in first frame currently displayed */
+            k=read(md);
+            write(mam)=trd.ptr+1; write(mal)=1;
+            if k<>read(md) then write(md)=k;    /* update first frame currently displayed in display area */
+            write(mam)=trd.ptr;   write(mal)=2; /* see if there is a differrence in last frame currently displayed */
+            k=read(md);
+            write(mam)=trd.ptr+1; write(mal)=2;
+            if k<>read(md) then write(md)=k;    /* update last frame currently displayed in display area */
+
+         end;  /* of if a synthesized timbre */
+
+         /* $page */
+
+         if (token(0)=0) and (tds.frame#<>-1) then do;  /* only look for button activity if not typing and not on menu selection line */
+            k=active.parms(0);               /* look at number of parameters */
+            if k<>0 then do;                 /* if a parameter has been selected */
+               k=shr(active.parms(k),8);     /* parameter number is in top byte */
+               if (k>=12) and (k<24) then k=k+hgs*12; /* adjust parameter for harmonic group select */
+               if k<>last.parm# then do;     /* if different than last selected parameter */
+                  i=MAP.SYN.TO.FRAM(k);
+                  if i<>-1 then do;          /* if a valid mapping */
+                     tds.parm#=i;
+                     last.parm#=k;           /* save last selected parameter */
+                     token(0)=0;             /* reinitialize typed in value */
+                     call SET.MAX.TLEN(s.tds.afram);      /* set maximum token length for new field */
+                     call POS.ALPHA.FRAME.CURSOR;
+                  end;                       /* of if a valid mapping */
+               end;
+            end;                             /* of if a parameter has been selected */
+
+            j=C.FRAME(previous.partial);    /* look up selected timbre frame for previous partial */
+            if j<>tds.frame# then do;            /* if different from current */
+               tds.frame#=j;
+               if tds.frame#>last.frame then do; /* go to the dialed in frame number */
+                  last.frame=tds.frame#;         /* and set limits to scroll downwards */
+                  first.frame=last.frame-4;
+                  if first.frame<0 then first.frame=0;
+               end;
+               else if tds.frame#<first.frame then do;
+                  first.frame=tds.frame#;        /* and set limits to scroll upwards */
+                  last.frame=first.frame+4;
+               end;
+               call SELECT.PARTIAL(previous.partial);
+               call SELECT.TIMBRE.FRAME(previous.partial,tds.frame#); /* activate the timbre frame if it exists */
+               i=MAP.FRAM.TO.SYN(tds.parm#);            /* convert timbre frame parameter to Synclavier(R) parameter */
+               if i<>-1 then call SELECT.PARAMETER(i);  /* select parameter */
+               call SET.MAX.TLEN(s.tds.afram);          /* set maximum token length for new field */
+               token(0)=0;                              /* reinitialize typed in value */
+               call POS.ALPHA.FRAME.CURSOR;             /* move cursor to reflect change */
+            end;
+         end;  /* of only look for button activity if not typing */
+
+         next.event.info=new.ABLE.prm.info;
+         new.ABLE.prm.info=0;
+      end;    /* of stay here for consecutive knob changes */
+
+   end UPDATE.FRAME.ALPHA.DISP;
+
+   /* $SubTitle Timbre Frame Display Routine */
+
+   FRAME_ALPHA_DISPLAY: proc swapable; /* Draw Timbre Frame Display */
+      dcl i           fixed;
+
+      call cpos(0,29);
+      call DRAW.FRAME(2,'TIMBRE FRAME DISPLAY',2); 
+
+      call cpos(1,20);
+      call ps('Partial Timbre');
+      previous.partial=find.partial;
+      call PRINT.PARTIAL.NUMBER(previous.partial,1,tf.part.num);
+      call cpos(1,37);
+      call ps('of ');
+      call PRINT.TIMBRE.NAME(1,start.tf.tim.nam);
+
+      call DRAW.BOX(4,0,22,79);
+      call cpos(5,1);
+      call ps('Frame');
+      call cpos(5,8);
+      call ps('Splice');
+      call cpos(5,15);
+      call ps('Splice');
+      call cpos(5,22);
+      call ps('Splice');
+      call cpos(5,29);
+      call ps('Peak');
+      call cpos(5,35);
+      call ps('Pitch');
+      call cpos(5,46);
+      call ps('Harmonic Coefficients (  -  )');
+      call LAB.HARMS;        /* label the harmonics */
+      call cpos(6,8);
+      call ps('Delay');
+      call cpos(6,15);
+      call ps('Time');
+      call cpos(6,22);
+      call ps('Shape');
+      call cpos(6,29);
+      call ps('Level');
+      call cpos(6,35);
+      call ps('Offset');
+      call cpos(7,1);
+      call DRAW.HOR(78);
+
+      tds.frame#=-1; tds.parm#=1; tds.harm#=0;  /* initialize addresses to cursor postion */
+      last.parm#=-1;                  /* initialize last selected parameter */
+
+      call timbre.frame.snap.shot;    /* take picture of timbre frames now */
+      call run.syn.loop;
+
+      write(mam)=trd.ptr;             /* copy snap shot to display area */
+      call copy.in (addr(misc.buf(0)),256);
+      write(mam)=trd.ptr+1;
+      call copy.out(addr(misc.buf(0)),256);
+      do i=first.frame to last.frame; /* draw what is in snapshot area */
+         call DISP.ALPHA.FRAME(i);
+      end;
+   end FRAME_ALPHA_DISPLAY;
+
+   FRAME.ALPHA.DISP:proc swapable; /* TDS partial timbre graphics display routine */
+      dcl i fixed;
+
+      if inc.tds=0 then return;
+
+      call clear.term;                /* clear screen */
+      call FRAME_ALPHA_DISPLAY;
+      call cpos(2,0);
+      call ps('Press arrow key to move cursor and enter value. Press <');
+      if vt100<>0 then call ps(ENTER.STR);  /* different keys for different terminals */
+      else call ps(DBL.ESC);
+      call ps('> for Main Menu.');
+      call DRAW.MENU.SELECTION(3);    /* draw the menu selection line */
+      tds.choice=3; tds.last.choice=3;/* set menu selection to screen display */
+      call POS.CHOICE.CURSOR(3);      /* position menu selection cursor */
+      if D44_present then call PLOT.MOUSE.HOLE(mouse.hole.lowerx,mouse.hole.lowery); /* if device available draw the mouse hole */
+
+   end FRAME.ALPHA.DISP;
+
+   /* $SubTitle Timbre Frame Parameter Deposit and Toggle Routines */
+
+   TIMBRE.FRAME.DEPOSIT: proc swapable; /* parses parameter and updates timbre */
+      dcl val   fixed;
+      dcl (i,j) fixed;
+
+      call REMOVE.ERR;
+
+      if token(0)=0 then return;
+
+      if ((tds.frame#=0) and ((tds.parm#=3) or (tds.parm#=5)))  /* if timbre frame 0 and splice shape or pitch offset*/
+      then call no.timbre.frame.parm;  /* parameter is not a feature of timbre frame 0 */
+
+      i=MAP.FRAM.TO.SYN(tds.parm#);        /* map current TDS parameter to Synclavier parameter */
+      val=PARSE.SYNCLAVIER.PARM(tds.frame#,i);  /* get the appropriate Synclavier value */
+      write(mam)=trd.ptr+1; write(mal)=3; j=read(md); /* find the harmonic group selected */
+      if ertyp=0 then do;                  /* if no errors then deposit timbre frame value */
+         call STORE.SYNCL.PARAM(previous.partial,tds.frame#,par.l+i,val);
+         call UPDATE.FRAME.PARM(trd.ptr,  tds.frame#,tds.parm#,tds.harm#+12*j,val); /* update snapshot value */
+         call UPDATE.FRAME.PARM(trd.ptr+1,tds.frame#,tds.parm#,tds.harm#+12*j,val); /* update display value */
+         call DISP.ALPHA.FRAME.PARM(tds.frame#,tds.parm#,tds.harm#,val);  /* redraw value */
+      end;
+      else do;
+         val=EXTRACT.FRAME.PARM(trd.ptr+1,tds.frame#,tds.parm#,tds.harm#+12*j);
+         call DISP.ALPHA.FRAME.PARM(tds.frame#,tds.parm#,tds.harm#,val);
+      end;
+      token(0)=0;
+   end TIMBRE.FRAME.DEPOSIT;
+
+   /* $Subtitle Alphanumeric Timbre Frame Character Processing Routine */
+
+   FRAME.ALPHA.DISP.INPUT:  proc(in.cmd,in.arg) swapable; /* Timbre Frame display character processing routine */
+      dcl (in.cmd,in.arg) fixed; /* input command and argument */
+      dcl i               fixed;
+      dcl num.frames      fixed; /* number of timbre frames */
+
+      call REMOVE.ERR;
+      do case (in.cmd);                         /* do depending upon the input command */
+         do;                                    /* 0: character input */
+            if (lower.a<=in.arg) and (in.arg<=lower.z) then in.arg=in.arg-"40"; /* make uppercase */
+
+            if in.arg=ESC                       /* ESC:  Return to Main Menu */
+            then exit.my.screen=1;
+            else if in.arg=cret then do;              /* CR:   if carriage return */
+               if ((token(0)=0) and (tds.frame#=-1)) /* if nothing typed and on the menu selection line */
+               then call CHANGE.TDS.STATE(tds.choice,s.tds.afram);       
+               else do;                                 /* if something typed and carriage return */
+                  call TIMBRE.FRAME.DEPOSIT;            /* enter new value */
+                  call POS.ALPHA.FRAME.CURSOR;          /* reposition cursor */
+               end;
+            end;                                        /* of if carriage return */
+            else if in.arg=sp then do;                      /* toggle harmonic groups */
+               token(0)=0;                              /* ignore anything typed thus far */
+               call misc.button(hgs1.l+1-hgs-misc.l,1,1);   /* fake press of hgs1 or hgs2 */
+               call misc.button(hgs1.l+1-hgs-misc.l,0,1);   /* fake release of button */
+            end;
+            else if ((in.arg=asc.plus) or (in.arg=asc.min) or (in.arg=dot)
+            or ((in.arg>=asc.0) and (in.arg<=asc.9)))
+            and (token(0) ILT max.tlen) then do;
+               call pbyte(token,token(0),in.arg);
+               token(0)=token(0)+1;
+               CALL POS.ALPHA.FRAME.CURSOR;
+            end;
+
+            /* $page */
+
+            else if (in.arg=del) or (in.arg="32") then do; /* DELETE or CTRL-Z: Erase last char */
+               if token(0)<>0 then do;             /* chars to delete */
+                  token(0)=token(0)-1;
+                  if token(0)=0 then do;           /* token now has zero length */
+                     in.arg=EXTRACT.FRAME.PARM(trd.ptr+1,tds.frame#,tds.parm#,tds.harm#); /* get original value */
+                     call DISP.ALPHA.FRAME.PARM(tds.frame#,tds.parm#,tds.harm#,in.arg);         /* and redisplay it */
+                     call POS.ALPHA.FRAME.CURSOR;            /* reposition cursor */
+                  end;
+                  else do;                    /* delete the character */
+                     call POS.ALPHA.FRAME.CURSOR;
+                     call pc(sp); call pc(bs);
+                  end;
+               end;
+            end;
+
+            else if (in.arg=home) and (tds.frame#<>-1) then do;    /* HOME:  reposition to top left */
+               call TIMBRE.FRAME.DEPOSIT;
+               first.frame=0; last.frame=first.frame+4; /* go back to original screen */
+               if (tds.frame#>last.frame) then new.ABLE.prm.info = new.ABLE.prm.info \ "37";    /* force update */
+               tds.frame#=0; tds.parm#=1; tds.harm#=0;
+               call SELECT.PARTIAL(previous.partial);
+               call SELECT.TIMBRE.FRAME(previous.partial,tds.frame#);
+               i=MAP.FRAM.TO.SYN(tds.parm#);
+               if i<>-1 then do;
+                  call SELECT.PARAMETER(i);
+                  last.parm#=i;                            /* save last selected parameter */
+               end;
+               call SET.MAX.TLEN(s.tds.afram);
+               call POS.ALPHA.FRAME.CURSOR;
+            end;
+            else if (in.arg=u.arr) or (in.arg=d.arr) or (in.arg=r.arr) or (in.arg=l.arr) then do; /* if any of the arrow keys */
+               if in.arg=u.arr then do;                        /* if up arrow */
+                  if tds.frame#<>-1 then do;               /* if not on menu selection line */
+                     call TIMBRE.FRAME.DEPOSIT;
+                     tds.frame#=tds.frame#-1;
+                     if (tds.parm#=6) and (tds.harm#>6) then do;    /* move within harmonic coefficient group */
+                        tds.frame#=tds.frame#+1;
+                        tds.harm#=tds.harm#-6;
+                     end;
+                     else if (tds.parm#=6) and (tds.frame#<>-1) and (tds.frame#>=first.frame)
+                     then tds.harm#=tds.harm#+6;          /* move to next tier of harmonics for new frame */
+                     if (tds.frame#<first.frame) and (tds.frame#<>-1) then do;
+                        first.frame=tds.frame#;           /* scroll upwards */
+                        last.frame=first.frame+4;
+                        new.ABLE.prm.info = new.ABLE.prm.info \ "37"; /* force update */
+                     end;
+                  end;                                     /* of if not on menu selection line */
+               end;
+               else if in.arg=d.arr then do;                   /* if down arrow */
+                  if tds.frame#<>-1 then do;                   /* if not on selection menu line*/
+                     call TIMBRE.FRAME.DEPOSIT;
+                     tds.frame#=tds.frame#+1;
+                     if (tds.parm#=6) and (tds.harm#<=6) then do;   /* move within the harmonic group */
+                        tds.frame#=tds.frame#-1;
+                        tds.harm#=tds.harm#+6;
+                     end;
+                     else if (tds.parm#=6) and (tds.frame#<=last.frame) then tds.harm#=tds.harm#-6;     /* move to next group of harmonic coefficients */
+                     if tds.frame#>last.frame then do;                   /* scroll downwards */
+                        num.frames=COUNT.TIMBRE.FRAMES(previous.partial);
+                        if tds.frame#>num.frames then tds.frame#=num.frames;  /* set limits */
+                        else do;
+                           last.frame=tds.frame#;
+                           first.frame=last.frame-4;
+                        end;
+                        new.ABLE.prm.info = new.ABLE.prm.info \ "37";     /* force update */
+                     end;
+                  end;
+                  else tds.frame#=0;
+               end;
+
+            /* $page */
+
+               else if in.arg=r.arr then do;            /* if right arrow */
+                  if tds.frame#=-1 then do;              /* if selecting from menu */
+                     tds.last.choice=tds.choice;
+                     tds.choice=tds.choice+1;
+                     if tds.choice>5 then tds.choice=5;
+                  end;
+                  else do;
+                     call TIMBRE.FRAME.DEPOSIT;
+                     tds.parm#=tds.parm#+1;
+                     if tds.parm#>=6 then do;               /* move within the harmonic group */
+                        tds.parm#=6;
+                        tds.harm#=tds.harm#+1;
+                        if tds.harm#>12 then tds.harm#=12;           /* stay within the right boundary of the screen */
+                     end;
+                     else tds.harm#=0;
+                  end;
+               end;
+
+               else if in.arg=l.arr then do;                   /* if left arrow */
+                  if tds.frame#=-1 then do;                    /* if selecting from menu */
+                     tds.last.choice=tds.choice;
+                     tds.choice=tds.choice-1;
+                     if tds.choice<0 then tds.choice=0;
+                  end;
+                  else do;
+                     call TIMBRE.FRAME.DEPOSIT;
+                     tds.parm#=tds.parm#-1;
+                     if tds.parm#<1 then tds.parm#=1;       /* stay within the left boundary of the screen */
+                     if (tds.parm#=5) and ((tds.harm#<>0) and (tds.harm#<>1)) then do;   /* move within the harmonic group */
+                        tds.parm#=6;
+                        tds.harm#=tds.harm#-1;
+                     end;
+                     else tds.harm#=0;
+                  end;
+               end;
+
+               if tds.frame#<>-1 then do;                   /* if not on the menu selection line */
+                  if (next.d50.in.char=u.arr) or (next.d50.in.char=d.arr)      /* skip selects if arrow */
+                  or (next.d50.in.char=r.arr) or (next.d50.in.char=l.arr)      /* key is held down      */
+                  then do;                         /* arrow character waiting */
+                     /* as little as possible */
+                  end;
+                  else do;                         /* no character waiting - select parameter */
+                     call SELECT.PARTIAL(previous.partial);
+                     call SELECT.TIMBRE.FRAME(previous.partial,tds.frame#); /* activate the timbre frame if it exists */
+                     i=MAP.FRAM.TO.SYN(tds.parm#);
+                     if i<>-1 then do;
+                        call SELECT.PARAMETER(i);
+                        last.parm#=i;                      /* save last selected parameter */
+                     end;
+                     call SET.MAX.TLEN(s.tds.afram);
+                  end;
+               end;                                 /* of if not on the menu selection line */
+               call POS.ALPHA.FRAME.CURSOR;         /* move the cursor according to parameter and frame number */
+            end;                                    /* of if any of the arrow keys */
+            else call POS.ALPHA.FRAME.CURSOR;      /* reposition cursor in case error message erase */
+         end;                                      /* of character input */
+         do;                                       /* 1: absolute select */
+            call TIMBRE.FRAME.DEPOSIT;
+            tds.frame#=#ypos;
+            if tds.frame#=-1 then do;                   /* if not on menu selection line */
+               first.frame=0; last.frame=first.frame+4; /* go back to original screen */
+               tds.frame#=0; tds.parm#=1; tds.harm#=0;
+               new.ABLE.prm.info = new.ABLE.prm.info \ "37";      /* force update */
+            end;
+            else do;
+               i=tds.frame#-first.frame;    /* find last logical frame number chosen*/
+               i=i-#ypos;                   /* find difference between the two logical timbre frames */
+               tds.frame#=tds.frame#-i;     /* map it to the physical timbre frame # */
+               tds.parm#=shr(in.arg,8);
+               tds.harm#=in.arg&255;
+               call SELECT.PARTIAL(previous.partial);
+               call SELECT.TIMBRE.FRAME(previous.partial,tds.frame#); /* activate the timbre frame if it exists */
+               i=MAP.FRAM.TO.SYN(tds.parm#);
+               if i<>-1 then do;
+                  call SELECT.PARAMETER(i);
+                  last.parm#=i;                      /* save last selected parameter */
+               end;
+               call SET.MAX.TLEN(s.tds.afram);
+               call POS.ALPHA.FRAME.CURSOR;         /* move the cursor according to parameter and frame number */
+            end;
+         end;
+         ;                                         /* 2: scroll down */
+         ;                                         /* 3: scroll up */
+         EXIT.MY.SCREEN=1;                         /* 4: return to previous screen  */
+      end;                                         /* of do depending upon input command*/
+   end FRAME.ALPHA.DISP.INPUT;
+
+   /* $Subtitle Timbre Frame Mouse Mapping  */
+
+   FRAME.ALPHA.DISP.MOUSE.POS:  proc(x,y) swapable;   /* TDS Timbre Frame Alpha Display Mouse Positioner*/
+
+      /*
+       Considers the following TDS variables :
+          tds.choice       -> TDS menu selection
+          tds.last.choice  -> last TDS choice
+          tds.frame#       -> physical timbre frame number 
+          last.parm#       -> last logical timbre parameter
+          tds.parm#        -> logical timbre parameter
+          tds.harm#        -> logical harmonic number
+      */
+
+      dcl (x,y)            fixed;  /* mouse position in screen coordinates */
+      dcl i                fixed;  /* index to look up table */
+      dcl num.frames       fixed;  /* number of timbre frames in a partial */
+
+      dcl selection.y    lit '3';  /* row on which menu selection exists */
+      dcl timbre.frame.y data (10,8,9,11,12,14,15,17,18,20,21);
+      dcl tds.parm#.x    data (6,8,14,22,29,35,42);
+      dcl tds.harm#.x    data (7,43,49,55,61,68,74,79);
+
+      if inc.tds=0 then return;
+
+
+      if mouse.hole(x,y) then do;                  /* if exit condition */
+         call FRAME.ALPHA.DISP.INPUT(in.rtps,0);   /* return to previous screen */
+         return;
+      end;
+
+      if err.displayed<>0 then do;
+         call REMOVE.ERR;               /* remove any error */
+         call PRINT.CCAT;               /* show current cat name */
+         call POS.ALPHA.FRAME.CURSOR;   /* repositions the cursor depending upon frame, parameter, and harmonic number */
+      end;
+
+      /* convert the mouse pixel coordinates to screen coordinates */
+      x=CONVERT.MOUSE.X(x);     /* 0-79 */
+      y=CONVERT.MOUSE.Y(y);     /* 0-23 */
+
+      #ypos=C.FRAME(previous.partial); /* find the current frame number */
+      if y=selection.y then do;        /* mouse points to the menu selection */
+         i=MOUSE.SELECT.TDS.SCREEN(x); /* select the appropriate TDS screen with the mouse */
+         if i>=0 then do;
+            #ypos=-1;
+            tds.last.choice=tds.choice; /* update last choice */
+            tds.choice=i;
+            call CHANGE.TDS.STATE(tds.choice,s.tds.afram);
+         end;
+      end;
+
+      /* $page */
+
+      else if (y>=timbre.frame.y(1)) and (y<=timbre.frame.y(timbre.frame.y(0))) then do; /* if mouse in the timbre frame area */
+         i=1;                         /* see if on a specific timbre frame row */
+         do while (i<=timbre.frame.y(0)) and (y<>timbre.frame.y(i));
+            i=i+1;
+         end;
+
+         if y=timbre.frame.y(i) then do;       /* if on a specific timbre frame row */
+            #ypos=shr((i-1),1);                /* find new logical timbre frame number */
+            num.frames=COUNT.TIMBRE.FRAMES(previous.partial);
+            if #ypos>num.frames then #ypos=num.frames;  /* set limits */
+
+            i=1;
+            do while (i<=tds.parm#.x(0)) and (x>tds.parm#.x(i));
+               i=i+1;
+            end;
+            if ((x<tds.parm#.x(i)-1) or       /* if a valid timbre frame parameter */
+            ((x=tds.parm#.x(i)) and i<tds.parm#.x(0))) then do;
+               if (((y mod 3)<>0) and (x>=tds.parm#.x(1))) then do;  /* and on a valid line and greater than or equal to splice delay time */
+                  if x<tds.parm#.x(i)-1
+                  then x=i-1;                 /* set up tds.parm# value */
+                  y=0;                        /* set up tds.harm# */
+                  call FRAME.ALPHA.DISP.INPUT(in.abss,shl(x,8)\y);   /* Timbre Frame display character processing routine */
+               end;
+            end;
+            else if (i>=tds.parm#.x(0) and (x>=tds.parm#.x(i))) then do;     /* must be a harmonic */
+               i=1;
+               do while (i<=tds.harm#.x(0)) and (x>tds.harm#.x(i));
+                  i=i+1;
+               end;
+               if ((x<tds.harm#.x(i)-1) or (x=tds.harm#.x(i))) then do;   /* if a valid timbre frame harmonic */
+                  if (x<tds.harm#.x(i)-1) or (x=tds.harm#.x(i) and (i=tds.harm#.x(0)))
+                  then i=i-1;
+                  if (y mod 3)=0             /* if row number is a multiple of three */
+                  then i=i+6;
+                  y=i;                       /* set up tds.harm# */
+                  x=6;                       /* set up tds.parm# */
+               end;                        
+               call FRAME.ALPHA.DISP.INPUT(in.abss,shl(x,8)\y);   /* Timbre Frame display character processing routine */
+            end;
+         end;
+      end;
+      
+   end FRAME.ALPHA.DISP.MOUSE.POS;
+

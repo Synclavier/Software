@@ -1,0 +1,527 @@
+/*	:SYNSOU:AUDMOD:AUD-CU12  $TITLE  Define shuttle editor items
+
+Modified:
+2001/02/19 - TY  - Make modifications needed for 24 hour wrap.
+1989/06/14 - cj  - redefine "place" buttons
+1989/05/05 - cj  - added "Place Cue", "Place Event", "Repl Event"
+1988/10/03 - cj  - checked for live click track when defining shuttle times
+1988/08/22 - LSS - changed 'PREVIEW EDIT' to 'PREVIEW SLIDE'
+1988/05/20 - TSS - Renamed file to AUD-SH6
+1988/04/04 - MWH - Add buttons over left arrows of scroll bars for waves
+*/
+
+/*	the top right of the shuttle panel can hold either a project name/switch	*/
+/*	or a caption entry field.																	*/
+
+Enable.Shuttle.Proj.Capt.Fields:proc swapable;
+
+	/*	check for project items	*/
+
+	if Fetch.Switch(Shuttle.Proj.Capt.Switch) = 0
+	then do;
+		/*	erase caption items	*/
+		call Set.Term.Attr(ATTR#Normal);				/*	to avoid smgr bug	*/
+		call Erase.Object(Shuttle.Comment.Id);
+		if (Cur.Obj.Id = Shuttle.Comment.Id)
+		then call Select.New.Cur.Obj(Corner.Label,-1,-1);
+		call Disable.Object(Shuttle.Comment.Id);
+		/*	enable project items	*/
+		call Enable.Object(Shuttle.Project.Number);
+		call Enable.Object(Shuttle.Project.Dot);
+		call Enable.Object(Shuttle.Project.Name);
+	end;
+
+	else do;
+		/*	Erase Project Items	*/
+		call Set.Term.Attr(ATTR#Normal);				/*	to avoid smgr bug	*/
+		call Erase.Object(Shuttle.Project.Number);
+		call Erase.Object(Shuttle.Project.Dot);
+		call Erase.Object(Shuttle.Project.Name);
+		if (Cur.Obj.Id = Shuttle.Project.Number)
+		or (Cur.Obj.Id = Shuttle.Project.Dot)
+		or (Cur.Obj.Id = Shuttle.Project.Name)
+		then call Select.New.Cur.Obj(Corner.Label,-1,-1);
+		call Disable.Object(Shuttle.Project.Number);
+		call Disable.Object(Shuttle.Project.Dot);
+		call Disable.Object(Shuttle.Project.Name);
+		/*	Enable Caption Items	*/
+		call Enable.Object(Shuttle.Comment.Id);
+	end;
+end Enable.Shuttle.Proj.Capt.Fields;
+
+/*	$page - define shuttle icons	*/
+
+Define.Shuttle.Buttons#1:proc(row) swapable;
+	dcl row				fixed;
+	dcl (x1,y1,x2,y2)	fixed;
+	dcl s1(2)			fixed;
+	dcl s2(2)			fixed;
+
+	call Set.Default.Action(O#ACT.Middle.Press\O#ACT.Prev.Obj);
+
+	/*	Buttons on top row:	*/
+
+	call								 Load.UpDown.Icon(Misc.Buf);
+	Shuttle.Switch.Button	  = Define.Graphics.Icon(S#AA, -10, row*100, 1, Misc.Buf);
+
+	call								 Load.Increment.Icon(Misc.Buf);
+	Shuttle.Name.Incr.Button  = Define.Graphics.Icon(S#AA, 200, row*100, 1, Misc.Buf);
+
+	call								 Load.UpDown.Icon(Misc.Buf);
+	Shuttle.Project.Switch	  = Define.Graphics.Icon(S#AA, 3700, row*100, 1, Misc.Buf);
+
+	Shuttle.Protect.Indicator = Define.Label(S#AA, row, 77, 0, ' P ');
+
+	/*	Define all Graphics Regions:	*/
+
+	/*	define show cues/show edits region before flag region	*/
+	/*	since they are actually underneath the flag region		*/
+	/*	same with scisors park											*/
+
+	Shuttle.Symbol.Button = Define.Graphics.Button.Table
+		(S#AA, 6500, row*100, 6800, (row+1)*100, 1, 1, 0);
+	call COPY.STRING('SHOW',s1);
+	call COPY.STRING('CUES',s2);
+	call Deposit.Graphics.Button.Table.Label
+		(Shuttle.Symbol.Button, 0, 0, 1, s1, s2);
+
+	Shuttle.Edit.Button = Define.Graphics.Button.Table
+		(S#AA, 1600, row*100, 1900, (row+1)*100, 1, 1, 0);
+	call COPY.STRING('SHOW',s1);
+	call COPY.STRING('EDIT',s2);
+	call Deposit.Graphics.Button.Table.Label
+		(Shuttle.Edit.Button, 0, 0, 1, s1, s2);
+
+	Shuttle.CWave.Button = Define.Graphics.Button.Table
+		(S#AA, 1600, (row+2)*100, 1900, (row+3)*100, 1, 1, 0);
+	call COPY.STRING('SHOW',s1);
+	call COPY.STRING('WAVE',s2);
+	call Deposit.Graphics.Button.Table.Label
+		(Shuttle.CWave.Button, 0, 0, 1, s1, s2);
+
+	Shuttle.FWave.Button = Define.Graphics.Button.Table
+		(S#AA, 1600, (row+3)*100, 1900, (row+4)*100, 1, 1, 0);
+	call COPY.STRING('SHOW',s1);
+	call COPY.STRING('WAVE',s2);
+	call Deposit.Graphics.Button.Table.Label
+		(Shuttle.FWave.Button, 0, 0, 1, s1, s2);
+
+	Shuttle.Left.Scisors.Park = Define.Graphics.Button.Table
+		(S#AA, 1600, (row+1)*100, 1900, (row+2)*100, 1, 1, 0);
+	call Set.Object.Mouse.Access(Shuttle.Left.Scisors.Park,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+
+	Shuttle.Right.Scisors.Park = Define.Graphics.Button.Table
+		(S#AA, 6500, (row+1)*100, 6800, (row+2)*100, 1, 1, 0);
+	call Set.Object.Mouse.Access(Shuttle.Right.Scisors.Park,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+
+	/*	Graphics Region for Flags:	*/
+	x1 = gpos.x(1300		  );
+	y1 = gpos.y(row*100	  );
+	x2 = gpos.x(7100		  );
+	y2 = gpos.y((row+2)*100);
+
+	Shuttle.Flag.Region = Define.Graphics.Region(S#AA,x1,y1,x2,y2);
+
+	Shuttle.Disk.Table = Define.Graphics.Button.Table
+		(S#AA, 7100, row*100, 8000, (row+3)*100, 4, 4, 0);
+
+	Shuttle.Sbar.Control.Table = Define.Graphics.Button.Table
+		(S#AA, 700, (row+2)*100, 1600, (row+4)*100, 3, 2, 1);
+
+	Shuttle.Reel.Table = Define.Graphics.Button.Table
+		(S#AA, 1900, (row+4)*100, 3100, (row+7)*100, 4, 3, 1);
+
+	Shuttle.Leader.Reel = Define.Graphics.Button.Table
+		(S#AA, 1900, (row+7)*100, 2500, (row+8)*100, 1, 1, 0);
+
+	Shuttle.Displaced.Audio.Reel = -1;	/*	undefined until a SLIDE edit	*/
+
+	Shuttle.Edit.Table = Define.Graphics.Button.Table
+		(S#AA, 3150, (row+4)*100, 5350, (row+8)*100, 4, 4, 1);
+
+	/*	Buttons on third row:	*/
+
+	call								  Load.Play.Icon(misc.buf);
+	Shuttle.Play.Button			= Define.Graphics.Icon(S#AA, 0, (row+2)*100, 2, misc.buf);
+
+	Shuttle.Zoom.In.Button		= Define.Graphics.Button.Table
+		(S#AA, 700, (row+1)*100, 1000, (row+2)*100, 1, 1, 0);
+	call COPY.STRING('ZOOM',s1);
+	call COPY.STRING( 'IN', s2);
+	call Deposit.Graphics.Button.Table.Label
+		(Shuttle.Zoom.In.Button, 0, 0, 1, s1, s2);
+
+	Shuttle.Zoom.Back.Button	= Define.Graphics.Button.Table
+		(S#AA, 1000, (row+1)*100, 1300, (row+2)*100, 1, 1, 0);
+	call COPY.STRING('ZOOM',s1);
+	call COPY.STRING('OUT' ,s2);
+	call Deposit.Graphics.Button.Table.Label
+		(Shuttle.Zoom.Back.Button, 0, 0, 1, s1, s2);
+
+	/*	Fourth Row:	*/
+
+	call								  Load.Pause.Icon(misc.buf);
+	Shuttle.Pause.Button			= Define.Graphics.Icon(S#AA,0,(row+3)*100, 2, misc.buf);
+
+	call								  Load.Fast.Forward.Icon(Misc.Buf);
+	Shuttle.Fast.Play.Button	= Define.Graphics.Icon(S#AA,300,(row+3)*100, 2, Misc.Buf);
+
+	/*	Fifth Row	*/
+
+	call								  Load.Stop.Icon(misc.buf);
+	Shuttle.Stop.Button			= Define.Graphics.Icon(S#AA,0,(row+4)*100, 2, misc.buf);
+
+	call								  Load.Slow.Forward.Icon(Misc.Buf);
+	Shuttle.Slow.Play.Button	= Define.Graphics.Icon(S#AA,300,(row+4)*100,2,Misc.Buf);
+
+	call								  Load.Play.Icon(Misc.Buf);
+	Shuttle.Cue.Play.Button		= Define.Graphics.Icon(S#AA,5400, (row+5)*100, 2, Misc.Buf);
+
+	call								  Load.Take.Icon(Misc.Buf);
+	Shuttle.Cue.Take.In.Button = Define.Graphics.Icon(S#AA,6200, (row+5)*100, 1, Misc.Buf);
+
+	call								  Load.Exchange.Icon(Misc.Buf);
+	Shuttle.Cue.Exchange.In.Button = Define.Graphics.Icon(S#AA,6500, (row+5)*100, 1, Misc.Buf);
+
+	call Check.Next.Event;
+
+end Define.Shuttle.Buttons#1;
+
+/*	Define yet more buttons for the shuttle panel	*/
+
+Define.Shuttle.Buttons#2:proc(row) swapable;
+	dcl row				fixed;
+	dcl (s1,s2) (8)	fixed;
+
+	/*	define other play buttons	*/
+
+	Misc.Buf(0)						 = O#ICON.InsertIcon;
+	Misc.Buf(1)						 = Shuttle.Cue.Play.Button;
+	Misc.Buf(2)						 = O#Icon.End;
+
+	Shuttle.Cue.Edit.Play.Id	 = Define.Graphics.Icon(S#AA,5400, (row+7)*100, 2, Misc.Buf);
+
+	/*	define other take buttons	*/
+
+	Misc.Buf(0)						 = O#ICON.InsertIcon;
+	Misc.Buf(1)						 = Shuttle.Cue.Take.In.Button;
+	Misc.Buf(2)						 = O#Icon.End;
+
+	Shuttle.Cue.Take.Out.Button = Define.Graphics.Icon(S#AA,6200, (row+6)*100, 1, Misc.Buf);
+	Shuttle.Take.Edit.In.Button = Define.Graphics.Icon(S#AA,6200, (row+7)*100, 1, Misc.Buf);
+	Shuttle.Take.Edit.Out.Button= Define.Graphics.Icon(S#AA,6200, (row+8)*100, 1, Misc.Buf);
+	Shuttle.Cue.Take.Sync.Button= Define.Graphics.Icon(S#AA,0,	  (row+7)*100, 1, Misc.Buf);
+
+	Misc.Buf(0)						 = O#ICON.InsertIcon;
+	Misc.Buf(1)						 = Shuttle.Cue.Exchange.In.Button;
+	Misc.Buf(2)						 = O#Icon.End;
+
+	Shuttle.Cue.Exchange.Out.Button = Define.Graphics.Icon(S#AA,6500, (row+6)*100, 1, Misc.Buf);
+	Shuttle.Exchange.Edit.In.Button = Define.Graphics.Icon(S#AA,6500, (row+7)*100, 1, Misc.Buf);
+	Shuttle.Exchange.Edit.Out.Button= Define.Graphics.Icon(S#AA,6500, (row+8)*100, 1, Misc.Buf);
+
+	call									Load.Small.Backup.Icon(Misc.Buf);
+	Shuttle.Cue.Backup.Button	 = Define.Graphics.Icon(S#AA,5400, (row+6)*100, 1, Misc.Buf);
+	call									Load.Small.Forward.Icon(Misc.Buf);
+	Shuttle.Cue.Forward.Button	 = Define.Graphics.Icon(S#AA,5560, (row+6)*100, 1, Misc.Buf);
+
+	Misc.Buf(0)						 = O#ICON.InsertIcon;
+	Misc.Buf(1)						 = Shuttle.Cue.Backup.Button;
+	Misc.Buf(2)						 = O#Icon.End;
+	Shuttle.Edit.Backup.Button	 = Define.Graphics.Icon(S#AA,5400, (row+8)*100, 1, Misc.Buf);
+	Misc.Buf(1)						 = Shuttle.Cue.Forward.Button;
+	Shuttle.Edit.Forward.Button = Define.Graphics.Icon(S#AA,5560, (row+8)*100, 1, Misc.Buf);
+
+	/*	Sixth Row	*/
+
+	Shuttle.Cue.Block.Button	 = Define.Label(S#AA, row+5, 0, 0, ' Block ');
+	Shuttle.Cue.Save.Button		 = Define.Label(S#AA, row+5, 7, 0, ' Save ');
+	Shuttle.Preview.Edit.Button = Define.Graphics.Button.Table
+											(S#AA, 1300, (row+4)*100, 1900, (row+5)*100, 1, 1, 0);
+	call COPY.STRING('PREVIEW',s1);
+	call COPY.STRING('SLIDE',s2);
+	call Deposit.Graphics.Button.Table.Label
+		(Shuttle.Preview.Edit.Button, 0, 0, 1, s1, s2);
+
+	/*	Seventh Row	*/
+
+	Shuttle.Cue.Audition.Button = Define.Label(S#AA, row+6, 12, 0, ' Audit ' );
+
+	/*	Eighth/Ninth Rows	*/
+
+	Shuttle.Cue.Place.Button	 = Define.Graphics.Button.Table
+											(S#AA, 0, (row+7)*100, 1200, (row+8)*100, 2, 1, O#GBTAB.Divide);
+	call COPY.STRING('PLACE',	 s1);
+	call COPY.STRING('IN SEQ.', s2);
+	call Deposit.Graphics.Button.Table.Label
+		(Shuttle.Cue.Place.Button, 0, 0, 1, s1, s2);
+	call COPY.STRING('REPLACE', s1);
+	call Deposit.Graphics.Button.Table.Label
+		(Shuttle.Cue.Place.Button, 0, 1, 1, s1, s2);
+
+	call Check.Next.Event;
+
+	call									Load.Lock.Icon(Misc.Buf);
+	Shuttle.Cue.Sync.Lock.Id	 = Define.Graphics.Icon(S#AA,1700,(row+7)*100,1,Misc.Buf);
+
+end Define.Shuttle.Buttons#2;
+
+/*	$page - define shuttle panel cue items	*/
+
+Define.Shuttle.Panel.Cue.Items:proc(row) swapable;
+	dcl row		fixed;
+	dcl i			fixed;
+	dcl s1(8)	fixed;
+	dcl s2(8)	fixed;
+
+	call Set.Default.Attr(0,ATTR#Normal\ATTR#AltIntensity);
+	call Set.Default.Action(O#ACT.Middle.Press);
+
+/*	Shuttle.In.Label		*/	i = Define.Label(S#AA, row+5, 57, 0, 'In ');
+	call							Set.Object.Mouse.Access(i,0);
+	Shuttle.Cue.Out.Switch= Define.Switch(S#AA,row+6, 57, 3, 0, 'Out|Dur');
+/*	Shuttle.Edit.Label	*/	i = Define.Label(S#AA, row+7, 57, 0, 'Edit');
+	call							Set.Object.Mouse.Access(i,0);
+	Shuttle.Edit.Out.Switch	  = Define.Switch(S#AA,row+8, 57, 3, 0, 'Out|Len');
+/*	Shuttle.Sync.Label	*/	i = Define.Label(S#AA, row+6, 1, 0, 'Sync:');
+	call							Set.Object.Mouse.Access(i,0);
+	Shuttle.Cue.Sync.Switch	  = Define.Switch(S#AA,row+6, 7, 4, 0, 'Pre|Offs|Post');
+	call							Set.Object.Attr(Shuttle.Cue.Sync.Switch,0,ATTR#Normal);
+/*	Shuttle.Cue.Place.Track.Label	*/ i = Define.Graphics.Button.Table
+		(S#AA, 1200, (row+7)*100, 1500, (row+8)*100, 1, 1, 0);
+	call COPY.STRING('TRK:',s1);
+	call COPY.STRING('',		s2);
+	call Deposit.Graphics.Button.Table.Label
+		(i, 0, 0, 1, s1, s2);
+	call	Set.Object.Mouse.Access(i,0);
+
+	call Set.Default.Attr(0,ATTR#Normal);
+
+	Shuttle.Cue.Place.Track.Field = Define.Fixed.Point(S#AA,row+8,15,3,0,cf#right);
+	call Set.Object.Mouse.Access(Shuttle.Cue.Place.Track.Field,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	call Set.Object.Action(Shuttle.Cue.Place.Track.Field,O#ACT.Update.On.Dep,true);
+
+	Shuttle.Name.Id			 = Define.String(S#AA,row,5,32,O#STR.General);
+	Shuttle.Proj.Capt.Switch = Define.Switch(S#AA,row, 40, 5, 0, 'Proj:|Capt:');
+
+	Shuttle.Project.Number	 = Define.Fixed.Point(S#AA,row,46,2,0,cf#right);
+	call								Set.Object.Attr(Shuttle.Project.Number,0,ATTR#Normal);
+
+	Shuttle.Project.Dot		 = Define.Label(S#AA,row,48,0,'.');
+	call								Set.Object.Mouse.Access(Shuttle.Project.Dot,0);
+
+	Shuttle.Project.Name		 = Define.Label(S#AA,row,50,24,'');
+	call								Set.Object.Attr(Shuttle.Project.Name,0,ATTR#Normal);
+	call								Set.Object.Mouse.Access(Shuttle.Project.Name,0);
+
+	Shuttle.Comment.Id	= Define.String(S#AA,row,46,31,O#STR.General);
+
+	/*	define cue/edit in/out time fields	*/
+
+	/*	define in order for following call	*/
+	/*	to set arrow links						*/
+
+	Shuttle.Cue.In.Time.Id	 = Define.32Bit.MSEC(S#AA, row+5, 66, 14,
+																AEE.Time.Format|O#MSEC.RealTime,
+																cf#time, cf#default, cf#default);
+	call Set.Object.Mouse.Access(Shuttle.Cue.In.Time.Id,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	call Set.Object.Drag			 (Shuttle.Cue.In.Time.Id,true,true);
+
+	Shuttle.Cue.Out.Time.Id	 = Define.32Bit.MSEC(S#AA, row+6, 66, 14,
+																AEE.Time.Format|O#MSEC.RealTime,
+																GID(Saved.AEE.Shuttle.Cue.Out.Switch), cf#default, cf#default);
+	call Set.Object.Mouse.Access(Shuttle.Cue.Out.Time.Id,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	call Set.Object.Drag			 (Shuttle.Cue.Out.Time.Id,true,true);
+
+	call Check.Next.Event;
+
+	Shuttle.Edit.In.Time.Id	 = Define.32Bit.MSEC(S#AA, row+7, 66, 14,
+																AEE.Time.Format|O#MSEC.RealTime,
+																cf#time, cf#default, cf#default);
+	call Set.Object.Mouse.Access(Shuttle.Edit.In.Time.Id,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	call Set.Object.Drag			 (Shuttle.Edit.In.Time.Id,true,true);
+
+	Shuttle.Edit.Out.Time.Id = Define.32Bit.MSEC(S#AA, row+8, 66, 14,
+																AEE.Time.Format|O#MSEC.RealTime,
+																GID(Saved.AEE.Shuttle.Edit.Out.Switch), cf#default, cf#default);
+	call Set.Object.Mouse.Access(Shuttle.Edit.Out.Time.Id,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	call Set.Object.Drag			 (Shuttle.Edit.Out.Time.Id,true,true);
+
+	Shuttle.Cue.Sync.Time.Id = Define.32Bit.MSEC(S#AA, row+7,  3, 14,
+																AEE.Time.Format|O#MSEC.RealTime|O#MSEC.Allow.Minus,
+																cf#time, cf#default, cf#default);
+	call Set.Object.Mouse.Access(Shuttle.Cue.Sync.Time.Id,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+	call Set.Object.Drag			 (Shuttle.Cue.Sync.Time.Id,true,true);
+
+	Disable.Deposits = true;	/*	pick up initial screen	*/
+										/*	values for now				*/
+	call Deposit.Fixed.Point(Shuttle.Cue.Place.Track.Field,GID(Cue.Place.Track)-1);
+	call Deposit.Switch(Shuttle.Cue.Out.Switch,GID(Saved.AEE.Shuttle.Cue.Out.Switch));
+	call Deposit.Switch(Shuttle.Edit.Out.Switch,GID(Saved.AEE.Shuttle.Edit.Out.Switch));
+	call Deposit.Switch(Shuttle.Cue.Sync.Switch,Current.Cue.Sync.Mode);
+
+	Disable.Deposits = false;
+
+end Define.Shuttle.Panel.Cue.Items;
+
+/*	$page - define shuttle panel	*/
+
+DEFINE.SHUTTLE.PANEL: proc (row,size) swapable;
+	dcl row			fixed;
+	dcl size			fixed;
+	dcl Low.Id		fixed;
+	dcl High.Id		fixed;
+	dcl i				fixed;
+	dcl j				fixed;
+	dcl Lines (10)	fixed;
+	dcl type			fixed;
+
+	zchk:proc(arr);
+		dcl arr	array;
+
+		if COM16(zero.time,arr) = lw#igt
+		then call STR32(0,zero.time,arr);
+	end zchk;
+
+	call Copy.String('CUE EDITOR',lines);
+	call Print.Panel.Title(row,lines);
+
+	call Set.Auto.Allocation.Id(Shuttle.Alloc);
+
+	call Set.Default.Action(O#ACT.Middle.Press);
+
+	Low.Id				 = Define.Graphics.Box(S#AA,gpos.x(-10),gpos.y(row*100-100),gpos.x(8010),gpos.y(row*100+800),0);
+
+	call Load.Shuttle.Divider.Icon (Misc.Buf);
+
+	call						Define.Graphics.Icon(S#AA,0,row*100,0,Misc.Buf);
+
+	/*	double boxes around block and trash:		*/
+
+	call Define.Graphics.Box(S#AA,gpos.x(0   )+2,gpos.y(row*100+400)-2,gpos.x(700)-2,gpos.y(row*100+500)+2,0);
+	call Define.Graphics.Box(S#AA,gpos.x(700 )+2,gpos.y(row*100+400)-2,gpos.x(1300)-2,gpos.y(row*100+500)+2,0);
+
+	call						Load.Close.Box.Icon(misc.buf);
+	Shuttle.Size.Box	 = Define.Graphics.Icon(S#AA,0,row*100,1,misc.buf);
+
+	call Activate.Object.Range(Low.Id,Shuttle.Size.Box);
+	do i = Low.Id to Shuttle.Size.Box;
+		call Update.Object(i);
+	end;
+
+	call Set.Default.Attr(0,ATTR#Normal\ATTR#AltIntensity);
+	call Set.Default.Attr(1,ATTR#Normal\ATTR#Reverse\ATTR#AltIntensity);
+
+	/*	define icon buttons first:	*/
+
+	call Define.Shuttle.Buttons#1(row);
+	call Define.Shuttle.Buttons#2(row);
+
+	/*	define cue items				*/
+
+	call Define.Shuttle.Panel.Cue.Items(row);
+
+	/*	now define switches, labels, scroll bars	*/
+
+	call Set.Default.Action(O#ACT.Middle.Press);
+
+	Shuttle.Time.Display = Define.32Bit.MSEC(S#AA,row+1,1,14,AEE.Time.Format\O#MSEC.RealTime,cf#time,cf#default,cf#default);
+	call Set.Object.Attr			 (Shuttle.Time.Display,0,ATTR#Normal);
+	call Set.Object.Drag			 (Shuttle.Time.Display,true,true);
+	call Set.Object.Action		 (Shuttle.Time.Display,O#ACT.Update.On.Dep,true);
+	call Set.Object.Action		 (Shuttle.Time.Display,O#ACT.RealTime.Object,true);
+	call Set.Object.Mouse.Access(Shuttle.Time.Display,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+
+	call Set.Default.Attr(0,ATTR#Normal);
+
+	Shuttle.Coarse.Bar	 = Define.Scroll.Bar(S#AA,O#SBAR.Orient.Hor,
+									O#SBAR.Just.Top,
+									gpos.y((row+2)*100),gpos.x(1600),gpos.x(6800));
+
+	Shuttle.Fine.Bar		 = Define.Scroll.Bar(S#AA,O#SBAR.Orient.Hor,
+									O#SBAR.Just.Top,
+									gpos.y((row+3)*100),gpos.x(1600),gpos.x(6800));
+
+	call							Set.Default.Attr(0,ATTR#AltIntensity);
+
+	Shuttle.Memory.Type	 = Define.Label(S#AA,row+4,68,3,'');
+	call							Set.Object.Attr(Shuttle.Memory.Type,1,ATTR#AltIntensity);
+	Shuttle.Memory.Table	 = Define.Table(S#AA,Shuttle.Memory.Columns,1,Shuttle.Memory.Type);
+	call							Copy.String(' M1| M2| M3| M4',misc.buf);
+	call							Fill.String.Table(Shuttle.Memory.Table,0,0,1,misc.buf);
+	call							Set.Object.Drag(Shuttle.Memory.Table,true,true);
+	call							Set.Object.Action(Shuttle.Memory.Table,O#ACT.Prev.Obj,true);
+	call							Set.Object.Action(Shuttle.Memory.Table,O#ACT.Update.On.Dep,true);
+
+	call							Set.Default.Attr(0,ATTR#AltIntensity);
+
+	call Set.Default.Attr(1,ATTR#Normal);
+
+	Shuttle.Group = Group.Objects(Shuttle.Group.Id,Shuttle.Alloc,Shuttle.Alloc+999,Get#Screen.Event);
+	call Activate.Object.Range(Shuttle.Alloc,Shuttle.Alloc+999);
+
+	/*	set up initial static values:	*/
+
+	/*	check for zero time to get good values	*/
+	/*	on startup										*/
+
+	call zchk(AEE.Shuttle.Anchor.Time);
+	call zchk(AEE.Shuttle.In.Time);
+	call zchk(AEE.Shuttle.Out.Time);
+	call zchk(AEE.Fine.In.Time);
+	call zchk(AEE.Fine.Out.Time);
+	call zchk(loc(addr(Cur.DTD.MS.Msb)));
+
+	Disable.Deposits = true;
+	call Deposit.Switch(Shuttle.Proj.Capt.Switch,GID(Saved.AEE.Shuttle.Capt.Switch) + Capt.Switch.Default);
+	call Activate.Scroll.Bar(Shuttle.Coarse.Bar,0);
+	call Activate.Scroll.Bar(Shuttle.Fine.Bar,0);
+	Disable.Deposits = false;
+
+	call Enable.Shuttle.Proj.Capt.Fields;	/*	enable/disable proj/caption	*/
+
+	/*	set scroll bar bits after above call to activate so	*/
+	/*	box is not drawn twice											*/
+
+	call Set.Scroll.Bar.Bits(Shuttle.Coarse.Bar,O#SBAR.Bits.Real.Time,true);
+	call Set.Scroll.Bar.Bits(Shuttle.Coarse.Bar,O#SBAR.Bits.GoThere,	true);
+	call Set.Scroll.Bar.Bits(Shuttle.Coarse.Bar,O#SBAR.Bits.NoArrows,	true);
+	call Set.Scroll.Bar.Fill.Pattern(Shuttle.Coarse.Bar,11);
+
+	call Set.Scroll.Bar.Bits(Shuttle.Fine.Bar,O#SBAR.Bits.Real.Time,true);
+	call Set.Scroll.Bar.Bits(Shuttle.Fine.Bar,O#SBAR.Bits.GoThere,  true);
+	call Set.Scroll.Bar.Bits(Shuttle.Fine.Bar,O#SBAR.Bits.NoArrows, true);
+
+	call Draw.Coarse.Scroll.Bar.Axes;
+
+	/*	must set other times after shuttle.group is set up	*/
+
+	/*	Highlight cell if non-zero value is placed in it	*/
+
+	do i=0 to Shuttle.Memory.Columns-1;
+		call COPY32(loc(addr(AEE.Memory.Array(shl(0*Shuttle.Memory.Columns+i,1)))),Lines);
+		type = AEE.Memory.Format(0*Shuttle.Memory.Columns+i) & 255;
+		if	 ((type = cf#time				)
+		and  ((Lines(0) <> 0			  )
+		or		(Lines(1) igt zero.time)))
+		or	 ((type = cf#dur				)
+		and  ((Lines(0) <> 0			  )
+		or		(Lines(1) <> 0			  )))
+		then do;
+			call Set.Table.Cell.Attr(Shuttle.Memory.Table,i,0,0,ATTR#Reverse\ATTR#AltIntensity);
+		end;
+	end;
+
+	call DEPOSIT.AUDITION.BUTTON.DISPLAY;			/*	set highlight for audition button	*/
+
+	call DEPOSIT.SYNC.FIELD.ATTRIBUTES;				/*	set highlight for sync field depending on lock state	*/
+
+	call Set.Auto.Arrow.Link.Range(Shuttle.Cue.In.Time.Id,Shuttle.Cue.Sync.Time.Id);
+	call Set.Object.Arrow.Links(Shuttle.Name.Id,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+	call Set.Object.Arrow.Links(Shuttle.Comment.Id,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+	call Set.Object.Arrow.Links(Shuttle.Project.Number,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+	call Set.Object.Arrow.Links(Shuttle.Project.Name,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+	call Set.Object.Arrow.Links(Shuttle.Time.Display,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+	call Set.Object.Arrow.Links(Shuttle.Cue.Place.Track.Field,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+
+end DEFINE.SHUTTLE.PANEL;

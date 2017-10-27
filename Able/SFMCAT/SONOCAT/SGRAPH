@@ -1,0 +1,690 @@
+/* SONOGRPH  $TITLE  Sonograph Prototype Software */
+
+dcl in.main.module lit '0';
+dcl debug          lit '0';
+dcl sector.size    lit '256';
+dcl buf1.len       lit '0'; /* not used - needed by compiler */
+dcl databuf1 (0)   fixed;   /* not used - needed by compiler */
+
+/* insert file list */
+
+insert ':-xpl:literals'; 	/* system literals */
+insert ':-xpl:asciilit'; 	/* ASCII literals  */
+insert ':-xpl:catrtns';  	/* catalog routines */
+insert ':-xpl:strings';  	/* string functions */
+insert ':-xpl:intrprtr';	/* interpreter interface */
+
+insert ':sfmcat:00-sfm';
+insert ':sfmcat:01-io';
+insert ':sfmcat:02-plot';
+insert ':sfmcat:04-angle';
+insert ':sfmcat:04-ifast';
+insert ':sfmcat:06-globl';
+insert ':sfmcat:07-util';
+insert ':sfmcat:08-symbl';
+insert ':sfmcat:09-files';
+insert ':sfmcat:40-windo';
+
+dcl catalog.buffer (c#dir_max - 1) fixed; /* catalog buffer */
+
+/* Parameter Area Definitions */
+
+dcl max.swindow.width      lit '640'; /* max number of pixels in window */
+dcl max.pixels.frame       lit '64'; /* max number of pixels in frame */
+dcl n.swindows             lit '3'; /* number of sonograph windows */
+dcl num.ref.lines          lit '16'; /* max number of reference lines */
+
+dcl AMP_TYPE lit '0';  dcl SPEC_TYPE lit '1';  dcl FREQ_TYPE lit '2';
+
+dcl M.LINEAR   lit '0';  dcl M.LOG       lit '1'; /* mode bits */
+
+dcl start.time (3)  fixed; /* start and end time to plot */
+dcl stop.time  (3)  fixed;
+dcl rate            fixed; /* (sampling rate)/10 */
+dcl top.line        fixed; /* first line of screen to print */
+dcl max.col         fixed; /* overall width of display in pixels */
+dcl sono.title (40) fixed; /* title for plot */
+dcl any_spectra     fixed;
+dcl lowbin.table(max.swindow.width*n.swindows) fixed;
+dcl bins.table  (max.swindow.width*n.swindows) fixed;
+
+dcl start.sonodata  fixed; /* starting marker of stored area */
+dcl pixels.frame    fixed; /* number of output pixels per analysis frame (limit to 64) */
+
+dcl swindow.type  (n.swindows-1) fixed; /* type of plot for window */
+dcl swindow.width (n.swindows-1) fixed; /* number of pixels in window */
+dcl swindow.lower (n.swindows-1) fixed; /* lower limit for window */
+dcl swindow.upper (n.swindows-1) fixed; /* upper limit for window */
+dcl swindow.mode  (n.swindows-1) fixed; /* true for LOG, false for LIN */
+dcl swindow.other1(n.swindows-1) fixed;
+dcl swindow.other2(n.swindows-1) fixed;
+
+/* for spectral and frequency types, upper and lower limits are in FFT bins */
+
+dcl swindow.lbins  (n.swindows*16-1) fixed; /* ref line locs in bins */
+dcl swindow.lpixels(n.swindows*16-1) fixed; /* ref line locs in pixels */
+dcl swindow.ltypes (n.swindows*16-1) fixed; /* reference line codes */
+
+dcl logtab.len                   lit '256'; /* must be a power of 2 */
+dcl logtab (logtab.len)          fixed;
+
+dcl end.sonodata    fixed; /* ending word of parameter area (2 sectors) */
+
+/* Analysis Frame and Data Buffer Definitions */
+
+dcl anal_pos_amp(max.pixels.frame) fixed; /* positive amplitude for frame */
+dcl anal_neg_amp(max.pixels.frame) fixed; /* negative amplitude for frame */
+dcl anal_power                     fixed; /* ave energy in frame on log scale */
+dcl (lastx,lasty) (n.swindows-1)   fixed; /* coords of last amp point for each window */
+dcl anal_time(3)     fixed; /* starting time of frame */
+dcl anal_other1      fixed; /* spare word */
+dcl data.msb(8192)   fixed; /* data and fft output buffers */
+dcl data.lsb(8192)   fixed;
+dcl threshold(max.swindow.width*n.swindows) fixed; /* threshold for each pixel */
+
+return_to_sfm:  proc(status); /* chain back to .SFM-x */
+   dcl status fixed;
+
+   call tty_wait; disable;
+   core(sfm.intact)=1; /* means SFM high core is still valid */
+   ovl.error=0; /* no errors in overlay module */
+   core(LOC.RST)=status;
+   call overlay(core(LOC.P1+1),core(LOC.P1),core(LOC.P1-1)); /* chain back */
+end return_to_sfm;
+
+insert ':sfmcat:sonocat:vtdump'; 		/* special HARDCOPY routine */
+insert ':sfmcat:sonocat:fastlog'; 		/* special 32-bit fixed point log routine */
+insert ':sfmcat:sonocat:sonofont'; 		/* special clear, and number font defs and routines */
+insert ':sfmcat:sonocat:sonoset'; 		/* set menu module */
+insert ':sfmcat:sonocat:sonoanal'; 		/* analysis routines */
+
+/* $SUBTITLE  Routines to Display Analyzed Data Frames */
+
+dcl base.col              lit '70'; /* first pixel column used for window area */
+dcl pixels.tick           lit '50'; /* pixels per tick mark on time axis */
+
+dcl current.index(3)      fixed; /* current processing time as an index */
+dcl current.time (3)      fixed; /* current processing time             */
+dcl finish.index (3)      fixed; /* last processing    time as an index */
+dcl (pix.col,pix.line)    fixed; /* current screen position in pixels */
+dcl next.tick             fixed;
+dcl symbol.index          fixed; /* index into SFM symbol table */
+dcl frame.line            fixed; /* line number in frame */
+
+dcl (randomlsb,randommsb) fixed; /* seed for random number generator */
+/* initialize seed for random number generator to 123457 */
+randommsb=1;  randomlsb=57921;
+
+randomgen:  proc fixed; /* returns random deviate -32768 to 32767 */
+  /* A linear congruential generator with multiplier 16807 and modulus
+     2**31-1.  These are the same values as the IMSL routine GGUBS,
+     and the same logic is used, but RANDOMGEN is implemented in 
+     fixed point.  RANDOMMSB and RANDOMLSB are the most and least 
+     significant bits of the seed. */
+
+   dcl root lit '16807';
+   dcl x    fixed;
+
+   write(5) = root; write(6) = randomlsb; x = read(4); randomlsb = read(5);
+   write(5) = root; write(6) = randommsb;              randommsb = x + read(5);
+   if randommsb ILT read(5) then x = shl(read(4)+1,1); /* carry */
+   else                          x = shl(read(4),1);   /* no carry */
+
+   x = x + ((randommsb & "100000") <> 0); /* add most sig. bit of msb */
+   randomlsb = randomlsb + x; /* adjust modulus by multiple of 2**31-1 */
+   if randomlsb ILT x then randommsb = randommsb + 1; /* carry */
+   randommsb = randommsb & "077777"; /* mod 2**31 */
+
+   return (shl(randommsb,1) + ((randomlsb & "100000") <> 0));
+end randomgen;
+
+log.base10:  proc(num) fixed; /* log (base 10) * 10000 of a number in range 1 to 65535 */
+   dcl num fixed;
+
+   /* 3402=fastlog(10,0)*10000 */
+   return 10000*(fastlog(num,0)-(16*1024))/3402;
+end log.base10;
+
+volts.to.db:  proc(v) fixed; /* converts internal volts units to 100 * dB */
+   dcl v  fixed; /* should be in the range of -32768 to 32767 */
+   dcl db fixed; /* will be in range 0 to -9633 */
+
+   if      v=0 then return (-9633); /* minimum case */
+   else if v<0 then do;
+      v=abs(v); /* convert to postitive volts */
+      if v=-32768 then v=32767; /* handle special case */
+   end;
+
+   /* 45149=log10(32767)  and  9633-->96.33 dB or a 16-bit dynamic range */
+   v=10000*(fastlog(v,0)-(16*1024))/3402; /* 10000 * log (base 10) of volt value */
+   write(5)=45149-v; write(6)=9633; write(7)=45149;
+   db=-read(5);
+   if read(4) IGE shr(45149,1) then db=db-1; /* round up if needed */
+
+   return db;
+end volts.to.db;
+
+compute.time:  proc(cur.time); /* computes current time from PIX.LINE and FRAME.LINE */
+   dcl cur.time fixed array; /* output vector */
+   dcl temp (3) fixed;
+   dcl i        fixed;
+
+   i=frame.line*window.offset/pixels.frame; /* time adjust in samples */
+   temp(0)=0; temp(1)=shr(i,8); temp(2)=i&"377"; /* store in temp vector */
+   call add_len_to_len(current.index,temp,temp); /* adjust time */
+   call index_to_time(cur.time,temp,period.index); /* convert to time */
+end compute.time;
+
+draw.amp.data:  proc(w); /* draw pixel line of amplitude display for window w */
+   dcl (w,j)     fixed;
+   dcl range     fixed;
+   dcl (up,low)  fixed; /* temps for swindow.upper and swindow.lower */
+   dcl (pos,neg) fixed; /* positive and negative going amplitude range */
+
+   if swindow.mode(w)&M.LOG then do; /* copy short-time energy values into temps */
+      up=0; low=-9633;
+      neg=anal_power; pos=anal_power;
+   end;
+   else do; /* copy volt values into temps */
+      up =swindow.upper(w);         low=swindow.lower(w);
+      neg=anal_neg_amp(frame.line); pos=anal_pos_amp(frame.line);
+   end;
+   range=up-low; /* compute range */
+   
+   if (debug&4)<>0 then do;
+      transparent_mode;
+      if frame.line=0 then nl;
+      ps('FRAME.LINE is '); pnum(frame.line); nl;
+      ps('NEG and POS are ');pnum(neg); ps('  '); pnum(pos); nl;
+      ps('RANGE is '); pnum(range); nl;
+      vector_mode;
+      call tty_wait;
+   end;
+   if not (swindow.mode(w)&M.LOG) then do;
+      if #greater(low,neg) then neg=low; /* limit to display range */
+      if #greater(neg,up)  then neg=up;
+   end;
+   if #greater(low,pos) then pos=low;
+   if #greater(pos,up)  then pos=up;
+
+   if not (swindow.mode(w)&M.LOG) then do;
+      /* neg=(neg-low)*swindow.width(w)/range */
+      write(5)=neg-low; write(6)=swindow.width(w); j=read(4);
+      write(7)=range; neg=read(5); /* unsigned result */
+   end;
+
+   /* pos=(pos-low)*swindow.width(w)/range */
+   write(5)=pos-low; write(6)=swindow.width(w); j=read(4);
+   write(7)=range; pos=read(5); /* unsigned result */
+
+   if (debug&4)<>0 then do;
+      transparent_mode;
+      ps('Transformed NEG and POS are '); pnum(neg); ps('  '); pnum(pos); nl;
+      vector_mode;
+      call tty_wait;
+   end;
+   if not (swindow.mode(w)&M.LOG) then do; /* draw the signal */
+      if lastx(w)<>(-1) then move_to(lastx(w),lasty(w)); /* if defined, move to last amp point */
+      else do; /* first time plotting amp on this screen */
+         lastx(w)=pix.col+pos; 
+         lasty(w)=pix.line;
+         move_to(lastx(w),lasty(w)); /* move to first amp point */
+      end;
+
+      plot(pix.col+pos,pix.line); /* connect old min     to current max */
+      plot(pix.col+neg,pix.line); /* connect current max to current min */
+      lastx(w)=pix.col+neg; lasty(w)=pix.line; /* update last point coords */
+   end;
+   else do; /* draw a segment of the energy display */
+      move_to(pix.col    ,pix.line); /* move to bottom of plot */
+      plot   (pix.col+pos,pix.line); /* connect to energy level */
+      /* don't need to keep track of last x and y values */
+   end;
+end draw.amp.data;
+
+/* $PAGE */
+
+draw.spec.data:  proc(w); /* draw frame of spectral display for window w */
+   dcl (w,i)  fixed;
+   dcl outpat fixed;
+
+   alpha_mode; /* try to reset terminal */
+   /* load screen address for this line */
+   call pc(a.esc); call pc(a.quote); pnum(pix.col/5); 
+   call pc(a.semicolon); pnum(pix.line); call pc(l.a);
+   call pc(a.esc); call pc(a.plus); /* initiate data load */
+
+   outpat = 0; /* initialize */
+   do i = 0 to swindow.width(w)-1; /* loop over pixels in window */
+      outpat = shl(outpat,1); /* shift output pattern */
+      if randomgen ILT threshold(max.swindow.width*w+i) then outpat = outpat \ 1; /* turn on pixel */
+
+      if (i mod 5) = 4 then do; /* time to send a byte to terminal */
+         call pc(outpat + "100"); /* send data pattern */
+         outpat   = 0; /* reset */
+      end;
+   end; /* of loop over pixels in window */
+
+   call pc(a.sharp); /* terminate data load on current line */
+end draw.spec.data;
+
+draw.time:  proc; /* draw a time mark */
+
+   move_to(0,pix.line-3); /* center time label on tick */
+   call print_time(current.time,3,0); /* print adjusted time */
+
+   connect(BASE.COL-10,pix.line,BASE.COL,pix.line); /* draw tick marks */
+   connect(max.col +10,pix.line,max.col ,pix.line);
+end draw.time;
+
+draw.symbol:  proc (index); /* draw a symbol label */
+   dcl index fixed; /* index into SFM symbol table */
+   dcl i     fixed;
+
+   if (pix.line-next.tick)<=12 then next.tick=pix.line-12; /* avoid time tick overlaps */
+
+   move_to(0,pix.line-3); /* center time label on tick */
+   alpha_mode;
+   do i=1 to (8-core(symbol_name(index))); call pc(A.SP); end; /* right justify text */
+   ps(location(symbol_name(index))); /* plot symbol name */
+
+   connect(BASE.COL-5,pix.line,BASE.COL,pix.line); /* draw tick marks */
+   connect(max.col +5,pix.line,max.col ,pix.line);
+   data_level(2); /* set mode comp */
+   connect(BASE.COL,pix.line,max.col,pix.line); /* draw line across plot */
+   data_level(0); /* set mode regular */
+end draw.symbol;
+
+display.data:  proc; /* print a pixel row of the frame */
+   dcl (i,j,k,type) fixed;
+
+   pix.col=BASE.COL; /* start at left edge of display region */
+   do i=0 to n.swindows-1; /* loop over windows */
+      if swindow.width(i)>0 then do; /* window exists */
+
+         vector_mode;
+         do case swindow.type(i); /* branch on window type */
+            call draw.amp.data (i); /* amplitude display */
+            call draw.spec.data(i); /* spectral display */
+            call draw.spec.data(i); /* frequency lines */
+         end;
+
+         point_mode;
+         plot(pix.col,pix.line); /* draw left edge */
+         do j=0 to num.ref.lines-1; /* draw in reference markers */
+            k=swindow.lpixels(16*i+j); /* get value in pixels */
+            if k>0 then do; /* line exists */
+               do case swindow.ltypes(16*i+j); /* branch on line type */
+                  ; /* 0:  solid */
+                  if (pix.line/2) then data_level(1); /* 1:  dotted */
+                  if (pix.line/6) then data_level(1); /* 2:  dashed */
+               end;
+               plot(pix.col+k,pix.line);
+               data_level(0); /* restore dots on */
+            end; /* of line exists */
+         end; /* of loop over lines */
+
+         pix.col=pix.col+swindow.width(i); /* move right over window */
+      end; /* of window exists */
+   end; /* of loop over windows */
+   plot(pix.col,pix.line); /* draw right edge */
+   vector_mode;
+
+   /* if time indicates new time symbol, then draw symbol */
+   if (symbol.index<=number.of.symbols) /* not past end of symbol table */
+   and (compare_vectors(location(symbol_time(symbol.index)),current.time,3)<=0) then do;
+      call draw.symbol(symbol.index);
+      symbol.index=symbol.index+1; /* move onto next symbol */
+   end; /* of not past end of symbol table and time for symbol */
+
+   if pix.line=next.tick then do; /* draw tick mark */
+      call draw.time;
+      next.tick=next.tick-PIXELS.TICK; /* tick mark every PIXELS.TICK pixels */
+   end;
+
+   vector_mode;
+end display.data;
+
+/* $SUBTITLE  Routine to Handle Screen Printing */
+
+printer.module:  proc(force_end);
+   dcl force_end        fixed; /* set true to force call to HARDCOPY with formfeed */
+   dcl total.lines      fixed; /* total count of pixel lines used on this screenful */
+   dcl (temp,temp1) (3) fixed;
+   dcl (i,j,k)          fixed;
+
+   total.lines=top.line-pix.line; /* number of pixel lines in use */
+   if (total.lines=462) or (force_end) then do; /* screen is full */
+
+      i=(frame.line+5)*window.offset/pixels.frame; /* time adjust in samples */
+      temp(0)=0; temp(1)=shr(i,8); temp(2)=i&"377"; /* store in temp vector */
+      call add_len_to_len(current.index,temp,temp); /* adjust time */
+      call index_to_time(temp1,temp,period.index); /* convert to time */
+
+      /* if needed draw symbol in advance to ensure continuous output */
+      if (symbol.index<=number.of.symbols) /* not past end of symbol table */
+      and (compare_vectors(location(symbol_time(symbol.index)),temp1,3)<=0) then do;
+         call draw.symbol(symbol.index);
+         symbol.index=symbol.index+1; /* move onto next symbol */
+      end; /* of not past end of symbol table and time for symbol */
+
+      if (not force_end) and ((pix.line-next.tick)<5) then call draw.time; /* put advance time marker on screen */
+
+      call hardcopy(top.line,pix.line+1,force_end); /* copy screen to printer */
+
+      special_clear;
+      next.tick=469+next.tick-pix.line; /* find next tick point */
+      pix.line=469; /* reset to approximate top of screen - slop to allow digit plotting */
+      top.line=pix.line;
+
+      do i=0 to n.swindows-1; /* loop over windows */
+         lastx(i)=(-1); lasty(i)=(-1); /* re-initialize last plot point values */
+      end;
+   end; /* of screen is full */
+end printer.module;
+
+compute.tables:  proc; /* compute FFT bin mapping tables */
+   dcl (type,mode)    fixed; /* window parameters */
+   dcl (up,low,width) fixed;
+   dcl offset         fixed;
+   dcl (lowbin,bins)  fixed;
+   dcl constant       floating;
+   dcl (i,j,k,w)      fixed;
+
+   do w=0 to n.swindows-1; /* loop over windows */
+      width=swindow.width(w);
+      type =swindow.type(w);
+      mode =swindow.mode(w);
+
+      if (width>0) and (type<>AMP_TYPE) then do; /* must compute */
+         up    =swindow.upper(w);
+         low   =swindow.lower(w);
+         offset=max.swindow.width*w; /* offset into threshold array for this window */
+
+         if (mode&M.LOG) and low=0 then low=1;
+         constant=log(up/low)/(width-1);
+         do i=0 to width-1; /* loop over table elements */
+            if mode&M.LOG then do; /* use log mapping */
+               lowbin.table(offset+i)=int(low*exp(i*constant)+.5);
+            end;
+            else do; /* use linear mapping */
+               write(5)=up-low; write(6)=i; j=read(5);
+               write(7)=width-1;
+               j=low+read(5);
+               if read(4) IGE shr(width-1,1) then j=j+1; /* round up if needed */
+               lowbin.table(offset+i)=j;
+            end;
+            if i<>0 then bins.table(offset+i)=lowbin.table(offset+i)-lowbin.table(offset+i-1);
+            if bins.table(offset+i)=0 then bins.table(offset+i)=1; /* must be at least one */
+         end; /* of loop over table elements */
+         bins.table(offset)=lowbin.table(offset+1)-lowbin.table(offset);
+         if bins.table(offset)=0 then bins.table(offset)=1; /* at least one */
+
+         /* map ref line locs in bins into locs in pixels */
+         do i=0 to num.ref.lines-1; /* loop over ref lines */
+            swindow.lpixels(num.ref.lines*w+i) = (-1); /* put line out of the way */
+            j=swindow.lbins(num.ref.lines*w+i); /* get value in bins */
+            if (j>low) and (j<up) then do k=0 to width-1; /* loop over pixels */
+               if lowbin.table(offset+k)>=j then do;
+                  swindow.lpixels(num.ref.lines*w+i)=k;
+                  goto break.out;
+               end;
+            end;
+            BREAK.OUT:
+         end; /* of loop over ref lines */
+      end; /* of must compute */
+   end; /* of loop over windows */
+end compute.tables;
+
+/* $SUBTITLE  Label Plotting Routine */
+
+draw.labels:  proc(code); /* draw labels across all windows, uses pix.line */
+   dcl code           fixed; /* 1:  complete and regular, -1:  partial and mirrored */
+   dcl (type,mode,up,low,width)  fixed; /* window parameters */
+   dcl (top,bottom,range,adjust) fixed;
+   dcl (value,offset)            fixed;
+   dcl (str1,str2,str3) (8)      fixed;
+   dcl (label,constant)          floating;
+   dcl (i,j,k,v)                 fixed;
+
+   pix.col=BASE.COL; /* start at left */
+
+   do i=0 to n.swindows-1; /* loop over windows */
+      width=swindow.width(i); /* look up width */
+
+      if width>0 then do; /* window exists */
+         low   =swindow.lower(i); /* look up parameters */
+         up    =swindow.upper(i);
+         type  =swindow.type (i);
+         mode  =swindow.mode (i);
+         offset=max.swindow.width*i;
+
+         do case type; /* determine label to print */
+            if width<75 then call assign(str1,'Amp.'); /* 0:  amplitude */
+            else             call assign(str1,'Amplitude');
+
+            if width<65 then call assign(str1,'Sono.'); /* 1:  sonogram */
+            else             call assign(str1,'Sonogram');
+
+            if width<75 then call assign(str1,'Freq.'); /* 2:  frequency */
+            else             call assign(str1,'Frequency');
+         end; /* of do case */
+
+         str2(0)=0; /* clear string 2 */
+         if type<>AMP_TYPE then do; /* determine units for spectral window */
+            if mode<>M.LOG then do; /* linear => khz */
+               call assign(str2,'Lin');
+               if width>75 then call assign(str3,'Kilohertz');
+               else             call assign(str3,'kHz');
+            end;
+            else do; /* log => cents */
+               call assign(str2,'Log'); call assign(str3,'Cents');
+            end;
+         end;
+         else if mode=M.LOG then call assign(str3,'dB');
+         else                    call assign(str3,'Volts');
+
+         if code=1 then do; /* full label set */
+            /* pixel computations assume one char takes 8 pixels to plot at size 0 */
+            move_to(pix.col+(width-str1(0)*8)/2,pix.line+110);
+            alpha_mode;
+            ps(str1); /* print the label */
+            move_to(pix.col+(width-str2(0)*8)/2,pix.line+95);
+            alpha_mode;
+            ps(str2); /* print the mode */
+            move_to(pix.col+(width-str3(0)*8)/2,pix.line+80);
+            alpha_mode;
+            ps(str3); /* print the units */
+            vector_mode;
+         end;
+
+         if type=AMP_TYPE then do; /* precompute scaling constants for amp window */
+            if mode=M.LINEAR then do;
+               top   =up  % 10000; /* high voltage of window */
+               bottom=low % 10000; /* low  voltage of window */
+               if up = 32767 then top=top+1; /* adjust for error */
+            end;
+            else do; /* db scale */
+               top=0;  bottom=-9633;
+            end;
+            range =top-bottom; /* range of window */
+         end; /* of amp type */
+         else if mode=M.LOG then do; /* precompute for cents display */
+            if low=0 then low=1;
+            constant=log(up/low)/(width-1);
+         end;
+
+         do j=0 to width; /* loop over pixels in window */
+            if ((width<=150) and ((j=0) or (j=width) or (j=width/2)))
+            or ((width> 150) and ((j mod (width/10)=0))) then do; /* time to plot a label and tick */
+
+               if type=AMP_TYPE then do; /* amplitude window */
+                  if mode=M.LINEAR then do;
+                     value=bottom+j*range/width; /* volts*1000 or Hz at label */
+                     label=value/1000.; /* convert to floating pt. volts or kHz */
+                  end;
+                  else label=(bottom+j*range/width)/100.; /* dB */
+               end; /* amplitude */
+               else if mode=M.LOG then do; /* log khz */
+                  label=low*exp(j*constant); /* floating bin number */
+                  label=label*rate/fft.len*10.; /* hz at pixel */
+                  label=freq_to_pitch(label); /* convt to 8.pc */
+               end;
+               else do; /* linear khz */
+                  label=((low+(up-low)*j/width)*rate/fft.len)/100.; /* scale that into frequency */
+               end;
+
+               /* compute the adjustment in pixels for this label */
+               adjust=0; /* neutral */
+               if      (j=0)     and (pix.col<>BASE.COL)  then adjust=(+1); /* adjust to right */
+               else if (j=width) and (pix.col+j<>max.col) then adjust=(-1); /* adjust to left */
+
+               if code=1 /* full label set */
+               then call draw_float(pix.col+j+6*adjust-4,pix.line+97,label,5,3);
+               connect(pix.col+j+5*adjust,pix.line+11*code,pix.col+j,pix.line+code); /* plot tick */
+            end; /* time to plot a label and tick */
+
+            do k=0 to num.ref.lines-1; /* loop over ref lines */
+               v=swindow.lpixels(num.ref.lines*i+k); /* get value in pixels */
+               if (v>0) and (v=j) /* time to draw it */
+               then connect(pix.col+j,pix.line+6*code,pix.col+j,pix.line+code);
+            end;
+         end; /* of loop over pixels in window */
+
+         connect(pix.col,pix.line+code,pix.col+width,pix.line+code);
+         pix.col=pix.col+width; /* move to right */
+      end; /* of window exists */
+   end; /* of loop over windows */
+end draw.labels;
+
+/* $SUBTITLE  Initialization and Start-Up Code */
+
+dcl (temp,temp1) (3) fixed;
+dcl (i,j,k)          fixed;
+
+call set_catbuf (addr(catalog.buffer(0)), 0); /* set up catalog buffer */
+
+mem.siz=memory.size; /* look up configured memory size */
+
+enable;
+if core(loc.rst)<>3 then do;
+   psr('Sonograph can only be invoked through the SFM');
+   call tty_wait; /* allow chars to be printed before quitting */
+   call exit(-1);
+end;
+
+i=core(c#contab+c#vstart)+core(c#contab+c#vlngth)+core(c#contab+c#stklen);
+if i IGE ((60*1024)-1928) then do;
+   /* this check will catch errors where the program is too large for 60K systems */
+   clear;
+   ps('SYSTEM PROGRAMMING ERROR:  This module of SFM is too large to run.');
+   call tty_wait; call exit(-1); /* quit with stop status */
+end;
+
+clock.inc=10/d03_speed;                    /* compute real time clock period */
+dq640    =((terminal.type=t#dq640) and (terminal.graphics=g#dq640));
+
+if dq640 then punits(799,479);
+else          punits(639,479); /* initialize display units */
+
+call read_system_file (SINTAB.FILE,sintable,sintable.len+intpol.len+1); /* read sine table */
+
+file1; /* setup last current file */
+
+call assign(sono.title,id.field); /* default title is caption */
+call copy_vector(start.time,cursor.time,3);
+call copy_vector(stop.time,location(data.end),3);
+
+RESTART:
+
+i=100;
+rate=clock.rate*i/period.index; /* (sampling rate)/10 */
+
+call SET_MENU; /* get all inputs */
+
+any_spectra = 0; /* assume no spectral windows present */
+max.col=BASE.COL; /* prepare to compute overall width */
+
+do i=0 to n.swindows-1; /* loop over windows */
+   max.col=max.col+swindow.width(i); /* update width */
+   if (swindow.width(i)>0) and (swindow.type(i)<>AMP_TYPE)
+   then any_spectra = 1;
+   lastx(i)=(-1); lasty(i)=(-1); /* initialize */
+end;
+
+special_clear;
+viewport(0,639,0,479); window(0,639,0,479);
+vector_mode; alpha_mode; char_size(1); move_to(0,445); ps(sono.title); char_size(0);
+
+if any_spectra then call compute.tables;
+
+top.line=469; /* mark top edge of printing area */
+pix.line=300; /* begin labels at upper edge of windows area */
+
+call draw.labels(1); /* draw full label set */
+
+next.tick=pix.line; /* first tick here */
+
+/* look for first symbol beyond start time of analysis */
+symbol.index=1; /* initialize to start of symbol table */
+do while (symbol.index<=number.of.symbols) /* not past end of symbol table */
+and (compare_vectors(location(symbol_time(symbol.index)),start.time,3)=(-1));
+   symbol.index=symbol.index+1; /* skip to next symbol */
+end;
+
+/* $SUBTITLE  Main Data Frame Processing Loop */
+
+call time_to_index(start.time,current.index,period.index);
+call time_to_index(stop.time, temp,         period.index);
+temp1(0)=0; temp1(1)=0; temp1(2)=window.length;
+call sub_len_from_len(temp, temp1, finish.index); /* subtract off frame length */
+temp1(0)=0; temp1(1)=0; temp1(2)=window.offset;
+
+vector_mode;
+frame.line=0; /* start with new frame */
+do while 1; /* loop forever */
+
+   if frame.line=0 then do; /* get data for new frame */
+      if (compare_vectors(current.index,finish.index,3)>0)
+      or (break.rcvd) then do; /* set up for exit */
+         call printer.module(0); /* dump screen if needed */
+         goto break.out; /* either done with analysis or user wants to quit */
+      end;
+
+      call analyze.data(current.index);
+      /* analyzer determines region of file to read, and performs FFT and
+         amplitude averaging, putting data into analysis_frame */
+   end; /* of new frame */
+
+   call compute.time(current.time); /* calculate current time */
+
+   call display.data;
+   /* display module examines selected options in parameter data, and
+      creates bit codes for screen.  Also updates current screen position
+      values for printer module */
+
+   pix.line=pix.line-1; /* advance down screen */
+
+   call printer.module(0); /* dump screen to printer */
+   /* printer module examines screen position and parameters, and when
+      needed, dumps screen contents to printer */
+
+   frame.line=((frame.line+1) mod pixels.frame); /* bump and wrap line in frame */
+   if frame.line=0 then call add_len_to_len(temp1,current.index,current.index); /* increment time if analysis just done */
+
+   interp_run_host_at_level();
+	
+end; /* of loop forever */
+
+BREAK.OUT:
+
+if not break.rcvd then do; /* finish up properly */
+   pix.line=pix.line+1; /* adjust line value for labels */
+   call draw.labels(-1); /* draw partial labels at bottom */
+   pix.line=pix.line-11; /* adjust for label area */
+   call printer.module(1); /* force last screen dump */
+end;
+
+break.rcvd=0; /* clear flag for re-runs */
+
+goto RESTART;

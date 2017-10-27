@@ -1,0 +1,784 @@
+/* 09-FILES  $TITLE  Special Purpose File Manipulations for SFM */
+
+/* Copyright 1985 by New England Digital Corporation */
+
+// 2016-10-02 - CJ - Skipped .sndfile in catalog output
+
+user.dev.valid:  proc returns (boolean); /* returns TRUE if we can overlay to current user device */
+   dcl dev fixed;
+   dev = shr(core(loc.ucat + 1),8); /* get device */
+   return ( ((systyp = 0) and (dev < 6)) or ((systyp = 1) and (dev > 5)) ); /* valid floppy and winchester types */
+end user.dev.valid;
+
+openfile:  proc(name,loc,quit) returns (fixed); /* search for a system file */
+   dcl name        fixed array; /* name of file to open */
+   dcl loc         fixed;
+   dcl quit        fixed; /* true if we want to quit if file not there */
+   dcl found       boolean; /* TRUE if file is found */
+   dcl i           fixed;
+
+   found = false; /* have not found file yet */
+   i = 0; /* start search at system catalog */
+   do while (i < 3) and (not found); /* search 3 different catalogs */
+      do case i;
+         found = locate(name,-2); /* search path catalog */
+         found = locate(name,0); /* search system catalog */
+         found = ((user.dev.valid) and (locate(name,1)) ); /* search current catalog */
+      end;
+      i = i + 1;
+   end;
+
+   if found then do;
+      core(loc + 1) = f#ms_sector;
+      core(loc    ) = f#ls_sector;
+      core(loc - 1) = f#words;
+   end;
+   else do;
+      core(loc    ) = 0;
+      core(loc - 1) = 0;
+      if quit then do; /* file not found and we want to quit */
+         restore.flag = 0;
+         clear;
+         keypad_numeric;
+         ps('Cannot run the Signal File Manager.  System file "');
+         ps(name); ps('"'); nl;
+         ps('was not found on your system.'); nl;
+         core(loc.rst)=2;
+         call tty_wait; call exit(-1);
+      end;
+   end;
+   return(found); /* return TRUE if file was found */
+end openfile;
+
+read_system_file: proc(name,ptr,len); /* read in system file */
+   dcl name        fixed array; 
+   dcl ptr         fixed; /* start of file */
+   dcl len         fixed; /* length to read in */
+   dcl finfo(2)    fixed; /* temporary data storage */
+
+   call openfile(name,addr(finfo(1)),1); /* find file and open it */
+   call readdata(finfo(2),finfo(1),location(ptr),len);
+end read_system_file;
+
+file.truncate:proc(name,type,sectors) fixed swap; /* truncates cataloged file, return 1 if failure */
+  dcl level         lit '1'; /* always current catalog */
+  dcl name          fixed array; /* file name */
+  dcl type          fixed; /* file type */
+  dcl sectors       fixed; /* new length in sectors */
+  dcl blk(f#len-1)  fixed; /* FCB data arrays */
+  dcl blk2(f#len-1) fixed;
+  dcl (p,i)         fixed;
+
+  call read_catalog ('', level); /* get catalog */
+  call findmax; /* consolidate the catalog */
+
+  if not shortenfile (name, 0, sectors, shl(sectors, 8)) then do; /* try to shorten the file */
+     call upper(name); /* put name in upper case for error message */
+     if c#status = e#no_file then do; /* file is not there */
+        ps('File '); ps(name); ps(' not found.');
+        return (false);
+     end;
+     else if c#status = e#truncate then do; /* trying to expand the file */
+        ps('Expansion of file '); ps(name); ps('to ');     
+        pnum(sectors); ps(' not allowed.');
+        return (false);
+     end;
+     else if c#status = e#dir_full then do; /* no room in the directory for resulting free block */
+        error.flag=e.no.room;
+        return (false);
+     end;
+  end;
+
+  else do; /* truncated the file okay */
+     call write_catalog; /* write the catalog back out to disk */
+     return (true);
+  end;
+end file.truncate;
+
+/* $PAGE */
+
+old:  proc(name) fixed swap; /* opens file, call with fcb pointer set */
+   dcl name         fixed array; /* file name */
+   dcl fp           floating;
+   dcl buf(50)      fixed; /* buffer for checking sound file header info */
+   dcl fcb(f#len-1) fixed;
+   dcl i            fixed;
+   dcl level        lit '1'; /* level number */
+   
+   if not locate(name,level) then do; /* check for existence */
+      error.flag=e.not.saved; return 1;
+   end;   
+
+   if f#type <> t#sound then do; /* check that it is soundfile */
+      error.flag=e.file.type; return 1;
+   end;   
+   
+   i = findfile(name); 
+   call get_fcb(i, fcb); /* get the FCB for the file */
+   if c#ls_sector+fcb(f#ls) ILT c#ls_sector then i=1; else i=0;
+   call readdata(c#ms_sector+fcb(f#ms)+i,c#ls_sector+fcb(f#ls),buf,50); /* read in first part of header */
+   if (buf(41)<>0) then do; /* make sure its not stereo */
+      error.flag=e.stereo; return 1;
+   end;
+   if (buf(42)>500) then do; /* sample rate above 50kHz */
+      error.flag=e.sample.rate; return 1;
+   end;
+
+   f.drive      =f#ms_sector; 
+   f.sector     =f#ls_sector;
+   f.offset     =0;
+   f.tlen.up    =f#ms_length;
+   f.tlen.low   =f#ls_length; 
+   f.tlen.offset=0;
+   f.type       =f#type;
+   compute_f.data.index;
+   call assign(f.name,name);      
+
+   /* fill heading and symbol buffers */
+   call readdata(f.drive,f.sector,location(f.headptr),shl((heading.length+symbol.sectors),8));
+
+   if compatibility=0 then do; /* 5-4-82 changed period.index to indicate sample periods */
+      compatibility=1; period.index=600;
+   end;
+   if compatibility=1 then do; /* 6-16-82 added hertz */
+      compatibility=2;
+      call copy_vector(location(addr(fp)),location(octave),2);
+      if fp=0.0 then do;
+        hertz=4400; fp=3.09;
+        call copy_vector(location(octave),location(addr(fp)),2);
+      end;  
+      else hertz=int(10.*pitch_to_freq(fp));
+   end;   
+   if compatibility=2 then do; /* 7-1-84 new keyboard decay format */
+      compatibility=3;
+      keyboard.decay.number=keyboard.decay.number*clock.inc;
+   end;
+
+   /* temporary kludge to attempt to fix glommed sound files
+      which were created using the 1 May 1984 release of SFM */
+   if compatibility IGT compatibility.number then compatibility=3;
+
+   if compatibility=3 then do; /* 8-20-84 new symbol table format */
+      compatibility=compatibility.number;
+      number.of.symbols=core(f.symbolptr); /* value used to be stored here */
+      /* slide all symbols down by one word */
+      do i=0 to (256+254); core(f.symbolptr+i)=core(f.symbolptr+i+1); end;
+   end;
+
+   if (core(valid.data)<>0) or (core(total.data)<>0) then begin; /* probably a glommed sound file */
+      dcl temp (2) fixed;
+      file.data.type=0; /* just reset to zero */
+      i=locate_index('END'); /* look for end label */
+      if i<>0 then do; /* label exists */
+         call copy_vector(location(data.end),location(symbol_time(i)),3); /* set up DATA.END */
+         /* recompute VALID.DATA from DATA.END */
+         call time_to_index(location(data.end),temp,period.index);
+         call add_len_to_len(zero.zero.one,temp,temp);
+         call copy_vector(location(valid.data),temp,3);
+         /* recompute TOTAL.DATA from VALID.DATA */
+         if temp(2)<>0 then do; temp(1)=temp(1)+1; temp(2)=0; end;
+         call copy_vector(location(total.data),temp,3);
+      end;
+   end;
+   return 0;
+end old;
+
+/* $PAGE */
+
+unsave:proc(name) fixed swap; /* unsave a file, only if type is T#SOUND or T#SPECT */
+   dcl name  fixed array;
+   dcl level lit '1';
+   dcl i     fixed;
+
+   if not locate(name,level) then do; /* check that it exists */
+      error.flag=e.not.saved;
+      return 1;
+   end;
+
+   if (f#type<>T#SOUND) and (f#type<>T#SPECT) then do; /* check type */
+      error.flag=e.file.type;
+      return 1;
+   end;
+
+   call delete(name,level); /* delete file from catalog */
+
+   do i=0 to max.file.blocks-1; /* erase from FCB area */
+      if compare(location(file.block.loc+i*file.block.len),name) then 
+      core(file.block.loc+i*file.block.len)=0; /* set F.NAME.BYTES to zero */
+   end;
+   return 0;
+end unsave;
+
+/* $PAGE */
+
+new_file:proc(sectors) fixed swap; /* creates new soundfile with known length, call with fcb.ptr set */
+   dcl sectors fixed array; /* data sectors */
+   dcl level   lit '1'; /* level */
+   dcl oct     floating data(3.09);
+   dcl i       fixed;
+
+   if add_len_to_len(sectors,data.offset.vector,location(f.tlength)) then do; /* add three sectors */
+      error.flag=e.overflow;
+      return 1;
+   end;
+
+   if compare_vectors(location(f.tlength),data.offset.vector,3) = 0 then do;
+      error.flag=e.samples; /* file is too short */
+      return 1;
+   end;
+
+   if f.tlen.offset<>0 then do; /* the length of a new file should be an integral sectors */
+      f.tlen.offset=0;
+      call add_len_to_len(zero.one.zero,location(f.tlength),location(f.tlength));
+   end;
+
+   if (f.tlen.up<>0) or ((f.tlen.up=0) and (f.tlen.low IGT 60000)) then do; /* trying to create file larger than 64K sectors */
+      error.flag=e.no.room;
+      return 1;
+   end;
+   /* input conditions are valid */
+   
+   i=f.tlen.low*sector.size; /* compute length mod 64K */
+   if (sectors(2)>0) and (sectors(2)<256) then i=i-256+sectors(2);
+
+   if not replace(recordfile.name,T#SOUND,f.tlen.up,f.tlen.low,i,level) then do;
+      error.flag=e.no.room;
+      return 1;
+   end;
+      
+   /* file could be created, so save FCB data */
+   f.drive =f#ms_sector;
+   f.sector=f#ls_sector; /* save starting sector */
+   f.offset=0;
+   f.type  =t#sound;   
+   compute_f.data.index; /* compute start of data area */
+
+   do i=0 to sector.size*heading.length-1; /* zero out file header area */
+      core(f.headptr+i)=0;
+   end;  
+   
+   compute_total.data;  
+   compatibility    =compatibility.number;
+   number.of.symbols=0; /* no symbols stored */
+   hertz            =4400;  /* default */
+   call copy_vector(location(octave),location(addr(oct(0))),2); /* default */
+   call assign(f.name,recordfile.name);
+
+   return 0; /* no error */
+end new_file;
+
+/* $PAGE */
+
+duplicate:proc(name) fixed swap; /* creates copy of display file */
+   dcl name      fixed array; 
+   dcl level     lit '1';
+   dcl ms.source fixed;
+   dcl ls.source fixed;
+   dcl i         fixed;
+
+   file1;
+   if f.name.bytes=0 then do; /* no file in FCB */
+      error.flag=e.no.file;
+      return 1;
+   end;
+   if locate(name,level) and (not compare(recordfile.name,name)) then do; 
+      error.flag=e.dup.file; /* destination file already exists */
+      return 1;
+   end;
+   if not replace(name,f.type,f.tlen.up,f.tlen.low,shl(f.tlen.low,8),level) then do;
+      error.flag=e.no.room;
+      return 1;
+   end;
+   
+   ms.source=f.drive; /* ms starting sector */
+   ls.source=f.sector; /* ls start */
+   i=0;
+   do while (i+buf1.len) ILE f.tlen.low; /* copy file */
+      call readdata (ms.source,ls.source,databuf1,shl(buf1.len,8));
+      if ((shl(f#ms_sector,8)<>0) or ((shl(f#ms_sector,8)=0) and (f#ls_sector IGT 3)))
+      then call writedata(f#ms_sector,f#ls_sector,databuf1,shl(buf1.len,8));
+      else do; error.flag=e.sfm.write; return 1; end;
+      ls.source=ls.source+buf1.len;
+      if ls.source ILT buf1.len then ms.source=ms.source+1;
+      f#ls_sector=f#ls_sector+buf1.len;
+      if f#ls_sector ILT buf1.len then f#ms_sector=f#ms_sector+1;
+      i=i+buf1.len;
+   end;
+   if i ILT f.tlen.low then do;
+      call readdata (ms.source,ls.source,databuf1,shl((f.tlen.low-i),8));
+      if ((shl(f#ms_sector,8)<>0) or ((shl(f#ms_sector,8)=0) and (f#ls_sector IGT 3)))
+      then call writedata(f#ms_sector,f#ls_sector,databuf1,shl((f.tlen.low-i),8));
+      else do; error.flag=e.sfm.write; return 1; end;
+   end;  
+   return 0;
+end duplicate;
+
+/* $PAGE */
+
+enter_cat: proc (treename) returns (fixed); /* enter catalog from treename */
+   dcl treename         fixed array;
+   dcl string.ptr       fixed;
+   dcl nam (f#name_len) fixed;
+   dcl ch               fixed;
+
+   set_error: proc (type); /* set the correct SFM error number */
+      dcl type fixed;
+      if error.flag <> 0 then return;
+      error.flag = type;
+   end set_error;
+
+   find_error: proc; /* find SFM error number from c#status */
+      dcl error fixed;
+      error = e.unrecog; /* set default value */
+      if c#status = e#no_file then error = e.not.saved;
+      else if c#status = e#name then error = e.not.catalog;
+      else if c#status = e#invalid then error = e.validity;
+      else if c#status = e#no_config then error = e.invalid.device;
+      call set_error(error); 
+   end find_error;
+
+   getc:  proc returns (fixed); /* get next character in command line */
+      dcl c        fixed;
+      if string.ptr = treename(0) then return (0);
+      c = byte(treename,string.ptr);
+      if (c >= l.a) and (c <= l.z) then c = c - "40";
+      string.ptr = string.ptr + 1;
+      return (c);
+   end getc;
+
+   check_device:  proc(str) returns (boolean); /* returns TRUE if string contains a valid device name */
+      dcl str fixed array; /* string containing device name */
+      dcl ch  fixed;
+
+      if str(0) = 2 then do; /* must be 2 characters long */
+         ch = byte(str,0); /* get first character */
+         if (ch = a.F) or (ch = a.R) or (ch = a.W) then do; /* must be F,R or W */
+            ch = byte(str,1); /* get second character */
+            if (ch = a.0) or (ch = a.1) then return (true); /* this is a valid device */
+         end;
+      end;
+      return (false); /* this is not a valid device */
+   end check_device;
+
+   apply_device:  proc(str,fatal) returns (fixed); /* returns device number if it is in configuration */
+      dcl str   fixed array; /* device */
+      dcl fatal boolean; /* TRUE if catalog validity error is a fatal error */
+      dcl dev   fixed;
+      dcl ch    fixed;
+
+      ch = byte(str,0); /* get device type */
+      if      ch = a.F then dev = 2; /* floppy */
+      else if ch = a.R then dev = 4; /* remote */
+      else if ch = a.W then dev = 6; /* winchester */
+      
+      if dev < 6 then do; /* entering floppies not allowed */
+         call set_error (e.no.floppy);
+         return (-1);
+      end;
+
+      ch = byte(str,1); /* get drive number */
+      if ch = a.1 then dev = (dev or "1"); /* or in drive number */
+
+      if not enter_alternate ('',dev) then do; /* try to open the top-most catalog of this device */
+         call find_error; /* get SFM error from c#status */
+         dev = -1; /* set failure flag */
+      end;
+      return (dev); /* return device number */
+   end apply_device;
+
+/* $page */
+
+   read_name:  proc (nam) returns (boolean); /* if TRUE returned, a valid file name is in NAM */
+      dcl nam      fixed array; /* return name in this array */
+      dcl valid    boolean;     /* TRUE if valid file name found */
+      dcl done     boolean;     /* TRUE to add characters to file name */
+      dcl delimiters data ('?:'); call pbyte(delimiters,0,a.nul); /* file name delimiters (including carriage return) */
+
+      delimiter.pos:  proc(c) returns (fixed); /* returns position of delimter found */
+         dcl c fixed; /* character to check */
+         dcl i fixed;
+
+         do i = 0 to delimiters(0) - 1; /* search delimiters */
+            if byte(delimiters,i) = c then return (i); /* delimiter found */
+         end;
+         return (-1); /* delimiter not found */
+      end delimiter.pos;
+
+      nam(0) = 0; /* zero out name */
+
+      valid = true; /* no invalid characters found yet */
+      done = false; /* have not found all name characters yet */
+      do while delimiter.pos(ch) = -1; /* loop until a delimiter is found */
+         if valid_filechar(ch) then do; /* character is valid */
+            if (nam(0) < shl(f#name_len,1)) and (not done) then do; /* enough room in buffer */
+               call pbyte(nam,nam(0),ch); /* insert this character into array */
+               nam(0) = nam(0) + 1;
+            end;
+         end;
+         else if ch = a.sp then done = true; /* space found, so stop filling in name */
+         else if ch > a.sp then do; /* invalid character found */
+            call set_error(e.inv.filename);
+            valid = false;
+         end;
+         ch = getc;
+      end;
+
+      return (valid); /* got a valid name */
+   end read_name;
+
+/* $page */
+
+   get_name:  proc(nam) returns (fixed); /* traverse a tree file name */
+      dcl nam            fixed array; /* file name returned here */
+
+      nam(0) = 0; /* set name to empty */
+      ch = getc;
+
+      if ch = a.colon then do; /* leading colon, so enter top-level catalog of current device */
+         if not enter_alternate('',shr(core(loc.ucat + 1),8)) then call find_error; /* try to enter top-most catalog of current catalog */
+         ch = getc;
+         if ch = a.nul then return (2); /* just a colon after enter */
+      end;
+
+      if not read_name(nam) then return (0); /* read first name */
+
+      if (check_device(nam)) and (ch = a.colon) then do; /* device name followed by colon */
+         if apply_device(nam,true) = -1 then return (0); /* invalid device */
+
+         ch = getc;
+         if not read_name(nam) then return (0); /* get next name */
+         if ch = a.nul then return (1); /* at end of line */
+      end;
+
+      do while (ch = a.colon) and (nam(0) > 0);
+         if check_device(nam) then do; /* device name in wrong place */
+            call set_error(e.inv.filename);
+            return (0);
+         end;
+
+         if not enter_alternate(nam,-1) then do; /* try to enter this catalog */
+            call find_error; /* get SFM error from c#status */
+            return (0); /* error */
+         end;
+
+         ch = getc;
+         if ch = a.nul then return (1); /* at end of line */
+         if not read_name(nam) then return (0); /* get next name from tree */
+         if nam(0) = 0 then do; /* command ends with a colon */
+            call set_error(e.not.catalog);
+            return (0);
+         end;
+      end; /* of loop over tokens */
+
+      if nam(0) = 0 then do; /* no name found after colon */
+         call set_error(e.not.catalog);
+      end;
+
+      return (1); /* got a name */
+   end get_name;
+
+
+/* main code */
+
+   string.ptr = 0;
+   if not enter_alternate('',1) then call set_error(e.validity); /* enter current catalog */
+
+   if (get_name(nam) <> 0) then do; /* got a valid name */
+      if enter_catalog(nam,-1) then return 1; /* OK to enter it */
+      else call find_error; /* get SFM error from c#status */
+   end;
+   else return (0); /* something went wrong */
+end enter_cat;
+
+/* $PAGE */
+
+catalog:proc swap; /* print the current catalog (SFM related files only) */
+   dcl level           lit '1';
+   dcl fcb(f#len)      fixed;
+   dcl (used,avail)(2) fixed;
+   dcl max.sectors (2) fixed;
+   dcl line.pos        fixed;
+   dcl total.lines     fixed;
+   dcl (x,y,z)         fixed;
+   dcl (ch,i,j,k)      fixed;
+
+   print.name:proc (valid); /* print name from fcb, add trailing spaces */
+      dcl valid  fixed; /* 0- invalid sound file, 1- valid SFM sound file */
+      dcl (i,ch) fixed;
+
+      if valid then call pc(a.sp); /* valid SFM sound file */
+      else call pc(a.lparen); /* invalid, so put it in parentheses */
+      do i=0 to 7; /* loop over chars of name */
+         ch=byte(location(addr(fcb(0))-1),i);
+         if ch>0 then call pc(ch);
+         else         call pc(A.SP);
+      end;  
+      if valid then call pc(a.sp); /* valid SFM sound file */
+      else call pc(a.rparen); /* invalid, so close parentheses */
+      ps('  '); /* leave space between name and length */
+   end print.name;
+
+   call read_catalog('', level); /* establish level and read cat */
+
+   max.sectors(0)=c#ms_length; /* max sectors on level */
+   max.sectors(1)=c#ls_length;
+   max.sectors(2)=0;
+
+   used(0)=0; /* sectors used value */
+   used(1)=shr(c#dir_size,8); /* set to catalog length */
+   used(2)=0;
+
+   i = findfile(recordfile.name); /* look for .DATA */
+   if i <> -1 then do; /* if present, erase from copy of catalog */
+      call get_fcb(i,fcb);
+      do j=0 to f#name_len-1; fcb(f#nm+j)=0; end;
+      call put_fcb(i,fcb);
+   end;
+   call findmax; /* consolidate after removing .DATA */
+
+   clear;
+   call pos(4,32); /* position in catalog display region of screen */
+   ps('Catalog '); psr(location(loc.ccnm));
+   psr('Sound Files (lengths in sectors):');
+
+   call set_scroll(6,24); call pos(6,1); /* allow catalog to scroll if necessary */
+   k=0; line.pos=6; /* init count */
+   do i=0 to c#dir_size/c#len-1; /* loop over catalog entries */
+      call get_fcb(i,fcb); /* get fcb */
+      if fcb(f#nm)<>0 then do; /* if something there */
+         used(1)=used(1)+fcb(f#ll); /* add it to space used */
+         if used(1) ILT fcb(f#ll) then used(0)=used(0)+1; /* carry */
+         if fcb(f#ty)=t#sound and (fcb(f#nm)&0xFF)<>a.period then do; /* if valid sound file entry */
+            CALL TTY_WAIT;
+            if c#ls_sector+fcb(f#ls) ILT c#ls_sector then j=1; else j=0;
+            call readdata(c#ms_sector+fcb(f#ms)+j,c#ls_sector+fcb(f#ls),databuf1,50); /* read in header info */
+
+            if (databuf1(41)<>0) or (databuf1(42)>500) /* check stereo and sample rate */
+            then call print.name(0); /* invalid file, print name with parentheses */
+            else call print.name(1); /* valid SFM sound file, print normally */
+
+            unum(fcb(f#ll),5); /* length in sectors */
+            call pc(A.SP); call pc(A.SP); call pc(A.SP);
+            k=k+1; /* bump count */
+            if (k&3)=0 then nl;
+         end; /* of valid soundfile */
+      end; 
+   end; /* of loop over catalog entries */
+
+   if (k&3)<>0 then nl; /* terminate current line */
+
+   /* $PAGE */
+
+   nl; psr('Subcatalogs:');
+   k=0;
+   do i = 0 to c#dir_max/c#len-1; /* loop over catalog entries */
+      call get_fcb(i,fcb);
+      if  (fcb(f#nm)<>0)
+      and ((fcb(f#ty)=t#subc) or (fcb(f#ty)=t#lsubc)) then do;
+         call print.name(1);
+         k=k+1; /* bump count */
+         if (k mod 6)=0 then nl;
+      end;
+   end; /* of loop over catalog entries */
+   if (k mod 6)<>0 then nl;
+
+   nl; psr('Spectral files:');
+   k=0;
+   do i = 0 to c#dir_max/c#len-1; /* loop over catalog entries */
+      call get_fcb(i,fcb);
+      if (fcb(f#ty)=t#spect) and (fcb(f#nm)<>0) then do;
+         call print.name(1);
+         k=k+1; /* bump count */
+         if (k mod 7)=0 then nl;
+      end;
+   end; /* of loop over catalog entries */
+   if (k mod 7)<>0 then nl;
+
+   /* compute space (and time) available */
+   call sub_len_from_len(max.sectors,used,avail); /* compute sectors available */
+   if ((avail(0) IGT 0) or ((avail(0)=0) and (avail(1) IGT (symbol.sectors+heading.length)))) then do; /* space is avail for a sound file */
+      avail(1)=avail(1)-(symbol.sectors+heading.length); /* correct avail num for header sectors */
+   end;
+   else do; avail(1)=0; avail(2)=0; end; /* no space for sound files */
+   
+   call index_to_time(avail,avail,current.per.index);
+   nl; ps('Total unused recording time in catalog at ');
+   call fprint(clock.rate*1./current.per.index,2,3);
+   ps(' kHz is '); call print_time(avail,0,0); psr(' Sec.');
+
+   call findmax; /* get largest contiguous block */
+   if (f#ms_length IGT 0) then avail(1)=60000-(heading.length+symbol.sectors); /* must truncate to 32K, minus heading */
+   else if (f#ls_length IGT (heading.length+symbol.sectors))
+   then avail(1)=f#ls_length-(heading.length+symbol.sectors); /* largest hole, less heading */
+   else avail(1)=0; /* no space left */
+   avail(0)=0; avail(2)=0; /* zero out top bits and words */
+   
+   call index_to_time(avail,avail,current.per.index);                    
+   ps('Largest contiguous recording interval at ');
+   call fprint(clock.rate*1./current.per.index,2,3);
+   ps(' kHz is '); call print_time(avail,0,0); ps(' Sec.');
+
+   call set_scroll(1,2); /* restore normal scrolling operation */
+   display.type=cat.display; /* establish display as cat display */
+end catalog;    
+
+directory:  proc swap; /* print sound files and captions at current level */
+   dcl level             lit '1';
+   dcl fcb (f#len-1)     fixed;
+   dcl line.pos          fixed;
+   dcl name (f#name_len) fixed;
+   dcl (i,j)             fixed;
+
+   call read_catalog('', level); /* read catalog */
+
+   clear;
+   call pos(4,18); /* position in catalog display region of screen */
+   ps('Directory of Sound Files in Catalog '); psr(location(loc.ccnm));
+   call pos(5,1);  ps('Sound File');
+   call pos(5,15); ps('Seconds');
+   call pos(5,26); ps('Caption');
+   
+   /* $PAGE */
+
+   call set_scroll(6,24); call pos(6,1); /* allow catalog to scroll if necessary */
+   line.pos=6; /* init count */
+   do i=0 to c#dir_size/c#len-1; /* loop over catalog entries */
+      call get_fcb(i,fcb); /* get fcb */
+      /* read in header info for sound file */
+      CALL TTY_WAIT;
+      if c#ls_sector+fcb(f#ls) ILT c#ls_sector then j=1; else j=0;
+      call readdata(c#ms_sector+fcb(f#ms)+j,c#ls_sector+fcb(f#ls),databuf1,256);
+
+      if (databuf1(41)=0) and (databuf1(42)<=500) /* check stereo and sample rate */
+      and (fcb(f#nm)<>0) and (fcb(f#ty)=t#sound) then do; /* if valid sound file entry */
+         do j=0 to f#name_len-1; name(j+1)=fcb(f#nm+j); end; /* copy name into array */
+         name(0)=0;
+         do j=0 to shl(f#name_len,1)-1; if byte(name,j)>a.sp then name(0)=name(0)+1; end;
+
+         call pos(line.pos,1);  ps(name);
+         call pos(line.pos,13); call print_time(location(addr(databuf1(9))),3,1);
+         if databuf1(127)>54 then databuf1(127)=54; /* impose temporary limit */
+         call pos(line.pos,26); ps(location(addr(databuf1(127))));
+
+         nl; if line.pos<24 then line.pos=line.pos+1; /* terminate current line */
+      end; /* of valid file */
+   end; /* of loop over catalog entries */
+
+   call set_scroll(1,2); /* restore normal scrolling operation */
+   display.type=dir.display; /* establish display as directory display */
+end directory;
+
+stop:proc swap; /* perform cleanup and terminate SFM */ 
+   restore.flag=0; /* don't repeat command line */
+   clear; 
+   call replace_head; /* update last sound file to disk */
+   call unsave(RECORDFILE.NAME); /* get rid of .DATA */
+   call set_scroll(1,24); /* reset terminal to 24 lines */
+   keypad_numeric;
+   call tty_wait; /* empty output buffer */
+   core(loc.rst)=2; /* good termination status */
+   call exit(0);
+end stop;
+
+chain:proc(name, synclavier) swap; /* chains from .SFM-x to specified module in top cat level */
+   dcl name       fixed array; /* name of program to chain to */
+   dcl synclavier boolean; /* TRUE if overlaying to an RTP version */
+   dcl status     fixed; /* returned from CAN.OVERLAY */
+
+   file1; /* update last current file to disk */
+   if not openfile(name,loc.p2,0) /* look for module */
+   then error.flag = e.sys.error; /* file not found */
+   else if f#type <> t#exec then error.flag = e.not.exec;
+   else do; /* okay to do overlay */
+      status=can.overlay(f#ms_sector,f#ls_sector,loc.load-(mem.siz-(1024+256)),0,databuf1);
+
+      /* previous line possibly blows up.  this routine does not distinguish
+      between SFM modules and other programs.  assumes it is okay to trash
+      most of SFM high core.  right now, programmer had better make sure
+      his module is not going to trash high core if it is not supposed to. */
+
+      if status<>0 then do;     /* have a problem with overlay */
+         if status=(-1)
+         then error.flag=e.old.exec;    /* -1:  not a xpl-6 or later compilation */
+         else if (status=-6) or (status=-7)
+         then error.flag=e.not.xpl;     /* -6 or -7:  not an XPL program */
+         else error.flag=e.pgm.too.big; /* -2 to -5:  overlay pgm is too big for mem */
+         return 1;
+      end;
+      if synclavier then do; /* clear screen for RTP */
+         restore.flag=0; clear;
+      end;
+      call set_scroll(1,24); /* turn all of screen back in any case */
+      call tty_wait;
+
+      if synclavier /* do this if starting up an RTP version */
+      then do;
+         psr('Starting the Synclavier (r).  Please wait...');
+         call tty_wait;
+      end;
+         
+      core(loc.rst)  = 3; /* value of 3 means chaining from .SFM-x */
+      call overlay(core(loc.p2+1),core(loc.p2),core(loc.p2-1));
+   end;
+end chain;
+
+/* $SUBTITLE  Filter Chaining Routine */
+
+chain_filter:proc(flag,filename,chain.file) fixed swap; /* filter or correlate current file by impulse response in FILENAME */
+   dcl flag       fixed; /* =0 to filter, =1 to correlate */                          
+   dcl filename   fixed array;
+   dcl chain.file fixed array;
+   dcl valid1(2)  fixed;
+   dcl valid2(2)  fixed;
+   dcl status     fixed;
+   dcl maxlength  data (0,nmax/2/sector.size,0);
+
+   /* files:  loc.p1 points to .SFM-x
+              loc.p2 will point to program to be overlayed
+              file1  will be input (current saved file)
+              file2  will be output (.DATA)
+              file3  will be impulse response file, modulating file, etc.  */
+
+   file1; /* select current display file */
+
+   if compare(f.name,recordfile.name) or (f.name.bytes=0) then do; /* check that file is saved */
+      error.flag=e.must.save;
+      return 1;
+   end;   
+   call copy_vector(valid1,location(valid.data),3);
+
+   file3;
+   if old(filename) then return 1; /* open impulse response file */
+   call copy_vector(valid2,location(valid.data),3);
+
+   file2;
+   call add_len_to_len(valid1,valid2,location(total.data)); /* get length */
+   if new_file(location(total.data)) then return 1;
+
+   file1;       
+   if not openfile(chain.file,loc.p2,1) then do; /* find file and open it */
+      error.flag=e.sys.error; 
+      return 1;
+   end;
+
+   call openfile(chain.file,loc.p2,0); /* look for file and open it */
+   status=can.overlay(f#ms_sector,f#ls_sector,loc.load-(mem.siz-1938),0,databuf1);
+   if status<>0 then do;     /* have a problem with overlay */
+      if status=(-1)
+      then error.flag=e.old.exec;    /* -1:  not a xpl-6 or later compilation */
+      else if (status=-6) or (status=-7)
+      then error.flag=e.not.xpl;     /* -6 or -7:  not an XPL program */
+      else error.flag=e.pgm.too.big; /* -2 to -5:  overlay pgm is too big for mem */
+      return 1;
+   end;
+
+   restore.flag=0;
+   clear;
+   call set_scroll(1,24); /* set full scroll */
+   call pos(5,1);
+   psr('Please wait');
+   call tty_wait;
+
+   core(loc.rst)=flag; /* pass data to overlay */
+   call overlay(core(loc.p2+1),core(loc.p2),core(loc.p2+1));
+end chain_filter;

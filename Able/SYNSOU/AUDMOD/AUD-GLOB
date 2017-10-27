@@ -1,0 +1,827 @@
+/* :SYNSOU:AUDMOD:AUD-GLOB  Routines used by the more than one group */
+
+/* 
+   MODIFIED:
+
+   05/15/89 - SGS - Split AUD-GLOB in two, creating AUD-GLB2
+   05/02/89 - TSS - Merged changes for Optical disk to DTD transfer project
+   04/24/89 - SGS - added optical group
+   10/22/88 - cj  - fixed bug with smpte time display update,  and improved
+                    big time display update response time
+   10/15/88 - PF  - Added tbut.ptr bits for input/auto/cuepb states
+   09/18/88 - cj  - Implemented complete dragging between tables
+                    in perform.aee.drag.function
+   08/22/88 - cj  - update sequence panel in real time, more dragging, seq note trigger
+   08/04/88 - cj  - different usage of Sync.SMPTE.Disp.Mode to handle
+                    different display mode from in-coming mode
+   06/30/88 - TSS - Changed INC.D34.REMOTE.CONTROL.CODE literal to D34GPI.THERE run-time variable
+   06-22/88 - cj - fixed panel menu/project manager bug
+
+*/
+
+dcl Shuttle.Range.Object         fixed public;
+dcl AEE.Initialized              fixed public;
+dcl AEE.SMPTE.Display.Format     fixed public;
+
+dcl Corner.Label                 fixed public;  /* Id for corner label */
+
+dcl Seq.Info.Track               fixed public;  /* for info note trigger */
+
+/* Global procedures */
+
+dcl Update.AEE.Track.Status.Displays.And.Tallies proc  (fixed, fixed) recursive;
+
+UPDATE.AUDIO.EVENT.EDITOR: proc returns (fixed) public swapable;
+   dcl Update.Project.Manager proc external;
+   dcl Update.Shuttle         proc external;
+   dcl Update.Cue.Menu.Table  proc (fixed,fixed) external;
+   dcl Update.Storage.Panel   proc external;
+   dcl Update.Record.Panel    proc external;
+   dcl Update.Motion.Panel    proc external;
+   dcl Project.Manager.Group  fixed external;
+   dcl Cue.Menu.Group         fixed external;
+   dcl Storage.Group          fixed external;
+   dcl Record.Group           fixed external;
+   dcl Motion.Group           fixed external;
+
+   if DTD.MAX.SECS <> 0 then do;
+
+      /* re-set up all system info before updating AEE screen: */
+
+      call SET.UP.AEE.DTD.GLOBALS;
+
+      call Update.AEE.Track.Status.Displays.And.Tallies (-1, -1);
+
+      if Project.Manager.Group <> 0 then call Update.Project.Manager;
+      if Shuttle.Group         <> 0 then call Update.Shuttle;
+      if Cue.Menu.Group        <> 0 then call Update.Cue.Menu.Table(0,-1);
+      if Cue.Group             <> 0 then call Update.Cue.Panel;
+      if Storage.Group         <> 0 then call Update.Storage.Panel;
+      if Record.Group          <> 0 then call Update.Record.Panel;
+      if Motion.Group          <> 0 then call Update.Motion.Panel;
+
+      return true;
+
+   end;
+
+   return false;
+end UPDATE.AUDIO.EVENT.EDITOR;
+
+SET.RANGE.32BIT.MSEC.DISPLAY.FORMATS: proc (lowid,highid,format,maxl,maxr) public swapable;
+   dcl lowid  fixed;
+   dcl highid fixed;
+   dcl format fixed;
+   dcl maxl   fixed;
+   dcl maxr   fixed;
+   dcl Next.Ptr  fixed;
+   dcl Cur.Ptr   fixed;
+
+   Next.Ptr = 0;
+   Cur.Ptr = 0;
+
+   do while Read.Object(Next.Ptr) <> -1;   /* Traverse entire list */
+      Cur.Ptr   = Next.Ptr;
+      Next.Ptr  = Next.Ptr + read(md);
+      if (Read.Object(Cur.Ptr+O#Type) = O$32Bit.MSEC)
+      &  (Read.Object(Cur.Ptr+O#ID) >= lowid)
+      &  (Read.Object(Cur.Ptr+O#ID) <= highid)
+      then call Set.32Bit.MSEC.Display.Format(Read.Object(Cur.Ptr+O#ID),format,0,maxl,maxr);
+   end;
+end SET.RANGE.32BIT.MSEC.DISPLAY.FORMATS;
+
+AEE.INIT: proc public swapable;
+   if LOD.Running <> 0 then do;
+      write(mam) = SCSI.Ptr;
+      write(mdi) = AEE.Current.Project;
+      call Send.To.Lod(152,2);
+      call Update.Audio.Event.Editor;
+      AEE.Initialized = true;
+   end;
+end AEE.INIT;
+
+PERFORM.AEE.DRAG.FUNCTION: proc (source,dest) public swapable;
+   dcl source   fixed;  /* id of source */
+   dcl dest     fixed;  /* id of dest   */
+   dcl sformat  fixed;
+   dcl dformat  fixed;
+   dcl sreal    fixed;
+   dcl dreal    fixed;
+   dcl tmp(1)   fixed;
+   dcl TypeId   fixed;
+   dcl msec(1)  fixed;
+   dcl dur (1)  fixed;
+   dcl misc(1)  fixed;
+   dcl stime(1) fixed;
+
+   /* get source time: */
+
+   if source = Shuttle.Memory.Table     /* get info from memory table */
+   then do;
+      tmp  (0)  = AEE.Memory.Array(shl(Screen.Event.Table.Row*Shuttle.Memory.Columns + Screen.Event.Table.Col,1)  );
+      tmp  (1)  = AEE.Memory.Array(shl(Screen.Event.Table.Row*Shuttle.Memory.Columns + Screen.Event.Table.Col,1)+1);
+      stime(0)  = AEE.Memory.Start(shl(Screen.Event.Table.Row*Shuttle.Memory.Columns + Screen.Event.Table.Col,1)  );
+      stime(1)  = AEE.Memory.Start(shl(Screen.Event.Table.Row*Shuttle.Memory.Columns + Screen.Event.Table.Col,1)+1);
+      sformat   = AEE.Memory.Format(Screen.Event.Table.Row*Shuttle.Memory.Columns + Screen.Event.Table.Col);
+      sreal     = sformat & "177400";
+      sformat   = sformat & "000377";
+   end;
+
+   else if Fetch.Object.Info(source,O#Type) = O$32Bit.Msec
+   then do;                             /* is 32 bit msec  */
+      call Fetch.32Bit.MSEC(source,tmp);
+      stime(0)  = Fetch.Object.Info(source, O#MSEC.MSW);
+      stime(1)  = Fetch.Object.Info(source, O#MSEC.LSW);
+      sreal     = Fetch.Object.Info(source, O#MSEC.Format) & (O#MSEC.RealTime\O#MSEC.Alt.Offset);
+      sformat   = Fetch.Object.Info(source, O#MSEC.Type  ) & 255;
+   end;
+
+   else if Fetch.Object.Info(source,O#Type) = O$Table
+   then do;
+      TypeId = Fetch.Object.Info(source, O#TABL.Cell.Type.Id);
+      if Fetch.Object.Info(TypeId, O#Type) <> O$32Bit.Msec
+      then return;
+      call Fetch.Table       (Source, 0, Screen.Event.Table.Row);
+      call Fetch.32Bit.MSEC  (TypeId, tmp);
+      stime(0)  = Fetch.Object.Info(TypeId, O#MSEC.MSW);
+      stime(1)  = Fetch.Object.Info(TypeId, O#MSEC.LSW);
+      sreal     = Fetch.Object.Info(TypeId, O#MSEC.Format) & (O#MSEC.RealTime\O#MSEC.Alt.Offset);
+      sformat   = Fetch.Object.Info(TypeId, O#MSEC.Type  ) & 255;
+   end;
+
+   else do;                             /* type mismatch */
+      return;
+   end;
+
+   /* check for source time before 0.000 */
+
+   if  (sformat  =  cf#time  )		/* if source is time */
+   and (tmp(0)   =  0        )		/* but is before     */
+   and (tmp(1)  ilt zero.time)		/* 0.000             */
+	then tmp(1)   =  zero.time;		/* set to 0.000      */
+
+   if Dest = Shuttle.Memory.Table then do;
+
+      /* note: save starting time of duration displays to try to get */
+      /* drag displays to work better:                               */
+
+      AEE.Memory.Array(shl(Screen.Event.Obj.Row*Shuttle.Memory.Columns + Screen.Event.Obj.Col,1)  ) = tmp(0);
+      AEE.Memory.Array(shl(Screen.Event.Obj.Row*Shuttle.Memory.Columns + Screen.Event.Obj.Col,1)+1) = tmp(1);
+      AEE.Memory.Format(Screen.Event.Obj.Row*Shuttle.Memory.Columns + Screen.Event.Obj.Col) = sformat \ sreal;
+      AEE.Memory.Start(shl(Screen.Event.Obj.Row*Shuttle.Memory.Columns + Screen.Event.Obj.Col,1)  ) = stime(0);
+      AEE.Memory.Start(shl(Screen.Event.Obj.Row*Shuttle.Memory.Columns + Screen.Event.Obj.Col,1)+1) = stime(1);
+
+      /* Highlight cell if non-zero value is placed in it */
+
+      if  ((sformat = cf#time     )
+      and  ((tmp(0) <>  0        )
+      or    (tmp(1) igt zero.time))) 
+      or  ((sformat = cf#dur      )
+      and  ((tmp(0) <>  0        )
+      or    (tmp(1) <>  0        ))) 
+      then do;
+         call Set.Table.Cell.Attr(Shuttle.Memory.Table,Screen.Event.Obj.Col,Screen.Event.Obj.Row,0,ATTR#Reverse\ATTR#AltIntensity);
+      end;
+      else do;
+         call Set.Table.Cell.Attr(Shuttle.Memory.Table,Screen.Event.Obj.Col,Screen.Event.Obj.Row,0,ATTR#NoReverse\ATTR#AltIntensity);
+      end;
+   end;
+
+   else if Fetch.Object.Info(dest,O#Type) = O$32Bit.Msec
+   then do;                             /* is 32 bit msec  */
+
+      if Dest = Shuttle.Time.Display  /* stop playback if deposit      */
+      then do;                        /* is into time display          */
+         call Stop.DTD.Playback;      /* so it does not get clobbered  */
+      end;
+
+      dreal   = Fetch.Object.Info(dest, O#MSEC.Format) & O#MSEC.RealTime;
+      dformat = Fetch.Object.Info(dest, O#MSEC.Type  ) & 255;
+
+      /* get current info about the dest value handy: */
+
+      msec(0) = Fetch.Object.Info(dest, O#MSEC.MSW  );
+      msec(1) = Fetch.Object.Info(dest, O#MSEC.LSW  );
+      dur (0) = Fetch.Object.Info(dest, O#MSEC.Dur  );
+      dur (1) = Fetch.Object.Info(dest, O#MSEC.Dur+1);
+
+      /* add/subtract zerotime to convert from start time to duration: */
+
+      if  (sformat = cf#time)
+      and (dformat = cf#dur )
+      then call SUB16(zero.time,tmp);
+
+      if  (sformat = cf#dur )
+      and (dformat = cf#time)
+      then call ADD16(zero.time,tmp);
+
+      /* convert from real time to sequence time or sequence time to */
+      /* real time if needed:                                        */
+
+      sreal = sreal & O#MSEC.Realtime;   /* no longer need Alt.Offset bit */
+
+      if dformat = cf#time then do;
+
+         if  (sreal   = O#MSEC.Realtime)
+         and (dreal   = 0              )
+         then call Map.Real.Time.To.Sequence.Time(tmp, tmp);
+
+         if  (sreal   = 0              )
+         and (dreal   = O#MSEC.Realtime)
+         then call Map.Sequence.Time.To.Real.Time(tmp, tmp);
+
+         call COPY32(tmp, msec);
+      end;
+
+      /* convert for durations: */
+
+      else do;
+
+         if  (sreal   = O#MSEC.Realtime)
+         and (dreal   = 0              )
+         then call Map.Real.Duration.To.Sequence.Duration(msec, tmp, tmp);
+
+         if  (sreal   = 0              )
+         and (dreal   = O#MSEC.Realtime)
+         then do;
+            call Map.Real.Time.To.Sequence.Time(msec, misc);
+            call Map.Sequence.Duration.To.Real.Duration(misc, tmp, tmp);
+         end;
+
+         call COPY32(tmp, dur);
+      end;
+
+      call Deposit.32Bit.MSEC(dest,msec,dur);
+      call Update.Object(Dest);
+
+   end;
+
+   else if Fetch.Object.Info(Dest, O#Type) = O$Table
+   then do;
+
+      TypeId = Fetch.Object.Info(Dest, O#TABL.Cell.Type.Id);
+
+      if Fetch.Object.Info(TypeId, O#Type) <> O$32Bit.Msec
+      then return;
+
+      call SELECT.NEW.CUR.OBJ(Dest, 0, Screen.Event.Obj.Row);
+      call Fetch.Table       (Dest, 0, Screen.Event.Obj.Row);
+
+      dreal   = Fetch.Object.Info(TypeId, O#MSEC.Format) & O#MSEC.RealTime;
+      dformat = Fetch.Object.Info(TypeId, O#MSEC.Type  ) & 255;
+
+      /* get current info about the dest value handy: */
+
+      msec(0) = Fetch.Object.Info(TypeId, O#MSEC.MSW  );
+      msec(1) = Fetch.Object.Info(TypeId, O#MSEC.LSW  );
+      dur (0) = Fetch.Object.Info(TypeId, O#MSEC.Dur  );
+      dur (1) = Fetch.Object.Info(TypeId, O#MSEC.Dur+1);
+
+      /* add/subtract zerotime to convert from start time to duration: */
+
+      if  (sformat = cf#time)
+      and (dformat = cf#dur )
+      then call SUB16(zero.time,tmp);
+
+      if  (sformat = cf#dur )
+      and (dformat = cf#time)
+      then call ADD16(zero.time,tmp);
+
+      /* convert from real time to sequence time or sequence time to */
+      /* real time if needed:                                        */
+
+      sreal = sreal & O#MSEC.Realtime;   /* no longer need Alt.Offset bit */
+
+      if dformat = cf#time then do;
+
+         if  (sreal   = O#MSEC.Realtime)
+         and (dreal   = 0              )
+         then call Map.Real.Time.To.Sequence.Time(tmp, tmp);
+
+         if  (sreal   = 0              )
+         and (dreal   = O#MSEC.Realtime)
+         then call Map.Sequence.Time.To.Real.Time(tmp, tmp);
+
+         call COPY32(tmp, msec);
+      end;
+
+      /* convert for durations: */
+
+      else do;
+
+         if  (sreal   = O#MSEC.Realtime)
+         and (dreal   = 0              )
+         then call Map.Real.Duration.To.Sequence.Duration(msec, tmp, tmp);
+
+         if  (sreal   = 0              )
+         and (dreal   = O#MSEC.Realtime)
+         then do;
+            call Map.Real.Time.To.Sequence.Time(msec, misc);
+            call Map.Sequence.Duration.To.Real.Duration(misc, tmp, tmp);
+         end;
+
+         call COPY32(tmp, dur);
+      end;
+
+      disable.deposits = 1;
+      call Deposit.32bit.Msec(Typeid, msec, dur);
+      disable.deposits = 0;
+      call Deposit.Table     (Dest, 0, Screen.Event.Obj.Row);
+   end;
+
+   else do;                             /* type mismatch */
+      return;
+   end;
+
+end PERFORM.AEE.DRAG.FUNCTION;
+
+PRINT.PANEL.TITLE: proc (row,string) public swapable;
+   dcl row         fixed;
+   dcl string      array;
+
+   call Push.Graphics.Attributes;
+
+   vector_mode;
+   call move_to(gpos.x(-10),gpos.y((row-1)*100)+3);
+   alpha_mode;
+   call pc(27); call ps(';');
+   call ps(string);
+   
+   call Pop.Graphics.Attributes;
+end PRINT.PANEL.TITLE;
+
+SET.AUTO.ARROW.LINK.RANGE: proc (first.id,last.id) public swapable; 
+   dcl first.id       fixed;
+   dcl last.id        fixed;
+   dcl i              fixed;
+
+   do i = first.id to last.id;
+      call Set.Object.Arrow.Links(i,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+   end;
+end SET.AUTO.ARROW.LINK.RANGE;
+
+dcl Max.Saved.Panels lit '8';
+
+FETCH.AEE.PANEL.INFO: proc (panel.id,info) fixed swapable;
+   dcl panel.id   fixed;
+   dcl info       array;
+   dcl i          fixed;
+
+   call GID(AEE.Screen.Layout);   /* set up MAM & MAL ptrs */
+
+   do i=1 to Max.Saved.Panels;    /* look for this panel */
+      if read(md) <> 0 then do;   /* see if valid info   */
+         if (shr(read(md),10)&"17")=Panel.Id then do; /* found it */
+            Info(0) = shr(read(md),5)&"37"; /* row  */
+            Info(1) = read(md)&"37";        /* size */
+            return true;
+         end;
+      end;
+      write(ATNV)=read(mdi); /* step to next panel position */
+   end;
+
+   /* never found it */
+   Info(0) = -1; 
+   Info(1) = 0;
+   return false;
+
+end FETCH.AEE.PANEL.INFO;
+
+SET.AEE.PANEL.INFO: proc(Panel.Id,Row,Size) public swapable;
+   dcl Panel.Id   fixed;
+   dcl (Row,Size) fixed;
+   dcl i          fixed;
+
+   call GID(AEE.Screen.Layout);   /* set up MAM & MAL ptrs */
+
+   do i=1 to Max.Saved.Panels;    /* look for existing def for this panel */
+      if read(md) <> 0            /* find a valid entry                   */
+      then do;
+         if (shr(read(md),10)&"17")=Panel.Id then do; /* found it */
+            if Size=0
+            then write(md)=0;
+            else write(md)=shl(Panel.Id,10)|shl(Row,5)|Size; /* save new values */
+            return;
+         end;
+      end;
+      write(ATNV)=read(mdi); /* step to next panel position */
+   end;
+
+   if Size = 0         /* if panel is closed, and not in list,  */
+   then return;        /* then we are done with our job         */
+
+   call GID(AEE.Screen.Layout); /* set up MAM & MAL ptrs to top of list */
+
+   do i=1 to Max.Saved.Panels; /* look for an unused slot */
+      if (read(md)&"37")=0 then do; /* found an unused spot */
+         write(md)=shl(Panel.Id,10)|shl(Row,5)|Size; /* save new values */
+         return;
+      end;
+      write(ATNV)=read(mdi); /* step to next panel position */
+   end;
+
+end SET.AEE.PANEL.INFO;
+
+DISPLAY.AEE.PLACE.TRACK: proc public swapable;
+   dcl Place.Track fixed;
+
+   Place.Track = GID(Cue.Place.Track);
+
+   if Place.Track ilt Num.Kbd.Tracks then do;
+      Place.Track=Num.Kbd.Tracks;
+   end;
+   if Place.Track ige (Num.Kbd.Tracks+200) then do;
+      Place.Track=Num.Kbd.Tracks+199;
+   end;
+
+   Disable.Deposits=true;
+      if Cue.Menu.Group<>0 then do; /* cue directory is displayed */
+         call Deposit.Fixed.Point(GID(Cue.Menu.Place.Track.Field),Place.Track-1);
+      end;
+
+      if Cue.Group<>0 then do; /* cue editor is displayed */
+         call Deposit.Fixed.Point(Cue.Place.Track.Field,Place.Track-1);
+      end;
+
+      if Shuttle.Group <> 0 then do; /* shuttle editor displayed */
+         call Deposit.Fixed.Point(Shuttle.Cue.Place.Track.Field,Place.Track-1);
+      end;
+
+      if (Optical.Group <> 0)            /* optical transfer displayed */
+      and (GID(AEE.Opt.Width.Mode)=0) then do; /* and in full width mode */
+         call Deposit.Fixed.Point(Optical.Place.Track.Num,Place.Track-1);
+      end;
+   Disable.Deposits=false;
+end DISPLAY.AEE.PLACE.TRACK;
+
+/* handy routine to set place track for AEE and snappily update */
+/* all AEE screen displays:                                     */
+
+SET.PLACE.TRACK: proc (Place.Track) public swapable; /* pass abs track # */
+   dcl Place.Track fixed;
+   dcl i           fixed;
+
+   /* Use system routine to assign track & notify everyone of events: */
+
+   i = ASSIGN.DTD.PLACE.TRACK(Place.Track);
+
+   if i = 1
+   then call DISPLAY.NOTICE (NT#BadPlaceTrack,ATTR#Normal,NulStr,0,0,0);
+
+   /* quickly update our place track display so humble user thinks    */
+   /* computers are fast:                                             */
+
+   call Display.AEE.Place.Track;
+
+end SET.PLACE.TRACK;
+
+DECREMENT.PLACE.TRACK: proc fixed public swapable;
+   dcl Place.Track fixed;
+
+   Place.Track=GID(Cue.Place.Track); /* look up current place trk */
+
+   Place.Track=Place.Track-1;
+
+   do while (Place.Track ige Num.Kbd.Tracks)
+      and   (not Track.Available.For.Cues(Place.Track));
+      Place.Track=Place.Track-1;
+   end;
+
+   if Place.Track ige Num.Kbd.Tracks then do;
+      call Set.Place.Track(Place.Track);
+   end;
+
+   return GID(Cue.Place.Track);
+end DECREMENT.PLACE.TRACK;
+
+INCREMENT.PLACE.TRACK: proc fixed public swapable;
+   dcl Place.Track fixed;
+
+   Place.Track=GID(Cue.Place.Track); /* look up current place trk */
+
+   Place.Track=Place.Track+1;
+
+   do while (Place.Track ilt (Num.Kbd.Tracks+200))
+      and   (not Track.Available.For.Cues(Place.Track));
+      Place.Track=Place.Track+1;
+   end;
+
+   if Place.Track ilt (Num.Kbd.Tracks+200) then do;
+      call Set.Place.Track(Place.Track);
+   end;
+
+   return GID(Cue.Place.Track);
+end INCREMENT.PLACE.TRACK;
+
+INIT.AEE.GLOBALS: proc public swapable;
+	//	if			(Q-page set by .SDEF-7)						then use its value
+	//	else if	(we've been to the G-Page or S-Page)	then use its value
+	//	else															use the keyboard's current time display mode
+
+   AEE.Time.Format = GID(Saved.AEE.Time.Format);
+
+	if (AEE.Time.Format < 0)	/* (haven't been to the Q-page yet) && (no preference stored in .SDEF-7)	*/
+	{
+		if (gid(sav.time.mode) < 0)	/* haven't been to the S-page or G-page yet	*/
+		{	/* default to the display mode currently set on the VK keyboard */
+			do case TRACK.FORMAT;
+				AEE.Time.Format	= 1;	//	case 0: BEATS				->	1: Beats
+				AEE.Time.Format	= 2;	//	case 1: MEASURES/BEATS	->	2: Meas:Beats
+				AEE.Time.Format	= 0;	//	case 2: SECONDS			->	0: Seconds
+				AEE.Time.Format	= 3;	//	case 3: SMPTE				->	3: SMPTE
+			end;
+		}
+		else
+		{	/* default to the display mode currently set on the S-page or G-page */
+			do case gid(sav.time.mode);
+				AEE.Time.Format	= 0;	//	case 0: seconds			->	0: Seconds
+				AEE.Time.Format	= 5;	//	case 1: min:sec			->	5: Mins:Seconds
+				AEE.Time.Format	= 1;	//	case 2: beats				->	1: Beats
+				AEE.Time.Format	= 2;	//	case 3: measures/beats	->	2: Meas:Beats
+				AEE.Time.Format	= 3;	//	case 4: smpte				->	3: SMPTE
+				AEE.Time.Format	= 4;	//	case 5: feet:frames		->	4: Feet:Frames
+			end;
+		}
+	}
+
+   ASSIGN.DTD.PLACE.TRACK(GID(Cue.Place.Track)); /* will init value if needed */
+
+end INIT.AEE.GLOBALS;
+
+/* $page - routine to get next screen event, draw flags and edits */
+
+dcl Draw.New.AEE.Flags.And.Edits fixed public;
+dcl Display.New.Project.Info     fixed public;
+dcl Play.Scroll.State            fixed;
+
+dcl Events.Pending               proc external;
+
+GET.NEXT.AEE.SCREEN.EVENT:proc PUBLIC swapable;
+   dcl evt              fixed;
+   dcl dtd.scroll       fixed;
+   dcl smpte.scroll     fixed;
+   dcl dtd.scroll.bit   fixed;
+   dcl smpte.scroll.bit fixed;
+
+   /* Disable real time scrolling events (dtd scrolling, play scrolling) */
+   /* while we update the screen,  otherwise the screen never gets       */
+   /* updated (while playing).                                           */
+
+   dtd.scroll        = get.item.enabled(Get.DTD.Scrolling); 
+   dtd.scroll.bit    = new.ABLE.dtd.info & 8;
+   new.ABLE.dtd.info = new.ABLE.dtd.info & (not(8));
+   get.item.enabled(Get.DTD.Scrolling)  = 0;
+
+   new.ABLE.seq.info = new.ABLE.seq.info & (not(32\64));
+   get.item.enabled(Get.PLAY.Scrolling) = 0;
+
+   smpte.scroll         = get.item.enabled(Get.SMPTE.Event);
+   smpte.scroll.bit     = new.ABLE.smpte.event;
+   new.ABLE.smpte.event = 0;
+   get.item.enabled(Get.SMPTE.Event) = 0;
+
+   call GET_ENABLE (Get.Screen.Event);
+
+   /* Update project manager display if needed */
+
+   if Display.New.Project.Info <> 0
+   then do;
+      if  (new.in.char        = 0)  /* if no inchar pending        */
+      and (new.mouse.button   = 0)  /* and no mouse press pending  */
+      and (m$Presses          = 0)  /* or stacked                  */
+      and (Events.Pending     = 0)  /* and internal smgr events    */
+      and (Check.Next.Event   = 0)  /* and no system event pending  */
+      then do;
+         if  (Project.Manager.Group <> 0)   /* if pmgr is up      */
+         and (Project.Manager.Mode   = 2)   /* showing project    */
+         then do;
+            /* update pmgr.            */
+            /* break out if new inchar */
+            /* or mouse press/release  */
+            call Actually.Display.One.Project;
+         end;
+         else Display.New.Project.Info = 0;  /* pmgr is gone now  */
+      end;
+   end;
+
+   /* Update sequencer display if needed                           */
+
+   if Seq.Refresh <> 0              /* update seq panel            */
+   then do;
+      if  (new.in.char        = 0)  /* if no inchar pending        */
+      and (new.mouse.button   = 0)  /* and no mouse press pending  */
+      and (m$Presses          = 0)  /* or stacked                  */
+      and (Events.Pending     = 0)  /* and internal smgr events    */
+      then do;
+         if  (Seq.Group <> 0)       /* if seq panel is available   */
+         then do;
+            /* update seq panel.       */
+            /* break out if new inchar */
+            /* or mouse press/release  */
+            call Update.Sequence.Editor;
+         end;
+         else Seq.Refresh = 0;      /* seq panel is gone now       */
+      end;
+   end;
+
+   /* now update the Screen Manager Items,  so user sees them     */
+   /* before the shuttle flags and edits,  and the wave display   */
+
+   if Screen.Changed <> 0 then do;
+      if  (new.in.char        = 0)  /* if no inchar pending        */
+      and (new.mouse.button   = 0)  /* and no mouse press pending  */
+      and (m$Presses          = 0)  /* or stacked                  */
+      and (Events.Pending     = 0)  /* and internal smgr events    */
+      and (Check.Next.Event   = 0)  /* and no system event pending  */
+      then do;
+         call GET_ENABLE(Get.In.Char);       /* enable explicity  */
+         call GET_ENABLE(Get.Mouse.Button);  /* for these items   */
+                                             /* since smgr uses   */
+         call Update.Screen;                 /* check next event  */
+                                             /* instead of        */
+         call GET_DISABLE(Get.In.Char);      /* explicitly        */
+         call GET_DISABLE(Get.Mouse.Button); /* checking.         */
+      end;
+   end;
+
+   /* now update shuttle editor flags and edits: */
+
+   if Draw.New.AEE.Flags.And.Edits <> 0 then do;
+      if  (new.in.char        = 0)  /* if no inchar pending        */
+      and (new.mouse.button   = 0)  /* and no mouse press pending  */
+      and (m$Presses          = 0)  /* or stacked                  */
+      and (Events.Pending     = 0)  /* and internal smgr events    */
+      and (Check.Next.Event   = 0)  /* and no system event pending  */
+      then do;
+         if Shuttle.Group <> 0 then do;
+            /* update flags and edits  */
+            /* break out if new inchar */
+            /* or mouse press/release  */
+            call Actually.Draw.Shuttle.Flags.And.Edits;
+         end;
+         else Draw.New.AEE.Flags.And.Edits = 0;  /* no shuttle now? */
+      end;
+   end;
+
+   /* Now compute the fine bar waveshape display */
+
+   if  (Fine.Shuttle.Wave = 2)
+   and (DTD.Play.State    = 0)
+   then do;
+      if  (new.in.char        = 0)  /* if no inchar pending        */
+      and (new.mouse.button   = 0)  /* and no mouse press pending  */
+      and (m$Presses          = 0)  /* or stacked                  */
+      and (Events.Pending     = 0)  /* and internal smgr events    */
+      and (Check.Next.Event   = 0)  /* and no system event pending  */
+      then do;
+         if Shuttle.Group <> 0 then do;
+            call Handle.Wave.Display(0);
+         end;
+         else Fine.Shuttle.Wave = 0;
+      end;
+   end;
+
+   /* Now compute coarse bar waveshape display */
+
+   if  (Coarse.Shuttle.Wave = 2)
+   and (DTD.Play.State      = 0)
+   then do;
+      if  (new.in.char        = 0)  /* if no inchar pending        */
+      and (new.mouse.button   = 0)  /* and no mouse press pending  */
+      and (m$Presses          = 0)  /* or stacked                  */
+      and (Events.Pending     = 0)  /* and internal smgr events    */
+      and (Check.Next.Event   = 0)  /* and no system event pending  */
+      then do;
+         if Shuttle.Group <> 0 then do;
+            call Handle.Wave.Display(1);
+         end;
+         else Coarse.Shuttle.Wave = 0;
+      end;
+   end;
+
+   /* Create null event to come back here in case the event that is */
+   /* pending does not cause GetScreenEvent to return.   (happens   */
+   /* if user clicks mouse,  but not on any object)                 */
+
+   if (Display.New.Project.Info     <> 0)  /* if we have more of our own */
+   or (Seq.Refresh                  <> 0)
+   or (Draw.New.AEE.Flags.And.Edits <> 0)  /* updating to do,  then      */
+   or ((Coarse.Shuttle.Wave         =  2)  /* create null get.dtd.event  */
+   and (DTD.Play.State              =  0))
+   or ((Fine.Shuttle.Wave           =  2)  /* so we eventually will      */
+   and (DTD.Play.State              =  0))
+   then do;
+      // Set bit to come back here if no other events are pending
+      if (Check.Next.Event == 0)
+         New.ABLE.DTD.Info = New.ABLE.DTD.Info \ 64;
+   end;
+
+   /* Restore get-enables to correct values: */
+
+   get.item.enabled(Get.DTD.Scrolling) = dtd.scroll; 
+   new.ABLE.dtd.info = new.ABLE.dtd.info \ dtd.scroll.bit;
+
+   get.item.enabled(Get.PLAY.Scrolling) = Play.Scroll.State;
+
+   get.item.enabled(Get.SMPTE.Event) = smpte.scroll;
+   new.ABLE.smpte.event = smpte.scroll.bit;
+
+   call GET_DISABLE (Get.Screen.Event);
+
+   evt = Get.Next.Screen.Event;   /* let smgr do its thing */
+
+   return evt;
+end GET.NEXT.AEE.SCREEN.EVENT;
+
+/* $page - Routine for times computation */
+
+/* this routine computes a percent (0-1000) of the scroll bar position */
+/* based upon global variables                                         */
+
+/* passed in disk address,  current disk address, out disk address     */
+/* returns 0 to 1000                                                   */
+
+TIMES.TO.PERCENT: proc (in,time,out) returns (fixed) PUBLIC swapable;
+   dcl in      array;  /* in disk time  */
+   dcl time    array;  /* now           */
+   dcl out     array;  /* out disk time */
+
+   dcl temptime  (1)  fixed;
+   dcl templen   (1)  fixed;
+
+   if COM32(time,in) = lw#ilt
+   then return 0;
+
+   if COM32(time,out) = lw#igt
+   then return 1000;
+
+   call SUB32(out,in,templen);     /* get length of shuttle bar */
+   call SUB32(time,in,temptime);   /* offset to time            */
+
+   /* shift for 16-bit math.  we only need 1 part in 1000 accuracy */
+
+   do while  (templen(0)\temptime(0))<>0;
+      call SHR32(templen,4);
+      call SHR32(temptime,4);
+   end;
+
+   if templen(1) = 0          /* if scroll bar has been reduced */
+   then return 0;             /* to 0 length, try 0 percent     */
+
+   load  1000;
+   uload shr(templen(1),1);   /* round up by 1/2 */
+   mul  temptime(1);
+   mwait;
+   div  templen(1);
+
+   return res;
+
+end TIMES.TO.PERCENT;
+
+/* $page - compute time from scroll bar position */
+
+/* routine is passed a percent (0-1000), an in time, and an out */
+/* time.  it computes a time that is scaled between the in      */
+/* and out times                                                */
+
+
+COMPUTE.TIME.FROM.PERCENT: proc (percent,in,out,time) PUBLIC swapable;
+   dcl percent            fixed;  /* Percent * 10 (i.e. 1000 = 100%) */
+   dcl in                 array;
+   dcl out                array;
+   dcl time               array;  /* return array (msb,lsb) */
+
+   call SUB32(out,in,loc(addr(BITMSB))); /* get length of scroll bar */
+
+   call ratio_multiply(percent,1000);    /* this even rounds!!       */
+
+   call ADD32(loc(addr(BITMSB)),in,time);
+
+end COMPUTE.TIME.FROM.PERCENT;
+
+/* $page - screen manager additions for AEE */
+
+/* convenient routine to highlight a table */
+
+Highlight.Table.With.Bits:proc (Table.Id,Columns,Drive.Bits,attr,max) PUBLIC swapable;
+   dcl Table.Id   fixed;   /* pass table id */
+   dcl Columns    fixed;   /* columns in it */
+   dcl Drive.Bits fixed;   /* bits word     */
+   dcl Attr       fixed;   /* attr word     */
+   dcl Max        fixed;   /* #             */
+
+   dcl i          fixed;
+   dcl (row,col)  fixed;
+
+   do i = 0 to Max-1;
+      load i; div Columns;
+      row = res; col = rem;
+      if (Drive.Bits&Bits(i)) <> 0 then do;
+         call Set.Table.Cell.Attr(Table.Id,col,row,0,attr);
+         call Set.Table.Cell.Attr(Table.Id,col,row,1,attr);
+      end;
+      else do;
+         call Set.Table.Cell.Attr(Table.ID,col,row,0,ATTR#NoReverse);
+         call Set.Table.Cell.Attr(Table.ID,col,row,1,ATTR#NoReverse);
+      end;
+   end;
+end Highlight.Table.With.Bits;

@@ -1,0 +1,404 @@
+/* 308-STR8 - ROUTINE 'START.NEW.NOTES'
+
+   Modified:
+	2007/02/02 - CJ  - Change NUM.MIDI.TRACKS to MAX.INPUTS = 202
+   12/12/96 - CJ -  Recorded thd.clpitch in track head correctly for pre-computed notes
+   02/07/91 - MWH - Combine 3200, 6400 and 9600 RTP's
+   11/05/90 - CJ  - Improved accuracy of "play to"
+   03/21/90 - PF  - Compressed CLAV.PTR to 43 sectors
+   03/09/90 - PF  - Increase MAX.INPUTS to 128
+   01/25/90 - MWH - Fix "300 msec delay starting cues" bug (from EditView)
+   08/24/89 - PF  - SAMPLE MIDINET ROUTING INTO PARTIAL BLOCKS (MIDIPATH)
+   08/24/89 - PF  - INCLUDE MIDINET BIT IN MIDIRT WHEN SAMPLING THD.MIDI
+   10/14/88 - CJ - COMPUTATIONS TO START UP POLY NOTES IN MIDDLE
+   09/22/88 - TSS - MOVED CODE HERE FROM 307-STR7
+   7/08/86 - CJ - MOVED START.KBD TO AVOID BUG IF KBDLIST=0
+   5/15/86 - "official" creation of release-M modules
+*/
+
+/* SETUP.NOTE (CONTINUED): DONE WITH NOTE START - CHECK FOR REPEAT/ARPEG */
+
+  NFPTR=NOTELIST; NOTELIST=NPTR;              /* STICK BLOCK ON NOTE LIST NOW */
+
+  WRITE(MAM)=TBP;
+  WRITE(MAL)=TIM.CSEM;
+  TFLAG=READ(MD);                             /* SAVE SEMAPHORE NUMBER FOR THIS NOTE */
+
+  WRITE(MAM)=THP;
+  WRITE(MAL)=THD.TRIGGER;                     /* REVERSE PING PONG TRIGGER */
+  WRITE(MD )=READ(MD ) XOR 1;
+
+  IF (ANY.HZ.SET = 0) THEN DO;				  /* IF NO HZ's WERE SET WHILST PROCESSING THE PARTIALS, 	*/
+	  WRITE(MAL) = THD.CLPITCH;				  /* SAVE BASIC PITCH AWAY FOR NEXT PORTAMENTO...			*/
+	  WRITE(MD ) = PITCH;
+  END;
+
+  WRITE(MAL)=THD.MIDI;
+
+  IF  (READ(MD)<>0)                             /* MIDI OUTPUT DESIRED */
+  AND ((MOVE.SPEED=0)\(TRK=0))                  /* AND NOT FF/REW      */
+  /* USED TO BE ---> AND ((TIME.BASE.MODE<>0)\(TRK=0)) */            /* AND NOT FF/REW      */
+  THEN BEGIN;
+
+     WRITE(MAL)=THD.CG.VAL;
+     IF READ(MD)<>G.VAL THEN DO;                /* CHANGE IN PORTA STATE */
+        WRITE(MD)=G.VAL;                        /* UPDATE */
+        WRITE(MAL)=THD.SYN.SROUT+R.GLIDE.SW;
+        IF READ(MD)<>0 THEN DO;                 /* GLIDE SWITCH IS ROUTED SOMEWHERE */
+           IF G.VAL<>0 THEN CALL MIDI.CONTROL.CHANGE(0,RTE.MAX);   /* DO MIDI OUTPUT */
+           ELSE             CALL MIDI.CONTROL.CHANGE(0,0);
+           WRITE(MAL)=THD.MIDI.CG.VAL;
+           WRITE(MD )=G.VAL;
+        END;
+     END;
+
+     IF QME=0 THEN DO;                         /* NOTE IS NOT FROM MIDI */
+        PPTR=PTLST;                            /* GET PTR TO FIRST PBOCK   */
+
+        NEXT:;
+
+        WRITE(MAM)=TBP;                        /* TIMBRE HEAD              */
+
+        IF PPTR<>0 THEN DO;                    /* LOOK AT BLOCK            */
+           IF EIDLIM=0 THEN DO;                /* NO SUST LIMIT - SKIP     */
+              PPTR=PFPTR;
+              GOTO NEXT;
+           END;
+           WRITE(MAL)=TIM.OPTIONS+PARTL;
+           IF (READ(MD)&ANY.DELAY)<>0 THEN DO;
+              PPTR=PFPTR;
+              GOTO NEXT;
+           END;
+        END;
+
+        IF  (PPTR = 0)                         /* IF MUST GET NEW PBLOCK   */
+        AND (PFREE<>0)                         /* AND ONE IS AVAILABLE     */
+        THEN DO;                               /* GET IT!!                 */
+
+           PPTR =PFREE;  PFREE=CORE(PFREE);    /* GET PARTIAL BLOCK        */
+           PFPTR=PTLST;  PTLST=PPTR;           /* PUT US ON FRONT OF PTLST */
+
+           IF  (TEMP.LIST(0)<>TEMP.PTR)        /* IF MORE STOLEN CHANNELS  */
+           AND (MIDIGHOST=0)                   /* AND NO GHOST BLOCK YET   */
+           THEN DO;                            /* CHECK FOR MIDI GHOST BLK */
+              I=TEMP.PTR+1;                    /* UNUSED MIDI-ONLY BLOCK   */
+              DO WHILE (I<=TEMP.LIST(0));
+                 IF  (TEMP.LIST(I)=0)          /* STOLEN MCHN=0            */
+                 AND (GHOST.LIST(I)<>0)        /* WITH GHOST BLOCK         */
+                 THEN DO;
+                    MIDIGHOST=GHOST.LIST(I);
+                    GHOST.LIST(I)=0;
+                 END;
+                 I=I+1;
+              END;
+           END;
+
+           IF MIDIGHOST<>0 THEN DO;            /* LINK UP MIDI GHOST BLKS  */
+              GFPTR=MIDIGHOST;                 /* USE AS GHOST BLK HERE    */
+              MIDIGHOST=0;                     /* CLEAR IT                 */
+           END;
+
+           ETIMER=0;
+           DO.FM=0;                            /* BLOCK HAS NO FM           */
+           ITIMER=(-1);
+
+           NACT=NACT+1;                        /* COUNT AS ACTIVE BLOCK     */
+
+        END;
+
+        IF PPTR<>0 THEN DO;                    /* GOOD BLOCK IS AVAILABLE   */
+           WRITE(MAM)=THP;
+           WRITE(MAL)=THD.MIDI;
+
+			IF ((READ(MD) & THD.MIDI.OMS) != 0) 								  				 			// Routed to OMS
+			{
+				IF ((READ(MD) & THD.MIDI.OMS.VPORT) != 0) 								  				// Routed to OMS Virtual Port
+					MIDIRT = (READ(MD) & (THD.MIDI.OMS+THD.MIDI.MIDINET+THC.MIDI.OMS.VPALL));  // Preserve MIDI Net and OMS bits; store virtual port and channel number
+				ELSE
+					MIDIRT = (READ(MD) & (THD.MIDI.OMS+THD.MIDI.MIDINET )) + TRACK;   			// Preserve MIDI Net and OMS bits; store track # for note on & note off
+			}
+			
+			ELSE
+				 MIDIRT = (READ(MD) & (THD.MIDI.ORIG+THD.MIDI.MIDINET));		   // Get MIDI Routing & MIDINet bit; mask off pressure bits
+			 
+           WRITE(MAL)=THD.ACTIVE.MIDI.RTES;
+           IF (READ(MD)&B.VELOCITY)<>0
+           THEN MIDIINFO=MIDI.MAP.KEY(KEYN+MIDIDIST)\SHL(VELD   ,8); /* AND SAVE KEY# AND VELOCITY */
+           ELSE MIDIINFO=MIDI.MAP.KEY(KEYN+MIDIDIST)\SHL(RTE.MAX,8); /* SAVE KEY#, USE MAX VELOCITY */
+          
+		   WRITE(MAL)=THD.MIDI.PATH;
+           MIDIPATH=READ(MD);                  /* SAMPLE MIDINET ROUTING INFO */
+        END;
+     END;
+  END;
+
+  IF ARPEG.VAL<>0 THEN DO;                    /* REPEAT AND/OR ARPEG IS ACTIVE */
+
+     WRITE(MAM)=TBP;
+     WRITE(MAL)=TIM.MISC.POINTER;
+
+     I=READ(MD)+REP.LOC;                      /* LOOK UP REPEAT RATE FROM MEMORY */
+     WRITE(MAM)=PAR.PTR+SHR(I,8); 
+     WRITE(MAL)=I; 
+
+     IF NORIG=0 THEN DO;                      /* KEYBOARD NOTE - SCALE FOR SPEED HERE SINCE MILLISECONDS ARE NOT */
+        LOAD SAMP.SPEED; MUL READ(MD)&8191;
+        IF READ(4) IGE 1000 THEN I="017777";  /* DETECT & HANDLE OVERFLOW - LIMIT TO 81.91 HZ */
+        ELSE DO;
+           DIV 1000; I=RES;                   /* SCALE REPEAT RATE FOR SPEED */
+           IF   I IGT "017777"
+           THEN I  =  "017777";
+        END;
+     END;
+     ELSE I=READ(MD)&8191;                    /* USE NORMAL REPEAT RATE FOR SEQUENCER NOTES */
+
+     WRITE(MAM)=TBP;
+     WRITE(MAL)=TIM.REPRATE.LOOK;
+     IF READ(MD)<>0 THEN DO;
+        I=SCALE(I);  
+        IF   I IGT "017777"
+        THEN I  =  "017777";
+     END;
+
+     IF I<4 THEN DO;                          /* COMPUTE TIME DELAY BASED ON REPEAT RATE.  CHECK FOR POSSIBLE OVERFLOW */
+        REMAIN=0; LOAD 25000;                 /* LIMIT DELAY TO 25000 MSEC */
+     END;
+     ELSE DO;                                 /* COMPUTE BASED ON RATE */
+        LOAD 34464; ULOAD 1;                  /* LOAD 100,000          */
+        DIV I;                                /* COMPUTE 100,000/(HZ*100) - GIVES DELAY TIME IN MSEC */
+        REMAIN=READ(4);                       /* SAVE REMAINDER FOR BETTER ROUND OFF COMPUTATION */
+     END;
+
+     /* $PAGE - COMPUTE REPEAT/ARPEG INFO FOR SEQUENCER NOTES */
+
+     IF NORIG=0 THEN DO;                      /* KEYBOARD NOTE - PRESCAN BY FIXED AMOUNT */
+        RTIM=OTIML+RES-REPSCAN2;              /* COMPUTE FIRST REPEAT TIME - REPSCAN2 */
+     END;
+     ELSE DO;                                 /* USE PRE-DELAY BASED ON INVERSE SPEED */
+        RTIM=OTIML+RES-REPSCAN1;              /* COMPUTE TIME TO TRIGGER */
+     END;
+
+     WRITE(MAM)=THP;
+     WRITE(MAL)=THD.ARP;
+
+     IF (ARPEG.VAL&BIT.ARPEG)<>0 THEN DO;     /* ARPEGIATION CALLED FOR */
+        IF READ(MD)=0 THEN DO;                /* PUT FIRST NOTE ON ARPEGGIATE LIST */
+           WRITE(MD)=NPTR;                    /* COUNT ON THIS NOTE - TRIGGER NEXT - PRESET FOR 5 MILLISECONDS DELAY */
+           IF EXT.REP.ARP=0                   /* IF INTERNAL REPEAT/ARPEG */
+           THEN I=I\"020000";                 /* SET BIT INDICATING NOTE HAS SOUNDED */
+        END;                                  /* ELSE DO NOTHING - RTIM & ETC WILL BE IGNORED */
+        I=I\"100000";                         /* SET ARPEGGIATE BIT IN RRATE */
+     END;
+
+     IF (ARPEG.VAL&BIT.REPEAT)<>0 THEN DO;    /* SET UP FOR REPEAT OR REPEAT/ARPEG */
+        I=I\"040000";                         /* SET REPEATING BIT IN NOTE BLOCK */
+        STEALOK=255;                          /* DISSALLOW CHANNEL STEALING IF REPEAT */
+     END;
+
+     IF  (  EXT.REP.ARP         <>0    )      /* IF USING EXTERNAL REP/ARPEG */
+     OR  (((ARPEG.VAL&BIT.ARPEG)<>0    )      /* OR ARPEGGIATING */
+     AND  ( READ(MD)            <>NPTR))      /* AND SOME ONE ELSE PLAYED BEFORE */
+     THEN DO;                                 /* DELAY NOTE UNTIL CORRECT TRIGGER */
+        PPTR=PTLST;                           /* ADD DELAY TO EACH PARTIAL */
+        DO WHILE PPTR<>0;                     /* SO THAT IT DOES NOT SOUND NOW */
+           ETIMER=ETIMER+20000;               /* ADD 20 SECOND DELAY TO KBD NOTE */
+           ITIMER=ITIMER+20000;               /* ADD 20 SECOND DELAY TO SEQ NOTES */
+           PPTR=PFPTR;
+        END;
+     END;
+
+     RRATE=I;                                 /* STORE IN NOTE BLOCK FOR PROCESSING */
+  END;
+
+  IF (TOPT&NOT.STEALABLE)<>0
+  THEN STEALOK=255;             /* DISALLOW CHANNEL STEALING IF SUST LEVEL EXISTS */
+  ELSE IF STEALOK=TRK THEN DO;  /* ALLOW CHANNEL STEALING RIGHT AWAY IF NO SUST LEVEL */
+     STEALOK=STEALOK\256;       /* ALLOW CHANNEL STEAL */
+     CALL NEW.DECAYER;          /* ACCOUNT FOR A STEALABLE CHANNEL */
+  END;
+
+  /* $PAGE - PERFORM SPECIAL CHECKS */
+
+  // Basic recording of keyboard notes
+  IF NORIG=0 THEN DO;              /* KEYBOARD/GUITAR - SPECIAL CHECKS */
+
+     WRITE(MAM)=TBUT.PTR;
+     WRITE(MAL)=TRACK;             /* FOR THIS TRACK              */
+
+     IF  (RECD<>0)                             /* RECORDING */
+     AND (RECD.TRK<>0)                         /* SYNCLAVIER RECORDING */
+     AND ((TRACK=RECD.TRK)                     /* THIS IS RECORD TRACK */
+     OR  ((READ(MD)&B.READY.TRK)<>0))          /* THIS TRACK IS ARMED FOR REC */
+     THEN DO;
+        CALL RECORD.ACTUAL.NOTE;               /* NOW RECORD NOTE.  CAN NOT ABORT.NOTE HERE SINCE WE HAVE ALREADY QUED UP NOTE.  MOST FAILURES WOULD HAVE BEEN DETECTED BY CALL TO JUSTIFY.TIME.AND.RECORD.EFFECTS ABOVE */
+        IF (INC.AXE<>0)&(GDATA<>0) THEN DO;    /* LIVE GUITAR NOTE */
+          IF (NUPDT<>0) THEN CALL STORE.GUITAR.UPDATE.RECORD(NUPDT); /* STORE AN IMMEDIATE UPDATE RECORD TO GET CORRECT FIRST PITCH. KEEP SAME KEY NUMBER. */
+        END;
+     END;
+     IF (INC.AXE=0) OR (GDATA=0)  /* SEE IF CLAVIER (VS. KEYBOARD) NOTE */
+     THEN DO;                     /* SUCCESSFUL START OF KEYBOARD NOTE - SET ACTIVE BIT IN CLAV.STAT FOR END OF NOTE CHECK */
+        WRITE(MAM)=MIDI.SWITCHDATA+SHR(SHL(CHORIG,3)+R.SUST.SW,8);
+        WRITE(MAL)=SHL(CHORIG,3)+R.SUST.SW;
+        L         =READ(MD);
+		LOAD CHORIG; ULOAD KEYN; MUL NUM.KEYS;
+        WRITE(MAM)=CLAV.PTR+SHR(RES,8);
+        WRITE(MAL)=RES;
+        IF (READ(MD)&DOWN)<>0
+        THEN DO;                /* CHECK FOR KEY ALREADY BEING RELEASED */
+           IF  ((CHORIG=0)
+           AND (SUSTSWITCH<>0))
+           OR  (L<>0)
+           THEN WRITE(MD)=READ(MD)\(SUSTD\ACTIVE);
+           ELSE WRITE(MD)=READ(MD)\(ACTIVE); /* INDICATE ACTIVE IF SUCCESSFUL NOTE START */
+        END;
+     END;
+     QME=(-1);                  /* SET QME TO QUE UP ATTACK ONLY */
+  END;
+
+  /* HANDLE VERY SHORT SEQUENCER NOTES BY QUEING UP BOTH THE ATTACK AND */
+  /* FINAL DECAY AT THE SAME TIME:                                      */
+
+  ELSE DO;                      /* ELSE HANDLE SEQUENCE NOTES           */
+
+    /* CHECK FOR QUEING NOTES LATE (IE STARTING UP NOTES IN MIDDLE) */
+
+    IF  (NORIG       = 3                  )
+    AND (NEW.SEQUENCER.FORWARD.MOTION <> 0)  /* DO THIS CHECK ONLY WHILE STARTING */
+    AND (PTRS.LOOPED = LOOP.RESTART       )  /* AND OVERALL LOOP HAS NOT HAPPENED */
+    AND (INC.MONO    = 0                  )  /* AND NO MONO SAMPLING              */
+    THEN CALL START.UP.MUSIC.NOTE.IN.MIDDLE;
+
+    QME=(-1);                            /* SET NOTE TO QUE UP ATTACK ONLY */
+    IF  (ADVANCED.PLAY.TIME.LSB >= FENDL)
+    AND (MOVE.SPEED>=0)                  /* BUT CHECK FOR VERY SHORT NOTE - QUE FINAL DECAY HERE IF SO */
+    THEN DO;                             /* QUICK CHECK */
+      IF  ((ADVANCED.PLAY.TIME.MSB IGT FENDM))
+      OR  ((ADVANCED.PLAY.TIME.MSB  =  FENDM)
+      AND  (ADVANCED.PLAY.TIME.LSB IGE FENDL))
+      THEN DO;                             /* OOPS - NOTE HAS ALREADY ENDED - QUE UP FOR MORE ACCURATE SOUNDS */
+        IF (STEALOK&256)=0 THEN CALL NEW.DECAYER; /* INDICATE A NEW DECAYING NOTE UNLESS WE HAVE ALREADY DONE SO */
+        STEALOK=256+TRK;                    /* SAVE INFO HERE TO ALLOW CHANNEL STEALING NOW, REGARDLESS OF SUST LEVELS */
+        NSTAT=1; RRATE=0;                  /* CHANGE STATE TO DECAYING.  INDICATE NON-REPEATING */
+        WRITE(MAM)=THP;
+        WRITE(MAL)=THD.ARP;
+        IF READ(MD)=NPTR THEN DO;          /* REMOVE THIS ARPEGGIATE NOTE */
+          CALL BACK.ARP.PTR(TRK);          /* GET NEXT FORWARD BLOCK ON QUE - SO NEXT NEW NOTE TRIGGERS */
+        END;
+        WRITE(MAM)=TBP;
+        WRITE(MAL)=TIM.FD.SPLICING;
+        IF  (READ(MD)<>0)                  /* SPLICING DURING FINAL DECAY - LET NOTE FINISH INITIAL DECAYS TO LIMIT OF ZERO */
+        THEN DO;                           /* LET INITIAL DECAY RUN ITS COURSE & TERMINATE NOTE */
+           QME=(-2);                       /* SET QME TO INDICATE QUE ATTACK, THEN DO FD SPLICING STATE IS OCCURRING */
+        END;                               /* OF FD SPLICING CASE */
+        ELSE DO;                           /* NO FD SPLICING      */
+          PPTR=PTLST;                      /* COMPUTE INFO FOR FINAL DECAY HERE */
+          DO WHILE PPTR<>0;                /* SO THAT WE CAN QUE FINAL DECAY RIGHT AWAY */
+            FTIMER=FENDL;                  /* SAVE END TIME       */
+            IF MCHN<>0 THEN DO;            /* SKIP OVER MIDI-ONLY BLOCK THOUGH - WILL BE QUED LATER */
+              PTL=PARTL;                   /* LOOK UP PARTIAL NUMBER FOR CONVENIENCE */
+              WRITE(MAM)=TBP;
+              WRITE(MAL)=(TIM.EFDINT+EFDINT.LOC)+(PTL*TIM.EFDINT.STR);
+              WRITE("300")=ADDR(EFDINT);
+              WRITE("360")=READ(MD);       /* EFDINT */  /* NO INCRMENT !!! */
+              WRITE("360")=READ(MDI);      /* SFDINT */
+              WRITE("360")=READ(MDI);      /* IFDINT */
+              ETMC        =READ(MDI);      /* EFTMC  */
+              ITMC        =READ(MDI);      /* IFTMC  */
+              WRITE(MAL)=TIM.OPTIONS+PTL;
+              IF (READ(MD)&(ENV.DADJ\INX.HADJ\FD.RTES))<>0
+              THEN CALL COMPUTE.FIN(0);    /* USE SUB CALL IF COMPLICATED - COMPUTE BOTH */
+
+              IF (PLAY.SEQ.TO.A.TIME <> 0) /* PROVIDE 0 MILLISECOND FINAL */
+              &  (FENDM = SEQ.PLAY.TO.MSB) /* DECAY TO ACHIEVE 'PLAY TO'  */
+              &  (FENDL = SEQ.PLAY.TO.LSB) /* FUNCTION                    */
+              THEN DO;
+                 EFDINT = (-1);
+                 SFDINT = (-1);
+              END;
+
+            END;
+            PPTR=PFPTR;                    /* MOVE ON TO NEXT PARTIAL */
+          END;           /* OF PARTIAL LOOP                           */
+          QME=(-3);      /* INDICATE Q BOTH ATTACK + FINAL DECAY HERE */
+        END;             /* OF NO FD SPLICING CASE                    */
+      END;
+    END;                 /* WITH NOTE ENDED WITH MOVESPEED >=0        */
+  END;                   /* OF SEQ NOTE                               */
+
+  NUPDT=0;               /* INITIALIZE NUPDT INFO FINALLY (NO MORE UPDATES REQUIRED - YET!!) */
+
+  /* $PAGE - CLEAN UP AND RETURN */
+
+  IF TEMP.LIST(0)<>0 THEN DO;           /* STOLEN CHANNELS - CLEAN UP (QUICK CHECK FOR NONE) */
+     IF (TEMP.PTR<>TEMP.LIST(0))        /* SOME STOLEN CHANNELS WERE NOTE USED!! */
+     OR (MIDIGHOST<>0)                  /* STOLEN BUT UNUSED MIDI-ONLY BLOCK */
+     THEN CALL RELEASE.TEMP.CHANS;      /* SILENCE CHANNELS, RETURN TO FREE LIST. FREE UP GHOST BLOCKS */
+     ELSE DO;                           /* ELSE JUST RESET POINTERS FOR NEXT TIME */
+        TEMP.LIST(0)=0; TEMP.PTR=0;
+     END;
+  END;
+
+  IF D164_PRESENT THEN DO;               /* IF CLAVIER THERE             */
+     IF TRK=KCV.TRACK THEN DO;
+        IF (ANY.TRACKING<>0)             /* QUICK CHECK FOR ANY TRACKING */
+        THEN RESET.FILTERS=1;            /* RESET FILTERS IF TRACKING    */
+        TRACK.DATA=SHL(KEYN,1);          /* MAP TO 24 STEPS/OCTAVE       */
+        DISABLE;                         /* WRITE KBD KCV HERE           */
+        WRITE(D164)=4;                   /* SELECT KEYBOARD PITCH DAC    */
+        WRITE(D165)=TRACK.DATA;          /* WRITE OUT PITCH              */
+        ENABLE;
+     END;
+  END;
+
+END SETUP.NOTE;
+
+/* $SUBTITLE  START.NEW.NOTES ROUTINE */
+
+/* NOTE: START.NEW.NOTES IS SOMETIMES CALLED FROM */
+/* WITHIN THE MAIN PROGRAM LOOP TO START KBD      */
+/* NOTES.   SEQLIST WILL BE ZERO DURING THIS      */
+/* SITUATION                                      */
+
+START.NEW.NOTES:PROC;                      /* CALL TO START ALL NEW NOTES */
+
+   IF KBDLIST<>0 THEN DO;                  /* SEE IF ANY */
+
+      START.KBD:;                          /* RE-ENTER TO GIVE PRIORITY TO KEYBOARD */
+
+      DO WHILE KBDLIST<>0;                 /* FIRST START KEYBOARD NOTES */
+         NPTR=KBDLIST; KBDLIST=NFPTR;      /* GET  BLOCK                 */
+         CALL SETUP.NOTE;                  /* DO IT                      */
+         IF NEWKEY<>0 THEN CALL SCANKBD;   /* ALSO CHECK FOR MORE HERE   */
+      END;
+
+      QUE.MORE:;                           /* RE-ENTER FROM BELOW TO QUE    */
+
+      NPTR=NOTELIST;                       /* POINT TO FIRST BLOCK ON LIST  */
+      DO WHILE NPTR<>0;                    /* CYCLE THROUGH EACH BLOCK */
+         IF QME<0 THEN DO;                 /* IF NOTE MUST STILL BE QUED */
+            INSERT '340-SQUE';             /* THEN DO SO */
+         END;
+         NPTR=NFPTR;                       /* MOVE ON */
+      END;
+
+   END;
+
+   IF SEQLIST<>0 THEN DO;                  /* NOW START SEQ NOTES IF ANY */
+
+      DO WHILE SEQLIST<>0;                 /* LOOP THROUGH EACH NEW NOTE */
+         NPTR=SEQLIST; SEQLIST=NFPTR;      /* GET BLOCK FROM NEW LIST */
+         IF SEQLIST=0 THEN SEQLAST=0;      /* ZAP LAST BLOCK ON QUEUE */
+         CALL SETUP.NOTE;                  /* SET UP BLOCKS FOR NEW NOTES IF CHANNELS AVAILABLE */
+
+         IF NEWKEY<>0 THEN DO;             /* OOPS - NEW KEY IS UPON US */
+            CALL SCANKBD;                  /* GET    IT (THEM) */
+            GOTO START.KBD;                /* AND DO IT (THEM) */
+         END;
+
+      END;
+
+      GOTO QUE.MORE;                       /* NOW QUE SEQUENCER NOTES */
+
+   END;                                    /* FOR ANY NEW NOTES */
+
+END START.NEW.NOTES;

@@ -1,0 +1,1311 @@
+/*	:SYNRSOU:05-BUTT:182-UPD2  --  $SUBTITLE  MAJOR.UPDATE ROUTINE	*/
+
+/*
+Modified:
+2000/11/17 - TY  - Modified LOOKUP.UPDATE.PRM#() and STORE.UPDATE.PRM#() to handle muted multichannel routing
+2000/10/07 - TY  - Added support for the mod wheel proxy function
+2000/04/17 - TY  - Removed obsolete variable
+2000/01/22 - TY  - Simplified logic in (PRM#=(CLICK.L-PAR.L)) part of MAJOR.UPDATE
+1999/04/12 - TY  - Made modifications to account for the independence of CLICK.DISP.MODE from CLICK.TRACK.MODE.
+1998/06/26 - TY  - Mark is automatically set to on when the user changes it's value.
+1998/06/25 - TY  - Don't toggle click's on/off status if the click rate is changed before
+						 the click button is released.
+1991/04/26 - CJ  - Smoothed out click rate changes from knob
+1991/03/15 - PF  - mask off pressure bits to avoid crash
+1991/02/13 - CJ  - Allowed change of click rate if no meter map
+1991/01/17 - PF  - Reverse direction of Denominator increment
+1991/01/09 - PF  - various bug fixes for sequencer and MIDInet
+1990/10/10 - PF  - numerous changes to support tempo/meter map VK Panel interface
+1989/09/26 - CJ  - created system event when smpte lock changes (for cmx)
+1989/01/20 - MWH - More new seq info bit 8's set on new constants
+1988/12/02 - TSS - MADE CHANGES DIAGNOSTICS CODE MOVES FILES TO NEW BINS
+1988/10/20 - PF  - Set new.motion in new seq info on mark start change
+1988/10/16 - TSS - Fixed bug in diagnostics max channel #  computation
+1988/10/03 - SGS - Partial buttons now cycle thru MAX.DIAGNOSE.VOICES/4 in diagnostics mode
+1988/08/19 - TSS - Changed references to INC.XXXX to DIAGNOSTICS.ENABLED
+1988/03/15 - cj  - Send over info to dtd after changing track volume
+1988/01/27 - MWH - Allow track's prefered poly bin to be changed from VK
+1987/12/23 - MWH - Merge SYN-NMP MIDI bug fixes with N-Final plus AEE and POLY
+1987/12/02 - cj  - check slocked in r.smpte processing
+1987/10/13 - LPG - ALTERED POWER ON/OFF CODES -- ADDED TRANSITION STATE
+1987/01/20 - TS  - ALLOWED MONO TIMBRES TO TOGGLE AUTOPHRASING ON OR OFF
+1986/11/14 - TS  - MADE SOME CHANGES TO CHAIN LOGIC
+1986/11/13 - TS  - CODE FOR CHAIN
+1986/10/30 - TS  - ADDED CODE TO UPDATE INSERT/DELETE PARMS
+1986/10/03 - TS  - WROTE NEW CODE FOR MEASURE,LOOP,MARK FEATURES
+1986/09/10 -CJ,EG- RESET MARK BUTTON VARIABLES ON TRACK SLIDING. ALSO SET NEW.MOTION ON MARK BUTTON CHANGE
+1986/08/12 - TS  - DON'T CALL SLIDE.TRACKS IF AMOUNT="100000"
+1986/08/11 - eg  - split major.update into several procedures to save swap space
+1986/07/08 - EG  - added call to set.clock.case
+1986/06/02 - CJ  - fixed bug with track routing button
+1986/05/19 - TIM - New code for repeated MIDI button presses
+1986/05/15 - "official" creation of release-M modules
+*/
+
+/*	'MAJOR.UPDATE' IS CALLED WHEN THE CONTROL KNOB HAS BEEN TURNED
+	FAR ENOUGH AND LONG ENOUGH TO REQUIRE A PARAMETER CHANGE.
+	THE APPROPRIATE PARAMETER IS LOOKED UP IN MEMORY AND ADJUSTED
+	ACCORDING TO THE KNOB POSITION.	*/
+
+DCL (XXXXCH)		FIXED PUBLIC;	/*	CHANNEL # FOR XXXX PROGRAM	*/
+
+DCL (TDS.PTL)		FIXED PUBLIC;	/*	PARTIAL # FROM TDS FOR STORE	*/
+DCL (TDS.PAR)		FIXED PUBLIC;	/*	PAR	  # FROM TDS FOR STORE	*/
+DCL (TDS.VALUE)	FIXED PUBLIC;	/*	VALUE		 FROM TDS FOR STORE	*/
+DCL (TDS.FRM)		FIXED PUBLIC;	/*	FRAME	  # FROM TDS FOR STORE	*/
+
+DCL MAJOR.UPDATE	PROC EXTERNAL;	/*	IT'S INSIDE THE FOLLOWING BEGIN/END PAIR	*/
+
+BEGIN;
+
+	DCL (J,K,L)									FIXED;
+	DCL (OUR.PARTIAL)							FIXED;
+	DCL (PRM,PRM#,MIN,MAX,MASK,VAL)		FIXED;
+	DCL (DISPLAY.PRM#,DISPLAY.VAL)		FIXED;
+	DCL (DISPLAY.CODE)						FIXED;
+	DCL (DISPLAY.ERR11,DISPLAY.ERR16)	FIXED;
+	DCL (L.KEY,R.KEY,X)						FIXED;
+	DCL (START.PRM#)							FIXED;
+
+	JOG.SEQUENCER.FOR.CLICK.CHANGE: PROC SWAPABLE;
+		DCL DIST  (1)	FIXED;
+		DCL RTIME (1)	FIXED;
+		DCL STIME (1)	FIXED;
+
+		DISABLE;									/*	GET CURRENT SEQUENCER TIME		*/
+		ACTUALLY.EMIT.CLICK = 0;			/*	STOP CLICK OUTPUT FOR A MOMENT	*/
+		CALL COPY32(LOC(ADDR(PLAY.TIME.MSB)), RTIME);
+		ENABLE;
+
+		/*	GET TIME TO (OR POSSIBLY FROM) NEXT CLICK								*/
+
+		CALL SUB32(LOC(ADDR(REAL.TIME.OF.NEXT.CLICK.MSB)), RTIME, DIST);
+
+		CALL MAP.REAL.TIME.TO.SEQUENCE.TIME(RTIME, STIME);
+
+		/*	COMPUTE NEXT/PRIOR CLICK SEQUENCE TIME	*/
+		CALL MAP.SEQUENCE.TIME.TO.NEAREST.CLICKS(STIME,
+															  LOC(ADDR(PRIOR.CLICK.MSB)),
+															  LOC(ADDR(NEXT.CLICK.MSB)));
+
+		/*	MAP NEXT CLICK TO REAL TIME	*/
+		CALL MAP.SEQUENCE.TIME.TO.REAL.TIME(LOC(ADDR(NEXT.CLICK.MSB)),
+														LOC(ADDR(REAL.TIME.OF.NEXT.CLICK.MSB)));
+
+		/*	COMPUTE PRIOR CLICK ALSO FOR JUSTIFY CODE	*/
+		CALL MAP.SEQUENCE.TIME.TO.REAL.TIME(LOC(ADDR(PRIOR.CLICK.MSB)),
+														LOC(ADDR(REAL.TIME.OF.PRIOR.CLICK.MSB)));
+
+		/*	POSITION SEQUENCER SO NEXT CLICK OCCURS IN SAME REAL TIME:	*/
+
+		DISABLE;
+		CALL SUB32(LOC(ADDR(REAL.TIME.OF.NEXT.CLICK.MSB)),
+					  DIST,
+					  LOC(ADDR(PLAY.TIME.MSB)));
+		ACTUALLY.EMIT.CLICK = 1;			/*	TELL INTERRUPT CODE OK TO EMIT NEXT CLICK	*/
+		ENABLE;
+
+	END JOG.SEQUENCER.FOR.CLICK.CHANGE;
+
+	LOOKUP.UPDATE.PRM#: PROC SWAPABLE;
+
+		COMPUTE.MASK:PROC(MAX);				/*	COMPUTE BIT MASK FROM MAX	*/
+			DCL (MAX,I)	FIXED;
+			I=0;
+			DO WHILE BITS(I) ILE MAX; I=I+1; END;
+			RETURN BITS(I)-1;	/*	RETURN MASK	*/
+		END COMPUTE.MASK;
+
+		MIN=0;									/*	SAVE CODE - INITIALIZE TO MOST USED MIN (0)	*/
+		IF PRM#<(START.L-PAR.L)
+		THEN MAX=PAR.LIMITS(PRM#);			/*	LOOK UP MAX FOR MOST PARAMETERS	*/
+		IF MAX<0 THEN DO;						/*	MEANS ALLOW MINUS	*/
+			MIN=MAX; MAX=-MAX; MASK=(-1);	/*	NO MASK	*/
+		END;
+		ELSE MASK=COMPUTE.MASK(MAX);		/*	POS ONLY - COMPUTE MASK	*/
+
+		/*	$PAGE -  NOW LOOK UP & EXTRACT PARAMETER	*/
+
+		/*	LOOK UP PARAMETER FOR A PARTIAL:	*/
+
+		IF PRM#<(MPAR.L-PAR.L) THEN DO;	/*	MEANS A PARTIAL PARAMETER	*/
+			PTPTR=TIM.HEAD.LOOKUP(0,TIM.PARTIAL.POINTERS+OUR.PARTIAL);	/*	LOOK UP POINTER TO SELECTED FRAME	*/
+			IF PRM#<46 THEN DO;				/*	0-45: REGULAR PARAMETER - EASILY LOOKED UP IN TIMBRE AREA	*/
+				VAL=P.LOOKUP(PTPTR+PRM#);	/*	LOOK UP CURRENT VALUE	*/
+				IF (PRM#>=12)&(PRM#<36)&(IN.BLINK.MODE<>0) THEN DO;	/*	PHASE CHANGE DESIRED	*/
+					VAL=SHR(VAL,10); MAX=63;	/*	EXTRACT PHASE, SET MAX	*/
+				END;
+				ELSE VAL=VAL&MASK;			/*	EXTRACT PARAMETER IN QUESTION - IGNORE UPPER BITS	*/
+				IF (PRM#=43) THEN MIN=(-9999);	/*	SPECIAL LIMIT FOR - RATIOS	*/
+			END;
+			ELSE IF PRM#<51 THEN DO CASE (PRM#-46);	/*	46-50: CASE FOR SPECIAL PARAMETER	*/
+				DO;						/*	46: HARM ADJUST	*/
+					VAL=SHR(P.LOOKUP(PTPTR+P.DECADJ),10); IF VAL>32 THEN VAL=VAL-64;
+				END;
+				DO;						/*	47: STEREO CENTR	*/
+					VAL=SHR(P.LOOKUP(PTPTR+P.GLIDEBITS),2)&"177"; IF VAL>64 THEN VAL=VAL-128;
+				END;
+				VAL=SHR(P.LOOKUP(PTPTR+P.GLIDEBITS),9);	/*	48: STEREO DEPTH	*/
+				VAL=SHR(P.LOOKUP(PTPTR+P.VIBWAVE),7);		/*	49: STEREO MODE	*/
+				VAL=SHR(P.LOOKUP(PTPTR+P.GLIDERATE),10);	/*	50: STEREO RATE	*/
+			END;	/*	OF DO CASE	*/
+
+			ELSE IF PRM#<55 THEN DO;	/*	51-54: KEYBOARD ENVELOPE PARAMETER	*/
+				PTPTR=TIM.HEAD.LOOKUP(0,TIM.PINFO.POINTERS+OUR.PARTIAL);	/*	LOOK UP POINTER TO PINFO BLOCK	*/
+				IF PTPTR=0 THEN PTPTR=CREATE.PINFO.FRAME(OUR.PARTIAL);	/*	CREATE THE BASTARD	*/
+				IF PTPTR=0 THEN DISPLAY.ERR11=1;		/*	PRESENT ERROR DISPLAY LATER ON IF NO ROOM	*/
+				ELSE DO;
+					VAL=P.LOOKUP(PTPTR+(PI.KBDL+(PRM#-51)));	/*	LOOK UP VALUE	*/
+					L.KEY=P.LOOKUP(PTPTR+PI.KBDL);
+					R.KEY=P.LOOKUP(PTPTR+PI.KBDR);
+					IF (PRESET.KBD.ENVELOPE&BITS(PRM#-51))<>0 THEN DO;	/*	KEY HAS BEEN PRESSED - PRESET KBD ENVELOPE TO KEY	*/
+						IF		  (PRM#=51) OR (PRM#=52) THEN VAL=KBD.VAL;			/*	USE PRESSED KEY	*/
+						ELSE IF (PRM#=53)					 THEN VAL=L.KEY-KBD.VAL;	/*	LEFT SLOPE	*/
+						ELSE									 VAL=KBD.VAL-R.KEY;			/*	RIGHT SLOPE	*/
+					END;
+				END;
+			END;
+
+			ELSE DO;	/*	55-58: PARAMETER FROM PINFO BLOCK	*/
+				PTPTR=TIM.HEAD.LOOKUP(0,TIM.PINFO.POINTERS+OUR.PARTIAL);	/*	LOOK UP POINTER TO PINFO BLOCK	*/
+				IF PTPTR=0 THEN PTPTR=CREATE.PINFO.FRAME(OUR.PARTIAL);	/*	CREATE THE BASTARD	*/
+				IF PTPTR=0 THEN DISPLAY.ERR11=1;		/*	PRESENT ERROR DISPLAY LATER ON IF NO ROOM	*/
+				ELSE VAL=P.LOOKUP(PTPTR+(PRM#-54));	/*	LOOK UP VALUE	*/
+			END;
+		END;	/*	OF BEGIN FOR PARTIAL PARAMETER	*/
+
+		/*	$PAGE - LOOK UP MISC, SEQUENCER, GLOBAL, SPECIAL PARAMETERS	*/
+
+		/*	LOOK UP PARAMETER FROM MISC AREA, SEQUENCER AREA, OR GLOBAL	*/
+
+		ELSE IF PRM#<(SCALE.L-PAR.L) THEN DO;	/*	MISC AREA PARAMETER	*/
+			IF PRM#<(TNAME.L-PAR.L) THEN DO;		/*	ORIGINAL MISC AREA	*/
+				PTPTR=TIM.HEAD.LOOKUP(0,TIM.MISC.POINTER);	/*	GET POINTER TO MISC	*/
+				PTPTR=PTPTR+(PRM#-(MPAR.L-PAR.L));	/*	COMPUTE POINTER FOR EASIER STORE LATER ON	*/
+				VAL=P.LOOKUP(PTPTR);					/*	LOOK UP PARAMETER	*/
+				IF PRM#=(POLY.L-PAR.L) THEN DO;	/*	POLYPHONY	*/
+					VAL=SHR(VAL,8);			/*	EXTRACT POLYPHONY FROM UPPER HALF	*/
+					MIN=1;						/*	MIN OF 1 VOICE	*/
+					IF VAL=0 THEN VAL=MAX;	/*	HAPPENS IF IT IS UNINITIALIZED	*/
+				END;
+				ELSE VAL=VAL&MASK;			/*	ELSE EXTRACT IT WITH MASK	*/
+			END;
+			ELSE DO;										/*	NEW TINFO AREA	*/
+				PTPTR=TIM.HEAD.LOOKUP(0,TIM.TINFO.POINTER);	/*	LOOK UP POINTER TO TINFO BLOCK	*/
+				IF PTPTR=0 THEN PTPTR=CREATE.TINFO.FRAME;	/*	CREATE ONE	*/
+				IF PTPTR=0 THEN DISPLAY.ERR11=1;	/*	PRESENT ERROR DISPLAY LATER ON IF NO ROOM	*/
+				ELSE DO;									/*	TINFO AREA FOUND	*/
+					IF PRM#=(TNAME.L-PAR.L) THEN DO;			/*	TIMBRE NAME	*/
+						MIN=32;							/*	USE MIN OF 32 (SPACE)	*/
+						VAL=P.LOOKUP(PTPTR+TI.NAME+SHR(TNAME.CURSOR,1));	/*	LOOK UP VALUE	*/
+						IF TNAME.CURSOR THEN VAL=ROT(VAL,8);
+						VAL=VAL&255;
+					END;
+					ELSE VAL=P.LOOKUP(PTPTR+PRM#-(TNAME.L-PAR.L));	/*	LOOK UP VALUE FROM TINFO	*/
+				END;
+			END;
+		END;
+
+		ELSE IF PRM#<(TBASE.L-PAR.L) THEN DO;			/*	SEQUENCER AREA PARAMETER	*/
+
+			WRITE(MAM)=BAS.PTR;
+
+			IF PRM#<=(SMPTE.L-PAR.L)
+			THEN WRITE(MAL)=PRM#-(SCALE.L-PAR.L);
+			ELSE WRITE(MAL)=PRM#-(SCALE.L-PAR.L)+3;
+
+			/*	NOTE THAT YOU NEED A KLUDGE OFFSET HERE FOR SEQ VALUES	*/
+			/*	STORED AFTER SMPTE.L SINCE SMPTE.L ACTUALLY STANDS FOR	*/
+			/*	FOUR (4) VARIABLES.													*/
+
+			VAL=READ(MD);								/*	LOOK UP CURRENT VALUE - NO MASK NEEDED	*/
+			IF PRM#=(CLICK.L-PAR.L) THEN MIN=25;	/*	CLICK RATE - SPECIAL MIN	*/
+			IF PRM#=(CRM.L  -PAR.L) THEN MIN=1;		/*	CLICK RATE MULTIPLIER MIN	*/
+			IF PRM#=(BPM.L  -PAR.L) THEN DO;			/*	BEATS PER MEASURE			*/
+				MIN=1;										/*	BEATS PER MEASURE MIN	*/
+
+				/*	OVERRIDE VALUE FOR BPM	*/
+				IF (BPM.CURSOR=0)
+				THEN VAL=LOOKUP.BEATS.PER.MEASURE(LOC(ADDR(SAMPLED.ACTUAL.SEQUENCE.TIME.MSB)));
+				ELSE DO;
+					VAL=LOOKUP.DENOM(LOC(ADDR(SAMPLED.ACTUAL.SEQUENCE.TIME.MSB)));
+					MAX=5;
+				END;
+			END;
+		END;
+
+		ELSE IF PRM#<(PTTUN.L-PAR.L) THEN DO;			/*	GLOBAL PARAMETER	*/
+			IF  (DIAGNOSTICS.ENABLED<>0)					/*	XXXX PROGRAM	*/
+			AND (PRM#=(TBASE.L-PAR.L))						/*	OVERALL TUNING	*/
+			THEN DO;												/*	SET UP FOR VOICE CHANGE	*/
+				VAL=XXXXCH; MIN=0; MAX=MAX.DIAGNOSE.VOICES-1;
+			END;
+			ELSE DO;											/*	LOOK UP GLOBAL INFO	*/
+				VAL=GPDT(PRM#-(TBASE.L-PAR.L));		/*	LOOK UP GLOBAL INFO - AGAIN - NO MASK NEEDED	*/
+				IF PRM#=(NUMP.L-PAR.L) THEN MIN=1;	/*	NUMPOINTS		*/
+			END;
+		END;
+
+		/*	$PAGE - HANDLE MORE SPECIAL CASES (SEMITONE CORRECT, TRACK INFO, ETC)	*/
+
+		ELSE IF PRM# < (START.L-PAR.L)				/*	NOT A SEQUENCER PARM	*/
+		THEN DO CASE (PRM#-(PTTUN.L-PAR.L));		/*	SPECIAL CASES	*/
+			DO;												/*	SEMITONE CORRECTION	*/
+				PTPTR=FIND.FRAME(OUR.PARTIAL,TDS.LINE#+1);
+				IF  (P.LOOKUP(PTPTR)=MOR)
+				AND (P.LOOKUP(PTPTR+TYPE)=PT.TYPE)
+				THEN VAL=P.LOOKUP(PTPTR+PT.TUN);
+				ELSE DO; VAL=0; PTPTR=0; END;
+			END;
+			DO;												/*	TRACK ROUTING	*/
+				dcl which	fixed;
+
+				which = find.significant.track.head(TBUT.MAPPING(TROUT.TRK#));
+
+				IF TRK.HEAD.LOOKUP(which, THD.CUE.TRACK) <> 0
+				THEN DO;
+					VAL=TRK.HEAD.LOOKUP(which,THD.CUE.OUT) & 255;
+					IF VAL <> 0 THEN VAL = (VAL&31) + 1;
+					IF LOD.RUNNING THEN MAX = DTD.NUM.VOICES;
+					ELSE					  MAX = 0;
+				END;
+				ELSE DO;
+					IF MULTI.THERE<>0 THEN	MAX = MULTI.MAX;	/*	LIMIT TO MULTI.MAX	*/
+					ELSE							MAX = 0;
+					VAL=TRK.HEAD.LOOKUP(which, THD.TROU);		/*	GET L,R					*/
+					IF HELD.TRINF.BUTTON
+					THEN VAL = VAL&255;					//	HELD - USE RIGHT
+					ELSE VAL = SHR(VAL,8);				//	ELSE - USE LEFT
+					IF (VAL != 0) VAL = (VAL&63)+1;	//	check for muted
+				END;
+			END;
+			DO;												/*	TRACK VOL	*/
+				VAL=TRK.HEAD.LOOKUP(TBUT.MAPPING(TROUT.TRK#),THD.TVOL);
+			END;
+			IF INC.POLY THEN DO;							/*	TOTAL LENGTH	*/
+				PTPTR=FIND.FRAME(OUR.PARTIAL,TDS.LINE#+1);
+				IF  (P.LOOKUP(PTPTR)<>MOR)
+				OR  (P.LOOKUP(PTPTR+TYPE)<>PT.TYPE)
+				THEN PTPTR=0;								/*	INDICATE NOT THERE	*/
+			END;
+			IF INC.POLY THEN DO;							/*	LOOP LENGTH	*/
+				PTPTR=FIND.FRAME(OUR.PARTIAL,TDS.LINE#+1);
+				IF  (P.LOOKUP(PTPTR)<>MOR)
+				OR  (P.LOOKUP(PTPTR+TYPE)<>PT.TYPE)
+				THEN PTPTR=0;								/*	SET FLAG	*/
+			END;
+			DO;												/*	MIDI		*/
+				IF (MIDI.PARAM.ID == 0)								// Change MIDI Output Routing of keyboard
+				{
+					VAL=TRK.HEAD.LOOKUP(0, THD.MIDI);			/*	LOOK UP CURRENT MIDI VALUE (IF ANY)	*/
+					
+					// Convert the track head value into a monotonic coding to change with the knob
+					
+					if ((val & THD.MIDI.OMS) != 0)				// Routed to OMS
+					{
+						if ((val & THD.MIDI.OMS.VPORT) != 0)	// Routed to Virtual Port
+							val = (val & (THD.MIDI.OMS | THC.MIDI.OMS.VPNUM | THC.MIDI.OMS.VPMC)) + 1;
+						else
+							val = THD.MIDI.OMS;
+					}
+					
+					else if ((val & THD.MIDI.ORIG) != 0)	// Routed to original hardware output
+					{
+						val = val & THD.MIDI.ORIG;    		// Extract output specifier
+						val = (shl(val & 7, 6) 					// Get midi substem * 64
+						    \ (shr(val, 1) & 0x30) 			// Get 2 bits of which output from bit position 5
+						    \ (shr(val, 8) & 15)) 				// Get 4 bits of MIDI output
+						    + 1;										// Present to user as 1-x
+					}
+					
+					else
+						val = 0;
+					
+					// Set Max to OMS or max midi chan
+					if ((midi.there & MIDI.THERE.OMS) != 0)
+						max = THD.MIDI.OMS + 0x3FF + 1;		// Max is Virtual Port 64 MIDI channel 16
+					else
+						MAX=(MAX.MIDI.CHAN*16);
+				}
+				ELSE													// Change MIDI Sync routing
+				{
+					IF (MIDI.SYNC.OUT < 0)						// Routed to OMS, or OMS + original hardware
+						VAL = MAX.MIDI.CHAN+1;
+					
+					else if ((MIDI.SYNC.OUT & 0xFF) != 0)	// Routed to original hardware
+						VAL = (MIDI.SYNC.OUT & 0xFF);
+					
+					else
+						VAL = 0;
+						
+					// Set Max to OMS or max midi chan
+					if ((midi.there & MIDI.THERE.OMS) != 0)
+						max = MAX.MIDI.CHAN+1;
+					else
+						MAX=MAX.MIDI.CHAN;
+				}
+			END;
+			;	/*	UPDATE OF LOOP.L (LOOP PARAMETERS) DONE IN ADD.TO.TIME CALL BELOW	*/
+			DO;												/*	CLICK VALUE	*/
+
+				/*	OVERRIDE VALUE FOR CLICKVAL	*/
+				VAL=LOOKUP.CLICK.VALUE(LOC(ADDR(SAMPLED.ACTUAL.SEQUENCE.TIME.MSB)));
+			END;
+			DO;												/*	TRACK MIDI OUT XPOS	*/
+				VAL=TRK.HEAD.LOOKUP(TBUT.MAPPING(TROUT.TRK#),THD.MIDX);
+			END;
+		END;
+		ELSE DO;	/*	UPDATE OF INSERT.L/DELETE.L DONE IN ADD.TO.TIME CALL BELOW	*/
+			IF PRM#=(CHAIN.L-PAR.L) THEN DO;	/*	CHAIN REPETITIONS	*/
+				VAL=CHAIN.REPETITIONS;			/*	GET VALUE FROM GLOBAL VAR	*/
+				MIN=1; MAX=1000;					/*	USE THIS RANGE FOR NOW	*/
+			END;
+		END;
+	END LOOKUP.UPDATE.PRM#;
+
+	STORE.UPDATE.PRM#: PROC SWAPABLE;
+		IF PRM#<(MPAR.L-PAR.L) THEN DO;		/*	0-45: PARTIAL PARAMETER	*/
+			IF PRM#<46 THEN DO;	/*	NORMAL PARAMETER - STORE BACK IN TIMBRE	*/
+				IF (PRM#=4)\(PRM#=5) THEN DO;	/*	CHANGING PK/SUST LEVEL	*/
+					IF ((VAL<>0)&((P.LOOKUP(PTPTR+PRM#)&1023) =0))
+					OR ((VAL =0)&((P.LOOKUP(PTPTR+PRM#)&1023)<>0))
+					THEN RESET.BITS=RESET.BITS\R.COEFS;	/*	REASSIGN WAVE MEMORIES AS PK/SUST LEVEL GO THROUGH 0	*/
+				END;
+				IF (PRM#=10)\(PRM#=11) THEN DO;	/*	CHANGING PK/SUST LEVEL OF INDEX ENVELOPE	*/
+					IF ((VAL<>0)&((P.LOOKUP(PTPTR+PRM#)&1023) =0))
+					THEN RESET.BITS=RESET.BITS\R.FREQS;	/*	RESET MODULATOR CHANNEL FREQUENCIES IF FM IS DIALED IN	*/
+				END;
+				IF (PRM#>=12)&(PRM#<36)&(IN.BLINK.MODE) THEN DO;	/*	STORE PHASE AGAIN	*/
+					VAL=SHL(VAL,10); MASK="176000";	/*	MOVE PHASE BACK INTO POSITION, CREATE SPECIAL MASK	*/
+				END;
+				X=P.LOOKUP(PTPTR+PRM#);	/*	GET CURRENT VALUE	*/
+				WRITE(MD)=(X&(NOT(MASK)))\VAL;
+				IF (PRM#=37) THEN DISPLAY.VAL=P.LOOKUP(PTPTR+P.VIBWAVE);			/*	LOOK UP COMPLETE VIBWAVE INCLUDING MODIFIER BITS FOR DISPLAY	*/
+			END;	/*	NORMAL	*/
+			ELSE IF PRM#<51 THEN DO CASE (PRM#-46);	/*	46-50: SPECIAL PARAMETERS	*/
+				DO;	/*	46: HARMONIC ADJUST	*/
+					X=P.LOOKUP(PTPTR+P.DECADJ);
+					WRITE(MD)=(X&"1777")\SHL(VAL,10);
+				END;
+				DO;	/*	47: STEREO CENTER	*/
+					X=P.LOOKUP(PTPTR+P.GLIDEBITS);
+					WRITE(MD)=(X&"177003")\SHL(VAL&"177",2);
+				END;
+				DO;	/*	48: STEREO DEPTH	*/
+					X=P.LOOKUP(PTPTR+P.GLIDEBITS);
+					WRITE(MD)=(X&"777")\SHL(VAL,9);
+				END;
+				DO;	/*	49: STEREO MODE	*/
+					X=P.LOOKUP(PTPTR+P.VIBWAVE);
+					WRITE(MD)=(X&"177")\SHL(VAL,7);
+				END;
+				DO;	/*	50: STEREO RATE	*/
+					X=P.LOOKUP(PTPTR+P.GLIDERATE);
+					WRITE(MD)=(X&"1777")\SHL(VAL,10);
+				END;
+			END;	/*	OF DO CASE FOR SPECIAL	*/
+			ELSE IF PRM#<55 THEN DO;			/*	51-54: KEYBOARD ENVELOPE PARAMETERS	*/
+				IF PTPTR<>0 THEN DO;
+					IF  (PRM#=51)&(VAL>R.KEY) THEN CALL P.STORE(PTPTR+PI.KBDR,VAL);
+					IF  (PRM#=52)&(VAL<L.KEY) THEN CALL P.STORE(PTPTR+PI.KBDL,VAL);
+					CALL P.STORE(PTPTR+PI.KBDL+(PRM#-51),VAL);
+				END;
+			END;
+
+			ELSE DO;									/*	55-58: PINFO AREA - ONLY REQUIRED FOR NEW FORMAT	*/
+				IF PTPTR<>0 THEN DO;				/*	IF BLOCK WAS THERE, CHECK FURTHER	*/
+					X=P.LOOKUP(PTPTR+PI.DENVH);	/*	LOOK UP DYN ENV HIGH LIMIT	*/
+					IF  (PRM#=57)&(VAL>X)
+					THEN WRITE(MD)=VAL;	/*	MUST USE SMART LIMITS FOR DYNAMIC ENVELOPE	*/
+					X=P.LOOKUP(PTPTR+PI.DENVL);	/*	LOOK UP DYN ENV LOW LIMIT	*/
+					IF  (PRM#=58)&(VAL<X)
+					THEN WRITE(MD)=VAL;	/*	MUST USE SMART LIMITS FOR DYNAMIC ENVELOPE	*/
+					CALL P.STORE(PTPTR+(PRM#-54),VAL);	/*	STORE VALUE - IF PINFO BLOCK WAS THERE OR CREATED	*/
+				END;
+			END;
+			NEW.PRM.INFO=NEW.PRM.INFO\BITS(OUR.PARTIAL);	/*	SET BIT TO INDICATE OVERALL CHANGE	*/
+		END;	/*	OF PARTIAL PARAMETER	*/
+
+		/*	$PAGE - STORE PARAMETER IN 8-WORD MISC AREA, OR SEQUENCER	*/
+
+		ELSE IF PRM#<(SCALE.L-PAR.L) THEN DO;	/*	MISC AREA PARAMETER	*/
+			IF PRM#<(TNAME.L-PAR.L)   THEN DO;	/*	NORMAL MISC AREA	*/
+				X=P.LOOKUP(PTPTR);
+				IF PRM#=(POLY.L-PAR.L) THEN DO;	/*	CHANGING POLYPHONY	*/
+					IF VAL<>1 THEN X=X&(NOT BIT.APHRASE);	/*	TURN OFF AUTOPHRASE BIT	*/
+					WRITE(MD)=(X&255)\SHL(VAL,8);	/*	STORE POLYPHONY IN UPPER HALF	*/
+					CALL TIM.HEAD.STORE(0,TIM.MAX.NUM.NOTES,VAL);	/*	CHANGING MAX # OF NOTES - STORE FOR PLAY SOFTWARE	*/
+				END;
+				ELSE WRITE(MD)=(X&(NOT(MASK)))\VAL;	/*	STORE IN BIT AREA	*/
+				IF (PRM#>=(LPFC.L-PAR.L))&(PRM#<=(BWDTH.L-PAR.L)) THEN RESET.FILTERS=1;	/*	CHANGING FILTER INFO	*/
+			END;
+			ELSE DO;												/*	FROM TINFO AREA	*/
+				IF (PTPTR<>0) THEN DO;						/*	STORE BACK IF TINFO BLOCK EXISTS	*/
+					IF PRM#=(TNAME.L-PAR.L) THEN DO;		/*	TIMBRE NAME	*/
+						J=P.LOOKUP(PTPTR+TI.NAME+SHR(TNAME.CURSOR,1));	/*	LOOK UP VALUE	*/
+						IF VAL=127 THEN VAL=32;							/*	RUBOUT TO SPACE	*/
+						IF TNAME.CURSOR THEN	J=(J&"000377")\SHL(VAL,8);
+						ELSE						J=(J&"177400")\VAL		 ;
+						WRITE(MD)=J;
+
+						/*	Create an event when a new timbre name is entered	*/
+						/*	for the current keyboard timbre:							*/
+
+						NEW.TIMBRE.INFO = NEW.TIMBRE.INFO \ 4;
+
+						IF NEW.PAN<>0
+						THEN CALL DISPLAY.TIMBRE.NAME(TIM.HEAD.LOOKUP(0,TIM.TINFO.POINTER),0);
+					END;
+					ELSE DO;								/*	STORE BACK IN TINFO AREA	*/
+						X=P.LOOKUP(PTPTR+PRM#-(TNAME.L-PAR.L));
+						WRITE(MD)=VAL;					/*	STORE IN TINFO	*/
+					END;
+				END;
+			END;
+			NEW.PRM.INFO=NEW.PRM.INFO\16;			/*	SET BIT TO INDICATE OVERALL CHANGE	*/
+		END;
+
+		ELSE IF PRM#<(TBASE.L-PAR.L) THEN DO;	/*	SEQUENCER AREA PARAMETER	*/
+			IF PRM#=(MARK.L-PAR.L) THEN DO;
+				CALL ADD.TO.TIME(MARK.L-PAR.L,AMOUNT,#TIME);
+				IF (AMOUNT <> "100000")
+				THEN DO;
+					/*	Turn Mark on for ergonomics (user probably wouldn't change mark unless intending to use it)	*/
+					IF MARK.BUTTON.DISABLED <> False
+					THEN DO;
+						MARK.BUTTON.DISABLED = False;
+						CALL ON(MARK.L);	/*	Update the button from blinking to steady	*/
+					END;
+				END;
+				CALL SPEED.COMP;
+				NEW.MOTION=1;							/*	UPDATE LOD	*/
+				/*	Create a system event when the mark start time changes:	*/
+				NEW.SEQ.INFO = NEW.SEQ.INFO \ 128;
+			END;
+
+			ELSE IF
+			(	(PRM# != SMPTE.L-PAR.L)										//	SMPTE WAS ALREADY HANDLED
+			&&	((PRM# != CLICK.L-PAR.L) || (TEMPO.MAP.PTR == 0))	//	CLICK AND BPM WAS ALREADY HANDLED IF THE SEQUENCE IS MAPPED
+			&&	((PRM# != BPM.L-PAR.L)	 || (METER.MAP.PTR == 0))
+			)
+			THEN DO;
+
+				WRITE(MAM)=BAS.PTR;
+
+				IF PRM#<=(SMPTE.L-PAR.L)
+				THEN WRITE(MAL)=PRM#-(SCALE.L-PAR.L);
+				ELSE WRITE(MAL)=PRM#-(SCALE.L-PAR.L)+3;
+
+				/*	NOTE THAT YOU NEED A KLUDGE OFFSET HERE FOR SEQ VALUES	*/
+				/*	STORED AFTER SMPTE.L SINCE SMPTE.L ACTUALLY STANDS FOR	*/
+				/*	FOUR (4) VARIABLES.													*/
+
+				WRITE(MD )=VAL;					/*	STORE NEW VALUE - NO MASK NEEDED	*/
+
+				IF PRM#=(CRM.L-PAR.L)			/*	CLICK RATE MULTIPLIER MIN	*/
+				THEN CALL RESYNC.TIME.BASE;	/*	KEEP IN SYNC, ALSO CALL SPEED.COMP	*/
+				CALL SPEED.COMP;					/*	ELSE LOOK UP & COMPUTE INFO ON SPEED, CLICK RATE CHANGE, SMPTE INFO	*/
+
+				/*	BUMP SEQUENCER POSITION TO PROVIDE FOR SMOOTH CLICK	*/
+				/*	CHANGE WHEN ADJUST CLICK RATE:							*/
+
+				IF  (PRM#	=	(CLICK.L-PAR.L))	/*	IF ADJUST CLICK	*/
+				AND (AMOUNT <> "100000"			)	/*	FROM KNOB			*/
+				AND (TIME.BASE.MODE <> 0		)	/*	WHILE PLAYING ...	*/
+				THEN CALL JOG.SEQUENCER.FOR.CLICK.CHANGE;
+			END;
+		END;
+
+		ELSE IF PRM#<(PTTUN.L-PAR.L) THEN DO;			/*	GLOBAL PARAMETER	*/
+			IF  (DIAGNOSTICS.ENABLED<>0)					/*	XXXX PROGRAM	*/
+			AND (PRM#=(TBASE.L-PAR.L))						/*	OVERALL TUNING	*/
+			THEN BEGIN;											/*	STORE VOICE CHANGE	*/
+				DCL CHANGE.DIAGNOSTICS.CHAN PROC EXTERNAL;
+				XXXXCH=VAL;										/*	STORE NEW CHANNEL NUMBER	*/
+				CALL CHANGE.DIAGNOSTICS.CHAN;				/*	MOVE FILES TO NEW BIN IF NEEDED	*/
+			END;
+			ELSE GPDT(PRM#-(TBASE.L-PAR.L))=VAL;		/*	STORE NEW VALUE - AGAIN - NO MASK NEEDED	*/
+
+			IF (PRM#=SCON.L-PAR.L)							/*	CHANGING VELOCITY RESPONSE	*/
+			OR (PRM#=SMIN.L-PAR.L)
+			THEN DO;
+				IF NEW.PAN<>0									/*	IF USING NEW KBD	*/
+				THEN CALL COMPUTE.SYNC.TTIME.MAP(V.S.CON);	/*	COMPUTE NEW VELOCITY MAP	*/
+				LOAD 0; WRITE(4)=V.S.MIN; DIV 100;		/*	COMPUTE HERE FOR FASTER VEL KBD SCAN	*/
+				V.S.MUL=RES;									/*	COMPUTE FRACT MUL CONSTANT	*/
+				IF (TIM.HEAD.LOOKUP(0,TIM.TINFO.POINTER)=0)
+				THEN DO;											/*	CREATE T.FRAME IF NOT ONE	*/
+					CALL CREATE.TINFO.FRAME;				/*	MAKE ONE TO STORE NEW VELOCITY SENSITIVITY	*/
+				END;
+				ELSE DO;
+					DCL I	FIXED;
+
+					I=TIM.HEAD.LOOKUP(0,TIM.TINFO.POINTER);
+					CALL P.STORE(I+TI.VSENS,V.S.MIN\256);
+					CALL P.STORE(I+TI.VCON ,V.S.CON	  );
+				END;
+			END;
+
+			IF (PRM#=SDELAY.L-PAR.L)						/*	CHANGING DELAY	*/
+			THEN CALL RESYNC.TIME.BASE;
+
+			if (PRM# == vkxpos.l-PAR.L && (AMOUNT<>"100000" or RESET.INFO<>0))	CLEAR.ALL.NOTES();	//	prevent held notes from being stuck on
+
+			NEW.PRM.INFO=NEW.PRM.INFO\16;					/*	SET BIT TO INDICATE OVERALL CHANGE	*/
+		END;
+
+		ELSE IF PRM# < (START.L-PAR.L)					/*	NOT A SEQUENCER PARM	*/
+		THEN DO CASE (PRM#-(PTTUN.L-PAR.L));			/*	SPECIAL CASES	*/
+			DO;													/*	SEMITONE CORRECTION	*/
+				IF (PTPTR<>0)
+				THEN DO;
+					CALL P.STORE(PTPTR+PT.TUN,VAL);
+					IF (AMOUNT<>"100000")					/*	IF ACTUAL CHANGE	*/
+					THEN NEW.PRM.INFO=NEW.PRM.INFO\32;	/*	PATCH LIST TUNING CORRECTION	*/
+				END;
+				ELSE DO;
+					CALL CLEAR.UPPER;
+					DISPLAY.CODE=0;
+				END;
+			END;
+			DO;													/*	TRACK ROUTING	*/
+				IF (AMOUNT<>"100000")						/*	MEANS ACTUALLY CHANGE PARAMETER	*/
+				THEN BEGIN;
+					dcl (which, style, track)	fixed;
+					dcl (newval)					fixed;
+
+					which = find.significant.track.head(TBUT.MAPPING(TROUT.TRK#));	/*	find significant track head	*/
+					style = TRK.HEAD.LOOKUP(which,THD.CUE.TRACK);						/*	get cue track attribute			*/
+
+					CLEAR.GRP.SEL.BITS();														/*	CLEAR GROUP SELECT BITS			*/
+					RECURS.TRACK.GROUP(TBUT.MAPPING(TROUT.TRK#));						/*	expand the group					*/
+
+					// Assign routing to all members of the track group
+
+					do track = 0 to 255;
+						write(mam)=tbut.ptr;														/*	index to this track				*/
+						write(mal)=track;
+
+						if ((read(md) & b.grpsel.trk) != 0)									/*	if member of group				*/
+						{
+							if (TRK.HEAD.LOOKUP(track,THD.CUE.TRACK) == style)			/*	if this track is also cue/mus	*/
+							{
+								IF style <> 0														/*	cue track							*/
+								THEN DO;
+									newval = val;
+									IF newval <> 0 THEN newval = (128 + (newval-1));
+									newval = newval \ SHL(newval,8);							/*	STORE IN BOTH HALVES FOR ROUTING DISPLAY COMPATIBILITY	*/
+									CALL TRK.HEAD.STORE(track,THD.CUE.OUT,newval);		/*	MOVE BOTH	*/
+									NEW.MOTION				  = 1;	/*	SEND NEW CUE TRACK CONSTANTS		*/
+									NEW.CUE.TRACK.SETTINGS = 1;	/*	OVER AFTER CHANGE OF DTD ROUTING	*/
+								END;
+								ELSE IF MULTI.THERE<>0
+								THEN DO;
+									newval = val;
+									IF newval <> 0 THEN newval = (64 + (newval-1));
+									IF HELD.TRINF.BUTTON THEN DO;			/*	HELD - CHANGE RIGHT	*/
+										newval = newval|(TRK.HEAD.LOOKUP(track,THD.TROU)&"177400");
+									END;
+									ELSE DO;
+										newval = SHL(newval,8) + newval;
+									END;
+									CALL TRK.HEAD.STORE(track,THD.TROU,newval);	/*	MOVE BOTH	*/
+								END;
+							}
+						}
+					end;
+				END;
+				NEW.PRM.INFO=NEW.PRM.INFO\64;			/*	TRK VOL/ROUT/OUTPUT CHANGE	*/
+			END;
+
+			if (AMOUNT<>"100000") then begin;		/*	TRACK VOLUME	*/
+				dcl which	fixed;
+
+				CLEAR.GRP.SEL.BITS();					/*	CLEAR GROUP SELECT BITS	*/
+				RECURS.TRACK.GROUP(TBUT.MAPPING(TROUT.TRK#));
+
+				// Assign to all members of the track group
+
+				do which = 0 to 255;
+					write(mam)=tbut.ptr;									/*	index to this track	*/
+					write(mal)=which;
+
+					if ((read(md) & b.grpsel.trk) != 0)				/*	if member of group	*/
+						TRK.HEAD.STORE(which,THD.TVOL,VAL);
+				end;
+
+				CALL COMPUTE.VOLUME.LEVELS;
+				NEW.MOTION				  = 1;	/*	SEND NEW CUE TRACK CONSTANTS	*/
+				NEW.CUE.TRACK.SETTINGS = 1;	/*	OVER AFTER TRACK HEAD ALLOCATE	*/
+				NEW.PRM.INFO=NEW.PRM.INFO\64;	/*	TRK VOL/ROUT/OUTPUT CHANGE	*/
+			END;
+
+			IF INC.POLY THEN DO;							/*	TOTAL LENGTH	*/
+				IF (PTPTR<>0) THEN						/*	USE SUBROUTINE	*/
+				CALL ADD.TO.LENGTH(PT.TLEN);
+				DISPLAY.CODE=0;							/*	ALSO DISPLAYED THERE	*/
+				IF (AMOUNT<>"100000")					/*	IF ACTUAL CHANGE	*/
+				THEN NEW.PRM.INFO=NEW.PRM.INFO\32;	/*	LOOP LENGTH		*/
+			END;
+			IF INC.POLY THEN DO;							/*	LOOP LENGTH	*/
+				IF (PTPTR<>0) THEN						/*	USE SUBROUTINE	*/
+				CALL ADD.TO.LENGTH(PT.LLEN);
+				DISPLAY.CODE=0;							/*	ALSO DISPLAYED THERE	*/
+				IF (AMOUNT<>"100000")					/*	IF ACTUAL CHANGE	*/
+				THEN NEW.PRM.INFO=NEW.PRM.INFO\32;	/*	LOOP LENGTH		*/
+			END;
+			DO;												/*	MIDI		*/
+				if (MIDI.PARAM.ID == 0)					// MIDI Output Routing
+				{
+					if ((amount ILT 32768)			// Not changing or changing in positive direction
+					&&  (val > 16*max.midi.chan)
+					&&  (val < THD.MIDI.OMS    ))
+							val = THD.MIDI.OMS;		// Handle bump up to OMS MIDI
+							
+					else if ((amount IGT 32768)	// Changing in negative direction
+					&&       (val > 16*max.midi.chan)
+					&&       (val < THD.MIDI.OMS    ))
+							val = 16*max.midi.chan;
+				}
+				
+				IF VAL=0 THEN DO;							/*	VALUE IS 0	*/
+					IF (MIDI.PARAM.ID == 0)				/*	new val is 0; change midi output routine	*/
+					{
+						// About to change routing from nonzero to zero.  Clean up pressure if we had sent some
+						// pressure.
+						IF (TRK.HEAD.LOOKUP(0,THD.MIDI) & THD.MIDI.PRESURE)<>0
+						THEN CALL CLEANUP.MIDI.PRESSURE(0);
+
+						// Store new value preserving MIDINet bit
+						CALL TRK.HEAD.STORE(0,THD.MIDI,TRK.HEAD.LOOKUP(0,THD.MIDI) & (THD.MIDI.MIDINET | THD.MIDI.PRESURE) );	/*	GET RID OF MIDI ROUTING BUT PRESERVE MIDINET AND PRESSURE BITS	*/
+
+						// If not routed anywhere now, make sure pressure bits are zero.
+						IF ((TRK.HEAD.LOOKUP(0,THD.MIDI) & (THD.MIDI.MIDINET | THD.MIDI.OMS | THD.MIDI.ORIG)) == 0)
+							TRK.HEAD.STORE(0,THD.MIDI,0);
+							
+						IF TRK.HEAD.LOOKUP(0,THD.MIDI)=0				/*	NO MIDI ROUTING or pressure AT ALL	*/
+						THEN CALL CLEAR.MIDI.OUT.CONTROLLERS(0);	/*	CLEAR CONTROLLER ROUTINGS	*/
+					}
+					ELSE														/*	new val is 0; change midi sync output	*/
+					{
+						IF ((MIDI.SYNC.OUT & 0x80FF) != 0)			/*	turn off midi sync out	*/
+						{
+							call stop.recd.move.play;
+							midi.sync.out=(midi.sync.out&"h7F00");	/*	place in lower byte of sync word	*/
+
+							/*	Create a system event when changing the	*/
+							/*	output sync:										*/
+
+							new.seq.info = new.seq.info \ 512;
+							call display.sequencer.status;
+
+							DISPLAY.MTC = 0;								/*	TURN OFF MTC DISPLAY WHEN TURNING OFF MIDI SYNC OUT	*/
+						}
+					}
+				END;
+				ELSE DO;												/*	VALUE IS NONZERO	*/
+					IF (MIDI.PARAM.ID == 0)						/* val is nonzero; change midi output routing */
+					{
+						// Compute corresponding THC.MIDI coding
+						if (val > THD.MIDI.OMS)					// Routed to virtual port
+						{
+							x = (val-1) | THD.MIDI.OMS.VPORT;
+						}
+						
+						else if (val == THD.MIDI.OMS)
+						{
+							x = THD.MIDI.OMS;
+						}
+						
+						else
+						{
+							X=VAL-1;									/*	GET 0-512	*/
+							X=(SHL(X&15,8)\(SHR(X,6)&7)\(SHL(X&"60",1)))+MIDI.SUBSYS;
+						}
+						
+						K=TRK.HEAD.LOOKUP(0,THD.MIDI);		/*	LOOK UP PRIOR VALUE	*/
+						WRITE(MD)=(READ(MD)&(THD.MIDI.MIDINET | THD.MIDI.PRESURE)) \ X;		/*	PRESERVE MIDI ROUTING	*/
+						IF K=0 THEN DO;							/*	WE ARE NOW TURNING MIDI ON	*/
+							WRITE(MAL)=THD.ACTIVE.MIDI.RTES;
+							IF (READ(MD)&B.PRESSURE)<>0		/*	PRESSURE IS ENABLED	*/
+							THEN DO;									/*	TURN ON BITS IN MIDI ROUTING FIELD	*/
+								WRITE(MAL)=THD.MIDI;
+								WRITE(MD)=READ(MD)\THD.MIDI.CHANP;	/*	ENABLE CHANNEL PRESSURE	*/
+							END;
+						END;
+						CALL SET.MIDI.OUT.CONTROLLERS(0);
+					}
+					
+					ELSE																// val is nonzero; change midi sync output
+					{
+						if (val == max.midi.chan+1) val = 32768;			// map from max.midi.chan+1 back to 32768
+
+						IF ((MIDI.SYNC.OUT & 0x80FF) != VAL)
+						{
+							call stop.recd.move.play;
+							midi.sync.out=(midi.sync.out&"h7f00")\val;	/*	place in lower byte of sync word		*/
+
+							if (midi.sync.is.tc != 0)							/*	send out full frame when changing	*/
+							{															/*	the output routing						*/
+								MIDI.FULL.FRAME(play.time.msb, play.time.lsb);
+								NEW.MTC.VAL = 0;									/*	but don't display time here...		*/
+							}
+
+							/*	Create a system event when changing the	*/
+							/*	output sync:										*/
+
+							new.seq.info = new.seq.info \ 512;
+							call display.sequencer.status;
+						}
+					}
+				END;
+				NEW.PRM.INFO=NEW.PRM.INFO\64;			/*	TRK VOL/ROUT/OUTPUT CHANGE	*/
+			END;
+
+			DO;	/*	UPDATE ONE OF THE LOOP PARAMETERS	*/
+				IF LAST.LOOP.PARM<2
+				THEN CALL ADD.TO.TIME(PRM#,AMOUNT,#TIME);
+				ELSE CALL ADD.TO.TIME(PRM#,AMOUNT,#DUR );
+				IF AMOUNT<>"100000"
+				THEN CALL DISPLAY.SEQUENCER.STATUS;
+			END;
+			;													/*	CLICK VALUE HANDLED ABOVE	*/
+			if (AMOUNT<>"100000" or RESET.INFO<>0) then begin;		/*	TRACK MIDI OUT XPOS	*/
+				dcl which	fixed;
+
+				CLEAR.GRP.SEL.BITS();					/*	CLEAR GROUP SELECT BITS	*/
+				RECURS.TRACK.GROUP(TBUT.MAPPING(TROUT.TRK#));
+
+				// Assign to all members of the track group
+
+				do which = 0 to 255;
+					write(mam)=tbut.ptr;									/*	index to this track	*/
+					write(mal)=which;
+
+					if ((read(md) & b.grpsel.trk) != 0)				/*	if member of group	*/
+						TRK.HEAD.STORE(which,THD.MIDX,VAL);
+				end;
+
+            WRITE(MAM)=CLAV.PTR;
+            DO I=0 TO (NUM.KEYS-1);            /* CLEAR CLAV.STAT  */
+              WRITE(MDI)=0;                    /* TO TURN OFF      */
+            END;                               /* STUCK MIDI NOTES */
+            NUM.HELD.KEYS=0;                   /* NONE HELD        */
+            CALL ALL.MIDI.NOTES.OFF;           /* EXTRA INSURANCE  */
+
+            NEW.PRM.INFO=NEW.PRM.INFO\64;	/*	TRK VOL/ROUT/OUTPUT CHANGE	*/
+			END;
+		END;	//	END OF DO CASE
+		ELSE DO;	/*	UPDATE SEQUENCER PARAMETER	*/
+			IF (PRM#=(INSERT.L-PAR.L))
+			OR (PRM#=(DELETE.L-PAR.L))
+			THEN DO;
+				CALL ADD.TO.TIME(PRM#,AMOUNT,#DUR);
+			END;
+			ELSE IF PRM#=(CHAIN.L-PAR.L)				/*	CHAIN PARAMETER		*/
+			THEN CHAIN.REPETITIONS=VAL;				/*	PUT BACK INTO GLOBAL	*/
+		END;
+	END STORE.UPDATE.PRM#;
+
+	CHANGE.UPDATE.PRM#: PROC SWAPABLE;
+
+		/*	COMPUTE MIN/MAX FOR FRAME PARAMETER	*/
+		MIN=0;				/*	MOST MINS ARE ZERO	*/
+		MAX=1000;			/*	MOST MAXS ARE 1000	*/
+		IF PRM#<11 THEN MAX=E.SEG.LIMITS(PRM#);	/*	LOOK UP SPECIFIED LIMIT FOR TIMBRE FRAME	*/
+		ELSE IF PRM#=11 THEN MAX=C.FRAME(OUR.PARTIAL);	/*	MAX IS CURRENT FRAME FOR LOOPING	*/
+		IF MAX<0 THEN DO;					/*	MEANS ALLOW MINUS	*/
+			MIN=MAX; MAX=-MAX;
+		END;
+
+		/*	LOOK UP AND EXTRACT CURRENT VALUE	*/
+
+		PTPTR=FR.PTRS(OUR.PARTIAL);			/*	LOOK UP POINTER TO SELECTED FRAME	*/
+		VAL=P.LOOKUP(PTPTR+PRM#+S.ENV.P);	/*	LOOK UP PARAMETER. SAVE FOR LATER MASK & OR	*/
+		IF PRM#>=12 THEN DO;						/*	COEFFICIENT - CHECK FOR PHASE OR VALUE	*/
+			J=VAL;									/*	SAVE OTHER BITS TO SIMPLIFY STORE BELOW	*/
+			IF (IN.BLINK.MODE)<>0 THEN DO; VAL=SHR(VAL,10); MAX=63; END;
+			ELSE VAL=VAL&"001777";				/*	EXTRACT 10 - BIT COEFFICIENT	*/
+		END;
+		IF (PRM#=3)\(PRM#=5)
+		THEN VAL=P.LOOKUP(TIM.HEAD.LOOKUP(0,TIM.PARTIAL.POINTERS+OUR.PARTIAL)+NUM.PARAMS+S.ENV.P+PRM#);	/*	GET E.SEG.VOL FROM FIRST FRAME ONLY	*/
+
+		IF  (TDS.PTL=OUR.PARTIAL+256)			/*	PICK UP VALUE FROM TDS	*/
+		AND (TDS.PAR=PRM#)
+		THEN VAL=TDS.VALUE;
+
+		/*	COMPUTE NEW VALUE	*/
+		/*	CHECK FOR RESET	*/
+		/*	DISPLAY VALUE		*/
+
+		IF AMOUNT<>"100000" THEN VAL=VAL+AMOUNT;	/*	IGNORE AMOUNT IF REDISPLAY ONLY	*/
+
+		IF VAL>=0 THEN DO;	/*	VAL IS POSITIVE - SEE IF ABOVE LIMIT	*/
+			IF VAL>MAX THEN VAL=MAX;	/*	CHECK FOR TOO LARGE	*/
+		END;
+		ELSE DO;	/*	VALUE IS MINUS	*/
+			IF VAL<MIN THEN VAL=MIN;
+		END;
+
+		IF (PRM=10)&(RESET.INFO=10)	/*	RESET OF PITCH GLIDE IN FRAME	*/
+		THEN DO;			/*	RESET PITCH OFFSET	*/
+			VAL=(VAL/100+1)*100;	/*	INCREMENT THROUGH SEMITONES	*/
+			IF VAL=1300 THEN VAL=-1200;
+		END;
+		TDS.VALUE=VAL;
+
+		DISPLAY.PRM#=PRM\SHL(PRM#,8); DISPLAY.VAL=VAL; DISPLAY.CODE=2;	/*	STORE INFO FOR DISPLAY OF LATEST ONE	*/
+
+		/*	NOW STORE VALUE BACK IN	*/
+
+		IF PRM#>=12 THEN DO;	/*	COEFFICIENT - CHECK BLINK.MODE + SET BIT FOR NEW WAVE COMPUTATION	*/
+			IF (IN.BLINK.MODE)<>0 THEN VAL=SHL(VAL,10)\(J&"001777");
+			ELSE VAL=VAL\(J&"176000");
+			IF ((AMOUNT<>"100000") OR (TDS.PTL<>0))
+			THEN NEW.FRAME.COEFF=NEW.FRAME.COEFF\BITS(OUR.PARTIAL);	/*	MUST COMPUTE NEW FRAME	*/
+		END;
+		ELSE RESET.BITS=RESET.BITS\R.ENPAR;		/*	MUST RECOMPUTE ENVELOPE PARAMETERS	*/
+		CALL P.STORE(PTPTR+PRM#+S.ENV.P,VAL);	/*	STORE VALUE BACK IN PARTIAL	*/
+		IF (PRM#=5)\(PRM#=3) THEN DO;	/*	UPDATING PARTIAL VOLUME, RANDOMNESS - STORE IN TF 1 ALWAYS	*/
+			CALL P.STORE(TIM.HEAD.LOOKUP(0,TIM.PARTIAL.POINTERS+OUR.PARTIAL)+(NUM.PARAMS+PRM#+S.ENV.P),VAL);	/*	STORE E.SEG.VOL ALWAYS IN T.F. 1	*/
+			IF PRM#=5 THEN RESET.BITS=RESET.BITS\R.ELIMS;	/*	RESET LIMITS/ RECOMPUTE VOLUME ON PARTIAL VOLUME CHANGE	*/
+		END;
+		NEW.PRM.INFO=NEW.PRM.INFO\BITS(OUR.PARTIAL);	/*	PERFORM SCREEN UPDATE	*/
+	END CHANGE.UPDATE.PRM#;
+
+	MAJOR.UPDATE:PROC PUBLIC SWAPABLE;
+		DCL I	FIXED;
+
+		STEP.TUNING:PROC(CURRENT);	/*	PROCEDURE TO STEP TUNING	*/
+			DCL (CURRENT)	FIXED;
+			IF (CURRENT<1100)
+			OR (CURRENT>=17600) THEN RETURN	1100;	/*	BELOW 110.0- GO TO 110.0	*/
+			IF CURRENT<2200	  THEN RETURN	2200;	/*							 220.0	*/
+			IF CURRENT<4400	  THEN RETURN	4400;	/*							 440.0	*/
+			IF CURRENT<8800	  THEN RETURN	8800;	/*							 880.0	*/
+											 RETURN 17600;	/*							1760.0	*/
+		END STEP.TUNING;
+
+		/*	START OF 'MAJOR.UPDATE' CODE	*/
+		/*	CHECK FOR POWER OFF, MOVE OF TRACK TIME	*/
+
+		IF TDS.PTL=0 THEN DO;								/*	CHECK OTHER STUFF IF NOT FROM TDS	*/
+			IF (POWER.OFF<>0) and (POWER.OFF <> 1000) THEN DO;	/*	POWER IS IN TRANSITION	*/
+				AMOUNT=0;  RETURN;
+			END;
+
+			IF  (NUM.OF.HELD.TRACK.BUTTONS<>0)			/*	TRACK BUTTON HELD - MOVE SEQUENCER	*/
+			AND (HELD.TRINF.BUTTON=0)						/*	BUT TRACK ROUTE/VOL NOT HELD	*/
+			AND (HELD.CLIK.BUTTON =0)						/*	AND CLICK RATE BUTTON NOT HELD	*/
+			AND (HELD.STARTLOOP.BUTTON=0)					/*	NOT HOLDING STARTLOOP BUTTON	*/
+			AND (HELD.MARK.BUTTON =0)						/*	AND MARK BUTTON NOT HELD	*/
+			THEN DO;
+				IF AMOUNT<>"100000"							/*	ARE GOING TO SLIDE THE TRK	*/
+				THEN CALL SLIDE.TRACKS(AMOUNT);			/*	SLIDE TRKS BY AMOUNT OF TICKS	*/
+
+				IF PRESET.KBD.ENVELOPE=0 THEN AMOUNT=0;	/*	SO KNOB PARAMETERS DO NOT CHANGE (UNLESS PRESETTING KBD ENVELOPE)	*/
+				IF (RESET.INFO\AMOUNT)=0 THEN RETURN;		/*	JUST RETURN QUICKLY.  CLEAN OUT POSSIBLE KBD.ENVELOPE PRESET	*/
+			END;	/*	CASE FOR TRACK BUTTON HELD	*/
+
+			/*	$PAGE - Check for change in frame selection	*/
+
+			IF (HELD.PSEL.BUTTONS<>0) THEN DO;				/*	CHANGE FRAME # IF HOLDING A PARTIAL SELECT BUTTON	*/
+				CALL FRAME.SLIDE;									/*	CALL OUR OWN SWAP PROCEDURE	*/
+				IF PRESET.KBD.ENVELOPE=0 THEN AMOUNT=0;	/*	SO KNOB PARAMETERS DO NOT CHANGE (UNLESS PRESETTING KBD ENVELOPE)	*/
+				IF (RESET.INFO\AMOUNT)=0 THEN RETURN;		/*	RETURN IF NO MORE TO DO	*/
+			END;
+
+			/*	$PAGE - Timbre name letter selection	*/
+
+			IF  (NEW.PAN<>0)										/*	IF NEW PANEL	*/
+			AND (HELD.TNAME.BUTTON<>0)							/*	AND TNAME BUTTON HELD	*/
+			THEN DO;
+				IF (RESET.INFO=(TNAME.L-PAR.L)) THEN DO;	/*	INCREMENT CURSOR ON SECOND PRESS	*/
+					AMOUNT=1; RESET.INFO=0;
+					IF TNAME.CURSOR=15 THEN TNAME.CURSOR=(-1);	/*	WRAP FROM 15 TO ONE	*/
+				END;	/*	STEP TO NEXT LETTER	*/
+				IF (AMOUNT<>0)&(AMOUNT<>"100000") THEN DO;		/*	CHANGE	*/
+					IF AMOUNT>0 THEN TNAME.CURSOR=TNAME.CURSOR+1;
+					ELSE				  TNAME.CURSOR=TNAME.CURSOR-1;
+					IF TNAME.CURSOR<0  THEN TNAME.CURSOR= 0;
+					IF TNAME.CURSOR>15 THEN TNAME.CURSOR=15;
+					/*	Create an event when the current cursor position	*/
+					/*	in the current timbre name changes:						*/
+
+					NEW.TIMBRE.INFO = NEW.TIMBRE.INFO \ 4;
+				END;
+				AMOUNT=0;											/*	NO MORE CHANGE	*/
+				CALL TIM.HEAD.LOOKUP(0,TIM.TINFO.POINTER);
+				IF (READ(MD)=0) THEN DO;						/*	CREATE T.FRAME IF ONE NOT THERE	*/
+					CALL CREATE.TINFO.FRAME;					/*	MAKE ONE SO CURSOR BLINKS	*/
+				END;
+				CALL DISPLAY.TIMBRE.NAME(TIM.HEAD.LOOKUP(0,TIM.TINFO.POINTER),0);	/*	PRESENT TIMBRE DISPLAY AS PARAMETER	*/
+				UPPER.DISP=TNAME.L-PAR.L;						/*	INDICATE NAME DISPLAYED	*/
+				ANY.MISC.FUNCTIONS = TRUE;
+				RETURN;												/*	NO MORE TO DISPLAY	*/
+			END;
+		END;
+		ELSE DO;									/*	RESELECT TDS PARTIAL/PARAMETER IN CASE IT WAS GLOMMED (BY TRACK SELECTION, FOR EXAMPLE)	*/
+			IF (TDS.PAR<(MPAR.L-PAR.L))	/*	PARTIAL PARAMETER	*/
+			OR (TDS.PAR=(PTTUN.L-PAR.L))	/*	PATCH LIST TUNING IS A PARTIAL PARAMETER	*/
+			THEN DO;
+				CALL SELECT.PARTIAL		(TDS.PTL&255);
+				CALL SELECT.TIMBRE.FRAME(TDS.PTL&255,TDS.FRM);
+			END;
+			CALL SELECT.PARAMETER	(TDS.PAR);
+		END;
+
+		/*	$SUBTITLE  Cycle Thru Memory and Change/Reset Parameters	*/
+
+		/*	BEGIN BY LOOKING UP CURRENT VALUE FOR PARAMETER	*/
+		/*	USE 'ACTIVE.PARMS' LIST AS INDEX TO CURRENTLY SELECTED PARAMETER	*/
+
+		IF UPPER.DISP=ERR.DISP THEN CALL CLEAR.DISPLAY;	/*	ERASE ERROR MESSAGE IF THERE	*/
+
+		DISPLAY.CODE=0;
+		DISPLAY.ERR11=0;		/*	INITIALIZE - ASSUME NO DISPLAY NEEDED	*/
+		DISPLAY.ERR16=0;
+
+		DO I=1 TO ACTIVE.PARMS(0);				/*	CYCLE THROUGH LIST OF ACTIVE PARAMETER KEYS	*/
+
+			PRM =ACTIVE.PARMS(I)&255;			/*	LOOK UP BUTTON CODE	*/
+			PRM#=SHR(ACTIVE.PARMS(I),8);		/*	GET OUR PARAMETER INDEX NUMBER 0-(64+64-1) (CORRECTED FOR BLINKING MODE)	*/
+
+			IF (PRM#>=12)&(PRM#<=23) THEN DO;			/*	ONE OF THE COEFF BUTTONS - CHECK HGS, SCALE ADJUST	*/
+				IF SCALE.ADJUST.IS.ACTIVE
+					THEN PRM#=PRM#+(SCALE.L-PAR.L)-12;	/*	MAP TO SCALE ADJUST AREA	*/
+				ELSE IF HGS=1
+					THEN PRM#=PRM#+12;						/*	MAP TO COEFFICIENTS 13-24	*/
+				IF  (INC.POLY<>0)								/*	POLY COMPILATION	*/
+				AND ((PRM#=14)\(PRM#=26))					/*	COEF 3 BUTTON	*/
+				AND (TIM.HEAD.LOOKUP(0,TIM.SYNTH.TYP+FIND.PARTIAL)=2)	/*	POLY PATCH LIST	*/
+				THEN PRM#=(NUMP.L-PAR.L);					/*	MAP TO NUMPOINTS	*/
+			END;
+
+			START.PRM#=PRM#;									/*	SAVE STARTING PRM# FOR EACH PARTIAL	*/
+
+			IF (PRM#<(MPAR.L-PAR.L))						/*	PARTIAL PARAMETER	*/
+			OR (PRM#=(PTTUN.L-PAR.L))						/*	PATCH LIST TUNING IS A PARTIAL PARAMETER	*/
+			THEN OUR.PARTIAL=0;								/*	CYCLE THROUGH 4 PARTIALS IF A PARTIAL PARAMETER	*/
+			ELSE OUR.PARTIAL=3;								/*	ONLY LOOP ONCE	*/
+
+			DO OUR.PARTIAL=OUR.PARTIAL TO 3;				/*	LOOP 4 TIMES FOR PARTIAL PARAM, ONCE FOR OTHERS	*/
+
+				PRM#=START.PRM#;								/*	GET STARTING PRM# FOR THIS PARTIAL	*/
+
+				IF  ((PRM#>=(MPAR.L-PAR.L))				/*	IF GLOBAL PARAMETER	*/
+				AND  (PRM#<>(PTTUN.L-PAR.L)))				/*	(BUT NOT PATCH LIST TUNING)	*/
+				OR  ((SELECTED.PARTIALS&BITS(OUR.PARTIAL))<>0)	/*	OR THIS PARTIAL IS SELECTED (IF PARTIAL PARAMETER/PATCH LIST TUNING)	*/
+				THEN DO;											/*	CHANGE PARAMETER	*/
+
+					IF (C.FRAME(OUR.PARTIAL)<>0)&(PRM#=5)
+					THEN PRM#=55;								/*	MAP OLD PARTIAL VOLUME BUTTON (IN FRAME) TO NEW ONE	*/
+
+					IF (PRM#>=36)								/*	IF ABOVE TIMBRE FRAME PARAMETER	*/
+					OR (C.FRAME(OUR.PARTIAL)=0)			/*	OR FRAME 0 SELECTED	*/
+					OR (TIM.HEAD.LOOKUP(0,TIM.SYNTH.TYP+OUR.PARTIAL)>1)	/*	OR IS A PATCH TIMBRE	*/
+					OR ((TDS.PTL<>0)							/*	OR ENTRY IS FROM TDS	*/
+					AND (TDS.FRM=0))
+					THEN DO;										/*	CHANGE IN FRAME 0 (MAIN PARTIAL), OR GLOBAL INFO	*/
+
+						/*	BEGIN BY LOOKING UP MIN/MAX FOR PARAMETER	*/
+
+						IF  (TIM.HEAD.LOOKUP(0,TIM.SYNTH.TYP+OUR.PARTIAL)>1)	/*	IF PATCH TIMBRE	*/
+						THEN DO;									/*	DISALLOW ITEMS	*/
+							IF  (READ(MD)=2)					/*	POLY ONLY		*/	/*	TIM.SYNTH.TYP	*/
+							AND ((PRM#=12)\(PRM#=13)\(PRM#=24)\(PRM#=25))	/*	COEF SELECTED	*/
+							THEN DO;
+								IF PRM#>=24 THEN PRM#=(PTTLEN.L-PAR.L)+(PRM#-24);	/*	MAP TO	*/
+								ELSE				  PRM#=(PTTLEN.L-PAR.L)+(PRM#-12);	/*	LOOP INFO	*/
+							END;
+							ELSE IF ((PRM#>=12)&(PRM#<36))	/*	IF COEF SELECTED	*/
+							OR		  ((PRM#>= 6)&(PRM#<12))	/*	IF FM   SELECTED	*/
+							OR		  ((PRM#=(RATIO.L-PAR.L)))	/*	OR RATIO			*/
+							THEN PRM#=(-1);
+						END;
+
+						IF (PRM#=(-1))							/*	DISALLOWED	*/
+						THEN CALL DISPLAY.ERR(19);
+
+						ELSE IF (PRM#<>12)\(IN.BLINK.MODE=0)	/*	IF NOT FRAME 0, PHASE 0 (DOES NOT EXIST)	*/
+						THEN DO;											/*	THEN ACTUALLY CHANGE PARAM	*/
+							CALL LOOKUP.UPDATE.PRM#;
+
+							/*	NOW CHANGE PARAMETER BY DESIRED AMOUNT.		  	*/
+							/*	CHECK FOR RESET/TOGGLE THEN DISPLAY NEW AMOUNT.	*/
+
+							IF AMOUNT<>"100000" THEN DO;						/*	MEANS ACTUALLY CHANGE PARAMETER	*/
+								IF (PRM#=(CLICK.L-PAR.L))						/*	CHANGING CLICK RATE	*/
+								THEN DO;
+									IF (CLICK.TRACK.MODE == 0) {				/*	INTERNAL CLICK	*/
+										IF (tempo.map.ptr == null)
+										{
+											if (CLICK.DISP.MODE == 0)	VAL=VAL-AMOUNT;	//	SHOWING BPM
+											else								VAL=VAL+AMOUNT;	//	SHOWING MILLISECONDS OR FRAMES/BEAT
+											NEW.SEQ.INFO = NEW.SEQ.INFO \ 8;	/*	NEW CONSTANTS ON CLICK RATE CHANGE	*/
+										}
+										else	ADD.TO.TEMPO(AMOUNT);			//	IF TEMPO MAP IS IN USE THEN USE ROUTINE
+									}
+									TOGGLE.CLICKON=FALSE;	/*	Don't toggle the click's on/off status on release of click button if we've been here.	*/
+								END;
+								ELSE IF (PRM#=(CLICKVAL.L-PAR.L))
+								THEN DO;
+									VAL = VAL+AMOUNT;
+									IF VAL<MIN THEN VAL=MIN;
+									IF VAL>MAX THEN VAL=MAX;
+									/*IF METER.MAP.PTR <> 0		//	we can't get at this parameter unless there's a meter map anyway
+									THEN*/ CALL SET.CLICK.VALUE(LOC(ADDR(SAMPLED.ACTUAL.SEQUENCE.TIME.MSB)),VAL);
+								END;
+								ELSE IF (PRM#=(BPM.L-PAR.L))
+								AND     (HELD.CLIK.BUTTON<>0)		/*	ONLY IF BUTTONS ARE HELD	*/
+								AND     (HELD.SPEED.BUTTON<>0)
+								THEN DO;
+									VAL = VAL+AMOUNT;
+									IF VAL<MIN THEN VAL=MIN;
+									IF VAL>MAX THEN VAL=MAX;
+									IF METER.MAP.PTR<>0 THEN DO;
+										IF (BPM.CURSOR = 0)
+										THEN CALL SET.BEATS.PER.MEASURE(LOC(ADDR(SAMPLED.ACTUAL.SEQUENCE.TIME.MSB)),VAL);
+										ELSE CALL SET.DENOM(LOC(ADDR(SAMPLED.ACTUAL.SEQUENCE.TIME.MSB)),VAL);
+										CALL DISPLAY.METER;
+									END;
+								END;
+								ELSE IF (PRM#=(SMPTE.L-PAR.L))	/*	CHANGING SMPTE START TIME	*/
+								THEN DO;
+									CALL ADD.TO.SMPTE(AMOUNT);	/*	ADD TO SMPTE TIME INSTEAD OF MODE	*/
+									CALL SPEED.COMP;				/*	SAMPLE INFO			*/
+									NEW.SEQ.INFO = NEW.SEQ.INFO \ 8;	/*	NEW CONSTANTS ON SMPTE OFFSET CHANGE	*/
+								END;
+								ELSE IF (PRM# == MWPROX.L-PAR.L)	/*	CHANGING MOD WHEEL PROXY	*/
+								{	//	just increment/decrement regardless of the magnitude of AMOUNT
+									IF (AMOUNT < 0) VAL = VAL - 1;
+									ELSE				 VAL = VAL + 1;
+								}
+								else if (prm#=(midi.l-par.l))
+								{
+									VAL=VAL+AMOUNT;				/*	NORMAL SENSING	*/
+									
+									if (MIDI.PARAM.ID == 0)				// MIDI Output Routing
+									{
+										if ((amount ILT 32768)			// Not changing or changing in positive direction
+										&&  (val > 16*max.midi.chan)
+										&&  (val < THD.MIDI.OMS    ))
+												val = THD.MIDI.OMS;		// Handle bump up to OMS MIDI
+												
+										else if ((amount IGT 32768)	// Changing in negative direction
+										&&       (val > 16*max.midi.chan)
+										&&       (val < THD.MIDI.OMS    ))
+												val = 16*max.midi.chan;
+									}
+								}
+								
+								ELSE DO;	/*	ADD VAL TO AMOUNT - CHECK FOR OVERFLOW	*/
+									IF (VAL<0) AND (AMOUNT<0) AND (VAL+AMOUNT>=0)
+									THEN VAL=-32000;
+									ELSE IF (VAL>=0) AND (AMOUNT>=0) AND (VAL+AMOUNT<0)
+									THEN VAL=+32000;
+									ELSE VAL=VAL+AMOUNT;				/*	NORMAL SENSING	*/
+								END;
+							END;	/*	OF IF AMOUNT<>"100000"	*/
+
+							/*	$PAGE - CHECK FOR TDS CHANGE, PARAMETER RESET	*/
+							IF  (TDS.PTL=OUR.PARTIAL+256)		/*	PICK UP VALUE FROM TDS	*/
+							AND (TDS.PAR=PRM#)
+							THEN VAL=TDS.VALUE;
+
+							IF (RESET.INFO=PRM) THEN DO;		/*	PERFORM RESET OF PARAMETER	*/
+
+								IF			(PRM# ilt START.L-PAR.L)	J	= PAR.RESET(PRM#);		/*	LOOK UP VALUE OR CODE	*/
+								ELSE IF	(PRM# ==  CHAIN.L-PAR.L)	J	= 2;							/*	INCREMENT CHAIN REPS	*/
+								ELSE											J	= 0;							/*	SPECIAL SEQUENCER PARMS	*/
+
+								IF J ige 20 THEN VAL=J;			/*	GO TO THAT VALUE		*/
+								ELSE DO CASE (J);					/*	LOOK UP CODE & PERFORM IT	*/
+									;									/*	0: NOTHING TO DO	*/
+									DO;								/*	1: PARTIAL TUNING/OVERALL TUNING	*/
+										IF  (DIAGNOSTICS.ENABLED<>0)	/*	XXXX PROGRAM	*/
+										AND (PRM#=(TBASE.L-PAR.L))
+										THEN DO;						/*	CHANGE CHANNEL PREFERENCE	*/
+											VAL=VAL+1;				/*	INCREMENT VOICE SELECTION FOR XXX	*/
+											IF VAL=MAX.DIAGNOSE.VOICES THEN VAL=0;
+										END;
+										ELSE VAL=STEP.TUNING(VAL);	/*	CYCLE THROUGH PARTIAL TUNING	*/
+									END;
+									DO;								/*	2: INCREMENT (VIBWAVE, STEREO MODE)	*/
+										VAL=VAL+1;
+										IF VAL>MAX THEN VAL=MIN;
+									END;
+									DO;								/*	3: RATIO - BY 1000	*/
+										IF VAL<0 THEN VAL=1000;
+										ELSE			  VAL=(VAL/1000+1)*1000;	/*	NEXT MULTIPLE OF 1000	*/
+										IF VAL>16000 THEN VAL=1000;	/*	MODULO 16.000	*/
+									END;
+									VAL=0;							/*	4: PRESET TO 0 (ST CENTER, HARM ADJ, KBD XPOS)	*/
+									DO;								/*	5: SPEED VARIABLE - 960/1000	*/
+										IF VAL=1000 THEN VAL=960; ELSE VAL=1000;	/*	RESET SPEED	*/
+									END;
+									;									/*	6: CLICK BUTTON: CODE MOVED TO CONTINUE BUTTON WHEN HELD.CLICK	*/
+									DO;								/*	7: TBEND SENS - EITHER NEW OR OLD	*/
+										IF VAL< 0 THEN ;			/*	LEAVE AS IS IF MINUS	*/
+										ELSE				  VAL=(VAL/100+1)*100;
+										IF VAL>1200 THEN VAL=100;	/*	FROM 12.00 BACK TO 1.00	*/
+
+										WRITE(MAM)=BAS.PTR;
+										DO K=0 TO 11;	/*	PERFORM SCALE RESET	*/
+											WRITE(MDI)=WESTERN.SCALE(K);
+										END;
+
+										RESET.BITS=RESET.BITS\R.FREQS;	/*	INDICATE WRITE NEW FREQUENCY DATA FROM SALE RESET	*/
+									END;
+									;						/*	 8: NO LONGER USED BY VELOCITY CONSTANT (V.S.CON)	*/
+									;						/*	 9: TIMBRE NAME - NO LONGER USED	*/
+									;						/*	10: MIDI BUTTON - NO LONGER USED	*/
+									DO;					/*	11: PRESSING POLYPHONY BUTTON REPEATEDLY	*/
+										IF NEW.PAN THEN DO;
+											IF VAL=1 THEN DO;	/*	VOICE IS MONOPHONIC, TOGGLE AUTOPHRASE BIT IN MISC.BITS	*/
+												K=TIM.HEAD.LOOKUP(0,TIM.MISC.POINTER);	/*	GET MISC.BITS	*/
+												CALL P.STORE(K,P.LOOKUP(K) XOR BIT.APHRASE);	/*	TOGGLE AUTOPHRASE BIT	*/
+											END;
+										END;
+									END;
+									VAL = R.MWHEEL;	/*	12: RESET MOD WHEEL PROXY (must be done here since R.MWHEEL < 20)	*/
+                           DO;               /*	13: Keyboard transpose, MIDI out transpose	*/
+                              val = (((val + (24+12)) / 12 ) * 12) - 24;
+                              if (val == 36) val = -24;
+                           END;
+								END;	/*	OF DO CASE	*/
+							END;	/*	OF PERFORM RESET OF PARAMETER	*/
+
+							IF VAL>=0 THEN DO;	/*	VAL IS POSITIVE - SEE IF ABOVE LIMIT	*/
+								IF VAL>MAX THEN VAL=MAX;	/*	CHECK FOR TOO LARGE	*/
+								IF (MIN>0)&(VAL<MIN) THEN VAL=MIN;	/*	CHECK FOR MIN OF 1,2,3, ETC. (AVOID OVERFLOW HERE)	*/
+							END;
+							ELSE DO;				/*	VALUE IS MINUS - ASSUME MAX OF 0 OR GREATER	*/
+								IF VAL<MIN THEN VAL=MIN;
+							END;
+							TDS.VALUE=VAL;		/*	PRESENT BACK TO TDS FOR UPATING SCREEN, AFTER LIMIT CHECK	*/
+
+							DISPLAY.PRM#=PRM\SHL(PRM#,8); DISPLAY.VAL=VAL; DISPLAY.CODE=1;	/*	STORE INFO FOR DISPLAY OF LATEST ONE	*/
+
+							/*	$PAGE - CHECK SYNTH UPDATES, STORE NEW PARAM	*/
+
+							/*	CHECK FOR SYNTH UPDATES REQUIRED	*/
+							/*	STORE NEW VALUE BACK IN MEMORY	*/
+
+							IF (AMOUNT<>"100000")				/*	IF REGULAR AMOUNT CHANGE	*/
+							OR (RESET.INFO<>0)					/*	OR WAS A RESET	*/
+							OR (PRESET.KBD.ENVELOPE<>0)		/*	OR WAS A PRESET ENVELOPE	*/
+							OR (TDS.PTL<>0)						/*	OR WAS A TDS CHANGE	*/
+							THEN DO;									/*	MUST CHECK FOR UPDATE IF ACTUAL CHANGE	*/
+								IF PRM#<(START.L-PAR.L)
+								THEN RESET.BITS=RESET.BITS\PAR.CHANGE(PRM#);	/*	LOOK UP CHANGE INFO	*/
+							END;
+
+							CALL STORE.UPDATE.PRM#;
+
+						END;	/*	OF BEGIN IF NOT FRAME 0, COEF 0 (PHASE)	*/
+					END;		/*	OF DOING DISPLAY/UPDATE IN MAIN FRAME	*/
+
+					/*	$PAGE - PROCESS TIMBRE FRAME PARAMETER	*/
+
+					ELSE
+					IF  ((PRM#<5) OR (PRM#>9))
+					OR  ((TDS.PTL<>0)								/*	OR ENTRY IS FROM TDS	*/
+					AND (TDS.FRM<>0))								/*	AND ON NON-ZERO FRAME	*/
+					THEN CALL CHANGE.UPDATE.PRM#;				/*	PROCESS CHANGE IN TIMBRE FRAME (IGNORE UNUSED BUTTONS)	*/
+				END;	/*	OF BEGIN FOR OUR.PARTIAL IS SELECTED (OR PRM#>=64)	*/
+			END;		/*	OF PARTIAL LOOP	*/
+		END;			/*	OF LOOP OVER ACTIVE PARAMETER LIST	*/
+
+		/*	$PAGE - END OF 'MAJOR.UPDATE' ROUTINE - CLEAN UP, CHECK FOR NEW WAVESHAPE COMPUTATION, RETURN	*/
+
+		RESET.INFO=0; PRESET.KBD.ENVELOPE=0;	/*	NO MORE BUTTON COMMANDS	*/
+		TDS.PTL=0;										/*	CLEAR OUT TDS PRESET	*/
+
+		IF      DISPLAY.ERR11<>0 THEN CALL DISPLAY.ERR(11);	/*	OUT OF ROOM TRYING TO CREATE PINFO OR TINFO BLOCK	*/
+		ELSE IF DISPLAY.ERR16<>0 THEN CALL DISPLAY.ERR(16);	/*	FEATURE NOT AVAILABLE (REL I/VKBD)	*/
+
+		ELSE IF (DISPLAY.CODE<>0) & (UPPER.DISP<>ERR.DISP)
+		THEN CALL DISPLAY.UPDATED.PARAMETER(DISPLAY.PRM#,DISPLAY.VAL,DISPLAY.CODE-1);	/*	PRESENT MOST RECENTLY COMPUTED DISPLAY	*/
+
+		AMOUNT=0;									/*	DONE WITH AMOUNT	*/
+
+		IF (HELD.SCALE.ADJUST.BUTTONS)=0 THEN DO;		/*	CHECK FOR UPDATE COEFFS IF NO COEFF BUTTONS HELD	*/
+			IF ((RESET.BITS&R.COEFS)<>0) THEN DO;		/*	IF COEFFICIENT CHANGED - UPDATE - BUT WAIT IF BUTTON IS HELD	*/
+				CALL DEALLOC(0);								/*	FREE UP ALL 4 PARTIALS FOR TIMBRE 0	*/
+				CALL ALLOC.TIMBRE(0);						/*	RE-ALLOCATE - WILL RECOMPUTE WAVE MEMORIES IF NEEDED	*/
+				RESET.BITS=(RESET.BITS XOR R.COEFS) OR (R.WMEMS);	/*	NOW RESET MEMORIES	*/
+			END;
+
+			IF (NEW.FRAME.COEFF<>0) THEN DO;				/*	FRAME WAVESHAPE CHANGED	*/
+				I=0;
+				DO WHILE (I<NUM.PARTIALS);					/*	CHECK EACH PARTIAL	*/
+					IF (NEW.FRAME.COEFF&BITS(I))<>0 THEN DO;	/*	MUST COMPUTE IT	*/
+						CALL COMPUTE.TIMBRE.FRAME(I);		/*	COMPUTE THE WAVESHAPE FOR CURRENTLY SELECTED FRAME #	*/
+						RESET.BITS=RESET.BITS\R.WMEMS;	/*	RESET WAVE MEMS IN SYNTH	*/
+					END;
+					I=I+1;
+				END;
+				NEW.FRAME.COEFF=0;	/*	ALL COMPUTED	*/
+			END;
+		END;
+
+		IF (RESET.BITS&R.ENPAR)<>0 THEN DO;	/*	MUST RECOMPUTE ENVELOPE PARAMETERS	*/
+			CALL COMPUTE.ENV.PARAMS(0);		/*	COMPUTE THEM FOR KEYBOARD	*/
+		END;
+
+		IF (RESET.BITS&R.MISCI)<>0 THEN DO;	/*	RECOMPUTE MISC INFO	*/
+			CALL COMPUTE.MISC.INFO;
+			RESET.BITS=RESET.BITS XOR R.MISCI;
+		END;
+
+		IF (RESET.BITS&R.FREQS)<>0 THEN DO;	/*	RECOMPUTE LOG INFO ON FREQ CHANGE	*/
+			LOGTBASE=LOG4400(TBASE);			/*	COMPUTE LOG FOR OVERALL TUNING	*/
+			CALL COMPUTE.LOGS(0);				/*	RECOMPUTE KEYBOARD RATIO LOGS, CHORUS LOGS, ETC.	*/
+		END;											/*	R.FREQS RESET AFTER SYNTH UPDATE	*/
+
+		IF (RESET.BITS&R.STERO)<>0 THEN DO;	/*	STEREO CHANGED	*/
+			IF NEW.PAN=0 THEN CALL COMPUTE.RTE.BUTTONS;
+			CALL COMPUTE.RBITS(0);				/*	RECOMPUTE ANY.STAM IN OPTIONS INFO	*/
+		END;											/*	R.STERO RESET AFTER SYNTH UPDATE	*/
+
+		IF (RESET.BITS&R.SMPTE)<>0 THEN DO;	/*	SMPTE - PERFORM RESYNC HERE FOR BETTER KNOB OPERATION	*/
+			if slocked <> 0 then do;			/*	IF CURRENTLY LOCKED TO SMPTE AND CHANGING THE START TIME,	*/
+				SLOCKED=0;							/*	THEN BREAK OUT OF MIDI LOCK AND STOP ANY ASSOCIATED			*/
+				IF (MIDI.SYNC.OUT   != 0)		/*	MIDI PLAYBACK																*/
+				&& (MIDI.SYNC.IS.TC == 0)
+				THEN DO;
+					DISABLE;
+					TIME.BASE.MODE=0;
+					CALL SEND.MIDI.STOP;
+					/*** NOTE: ABOVE CALL RE-ENABLES INTERRUPTS ***/
+				END;
+				ELSE TIME.BASE.MODE=0;
+				/*	Create a system event whenever smpte locks or unlocks		*/
+
+				NEW.SEQ.INFO = NEW.SEQ.INFO \ 128;
+				interpret_set_timebase_mode(TIME.BASE.MODE);
+			end;
+			RESET.BITS=RESET.BITS XOR R.SMPTE;
+		END;
+
+	END MAJOR.UPDATE;
+
+END;	/*	OF BEGIN FOR MAJOR.UPDATE GROUP OF SUBROUTINES	*/
+
+/*	$PAGE - ROUTINE TO STORE SYNCLAV PARAMETER	*/
+
+STORE.SYNCL.PARAM:PROC (PAR#,FRA#,LPN#,VAL) PUBLIC SWAPABLE;
+	DCL PAR#	FIXED;	/*	PASS PARTIAL #	*/
+	DCL FRA#	FIXED;	/*	PASS FRAME   #	*/
+	DCL LPN#	FIXED;	/*	PASS LPN			*/
+	DCL VAL	FIXED;	/*	VALUE				*/
+
+	TDS.PTL	 = 256+PAR#;	/*	SAVE PARTIAL #	*/
+	TDS.FRM	 = FRA#;			/*	SAVE FRA		 #	*/
+	TDS.PAR	 = LPN#-PAR.L;	/*	SAVE PRAM	 #	*/
+	TDS.VALUE = VAL;			/*	NEW VALUE		*/
+
+	CALL MAJOR.UPDATE;
+
+END STORE.SYNCL.PARAM;

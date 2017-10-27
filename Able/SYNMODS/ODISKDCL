@@ -1,0 +1,187 @@
+/*	:SYNMODS:ODISKDCL  $TITLE  common optical disk items
+
+Modified:
+2000/02/27 - TY  - Made changes to accommodate display of sound file loops
+1989/06/09 - TSS - Added args to APPEND.CURRENT.FILELIST.LENGTH.INFO
+1989/05/09 - SGS - Added Transfer.Optical.Data dcl
+1989/05/03 - TSS - Merged changes for Optical disk to DTD transfer project
+1989/05/02 - TSS - Merged changes for Optical disk to DTD transfer project
+*/
+
+/*	FOR DEBUGGING ONLY ***************/
+dcl Quit						proc			 external;
+dcl Window.Already.Open	proc (fixed) external;
+dcl Window.Not.Open		proc (fixed) external;
+dcl Menu.Already.Open	proc (fixed) external;
+dcl Menu.Not.Open			proc (fixed) external;
+dcl Debug.Print			proc (array) external;
+dcl DumpPos					proc			 external;
+
+DCL (SFD.PTR,SFD.LEN)	FIXED EXTERNAL;	/*	SEC # IN XMEM FOR SOUND FILE DIRECTORY	*/
+
+dcl OpenWindowBits	fixed	external;	/*	list of bits corresponding to window IDs (1->open, 0->closed)	*/
+dcl ActiveWindowId	fixed	external;	/*	ID # for the currently active window	*/
+
+/*	NOTE:	THE ORDER OF THE REST OF THE VARIABLES IN THIS FILE	*/
+/*			IS VERY IMPORTANT.  DON'T CHANGE THEIR ORDER WITHOUT	*/
+/*			LOOKING AT STATE SAVE AND RESTORE ROUTINES.				*/
+
+dcl Device.Mounted	fixed	external;	/*	non-zero if any device is active	*/
+dcl DirDevice			fixed	external;	/*	Current device being displayed	*/
+dcl SnapFCBs			fixed	external;	/*	number of FCBs in snapshot area	*/
+
+/*	File List & Category List State Variables	*/
+
+dcl FListIndex		fixed	external;	/*	index ptr to current file list record	*/
+dcl FListSector	fixed	external;	/*	sector & word ptr to current file list record	*/
+dcl FListWord		fixed	external;
+
+dcl CListIndex		fixed	external;	/*	current file index into current category list record	*/
+dcl CListSector	fixed	external;	/*	sector ptr to current category list record	*/
+dcl CListWord		fixed	external;	/*	word   ptr to current category list record	*/
+dcl CListRecLen	fixed	external;
+dcl CListCurPos	fixed	external;
+dcl CListFiles		fixed	external;
+
+dcl TotalCatCount			fixed	external;	/*	total number of categories on device	*/
+dcl TotalFileCount		fixed	external;	/*	total number of files on device		*/
+dcl TotalDisplayLines	fixed	external;	/*	number of lines of display in current mode	*/
+dcl ScreenTopLine			fixed	external;	/*	line # of top of screen	*/
+
+/*	Next two arrays are used to control formatting of		*/
+/*	info in the different modes base on SORTINFO var:		*/
+/*		ITEM$Category (0) ==> Sorting List by CATEGORIES	*/
+/*		ITEM$Filename (1) ==> Sorting List by FILENAMES		*/
+
+dcl MaxItemChars	array	external;	/*	char width of one item (indexed by item type)		*/
+dcl MaxRowItems	array	external;	/*	# of items to put on a line (indexed by item type)	*/
+
+/*	arrays to hold total # of lines of information in	*/
+/*	the current index file formatted in various ways	*/
+
+dcl FListDisplayLines	array	external;
+dcl CListDisplayLines	array	external;
+
+dcl SortInfo		fixed	external;	/*	actual sort mode in use	*/
+dcl UserSort		fixed	external;	/*	user set sort pos			*/
+dcl CurItemType	fixed	external;	/*	type code of item at current ptrs	*/
+dcl FunctionInfo	fixed	external;	/*	bits for which functions to perform when a sound file is selected		*/
+dcl ShowInfo		fixed	external;	/*	bits for which info to show	*/
+
+dcl Define.Device.Icon proc (fixed,fixed,fixed,fixed,fixed) returns (fixed) external;
+
+/*	NOTE: You should not really set ITEMFILTER to FILTER$FILENAME	*/
+/*			if looking at a File List, or FILTER$CATEGORY if			*/
+/*			looking at a Category List.										*/
+
+dcl ItemFilter	fixed external;
+
+dcl DESTINATION.PARTIAL.#	fixed	external;	/*	arguments passed to sound file	*/
+dcl DESTINATION.FRAME.#		fixed	external;	/*	screen									*/
+dcl RETURN.IMMEDIATELY		fixed	external;
+
+dcl Build.Window.Title				proc(fixed,array)		external;
+dcl Get.Window.Title					proc(fixed,array)		external;
+dcl Refresh.OptWindow.Title		proc(fixed)				external;
+dcl Clean.Category.Strings			proc(array,array)		external;
+dcl Display.Optical.Statistics	proc(array)				external;
+dcl Recall.Sound.File				proc(array,fixed,array,array,fixed,fixed) returns(fixed)	external;	/*	recall specified filename	*/
+dcl Get.Next.Optical.Event			proc returns (fixed)	external;
+dcl Toggle.Box.HighLight			proc(fixed,fixed)		external;
+
+dcl Set.Optical.Error		proc(fixed)		external;	/*	Sound File Recall/Storage Screen Error printing routine	*/
+dcl Generate.Optical.Error.Message	proc	external;	/*	construct message from scsi status codes	*/
+dcl Display.Optical.Status	proc(array,fixed,fixed)	external;
+dcl Erase.Optical.Status	proc				external;
+
+dcl Default.Activate.Optical.Control.Bits	fixed	external;
+dcl Activate.Operations.Performed			fixed	external;	/*	bits get set in word by Activate.Optical	*/
+dcl Activate.Optical			proc (fixed)	returns (boolean)	external;	/*	high level mount volume called from sound file and arch screens	*/
+dcl Update.Laser.Index		proc				returns (boolean)	external;	/*	tries to bring index file up to date with Optical disk	*/
+dcl Transfer.Optical.Data	proc(fixed,fixed,fixed,fixed,fixed,fixed,fixed,fixed)	external;	/*	transfers data to or from optical disk (exception: poly memory)	*/
+
+dcl SetFListPos							proc (Fixed) returns (fixed)	external;	/*	resets current position	*/
+dcl Append.Current.FileList.Length.Info	proc (array,fixed,fixed,array,fixed)	external;
+dcl Append.Current.FileList.Item				proc (array,fixed) returns (fixed)		external;
+dcl SetCListPos							proc (Fixed,fixed)				external;	/*	sets current position	*/
+dcl Append.Current.CatList.Item		proc (array,fixed) returns (fixed)	external;
+dcl SaveListPos							proc(fixed)							external;
+dcl GetListPos								proc(fixed)							external;
+dcl Advance.To.Next.Item				proc returns (fixed)				external;
+dcl BackUp.To.Prior.Item				proc returns (fixed)				external;
+dcl Advance.To.Next.Line				proc returns (fixed)				external;
+dcl BackUp.To.Prior.Line				proc returns (fixed)				external;
+dcl Get.Next.Item							proc (array) returns (fixed)	external;
+dcl Get.Next.Line							proc (array) returns (fixed)	external;
+dcl Get.Prior.Item						proc (array) returns (fixed)	external;
+dcl Get.Prior.Line						proc (array) returns (fixed)	external;
+dcl Seek.To.Line							proc (Fixed) returns (fixed)	external;
+dcl Get.Line	proc (Fixed,array) returns (fixed)	external;	/*	builds the specified line from index file without changing current position	*/
+dcl Get.Current.Filename.And.Info	proc(Array,Array)					external;	/*	gets file at current position	*/
+dcl Mount.New.Device						proc (fixed) returns (fixed)	external;
+
+dcl SaveDisplayPos						proc (fixed,fixed)	external;
+dcl Select.Active.Window				proc (fixed)			external;
+
+dcl Fetch.DirTable.Item.Type	proc (fixed,fixed) returns (fixed)	external;	/*	determines what type of item is on specified line of current table	*/
+dcl Fetch.DirTable.Item	proc (fixed,fixed,array) returns (fixed)	external;	/*	computes category or filename at specified loc	*/
+dcl Do.Selection.HighLighting	proc (fixed,fixed,fixed)	external;
+dcl Set.DirTable.Position		proc (fixed,fixed)			external;
+dcl Fill.DirTable					proc (fixed)	external;	/*	refills Dir Table from current index file position	*/
+dcl Page.DirTable.Forward		proc				external;
+dcl Page.DirTable.Backward		proc				external;
+dcl Scroll.DirTable.Forward	proc (fixed)	external;
+dcl Scroll.DirTable.Backward	proc (fixed)	external;
+dcl Scroll.To.Line				proc (fixed)	external;
+dcl Handle.Catalog.Select		proc (array) returns (fixed)	external;
+dcl Find.DirTable.Entry			proc (fixed,array)	external;
+dcl Update.DirTable.Entry		proc (fixed)			external;
+
+dcl Get.Next.ScrollBar.Event	proc						external;
+dcl Get.Next.Window.Event		proc returns (fixed)	external;
+
+dcl Set.ScrollBar.Pos	proc	external;
+
+dcl Get.Index.And.Offset		proc (array)					external;
+dcl Compute.SortFormat			proc (fixed,fixed) returns (fixed)	external;
+dcl Set.Cursor.Position.At.Entry		proc (fixed,fixed)	external;
+dcl Find.Entry.At.Cursor.Position	proc (array)			external;
+dcl Reset.DC.Pointers			proc (fixed)					external;
+dcl Fetch.DC.Top.Pointers		proc (array,fixed,fixed)	external;
+dcl Store.DC.Top.Pointers		proc (array,fixed,fixed)	external;
+dcl Fetch.DC.Cursor.Pointers	proc (array,fixed,fixed)	external;
+dcl Store.DC.Cursor.Pointers	proc (array,fixed,fixed)	external;
+dcl Open.Directory.Window		proc (fixed,array,fixed,fixed,fixed,fixed,fixed,fixed,fixed,fixed,fixed,fixed)	external;
+dcl RestoreDisplayPos			proc (fixed)					external;
+dcl SetDisplayPos					proc (fixed)					external;
+dcl Close.Directory.Window		proc (fixed)					external;
+dcl Set.Display.Format			proc (fixed,fixed,fixed,fixed,fixed)	external;
+dcl Select.New.Window.Device	proc (fixed,fixed)			external;
+dcl Change.Window.Sort.Format	proc (fixed,fixed,fixed)	external;
+dcl Change.Window.Function.Format	proc (fixed,fixed)	external;
+dcl Change.Window.Info.Format			proc (fixed,fixed)	external;
+dcl Change.Window.Filter.Format		proc (fixed,fixed)	external;
+dcl Refresh.All.Display.Windows		proc						external;	/*	re-opens devices and repositions to current line	*/
+dcl Refresh.Display.Window				proc (fixed)			external;	/*	re-opens devices and repositions to current line	*/
+
+dcl Close.Dialog.Panel				proc	external;
+dcl Set.DlgOrigObj					proc	external;
+dcl Select.DlgOrigObj				proc	external;
+dcl Open.Format.Optical.Dialog	proc	external;
+dcl Get.Format.Optical.Response	proc (array,array,array,array) returns (fixed)	external;	/*	handle input on FORMAT dialog panel	*/
+dcl Open.Update.Optical.Dialog	proc								external;
+dcl Get.Update.Optical.Response	proc returns (fixed)			external;	/*	handle input on UPDATE OPTICAL dialog panel	*/
+dcl Open.Optical.Volume.Change.Dialog	proc						external;
+dcl Get.Optical.Volume.Change.Response	proc returns (fixed)	external;	/*	handles input on VOLUME CHANGE dialog panel	*/
+dcl Open.Shuffle.Dialog				proc								external;
+dcl Get.Shuffle.Response			proc returns (fixed)			external;	/*	handles input on SHUFFLE dialog panel			*/
+
+dcl Set.SFD.Misc			proc (fixed,fixed,fixed)				external;
+dcl Get.SFD.Memory		proc (fixed) returns (boolean)		external;
+dcl Set.SFD.Dialog.Row	proc (fixed)								external;
+dcl Get.SFD.Ids			proc (array)								external;
+
+
+insert ':synauxs:odisklit';
+
+library ':synlibs:odisklib';

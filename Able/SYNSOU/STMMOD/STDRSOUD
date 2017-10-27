@@ -1,0 +1,1330 @@
+/*	$Title  :SYNSOU:STMMOD:STDRSOUD  Sample-To-Memory Sound Editor Menu and cursor positioning routines
+
+1999/10/13 - TY  - Made adjustments to accommodate new help text
+1989/08/02 - SJS - added support for Sample Rate Conversion
+1989/07/31 - TSS - Limited max sampling rate to 100.0 kHz instead of 101.0 kHz
+1989/04/14 - SJS - changed speech to 'ONE' and music to 'TWO'
+1988/12/13 - cj  - changed 'smart' to 'speech'
+1988/09/29 - SJS - Fixed conversion bug in Check.TSM.Ratio
+1988/09/08 - SJS - Changed TSM length to SFTime format
+1988/09/07 - SGS - Add check for new SAFE II adc - allow stereo 100 kHz sampling
+1988/08/25 - MWH - Add "real" DSP user interface
+1988/05/19 - SJS - Added Sample Rate Conversion commands
+1988/04/22 - JSS - Record subpage now deals w/new SAFE's (ADC) gain in dB.
+1988/04/19 - MWH - Add "OK" prompt for collect, max_time, print
+1988/04/15 - MWH - Add point mode and zero line
+1988/03/08 - TSS - Added Time Scale Modify commands
+1988/02/02 - MWH - Expand crossfade times to 65.535 seconds
+1987/12/11 - MWH - Merge poly updates with N-Final plus AEE sources
+1987/08/19 - MWH - Add stm.max.time option to shuffle for max recording time
+1987/08/11 - MWH - Update all to support max 4 poly bins, 512mb/bin
+1987/02/09 - BSW - Made this part of the STM draw screen module, STDRMOD
+*/
+
+	SET.MAXIMUM.TOKEN.LEN: proc swapable;	/*	sets the var STM.MAX.TLEN to correct value	*/
+		/*	NOTE:  This procedure looks at STM.SELECT.MODE and STM.CHOICE,
+			the variables representing the menu selection,
+			to determine the proper max length for TOKEN()	*/
+		/*												A	B	C	D	E	F	G	H	I	J	K	L	M	N	O	P	Q	R	S	T	U	V	W	*/
+		dcl stm.max.tlen.display.vals	data( 0, 0, 0,11, 2, 8, 8, 8, 0, 0, 0, 0, 0, 2, 0,43, 0, 0, 0, 0, 0, 0, 0);
+		dcl stm.max.tlen.modify.vals	data( 0, 0, 0, 0,40,40,40,40, 0,40, 1, 5,40,40,40, 6, 0,40,40,40, 0, 0, 0);
+		dcl stm.max.tlen.store.vals	data( 0, 0, 0,48,48, 8,48, 2, 5, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+		dcl stm.max.tlen.modify2.vals	data( 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,10);
+
+		do case (stm.select.mode);
+			stm.max.tlen=stm.max.tlen.display.vals(stm.choice);	/*	display	*/
+			stm.max.tlen=stm.max.tlen.modify.vals (stm.choice);	/*	modify	*/
+			stm.max.tlen=stm.max.tlen.store.vals  (stm.choice);	/*	store		*/
+			stm.max.tlen=stm.max.tlen.modify2.vals(stm.choice);	/*	modify II	*/
+		end;
+	end SET.MAXIMUM.TOKEN.LEN;
+
+	/*	$Subtitle Sample-To-Memory Sound Editor Command Menu Routines	*/
+
+	dcl cparen_sp	data (') ');
+
+	draw.command.menu.0:proc swapable;
+		call cpos(command.row  ,second.command.column); call pc(asc.d);call ps(cparen_sp);call ps('Show');
+		call cpos(command.row+1,second.command.column); call pc(asc.e);call ps(cparen_sp);call ps('Zoom');
+		call cpos(command.row+2,second.command.column); call pc(asc.f);call ps(cparen_sp);call ps('Search');
+		call cpos(command.row+3,second.command.column); call pc(asc.g);call ps(cparen_sp);call ps('Label');
+
+		call cpos(command.row  ,third.command.column); call pc(asc.h);call ps(cparen_sp);call ps('Unlabel');
+		call cpos(command.row+1,third.command.column); call pc(asc.i);call ps(cparen_sp);call ps('Center');
+		call cpos(command.row+2,third.command.column); call pc(asc.j);call ps(cparen_sp);call ps('Mark Start');
+		call cpos(command.row+3,third.command.column); call pc(asc.k);call ps(cparen_sp);call ps('Mark End');
+
+		call cpos(command.row  ,fourth.command.column); call pc(asc.l);call ps(cparen_sp);call ps('Left');
+		call cpos(command.row+1,fourth.command.column); call pc(asc.m);call ps(cparen_sp);call ps('Symbols');
+		call cpos(command.row+2,fourth.command.column); call pc(asc.n);call ps(cparen_sp);call ps('Print');
+		call cpos(command.row+3,fourth.command.column); call pc(asc.o);call ps(cparen_sp);call ps('Help   ');
+
+		call cpos(command.row  ,fifth.command.column); call pc(asc.p);call ps(cparen_sp);call ps('Caption ');
+		call cpos(command.row+1,fifth.command.column); call pc(asc.q);call ps(cparen_sp);call ps('Mark Off');
+		call cpos(command.row+2,fifth.command.column); call pc(asc.r);call ps(cparen_sp);call ps('Lock    ');
+		call cpos(command.row+3,fifth.command.column); call pc(asc.s);call ps(cparen_sp);call ps('Unlock  ');
+
+		call cpos(command.row  ,sixth.command.column); call pc(asc.t);call ps(cparen_sp);call ps('Dot Mode');
+		call cpos(command.row+1,sixth.command.column); call pc(asc.u);call ps(cparen_sp);call ps('Zero ---');
+		call cpos(command.row+2,sixth.command.column); call pc(asc.v);call ps(cparen_sp);	//	call ps('        ');
+		call cpos(command.row+3,sixth.command.column); call pc(asc.w);call ps(cparen_sp);	//	call ps('        ');
+	end draw.command.menu.0;
+
+	draw.command.menu.1:proc swapable;
+		call cpos(command.row  ,second.command.column); call pc(asc.d);call ps(cparen_sp);call ps('Reverse');
+		call cpos(command.row+1,second.command.column); call pc(asc.e);call ps(cparen_sp);call ps('Cut   ');
+		call cpos(command.row+2,second.command.column); call pc(asc.f);call ps(cparen_sp);call ps('Paste  ');
+		call cpos(command.row+3,second.command.column); call pc(asc.g);call ps(cparen_sp);call ps('Extract ');
+
+		call cpos(command.row  ,third.command.column); call pc(asc.h);call ps(cparen_sp);call ps('Delete  ');
+		call cpos(command.row+1,third.command.column); call pc(asc.i);call ps(cparen_sp);call ps('Exchange');
+		call cpos(command.row+2,third.command.column); call pc(asc.j);call ps(cparen_sp);call ps('Combine');
+		call cpos(command.row+3,third.command.column); call pc(asc.k);call ps(cparen_sp);call ps('Ext Mono');
+
+		call cpos(command.row  ,fourth.command.column); call pc(asc.l);call ps(cparen_sp);call ps('Crossfade');
+		call cpos(command.row+1,fourth.command.column); call pc(asc.m);call ps(cparen_sp);call ps('Copy     ');
+		call cpos(command.row+2,fourth.command.column); call pc(asc.n);call ps(cparen_sp);call ps('Fill     ');
+		call cpos(command.row+3,fourth.command.column); call pc(asc.o);call ps(cparen_sp);call ps('Loop     ');
+
+		call cpos(command.row  ,fifth.command.column); call pc(asc.p);call ps(cparen_sp);call ps('Volume   ');
+		call cpos(command.row+1,fifth.command.column); call pc(asc.q);call ps(cparen_sp);call ps('Normalize');
+		call cpos(command.row+2,fifth.command.column); call pc(asc.r);call ps(cparen_sp);call ps('Modulate ');
+		call cpos(command.row+3,fifth.command.column); call pc(asc.s);call ps(cparen_sp);call ps('Rev Loop ');
+
+		call cpos(command.row  ,sixth.command.column); call pc(asc.t);call ps(cparen_sp);call ps('Mix      ');
+		call cpos(command.row+1,sixth.command.column); call pc(asc.u);call ps(cparen_sp);call ps('Undo     ');
+		call cpos(command.row+2,sixth.command.column); call pc(asc.v);call ps(cparen_sp);call ps('Invert   ');
+		call cpos(command.row+3,sixth.command.column); call pc(asc.w);call ps(cparen_sp);call ps('DC Trim  ');
+	end draw.command.menu.1;
+
+	draw.command.menu.2:proc swapable;
+		call cpos(command.row  ,second.command.column); call pc(asc.d);call ps(cparen_sp);call ps('Save');
+		call cpos(command.row+1,second.command.column); call pc(asc.e);call ps(cparen_sp);call ps('Unsave');
+		call cpos(command.row+2,second.command.column); call pc(asc.f);call ps(cparen_sp);call ps('Rename');
+		call cpos(command.row+3,second.command.column); call pc(asc.g);call ps(cparen_sp);call ps('Recall');
+
+		call cpos(command.row  ,third.command.column); call pc(asc.h);call ps(cparen_sp);call ps('Collect');
+		call cpos(command.row+1,third.command.column); call pc(asc.i);call ps(cparen_sp);call ps('Record');
+		call cpos(command.row+2,third.command.column); call pc(asc.j);call ps(cparen_sp);call ps('Max Time');
+		call cpos(command.row+3,third.command.column); call pc(asc.k);call ps(cparen_sp);
+
+		call cpos(command.row  ,fourth.command.column); call pc(asc.l);call ps(cparen_sp);
+		call cpos(command.row+1,fourth.command.column); call pc(asc.m);call ps(cparen_sp);
+		call cpos(command.row+2,fourth.command.column); call pc(asc.n);call ps(cparen_sp);
+		call cpos(command.row+3,fourth.command.column); call pc(asc.o);call ps(cparen_sp);
+
+		call cpos(command.row  ,fifth.command.column); call pc(asc.p);call ps(cparen_sp);	//	call ps('        ');
+		call cpos(command.row+1,fifth.command.column); call pc(asc.q);call ps(cparen_sp);	//	call ps('        ');
+		call cpos(command.row+2,fifth.command.column); call pc(asc.r);call ps(cparen_sp);	//	call ps('        ');
+		call cpos(command.row+3,fifth.command.column); call pc(asc.s);call ps(cparen_sp);	//	call ps('        ');
+
+		call cpos(command.row  ,sixth.command.column); call pc(asc.t);call ps(cparen_sp);	//	call ps('        ');
+		call cpos(command.row+1,sixth.command.column); call pc(asc.u);call ps(cparen_sp);	//	call ps('        ');
+		call cpos(command.row+2,sixth.command.column); call pc(asc.v);call ps(cparen_sp);	//	call ps('        ');
+		call cpos(command.row+3,sixth.command.column); call pc(asc.w);call ps(cparen_sp);	//	call ps('        ');
+	end draw.command.menu.2;
+
+	draw.command.menu.3:proc swapable;
+		call cpos(command.row  ,second.command.column); call pc(asc.d);call ps(cparen_sp); call ps('TSM');
+		call cpos(command.row+1,second.command.column); call pc(asc.e);call ps(cparen_sp);	// call ps('   ');
+		call cpos(command.row+2,second.command.column); call pc(asc.f);call ps(cparen_sp);	// call ps('');
+		call cpos(command.row+3,second.command.column); call pc(asc.g);call ps(cparen_sp);	// call ps('');
+
+		call cpos(command.row  ,third.command.column); call pc(asc.h);call ps(cparen_sp); call ps('Sum L & R');
+		call cpos(command.row+1,third.command.column); call pc(asc.i);call ps(cparen_sp);
+		call cpos(command.row+2,third.command.column); call pc(asc.j);call ps(cparen_sp);
+		call cpos(command.row+3,third.command.column); call pc(asc.k);call ps(cparen_sp);
+
+		call cpos(command.row  ,fourth.command.column); call pc(asc.l);call ps(cparen_sp);
+		call cpos(command.row+1,fourth.command.column); call pc(asc.m);call ps(cparen_sp);
+		call cpos(command.row+2,fourth.command.column); call pc(asc.n);call ps(cparen_sp);
+		call cpos(command.row+3,fourth.command.column); call pc(asc.o);call ps(cparen_sp);
+
+		call cpos(command.row  ,fifth.command.column); call pc(asc.p);call ps(cparen_sp);
+		call cpos(command.row+1,fifth.command.column); call pc(asc.q);call ps(cparen_sp);
+		call cpos(command.row+2,fifth.command.column); call pc(asc.r);call ps(cparen_sp);
+		call cpos(command.row+3,fifth.command.column); call pc(asc.s);call ps(cparen_sp);
+
+		call cpos(command.row  ,sixth.command.column); call pc(asc.t);call ps(cparen_sp);
+		call cpos(command.row+1,sixth.command.column); call pc(asc.u);call ps(cparen_sp);
+		call cpos(command.row+2,sixth.command.column); call pc(asc.v);call ps(cparen_sp);
+		call cpos(command.row+3,sixth.command.column); call pc(asc.w);call ps(cparen_sp);//call ps('     ');
+	end draw.command.menu.3;
+
+	DRAW.COMMAND.MENU: proc public swapable;
+
+		call cpos(command.row  ,first.command.column); call pc(asc.a);call ps(cparen_sp); call ps('Display ');
+		call cpos(command.row+1,first.command.column); call pc(asc.b);call ps(cparen_sp); call ps('Modify ');
+		call cpos(command.row+2,first.command.column); call pc(asc.c);call ps(cparen_sp); call ps('Store/Recall ');
+		call cpos(command.row+3,first.command.column); call pc(asc.x);call ps(cparen_sp); call ps('Modify II');
+
+		do case(stm.select.mode);	/*	print a different group of commands depending upon selection mode	*/
+			call draw.command.menu.0;
+			call draw.command.menu.1;
+			call draw.command.menu.2;
+			call draw.command.menu.3;
+		end;		/*	of do depending upon menu selection mode	*/
+
+	end DRAW.COMMAND.MENU;
+
+	/*	$page	*/
+
+	ERASE.COMMAND.MENU: proc public swapable;
+		dcl sp10	data	('          ');
+		dcl sp09	data	('         ');
+		cpos(command.row	, second.command.column+3);	ps(sp10);	/*	don't erase the letter selections	*/
+		cpos(command.row+1, second.command.column+3);	ps(sp10);
+		cpos(command.row+2, second.command.column+3);	ps(sp10);
+		cpos(command.row+3, second.command.column+3);	ps(sp10);
+
+		cpos(command.row	, third.command.column+3);		ps(sp10);
+		cpos(command.row+1, third.command.column+3);		ps(sp10);
+		cpos(command.row+2, third.command.column+3);		ps(sp10);
+		cpos(command.row+3, third.command.column+3);		ps(sp10);
+
+		cpos(command.row	, fourth.command.column+3);	ps(sp10);
+		cpos(command.row+1, fourth.command.column+3);	ps(sp10);
+		cpos(command.row+2, fourth.command.column+3);	ps(sp10);
+		cpos(command.row+3, fourth.command.column+3);	ps(sp10);
+
+		cpos(command.row	, fifth.command.column+3);		ps(sp09);
+		cpos(command.row+1, fifth.command.column+3);		ps(sp09);
+		cpos(command.row+2, fifth.command.column+3);		ps(sp09);
+		cpos(command.row+3, fifth.command.column+3);		ps(sp09);
+
+		cpos(command.row	, sixth.command.column+3);		ps(sp09);
+		cpos(command.row+1, sixth.command.column+3);		ps(sp09);
+		cpos(command.row+2, sixth.command.column+3);		ps(sp09);
+		cpos(command.row+3, sixth.command.column+3);		ps(sp09);
+	end ERASE.COMMAND.MENU;
+
+	ERASE.COMMAND.LETTERS: proc public swapable;
+		dcl sp2	data	('  ');
+		cpos(command.row	, second.command.column);	ps(sp2);
+		cpos(command.row+1, second.command.column);	ps(sp2);
+		cpos(command.row+2, second.command.column);	ps(sp2);
+		cpos(command.row+3, second.command.column);	ps(sp2);
+
+		cpos(command.row	, third.command.column);	ps(sp2);
+		cpos(command.row+1, third.command.column);	ps(sp2);
+		cpos(command.row+2, third.command.column);	ps(sp2);
+		cpos(command.row+3, third.command.column);	ps(sp2);
+
+		cpos(command.row	, fourth.command.column);	ps(sp2);
+		cpos(command.row+1, fourth.command.column);	ps(sp2);
+		cpos(command.row+2, fourth.command.column);	ps(sp2);
+		cpos(command.row+3, fourth.command.column);	ps(sp2);
+
+		cpos(command.row	, fifth.command.column);	ps(sp2);
+		cpos(command.row+1, fifth.command.column);	ps(sp2);
+		cpos(command.row+2, fifth.command.column);	ps(sp2);
+		cpos(command.row+3, fifth.command.column);	ps(sp2);
+
+		cpos(command.row	, sixth.command.column);	ps(sp2);
+		cpos(command.row+1, sixth.command.column);	ps(sp2);
+		cpos(command.row+2, sixth.command.column);	ps(sp2);
+		cpos(command.row+3, sixth.command.column);	ps(sp2);
+	end ERASE.COMMAND.LETTERS;
+
+	/*	$Subtitle Record Menu Processing	*/
+
+	SET.RECORD.PARMS: proc (selection) swapable;	/*	sets the record menu for record choice	*/
+		dcl (selection)	fixed;		/*	record menu selection	*/
+		do case (selection);
+			do;
+				call cpos(19,29);			/*	0: Mode	*/
+            do case (shl(stm.record.device, 1) + stm.record.stereo); 
+               call ps('D66 Mono  ');
+               call ps('*Invalid* ');
+               call ps('STM Mono  ');
+               call ps('STM Stereo');
+               call ps('Dig STM Mo');
+               call ps('Dig STM St');
+				end;
+			end;
+			do;
+				call cpos(20,29);			/*	1: Trigger	*/
+				if stm.record.notrigger=0
+				then call ps('On ');
+				else call ps('Off');
+			end;
+			do;
+				call cpos(19,51);			/*	2: sound file sample rate	*/
+				call print.parm(stm.record.rate,0,0,5,1);
+			end;
+			do;
+				call cpos(20,51);			/*	3: Threshold	*/
+				call print.parm(stm.record.threshold,0,0,5,3);
+			end;
+			do;
+				call cpos(19,68);			/*	4: Gain	*/
+				if stm.record.device == stm.record.device.stm then do;
+					if (READ.STM.CONFIG(0)&"H8000") <> 0				/*	If new SAFE (Analogic ADC)		*/
+					then call print.parm(stm.record.scale,0,1,5,0);	/*	Print # decibels, signed, w/o decimal		*/
+					else call print.parm(stm.record.scale,0,0,5,1);	/*	Print linear scale val, uns., w/decimal	*/
+				end;
+			end;
+		end;
+	end SET.RECORD.PARMS;
+
+	SET.RECORD.MENU: proc(selection) swapable;	/*	sets the record menu for record choice	*/
+		dcl (selection)	fixed;	/*	record menu selection	*/
+
+		call SET.RECORD.PARMS(selection);		/*	set the recording parameters	*/
+		do case (selection);
+			do;								/*	0: Mode	*/
+				call DISPLAY.RECORDING.TIME;
+				call SET.RECORD.MENU(4);	/*	NOTE:  "SELECTION" gets clobbered by this recursive call	*/
+			end;
+			;									/*	1: trigger	*/
+			do;								/*	2: rate	*/
+				call cpos(19,57);
+				call ps('kHz');
+
+				call DISPLAY.RECORDING.TIME;
+			end;
+			do;								/*	3: threshold	*/
+				call cpos(20,57);
+				call ps('volts');
+			end;
+			do;								/*	4: gain	*/
+				call cpos(19,63);
+            if stm.record.device == stm.record.device.stm then do;
+					call ps('Gain: ');
+					call cpos(19,74);
+
+					if (READ.STM.CONFIG(0)&"H8000")<>0	/*	If new SAFE (Analogic ADC)	*/
+					then call ps('dB   ');					/*	then Show decibel units		*/
+					else call ps('times');					/*	else old SAFE; show linear units	*/
+				end;
+				else do;
+					call ps('           ');
+					call cpos(19,74);
+					call ps('     ');
+				end;
+			end;
+		end;
+	end SET.RECORD.MENU;
+
+	/*	$PAGE	*/
+
+	dcl POS.STM.RECORD.CURSOR proc recursive;
+	
+	CHANGE.RECORD.MENU: proc(selection) public swapable;	/*	changes the record menu selections	*/
+		dcl (i,selection)	fixed;	/*	record menu selection	*/
+		dcl stm_config		fixed;	/*	stm configuration	*/
+
+		do case(selection);
+			{                                                  	/* 0: Mode */
+				if (stm.record.device == stm.record.device.d66)		// D66 to STM
+				{
+					interp_release_dig_stm();								// Free up digital STM if changing mode
+					stm.record.device == stm.record.device.stm;
+				}
+				
+				else if (stm.record.stereo == 0)							// mono to stero
+		   		stm.record.stereo = 1;
+				
+				else																// next device mono
+				{
+					stm.record.stereo = 0;
+					stm.record.device = stm.record.device + 1;
+				}
+
+				if (stm.record.device > stm.record.device.dig)		// loop back to d66
+					stm.record.device = stm.record.device.d66;
+					
+				if ((stm.record.device == stm.record.device.dig)	// if dig stm selected
+				&&  (((read("51") & 0x8000) == 0)						// and no dig stm
+				||   ((read("57") & 0x4000) == 0)))
+					stm.record.device = stm.record.device.d66;		// loop back to d66
+
+				if ((stm.record.device == stm.record.device.d66)	// skip D66 if not configured
+				&&  ((core(core(1)+17)&"20000")=0))
+					stm.record.device = stm.record.device.stm;
+					
+				if ((stm.record.device == stm.record.device.stm)	// stm selected
+				&&  (polyadcs(0)==0)											// no stm hardware
+				&&  ((read("51") & 0x8000) != 0)							// and dig input exists
+				&&  ((read("57") & 0x4000) != 0))
+					stm.record.device = stm.record.device.dig;
+					
+            if ((stm.record.device == stm.record.device.stm)   // if stm hardware sampling
+				&&  (stm.record.stereo != 0)								// stereo
+				&&  (stm.record.rate>505))									// rate larger than 50.5 kHz */
+            {
+					stm_config = READ.STM.CONFIG(0);  					// get STM configuration
+					if ((stm_config&"H0003")<>"3")    					/* only one SAFE (old or new) in Box 0 */
+					{
+							if ( ((stm_config&"H8000")<>0)	/*	new SAFE		*/
+							and  ((stm_config&"H4000")=0) )	/*	but no PRM	*/
+							or   ((stm_config&"H8000")=0)		/*	OR old SAFE	*/
+							or ((stm_config&"H0003")=0)		/*	OR no SAFEs at all	*/
+							then do;
+								stm.record.rate=505;	/*	and not enough input channels	*/
+								call no.stm.hardware;
+							end;
+               }
+            }	                                               /* of if stm hardware sampling */
+				
+				if (stm.record.device == stm.record.device.dig)	  // Look up digital STM rate
+				{
+					if (stm.record.rate != interp_get_dig_stm_rate())
+					{
+						stm.record.rate = interp_get_dig_stm_rate();
+						SET.RECORD.PARMS(2);
+						SET.RECORD.MENU (2);
+						POS.STM.RECORD.CURSOR();
+					}
+				}
+
+         end;                                                 /* of if changing modes */
+         
+			stm.record.notrigger=stm.record.notrigger xor 1;     /* 1: Trigger  toggle the record trigger on and off */
+         
+			do;																/*	2: Rate	*/
+				if token(0)<>0 then do;					/*	if something typed	*/
+					ertyp=0;									/*	forget previous errors	*/
+					i=CONV.STR.TO.FIXED(token,1,0);	/*	get sampling rate in kHz*10	*/
+					if ertyp=0 then do;					/*	if so far so good	*/
+						if i<1 then call range.error;	/*	if sampling rate less than .1	*/
+						else do;								/*	otherwise check upper limits	*/
+                     if (stm.record.device == stm.record.device.d66)
+							then do;
+								if (i>500)					/*	if d66 mono sampling and >50 kHz then error	*/
+								then call range.error;
+								else stm.record.rate=i;
+							end;
+                     else if (stm.record.device == stm.record.device.dig)
+							then do;
+                        if (i<400) || (i>505)
+                        then call range.error;
+                        else do;
+									stm.record.rate=i;
+									interp_set_dig_stm_rate(stm.record.rate);
+								end;
+                     end;
+							else do;							/*	if sample to memory sampling	*/
+								if i>1000					/*	cannot sample at a rate larger than 100 kHz	*/
+								then call range.error;
+                        else if ((stm.record.stereo != 0)
+								and     (i>505)) then do;
+									stm_config = READ.STM.CONFIG(0);		/*	look at STM configuration	*/
+
+									if  ((stm_config&"H8000")<>0)			/*	new SAFEs used	*/
+									and ((stm_config&"H4000")<>0)			/*	PRM present	*/
+									and ((stm_config&"H0003")<>0)			/*	at least one SAFE is there	*/
+									then stm.record.rate=i;					/*	allow 100kHz stereo sampling	*/
+
+									else if ((stm_config&"H4000") =0)	/*	no PRM	*/
+                           and     ((stm_config&"H0003")="3")	/* both SAFEs (old or new) are there */
+									then stm.record.rate=i;					/*	allow 100kHz sampling	*/
+
+									/*	no PRMs and less than 2 SAFEs (old or new)	*/
+									/*	OR a PRM with no (new) SAFEs						*/
+									else do;										/*	both SAFEs not present in Box 0	*/
+										/*	not enough channels, cannot sample at a rate larger than 50 kHz	*/
+										call no.stm.hardware;
+										stm.record.rate=505;
+									end;
+								end;
+
+								else stm.record.rate=i;	/*	sampling in mono at any rate,	*/
+																/*	OR sampling in stereo at below 50.6 kHz	*/
+							end;
+						end;
+					end;	/*	of if so far so good		*/
+				end;		/*	of if something typed	*/
+			end;			/*	of rate	*/
+			do;																/*	3: Threshold	*/
+				if token(0)<>0 then do;
+					ertyp=0;									/*	forget previous errors	*/
+					i=CONV.STR.TO.FIXED(token,3,0);
+					if ertyp=0 then do;
+						if i<=5000 then do;
+							stm.record.threshold=i;
+							load stm.record.threshold; mul 32767;
+							i=res; div 5000;
+							STM.THRESHOLD=res;
+						end;
+						else call overflow.error;
+					end;
+				end;
+			end;
+			do;																/*	4: Gain	*/
+				if token(0)<>0 then do;
+					ertyp=0;											/*	forget previous errors		*/
+					if (READ.STM.CONFIG(0)&"H8000") <> 0	/*	If new SAFE (Analogic ADC)	*/
+					then do;
+						i=CONV.STR.TO.FIXED(token,0,1);	/*	Get signed, integer gain val	*/
+						if ertyp=0 then do;
+							if (i>=stm.new.gain.min)		/*	If entered gain isn't above 28dB	*/
+							and (i<=stm.new.gain.max)		/*	or below -3 dB	*/
+							then stm.record.scale=i;		/*	Then set global gain var		*/
+							else call gain.out.of.range;
+						end;
+					end;
+					else do;										/*	Old (Analog Solutions) SAFE		*/
+						i=CONV.STR.TO.FIXED(token,1,0);	/*	Get unsigned gain w/1 dec. place	*/
+						if ertyp=0 then do;
+							if (i>=stm.old.gain.min) and (i<=stm.old.gain.max)	/*	limit gain to 1.0 to 81.0 times	*/
+							then stm.record.scale=i;		/*	Set global gain var	*/
+							else call gain.out.of.range;
+						end;
+					end;	/*	of old SAFE else clause	*/
+				end;
+			end;	/*	of gain case	*/
+		end;		/*	of case	*/
+		call SET.RECORD.MENU(selection);
+		token(0)=0;
+	end CHANGE.RECORD.MENU;
+
+	/*	$Subtitle TSM Menu Processing	*/
+
+	PRINT.TSM.PARMS: proc (selection) swapable;	/*	draws value of tsm options	*/
+		dcl (selection)	fixed;	/*	TSM menu selection	*/
+
+		do case (selection);
+
+			do;								/*	0: Algorithm	*/
+				call cpos(prompt.y,prompt.x+11);
+				do case (tsm.algorithm);
+					call ps('THREE ');
+					call ps('ONE   ');
+					call ps('TWO   ');
+				end;
+			end;
+
+			do;								/*	1: Length	*/
+				call cpos(prompt.y,prompt.x+36);
+				call print.parm(tsm.length(0),0,0,3,0);
+				call ps('.');
+				call print_digits(tsm.length(1),3);
+				call ps(' ');
+				call print_digits(tsm.length(2),3);
+			end;
+
+			do;								/*	2: Ratio	*/
+				call cpos(prompt.y,prompt.x+55);
+				call print.parm(tsm.ratio,1,0,6,4);
+			end;
+
+			do;								/*	3: Max cut	*/
+				if tsm.algorithm = 0
+				then do;						/*	Fund	*/
+					/*	no options	*/
+				end;
+				else do;						/*	Max cut	*/
+					call cpos(prompt.y+1,prompt.x+14);
+					call print.parm(tsm.max.cut.time,1,0,6,2);
+				end;
+			end;
+
+			do;								/*	4: Justification	*/
+				call cpos(prompt.y+1,prompt.x+36);
+				call print.parm(tsm.justification,1,0,2,0);
+			end;
+		end;
+	end PRINT.TSM.PARMS;
+
+	/*	Will check that length and ratio are valid and in sync when one changes	*/
+
+	CHECK.TSM.RATIO: proc(lr) swapable;
+		dcl lr				fixed;	/*	0 = new length entered; 1 = new ratio	*/
+		dcl sec				fixed;	/*	Length of input sound file from its header	*/
+		dcl msec				fixed;	/*																*/
+		dcl mcsec			fixed;	/*																*/
+		dcl l_limit			fixed;	/*	Lower limit of ratio	*/
+		dcl u_limit			fixed;	/*	Upper limit of ratio	*/
+		dcl ratio.info(1)	fixed;
+		dcl (num,denom)	fixed;	/*	for ratio_multiply	*/
+		dcl status			fixed;
+
+		dcl C.or.E			fixed;	/*	compression or expansion flag (56000 format)	*/
+		dcl CRatio			fixed;	/*	56000 format ratio signed fraction
+												between -1 and 1 which represents
+												the ratio-1	*/
+
+		dcl temp.in(2)		fixed;	/*	temp buffer for format conversion	*/
+		dcl temp.out(2)	fixed;	/*	temp buffer for format conversion	*/
+
+		call LOOK.UP.SF.INFO;		/*	Read from current file	*/
+		if sf.type<>1 then return;
+		call psmread(sfile.base,sf.hdr,sf.data.end);
+
+		sec	= read(psd);			/*	Get seconds...		*/
+		msec	= read(psd);			/*	...and milliseconds	*/
+		mcsec = read(psd);			/*	...and microseconds	*/
+
+		if  tsm.length(0) = 0
+		and tsm.length(1) = 0
+		and tsm.length(2) = 0		/*	If no length specified...	*/
+		then do;
+			tsm.ratio	= 10000;		/*	...and ratio is 1.00	*/
+			tsm.length(0) = sec;		/*	set tsm.length seconds...	*/
+			tsm.length(1) = msec;	/*	...and milliseconds		*/
+			tsm.length(2) = mcsec;	/*	...and microseconds		*/
+			return;
+		end;
+		else if tsm.ratio = 0		/*	If ratio never specified...	*/
+		then do;
+			tsm.ratio	= 10000;		/*	...make it 1.00			*/
+			tsm.length(0) = sec;		/*	set tsm.length seconds...	*/
+			tsm.length(1) = msec;	/*	...and milliseconds		*/
+			tsm.length(2) = mcsec;	/*	...and microseconds		*/
+			return;
+		end;
+
+		call Time_to_Index(sec,msec,mcsec,stm.sample.rate,stereo);
+		temp.in(0) = sector.msb;	/*	results of time_to_index	*/
+		temp.in(1) = sector.numb;
+		temp.in(2) = sector.offset;
+
+		call Time_to_Index(tsm.length(0),tsm.length(1),tsm.length(2),
+								 stm.sample.rate,stereo);
+		temp.out(0) = sector.msb;
+		temp.out(1) = sector.numb;
+		temp.out(2) = sector.offset;
+
+		if lr = 0 then do;					/*	Given length, set ratio	*/
+			status =  Compute.Ratio.For.Time.Fit(temp.in,temp.out,ratio.info);
+			if status = true then do;
+				C.or.E = ratio.info(0);
+
+				load ratio.info(1);	/*	tsm.ratio in 56000 format	*/
+				mul 10000;
+
+				if C.or.E = 1
+				then do;	/*	expansion	*/
+					tsm.ratio = 10000 + ures + (res igt shr(10000,1));
+				end;
+				else do;	/*	compression	*/
+					denom = 10000 + ures + (res igt shr(10000,1));
+					bitmsb = 0;bitlsb = 10000;
+					call ratio_multiply(10000,denom);
+					tsm.ratio = bitlsb;
+				end;
+			end;
+			else if status = -1 then do;	/*	length too large to compute ratio		*/
+				tsm.ratio = 20000;			/*	set high so that code below will catch	*/
+			end;
+			else if status = -2 then do;	/*	ratio too small	*/
+				tsm.ratio = 5000;				/*	set low so that code below will catch	*/
+			end;
+
+		end;
+
+		/*	Set ratio limits	*/
+		if tsm.algorithm = 1 then do;		/*	ONE algorithm	*/
+			l_limit = 8000;
+			u_limit = 12000;
+		end;
+		else do;									/*	Other algorithms	*/
+			l_limit = 5001;
+			u_limit = 19999;
+		end;
+
+		/*	Limit ratio wherever we got it from	*/
+		if tsm.ratio < l_limit				/*	If ratio less than lower limit		*/
+		then do;
+			tsm.ratio = l_limit;				/*	Limit	*/
+			lr = 1;								/*	Force set of new length from this	*/
+		end;
+		else if tsm.ratio > u_limit		/*	If ratio greater than upper limit	*/
+		then do;
+			tsm.ratio = u_limit;				/*	Limit	*/
+			lr = 1;								/*	Force set of new length from this	*/
+		end;
+
+		/*	Now set length from the ratio when appropriate	*/
+		if lr = 1 then do;					/*	Given ratio, set length	*/
+
+			/*	convert tsm.ratio to 56k format, set C.or.E flag	*/
+			if tsm.ratio < 10000
+			then do;	/*	compression	*/
+				C.or.E = 0;
+				bitmsb=0;bitlsb=10000;
+				call ratio_multiply(10000,tsm.ratio);
+				Cratio = bitlsb;
+			end;
+			else do;	/*	expansion	*/
+				C.or.E = 1;
+				CRatio = tsm.ratio;
+			end;
+			if (CRatio ige 10000) and (CRatio ile 20000)
+			then do;
+				load 0; uload CRatio-10000; div 10000;	/*	map TSM factor onto	*/
+				CRatio=res+(rem ige shr(10000,1));		/*	0-65536 scale			*/
+			end;
+
+			call Convert.SF.len.to.Samples(temp.out,temp.out);	/*	convert to 32 bit sample #	*/
+			call Convert.SF.len.to.Samples(temp.in,temp.in);	/*	convert to 32 bit sample #	*/
+
+			if C.or.E =0
+			then call Compute.Compressed.Length(temp.in,temp.out,CRatio);
+			else call Compute.Expanded.Length(temp.in,temp.out,CRatio);
+
+			call Convert.Samples.to.SF.len(temp.out,temp.out);	/*	convert to 32 bit sample #	*/
+			call Index_to_Time(temp.out(0),temp.out(1),temp.out(2),
+									 stm.sample.rate,stereo);
+			tsm.length(0) =time.seconds;
+			tsm.length(1) =time.milliseconds;
+			tsm.length(2) =time.microseconds;
+
+		end;
+
+		return;
+	end CHECK.TSM.RATIO;
+
+	CHECK.TSM.OPTIONS: proc(algorithm) swapable;	/*	check limits	*/
+		dcl algorithm	fixed;
+		dcl l_limit	fixed;
+		dcl u_limit	fixed;
+
+		do case (algorithm);
+			do;	/*	THREE	*/
+				/*	no options	*/
+			end;
+
+			do;	/*	ONE	*/
+				l_limit = 512;
+				u_limit = 4096;
+
+				if tsm.max.cut.time = 0
+				then do;
+					tsm.max.cut.time = 2048;
+					bitmsb=0;bitlsb=tsm.max.cut.time;
+					call ratio_multiply(stm.sample.rate,1000);
+					tsm.max.cut.samples = bitlsb;
+				end;
+
+				if tsm.max.cut.time ilt l_limit
+				then do;
+					tsm.max.cut.time = l_limit;
+					bitmsb=0;bitlsb=tsm.max.cut.time;
+					call ratio_multiply(stm.sample.rate,1000);
+					tsm.max.cut.samples = bitlsb;
+				end;
+
+				if tsm.max.cut.time igt u_limit
+				then do;
+					tsm.max.cut.time = u_limit;
+					bitmsb=0;bitlsb=tsm.max.cut.time;
+					call ratio_multiply(stm.sample.rate,1000);
+					tsm.max.cut.samples = bitlsb;
+				end;
+
+				if tsm.justification = 0
+				then tsm.justification = 4;	/*	# 1-4	*/
+
+				if tsm.justification < 0
+				then tsm.justification = 1;
+
+				if tsm.justification > 4
+				then tsm.justification = 4;
+
+			end;
+
+			do;	/*	TWO	*/
+				/*	no options to date	*/
+			end;
+
+		end;
+	end CHECK.TSM.OPTIONS;
+
+	SET.TSM.MENU: proc(selection) swapable;
+		dcl (selection)	fixed;	/*	TSM menu selection	*/
+
+		do case (selection);
+			do;								/*	0: Algorithm	*/
+				call PRINT.TSM.PARMS(0);
+				do case (tsm.algorithm);
+
+					do;						/*	0: QUICK	*/
+						call cpos(prompt.y+1,prompt.x);
+						call ps('                                        ');
+						tsm.max.option = 2;
+					end;
+
+					do;						/*	1: ONE	*/
+						call cpos(prompt.y+1,prompt.x);
+						call ps('                                        ');
+						call cpos(prompt.y+1,prompt.x);
+						call ps('Max cut (MS):     ');
+						call cpos(prompt.y+1,prompt.x+21);
+						call ps('Justification:');
+						call CHECK.TSM.OPTIONS(tsm.algorithm);
+						call PRINT.TSM.PARMS(3);	/*	ONE has two extra options	*/
+						call PRINT.TSM.PARMS(4);
+						tsm.max.option = 4;		/*	2 extra entries	*/
+					end;
+
+					do;						/*	2: TWO	*/
+						call cpos(prompt.y+1,prompt.x);
+						call ps('                                               ');
+						tsm.max.option = 2;		/*	no extra entries	*/
+					end;
+				end;	/*	of do case tsm.algorithm	*/
+				call CHECK.TSM.RATIO(1);
+				call PRINT.TSM.PARMS(1);
+				call PRINT.TSM.PARMS(2);
+			end;
+
+			do;								/*	1: Length	*/
+				call CHECK.TSM.RATIO(0);
+				call PRINT.TSM.PARMS(1);
+				call PRINT.TSM.PARMS(2);	/*	Also print ratio	*/
+			end;
+
+			do;								/*	2: Ratio	*/
+				call CHECK.TSM.RATIO(1);
+				call PRINT.TSM.PARMS(2);
+				call PRINT.TSM.PARMS(1);	/*	Also print length	*/
+			end;
+
+			do;	/*	3. fundamental or max cut	*/
+				call CHECK.TSM.OPTIONS(tsm.algorithm);
+				call PRINT.TSM.PARMS(3);
+			end;
+
+		end;
+	end SET.TSM.MENU;
+
+	/*	$PAGE	*/
+
+	CHANGE.TSM.MENU: proc(selection) public swapable;	/*	changes the TSM menu selections	*/
+		dcl selection		fixed;	/*	tsm menu selection	*/
+		dcl temp				fixed;	/*	scratch variable		*/
+		dcl i					fixed;
+
+		do case(selection);
+
+			do;														/*	0: Algorithm	*/
+				tsm.algorithm = tsm.algorithm + 1;
+				if tsm.algorithm > 2 then tsm.algorithm = 0;
+			end;
+
+			do;														/*	1: Length	*/
+				if token(0)<>0 then do;							/*	if something typed	*/
+					call Conv.Str.to.SFTime(token,tsm.length);
+				end;
+			end;
+
+			do;														/*	2: Ratio	*/
+				if token(0)<>0 then do;							/*	if something typed	*/
+					tsm.ratio=CONV.STR.TO.FIXED(token,4,0);	/*	get ratio * 10000	*/
+				end;
+			end;
+
+			do;														/*	3: Max cut	*/
+				if token(0)<>0 then do;							/*	if something typed	*/
+					if tsm.algorithm = 0							/*	fundamental	*/
+					then do;	/*	convert pitch to samples (rate/pitch)	*/
+						tsm.pitch=CONV.STR.TO.FIXED(token,1,0);
+						bitlsb =  stm.sample.rate;bitmsb = 0;
+						call ratio_multiply(1000,tsm.pitch);
+						tsm.period = bitlsb;
+					end;
+					else if tsm.algorithm = 1					/*	max cut	*/
+					then do;	/*	convert time to samples (rate*time)	*/
+						tsm.max.cut.time=CONV.STR.TO.FIXED(token,2,0);
+						bitmsb=0;bitlsb=tsm.max.cut.time;
+						call ratio_multiply(stm.sample.rate,1000);
+						tsm.max.cut.samples = bitlsb;
+					end;
+				end;
+			end;
+
+			do;														/*	4: Justification	*/
+				if token(0)<>0 then do;							/*	if something typed	*/
+					tsm.justification=CONV.STR.TO.FIXED(token,0,0);
+				end;
+			end;
+
+		end;		/*	of case on selection	*/
+
+		call SET.TSM.MENU(selection);
+		token(0)=0;
+	end CHANGE.TSM.MENU;
+
+	/*	$Subtitle SRC processing				*/
+
+	Change.SRC.Menu: proc public swapable;
+		dcl rate	fixed;
+
+		rate = CONV.STR.TO.FIXED(token,0,0);
+
+		return rate;
+	end Change.SRC.Menu;
+
+	/*	$Subtitle Debug Tools menu processing	*/
+
+	PRINT.DEBUG.PARMS: proc(selection) swapable;
+		dcl selection	fixed;
+
+		do case (selection);
+			do;	/*	0: Debug function	*/
+				call cpos(prompt.y,prompt.x+17);
+				do case (debug.function);
+					do;
+						call ps('EDI>SYM');
+					end;
+					do;
+						call ps('PITCH  ');
+					end;
+					do;
+						call ps('PEEK   ');
+					end;
+					do;
+						call ps('SR Conv');
+					end;
+				end;
+			end;
+			do;	/*	1: options field	*/
+				if debug.function < 2 then do;	/*	EDI>SYM or PITCH	*/
+					call cpos(prompt.y,prompt.x+40);
+					call print.parm(debug.length(0),0,0,3,0);
+					call ps('.');
+					call print_digits(debug.length(1),3);
+					call ps(' ');
+					call print_digits(debug.length(2),3);
+				end;
+				else if debug.function = 2 then do;	/*	PEEK	*/
+					call cpos(prompt.y+1,prompt.x+12);
+					do case (debug.toggle);
+						call ps('x ');
+						call ps('y ');
+						call ps('p ');
+					end;
+				end;
+				else do;	/*	SR Conv	*/
+					call cpos(prompt.y,prompt.x+40);
+					call print.parm(debug.srate,0,0,5,0);
+				end;
+			end;
+			do;	/*	2: peek start	*/
+				call cpos(prompt.y+1,prompt.x+22);
+				call print.parm(debug.start,0,0,4,0);
+			end;
+			do;	/*	3: peek repeat	*/
+				call cpos(prompt.y+1,prompt.x+35);
+				call print.parm(debug.repeat,0,0,5,0);
+			end;
+		end;	/*	of do case	*/
+	end PRINT.DEBUG.PARMS;
+
+	SET.DEBUG.MENU: proc (selection) swapable;
+		dcl selection	fixed;	/*	handles screen updates	*/
+
+		do case (selection);
+			do;	/*	debug function	*/
+				call PRINT.DEBUG.PARMS(0);
+				do case (debug.function);
+					do;	/*	0: Edi>Sym	*/
+						call cpos(prompt.y+1,prompt.x);
+						call ps('                                             ');
+						call cpos(prompt.y,prompt.x+30);
+						call ps('Start Time:');
+						call PRINT.DEBUG.PARMS(1);
+						debug.max.option = 1;
+					end;
+					do;	/*	1:	*/
+						call cpos(prompt.y+1,prompt.x);
+						call ps('                                             ');
+						call cpos(prompt.y,prompt.x+30);
+						call ps('Start Time:');
+						call PRINT.DEBUG.PARMS(1);
+						debug.max.option = 1;
+					end;
+					do;	/*	2:	*/
+						call cpos(prompt.y,prompt.x+30);
+						call ps('                            ');
+						call cpos(prompt.y+1,prompt.x);
+						call ps('Data field: ');
+						call PRINT.DEBUG.PARMS(1);
+						call cpos(prompt.y+1,prompt.x+15);
+						call ps('Start: ');
+						call PRINT.DEBUG.PARMS(2);
+						call cpos(prompt.y+1,prompt.x+27);
+						call ps('Repeat: ');
+						call PRINT.DEBUG.PARMS(3);
+						debug.max.option = 3;
+					end;
+					do;	/*	3: SR Conversion	*/
+						call cpos(prompt.y+1,prompt.x);
+						call ps('                                             ');
+						call cpos(prompt.y,prompt.x+30);
+						call ps('New Rate:');
+						call PRINT.DEBUG.PARMS(1);
+						debug.max.option = 1;
+					end;
+				end;
+			end;
+
+			do;	/*	time field	*/
+				call PRINT.DEBUG.PARMS(1);
+			end;	/*	of time field	*/
+			do;	/*	2: Peek start	*/
+				call PRINT.DEBUG.PARMS(2);
+			end;
+			do;	/*	3: Peek repeat	*/
+				call PRINT.DEBUG.PARMS(3);
+			end;
+		end;
+	end SET.DEBUG.MENU;
+
+	/*	$Page	*/
+	CHANGE.DEBUG.MENU: proc(selection) public swapable;
+		dcl selection	fixed;	/*	which debug option is selected	*/
+
+		do case (selection);
+			do;	/*	debug function	*/
+				debug.function = debug.function +1;
+				if debug.function = 4
+				then debug.function = 0;
+			end;
+			do;														/*	1: Length or toggle	*/
+				do case (debug.function);
+					do;	/*	0: edit to symbol	*/
+						if token(0)<>0 then do;							/*	if something typed	*/
+							call Conv.Str.to.SFTime(token,debug.length);
+						end;
+					end;
+					do;	/*	1: Pitch	*/
+						if token(0)<>0 then do;							/*	if something typed	*/
+							call Conv.Str.to.SFTime(token,debug.length);
+						end;
+					end;
+					do;	/*	2: peek	*/
+						debug.toggle = debug.toggle+1;
+						if debug.toggle = 3
+						then debug.toggle = 0;
+					end;
+					do;	/*	3: SR Convert	*/
+						if token(0)<>0 then do;							/*	if something typed	*/
+							debug.srate =  Conv.Str.to.Fixed(token,0,0);
+						end;
+					end;
+				end;
+			end;	/*	of 1: length or toggle	*/
+			do;	/*	2: peek start	*/
+				if token(0)<>0 then do;							/*	if something typed	*/
+					debug.start =  Conv.Str.to.Fixed(token,0,0);
+				end;
+			end;
+			do;	/*	3: peek repeat	*/
+				if token(0)<>0 then do;							/*	if something typed	*/
+					debug.repeat =  Conv.Str.to.Fixed(token,0,0);
+				end;
+			end;
+		end;	/*	of do case (selection)	*/
+
+		call SET.DEBUG.MENU(selection);
+		token(0)=0;
+	end CHANGE.DEBUG.MENU;
+
+	/*	$Subtitle Sample-To-Memory Cursor Routines	*/
+
+	POS.SYMBOL.CURSOR: proc swapable;	/*	position the cursor over the symbol	*/
+		dcl i	fixed;
+
+		do i=0 to 1;									/*	first do previous then do current	*/
+			if ((i<>0) or								/*	if current value or have changed positions	*/
+			(prev.stm.symbol.index<>stm.symbol.index)) then do;
+				if vt100<>0 then call reverse.video(i);	/*	print value in reverse video	*/
+				call DISP.SYMBOL.NAME(prev.stm.symbol.index);
+				prev.stm.symbol.index=stm.symbol.index;
+			end;											/*	of if current value or have changed positions	*/
+		end;												/*	of first previous then current	*/
+		if vt100<>0										/*	if not an ADM terminal turn off reverse video	*/
+		then call reverse.video(0);				/*	otherwise turn off reverse video	*/
+	end POS.SYMBOL.CURSOR;
+
+	/*	$page	*/
+
+	POS.STM.RECORD.CURSOR: proc swapable;	/*	position the record menu cursor	*/
+
+		if stm.last.record.choice<>stm.record.choice then do;
+			call reverse.video(0);
+			call SET.RECORD.PARMS(stm.last.record.choice);
+			stm.last.record.choice=stm.record.choice;
+		end;
+		call reverse.video(1);
+		call SET.RECORD.PARMS(stm.record.choice);
+		if token(0)<>0 then do;
+			do case(stm.record.choice);
+				call cpos(19,29);			/*	0: Mode	*/
+				call cpos(20,29);			/*	1: Trigger	*/
+				call cpos(19,51);			/*	2: Rate	*/
+				call cpos(20,51);			/*	3: Threshold	*/
+				call cpos(19,68);			/*	4: Gain	*/
+			end;
+			call ps(token);	/*	we have some characters to display	*/
+		end;
+		call reverse.video(0);
+	end POS.STM.RECORD.CURSOR;
+
+	POS.STM.ZOOM.CURSOR: proc swapable;	/*	positions cursor for zoom prompt	*/
+		if (mg600<>0) then do;
+			call cpos(20,68);			/*	if handling resolution	*/
+			call reverse.video(1);
+			if token(0)<>0
+			then call ps(token);
+			else call print.parm(stm.resolution,0,0,2,0);
+			call reverse.video(0);
+		end;
+		else call cpos(19,52);		/*	not handing drawing resolution	*/
+	end POS.STM.ZOOM.CURSOR;
+
+	POS.TSM.CURSOR: proc swapable;	/*	position the TSM menu cursor	*/
+
+		if tsm.last.option <> tsm.option then do;
+			call reverse.video(0);
+			call PRINT.TSM.PARMS(tsm.last.option);
+			tsm.last.option = tsm.option;
+		end;
+
+		call reverse.video(1);
+		call PRINT.TSM.PARMS(tsm.option);
+		if token(0)<>0 then do;
+			do case(tsm.option);
+				call cpos(prompt.y,prompt.x+11);	/*	0: Algorithm	*/
+				call cpos(prompt.y,prompt.x+36);	/*	1: Length	*/
+				call cpos(prompt.y,prompt.x+55);	/*	2: Ratio	*/
+				call cpos(prompt.y+1,prompt.x+14);	/*	3: Max cut	*/
+				call cpos(prompt.y+1,prompt.x+36);	/*	4: Justification	*/
+			end;
+			call ps(token);	/*	we have some characters to display	*/
+		end;
+		call reverse.video(0);
+	end POS.TSM.CURSOR;
+
+	POS.DEBUG.CURSOR: proc swapable;
+		if debug.last.option <> debug.option then do;
+			call reverse.video(0);
+			call PRINT.DEBUG.PARMS(debug.last.option);
+			debug.last.option = debug.option;
+		end;
+
+		call reverse.video(1);
+		call PRINT.DEBUG.PARMS(debug.option);
+
+		if token(0)<>0 then do;
+			do case(debug.option);
+				call cpos(prompt.y,prompt.x+17);
+				do;	/*	start.time of toggle	*/
+					do case (debug.function);
+						call cpos(prompt.y,prompt.x+40);
+						call cpos(prompt.y,prompt.x+40);
+						call cpos(prompt.y+1,prompt.x+12);
+						call cpos(prompt.y,prompt.x+40);
+					end;
+				end;
+				call cpos(prompt.y+1,prompt.x+22);
+				call cpos(prompt.y+1,prompt.x+35);
+			end;
+			call ps(token);	/*	we have some characters to display	*/
+		end;
+		call reverse.video(0);
+	end POS.DEBUG.CURSOR;
+
+	/*	$page	*/
+
+	POS.COMMAND.CHOICE.CURSOR: proc swapable;	/*	positions the menu selection cursor and sets max token length	*/
+
+		dcl selection	fixed;
+		dcl i				fixed;
+
+		selection=stm.last.select.mode;
+		do i=0 to 1;				/*first turn the reverse video off the last choice, then turn the new one on	*/
+			call reverse.video(i);
+			do case(selection);
+				do;					/*	0: Display	*/
+					call cpos(command.row,first.command.column+3);
+					call ps('Display');
+				end;
+				do;					/*	1: Modify	*/
+					call cpos(command.row+1,first.command.column+3);
+					call ps('Modify');
+				end;
+				do;					/*	2: Store	*/
+					call cpos(command.row+2,first.command.column+3);
+					call ps('Store/Recall');
+				end;
+				do;					/*	3: Modify II	*/
+					call cpos(command.row+3,first.command.column+3);
+					call ps('Modify II');
+				end;
+			end;	/*	of do case	*/
+			selection=stm.select.mode;
+		end;
+		call reverse.video(0);
+
+	end POS.COMMAND.CHOICE.CURSOR;
+
+	/*	$page	*/
+
+	POS.STM.ALPHA.CURSOR: proc public swapable;		/*	moves the cursor to command line setting location	*/
+		dcl cursor.y	lit '19';
+
+		if inc.stm=0 then return;							/*	do not bother if not configured for poly	*/
+
+		if ((stm.cmd.line    == 0         )				// If not on record panel
+		||  (stm.select.mode != stm.store )
+		||  (stm.choice      != stm.record))
+		{
+			if (stm.record.device == stm.record.device.dig)
+				interp_release_dig_stm();					// Free up digital STM hardware when leaving record panel
+		}
+		
+		if stm.cmd.line=0 then call POS.COMMAND.CHOICE.CURSOR;
+		else do;
+			do case (stm.select.mode);
+				do;												/*	if selected mode is display	*/
+					do case (stm.choice);					/*	do depending upon selection	*/
+						;											/*	A: display	*/
+						;											/*	B: modify	*/
+						;											/*	C: store		*/
+						call cpos(cursor.y,22);				/*	D: show		*/
+						call POS.STM.ZOOM.CURSOR;			/*	E: zoom		*/
+						call cpos(cursor.y-1,44);			/*	F: search	*/
+						call cpos(cursor.y,22);				/*	G: label		*/
+						call cpos(cursor.y,22);				/*	H: unlabel	*/
+						;											/*	I: center	*/
+						;											/*	J: mark start	*/
+						;											/*	K: mark end	*/
+						;											/*	L: Left		*/
+						do;										/*	M: Symbols	*/
+							if inc.stmm
+							then call POS.SYMBOL.CURSOR;
+						end;
+						call cpos(cursor.y,22);				/*	N: Print		*/
+						call cpos(cursor.y+2,75);			/*	O: help		*/
+						do;										/*	P: Caption	*/
+							if inc.stmm
+							then call cpos(cursor.y,22);
+						end;
+						;											/*	Q: Mark Offset	*/
+						;											/*	R: Lock		*/
+						;											/*	S: Unlock	*/
+						;											/*	T: Dot Mode	*/
+						;											/*	U: Zero ---	*/
+						;											/*	V: reserved	*/
+						;											/*	W: reserved	*/
+					end;											/*	of do depending upon choice selection	*/
+				end;												/*	of do if choice selection is display	*/
+
+				do;												/*	if choice selection is modify	*/
+					do case(stm.choice);						/*	do depending upon choice	*/
+						;											/*	A: display	*/
+						;											/*	B: modify	*/
+						;											/*	C: store		*/
+						;											/*	D: reverse	*/
+						if inc.stmm
+						then call cpos(cursor.y,22);		/*	E: cut		*/
+						if inc.stmm
+						then call cpos(cursor.y,22);		/*	F: paste		*/
+						if inc.stmm
+						then call cpos(cursor.y,22);		/*	G: extract	*/
+						if inc.stmm
+						then call cpos(cursor.y,22);		/*	H: delete	*/
+						;											/*	I: exchange	*/
+						if inc.stmm
+						then call cpos(cursor.y,22);		/*	J: combine	*/
+						if inc.stmm
+						then call cpos(cursor.y,22);		/*	K: Extract mono	*/
+						if inc.stmm
+						then call cpos(cursor.y,22);		/*	L: crossfade	*/
+						if inc.stmm
+						then call cpos(cursor.y,22);		/*	M: copy		*/
+						if inc.stmm
+						then call cpos(cursor.y,22);		/*	N: fill		*/
+						if inc.stmm
+						then call cpos(cursor.y,22);		/*	O: loop		*/
+						if inc.stmm
+						then call cpos(cursor.y,22);		/*	P: Volume	*/
+						;											/*	Q: Normalize	*/
+						do;										/*	R: Modulate	*/
+							if inc.stmm
+							then call cpos(cursor.y,22);
+						end;
+						do;										/*	S: reverse Loop	*/
+							if inc.stmm
+							then call cpos(cursor.y,22);
+						end;
+						do;										/*	T: Mix		*/
+							if inc.stmm
+							then call cpos(cursor.y,22);
+						end;
+						;											/*	U: Undo		*/
+						;											/*	V: Invert	*/
+						;											/*	W: DC Trim	*/
+					end;											/*	of do depending upon choice	*/
+				end;												/*	of if selection is modify	*/
+
+				do;												/*	if selection is store	*/
+					do case(stm.choice);
+						;											/*	A: display	*/
+						;											/*	B: modify	*/
+						;											/*	C: store		*/
+						call cpos(cursor.y,22);				/*	D: save		*/
+						call cpos(cursor.y,22);				/*	E: unsave	*/
+						call cpos(cursor.y,22);				/*	F: rename	*/
+						call cpos(cursor.y,22);				/*	G: recall	*/
+						call cpos(cursor.y,22);				/*	H: collect	*/
+						call POS.STM.RECORD.CURSOR;		/*	I: record	*/
+						call cpos(cursor.y,22);				/*	J: max time	*/
+						;											/*	K: reserved	*/
+						;											/*	L: reserved	*/
+						;											/*	M: reserved	*/
+						;											/*	N: reserved	*/
+						;											/*	O: reserved	*/
+						;											/*	P: reserved	*/
+						;											/*	Q: reserved	*/
+						;											/*	R: reserved	*/
+						;											/*	S: reserved	*/
+						;											/*	T: reserved	*/
+						;											/*	U: reserved	*/
+						;											/*	V: reserved	*/
+						;											/*	W: reserved	*/
+					end;											/*	of do depending upon choice selection choice selection is store	*/
+				end;
+				do;												/*	if selection is Modify II	*/
+					do case(stm.choice);
+						;											/*	A: display	*/
+						;											/*	B: modify	*/
+						;											/*	C: store	*/
+						if inc.stmm & inc.dsp.code
+						then call POS.TSM.CURSOR;			/*	D: TSM	*/
+						call cpos(cursor.y,22);				/*	E: SRC	*/
+						;											/*	F: reserved	*/
+						;											/*	G: reserved	*/
+						;											/*	H: Monoize	*/
+						;											/*	I: reserved	*/
+						;											/*	J: reserved	*/
+						;											/*	K: reserved	*/
+						;											/*	L: reserved	*/
+						;											/*	M: reserved	*/
+						;											/*	N: reserved	*/
+						;											/*	O: reserved	*/
+						;											/*	P: reserved	*/
+						;											/*	Q: reserved	*/
+						;											/*	R: reserved	*/
+						;											/*	S: reserved	*/
+						;											/*	T: reserved	*/
+						;											/*	U: reserved	*/
+						;											/*	V: reserved	*/
+						if inc.stmm & inc.debug.code
+						then call POS.DEBUG.CURSOR;		/*	W: Debug	*/
+					end;											/*	of do depending upon choice selection choice selection is Modify II	*/
+				end;
+			end;
+			if  (token(0)<>0)
+			and ((stm.select.mode<>stm.store  ) or (stm.choice<>stm.record))
+			and ((stm.select.mode<>stm.modify2) or ((stm.choice<>stm.tsm) && (stm.choice<>stm.debug)))
+			and ((stm.select.mode<>stm.display) or (stm.choice<>stm.zoom  ))
+			then call ps(token);	/*	we have some characters to display (if not in certain sub-panels)	*/
+		end;
+
+	end POS.STM.ALPHA.CURSOR;
+

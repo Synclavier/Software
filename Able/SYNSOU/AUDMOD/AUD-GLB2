@@ -1,0 +1,614 @@
+/* AUD-GLB2   Routines used by the more than one group */
+
+/* 
+   MODIFIED:
+      06/25/91 - cj  - Improved GPI response
+      04/01/91 - KJC - Now coexists with external triggers on D34
+      11/17/90 - CJ  - Checked for better synchronization on remote
+                       control punch in and out.
+      05/15/89 - SGS - Created by splitting AUD-GLOB in two
+*/
+
+dcl Q.Screen.Active fixed external;
+dcl Q.Screen.Ready  fixed external;
+dcl P.Screen.Active fixed external;
+
+/* $page - update aee track status terminal displays and tally lines */
+
+/* update aee track status displays and tallies is called to update */
+/* both the audio event editor screen and the d34/d35 tally lines   */
+/* upon any change in the track mode (input/repro/auto/cue pb) or   */
+/* the track status (safe ready)                                    */
+
+/* this routine does many functions:                                */
+/*    1. it sets the state of the d35 tally lines for the modes     */
+/*       and statuses of all tracks                                 */
+/*    2. it updates the status and mode fields of the Project       */
+/*       Manager to reflect the safe/ready and input/repro          */
+/*       settings of the passed tracks                              */
+/*    3. it updates the Record Panel safe/ready indicates as well   */
+/*       as the allocate times.  Record.Ready bits are set          */
+
+dcl Mode.Update.Bits        fixed;  /* these tracks need mode   display updates */
+dcl Status.Update.Bits      fixed;  /* these tracks need status display updates */
+dcl Any.Status.Update.Bits  fixed;  /* these tracks had  status display updates */
+
+Update.AEE.Track.Status.Displays.And.Tallies:proc  (new.modes, new.statuses) PUBLIC  swapable;
+   dcl new.modes      fixed; /* bits set for tracks that have new modes    */
+   dcl new.statuses   fixed; /* bits set for tracks that have new statuses */
+   dcl modes    (15)  fixed;
+   dcl statuses (15)  fixed;
+   dcl i              fixed;
+   dcl j              fixed;
+   dcl Locked.Bits    fixed;
+
+   dcl Set.DTD.Motion.Tallies proc                external;
+   dcl Set.DTD.Tally.Lines    proc (array, array) external;
+
+   /* Fetch modes and status for each */
+   /* dtd track:                      */
+
+   call SEND.FOR.DTD.TRACK.MODES (modes,statuses);  /* leave values at 0 if dtd not ready */
+
+
+   /* compute record ready bits for record panel */
+
+   Record.Ready.Bits = 0;          /* reset ready bits */
+   Locked.Bits       = 0;
+   do i = 0 to 15;                 /* lookup new ready bits */
+      if statuses(i) = 1
+      then Record.Ready.Bits = Record.Ready.Bits\bits(i);
+      if (statuses(i)&2) <> 0
+      then Locked.Bits = Locked.Bits\bits(i);
+   end;
+   Record.Ready.Bits = Record.Ready.Bits & DTD.AVAIL.TRKS;
+
+   /* set tally lines quickly (before terminal) */
+
+   call Set.DTD.Motion.Tallies;                   /* set motions  in case we are leaving q screen while recording */
+   call Set.DTD.Tally.Lines(Modes, Statuses);     /* set safe/ready tallys in case they derive from screen changes */
+
+   /* now update screen.  begin by updating displays */
+   /* of safe/ready statuses                         */
+
+   Mode.Update.Bits       = Mode.Update.Bits       \ New.Modes;
+   Status.Update.Bits     = Status.Update.Bits     \ New.Statuses;
+   Any.Status.Update.Bits = Any.Status.Update.Bits \ New.Statuses;
+
+
+   /* loop here until screen is up to date           */
+
+   do while (Mode.Update.Bits \ Status.Update.Bits) <> 0;
+
+      call Check.Next.Event;     /* keep mouse going; check remote inputs */
+
+      /* break out of terminal updating if user presses button */
+      /* quickly                                               */
+
+      if (New.Seq.Info & 1024) <> 0
+      then return;
+
+
+      /* if track directory is active,  then use */
+      /* existing logic to update entire         */
+      /* screen                                  */
+
+      if (P.Screen.Active <> 0)
+      then do;
+         call send.to.lod(13,0);     /* request track directory */
+         Mode.Update.Bits       = 0; /* so user can redraw      */
+         Status.Update.Bits     = 0; /* screen                  */
+         Any.Status.Update.Bits = 0;
+         return;
+      end;
+
+      if (Q.Screen.Active = 0)       /* no AEE, nothing else    */
+      then do;                       /* to update               */
+         Mode.Update.Bits       = 0; /* so user can redraw      */
+         Status.Update.Bits     = 0; /* screen                  */
+         Any.Status.Update.Bits = 0;
+         return;
+      end;
+
+
+      /* if we are waiting for terminal i/o to complete, just */
+      /* wait here to quickly catch other button activities   */
+
+      if num.of.d50.out.chars <> 0
+      then do;
+         /* check next event called above */
+      end;
+
+
+      /* update 1 track status info on pmgr/rec pan */
+
+      else if Status.Update.Bits <> 0 then do;           /* check for status changes  */
+
+         i = 0;
+
+         do while (Status.Update.Bits&bits(i)) = 0;
+            i = i + 1;
+         end;
+
+         /* set safe/ready indications on project manager */
+         /* we know we are on AEE here                    */
+
+         if  (Project.Manager.Group <> 0)   /* if proj mgr             */
+         and (Project.Manager.Mode   = 2)   /* showing project         */
+         and (i >= Project.Onebar.Top.Drive)
+         and (i <= Project.Onebar.Top.Drive+Project.Manager.Size-3)
+         then do;
+            disable.deposits = 1;
+            if ((Locked.Bits&bits(i)) <> 0)
+            then j = 2;
+            else j = ((Record.Ready.Bits & bits(i)) <> 0); /* 0=safe.  1=ready */
+            call Fetch.Table(Project.Onebar.Status.Table,0,i-Project.Onebar.Top.Drive);
+            if Fetch.Switch(Project.Onebar.Status.Type)<>j then do;
+               call Deposit.Switch(Project.Onebar.Status.Type,j);
+               call Deposit.Table(Project.Onebar.Status.Table,0,i-Project.Onebar.Top.Drive);
+            end;
+            disable.deposits = 0;
+            call Check.Next.Event;
+         end;
+
+
+         /* set highlights on record panel */
+
+         if record.group <> 0 then do;
+            if (Record.Ready.Bits&Bits(i)) = 0 then do;  /* Not ready */
+               call Set.Table.Cell.Attr(Record.Drive.Table,i,0,0,ATTR#Normal\ATTR#AltIntensity);
+               call Set.Table.Cell.Attr(Record.Drive.Table,i,0,1,ATTR#Normal\ATTR#AltIntensity);
+            end;
+            else do;
+               if DTD.Ready.Enabled = 0 then do;              /* Ready is disarmed */
+                  call Set.Table.Cell.Attr(Record.Drive.Table,i,0,0,ATTR#Normal\ATTR#AltIntensity\ATTR#Reverse);
+                  call Set.Table.Cell.Attr(Record.Drive.Table,i,0,1,ATTR#Normal\ATTR#AltIntensity\ATTR#Reverse);
+               end;
+               else do;  /* Ready is armed */
+                  call Set.Table.Cell.Attr(Record.Drive.Table,i,0,0,ATTR#Normal\ATTR#Blink\ATTR#Reverse\ATTR#AltIntensity);
+                  call Set.Table.Cell.Attr(Record.Drive.Table,i,0,1,ATTR#Normal\ATTR#Blink\ATTR#Reverse\ATTR#AltIntensity);
+               end;
+            end;
+            call Check.Next.Event;
+         end;
+
+         Status.Update.Bits = Status.Update.Bits xor bits(i);
+
+      end;
+      
+
+      /* now update screen displays of mode indications: */
+
+      else if Mode.Update.Bits <> 0 then do;     /* check for mode change */
+         i = 0;
+
+         do while (Mode.Update.Bits&bits(i)) = 0;
+            i = i + 1;
+         end;
+
+         /* set mode indications on project manager */
+
+         if  (Project.Manager.Group <> 0)   /* if proj mgr             */
+         and (Project.Manager.Mode   = 2)   /* showing project         */
+         and (i >= Project.Onebar.Top.Drive)
+         and (i <= Project.Onebar.Top.Drive+Project.Manager.Size-3)
+         then do;
+            disable.deposits = 1;
+            call Fetch.Table(Project.Onebar.Mode.Table,0,i-Project.Onebar.Top.Drive);
+            call Deposit.Switch(Project.Onebar.Mode.Type,modes(i));
+            call Deposit.Table(Project.Onebar.Mode.Table,0,i-Project.Onebar.Top.Drive);
+            disable.deposits = 0;
+            call Check.Next.Event;
+         end;
+
+         Mode.Update.Bits = Mode.Update.Bits xor bits(i);
+
+      end;
+   end;
+
+   /* check for changing safe/ready - change alloc times */
+   /* if so                                              */
+
+   if   (Any.Status.Update.Bits <> 0)     /* new safe/ready tracks        */
+   and  (Q.Screen.Active        <> 0)     /* AEE up and running           */
+   and  (Record.Group           <> 0)     /* Rec pan there                */
+   and  (Record.Mode             = 0)     /* in allocate mode             */
+   and  (Record.Recording.State  = 0)     /* and not recording now        */
+   then do;
+      call UPDATE.ALLOCATE.TIMES;
+   end;
+
+   Any.Status.Update.Bits = 0;
+
+end Update.AEE.Track.Status.Displays.And.Tallies;
+
+
+/* $page = check dtd remote control inputs for Q Screen */
+
+/* This routine is called to process input functions activated */
+/* by the remote control interface.  Those input functions     */
+/* that must be processed by the Q screen software are         */
+/* processed here                                              */
+
+/* Note: we are only called from the Q screen main loop        */
+
+Check.Q.Screen.Remote.Control.Inputs  :proc  PUBLIC swapable;
+   dcl modes    (15)  fixed;
+   dcl statuses (15)  fixed;
+   dcl i              fixed;
+   dcl info.rcvd      fixed;
+   dcl NewModes       fixed;
+   dcl NewStatuses    fixed;
+   dcl newAEEouts     fixed;
+   dcl dtdstat(1)     fixed;
+
+   dcl RemoteControlInputUpdates   fixed external; /* bits for input updates  */
+   dcl RemoteControlArmUpdates     fixed external; /* bits for arm   updates  */
+
+   dcl RemoteControlNewMotions     fixed external; /* bits for motion buttons */
+
+   dcl RemoteControlPunchIns       fixed external; /* tracks to punch in      */
+   dcl RemoteControlPunchOuts      fixed external; /* tracks to punch out     */
+
+   restart:;                             /* re-enter from below on quick button press */
+
+   /* Get current drive status handy,  and introduce a short delay */
+   /* to (hopefully) detect all the track buttons that have been   */
+   /* pressed at the (same time).                                  */
+
+   call Fetch.DTD.Drive.Status(dtdstat);
+
+   /* Check next event again here to try to process two buttons    */
+   /* pressed at the same time as simultaneous presses             */
+
+   call Check.Next.Event;
+
+   New.Seq.Info = New.Seq.Info & (not(1024));     /* in case bit was set again by call to check.next.event before we got here */
+
+   NewModes                  = RemoteControlInputUpdates;
+   NewStatuses               = RemoteControlArmUpdates;
+   RemoteControlInputUpdates = 0;
+   RemoteControlArmUpdates   = 0;
+
+   if (RemoteControlNewMotions & M$MasterRecordIn) <> 0   /* check for master record */
+   then do;
+
+      if Record.Group = 0              /* no rec pan     */
+      then call DISPLAY.NOTICE (NT#MustUseRecPan,ATTR#Reverse,NulStr,0,0,0);
+
+      else if DTD.Ready.Enabled = 0    /* not ready      */
+      then call DISPLAY.NOTICE (NT#MustReadyToRecord,ATTR#Reverse,NulStr,0,0,0);
+
+      else do;
+
+         /* if recording has already started by pressing an  */
+         /* individual track record, and then the user       */
+         /* presses the master record, he really wants       */
+         /* to punch in on all other ready tracks:           */
+
+         if  (Record.Recording.State <> 0)    /* if already recording  */
+         and ((Record.Ready.Bits & (not(Record.Recording.Bits))) <> 0)
+         then do;
+            call TOGGLE.DTD.ARMED.RECORDING.TRACKS (Record.Ready.Bits & (not(Record.Recording.Bits)));
+            Record.Recording.Bits = Record.Recording.Bits or Record.Ready.Bits;
+         end;
+
+         else if (Record.Recording.State = 0)   /* if not recording     */
+         or      (Record.Mode            = 0)   /* or blocking desired  */
+         then do;    
+            call Process.Record.Panel.Record.Button(Record.Ready.Bits, dtdstat);
+         end;
+      end;
+
+      RemoteControlNewMotions = RemoteControlNewMotions xor M$MasterRecordIn;
+      RemoteControlPunchIns = 0;
+   end;
+
+
+   if (RemoteControlPunchIns <> 0)         /* check for indiv punch in */
+   then do;
+
+      RemoteControlPunchIns = RemoteControlPunchIns & DTD.AVAIL.TRKS & Record.Ready.Bits;
+
+      if Record.Group = 0              /* no rec pan     */
+      then call DISPLAY.NOTICE (NT#MustUseRecPan,ATTR#Reverse,NulStr,0,0,0);
+
+      else if DTD.Ready.Enabled = 0    /* not ready      */
+      then call DISPLAY.NOTICE (NT#MustReadyToRecord,ATTR#Reverse,NulStr,0,0,0);
+
+      else do;
+         if Record.Recording.State = 0
+         then do;
+            call Process.Record.Panel.Record.Button(RemoteControlPunchIns, dtdstat);
+         end;
+
+         else do;
+            call TOGGLE.DTD.ARMED.RECORDING.TRACKS (RemoteControlPunchIns & (not(Record.Recording.Bits)));
+            Record.Recording.Bits = Record.Recording.Bits \ RemoteControlPunchIns;
+         end;
+      end;
+
+      RemoteControlPunchIns = 0;
+
+   end;
+
+   if (RemoteControlNewMotions & M$MasterRecordOut) <> 0   /* check for master punch out */
+   then do;
+      if Record.Group <> 0                                 /* rec pan there  */
+      then call Stop.Record.Recording;
+
+      RemoteControlNewMotions = RemoteControlNewMotions xor M$MasterRecordOut;
+      RemoteControlPunchOuts = 0;
+   end;
+
+   if (RemoteControlPunchOuts <> 0)         /* check for indiv punch in */
+   then do;
+
+      RemoteControlPunchOuts = RemoteControlPunchOuts & DTD.AVAIL.TRKS;
+
+      do i = 0 to 15;
+
+         if (RemoteControlPunchOuts & bits(i)) <> 0
+         then do;
+
+            if  (Record.Group           <> 0)    /* rec pan there  */
+            and (DTD.Ready.Enabled      <> 0)    /* readied        */
+            and (Record.Recording.State <> 0)    /* recording      */
+            then do;
+               if (Record.Recording.Bits & bits(i)) <> 0
+               then newAEEouts = newAEEouts \ bits(i);
+            end;
+
+            RemoteControlPunchOuts = RemoteControlPunchOuts xor bits(i);
+         end;
+      end;
+
+      if newAEEouts <> 0 then do;
+
+         /* punch out of last track = stop recording */
+
+         if Record.Recording.Bits = newAEEouts
+         then call STOP.RECORD.RECORDING;
+         else do;
+            call TOGGLE.DTD.ARMED.RECORDING.TRACKS (newAEEouts);
+            Record.Recording.Bits = Record.Recording.Bits xor newAEEouts;
+         end;
+
+         newAEEouts = 0;
+
+      end;
+
+   end;
+
+   /* Update tally lines and screen displays for */
+   /* the new changes                            */
+
+   call Update.AEE.Track.Status.Displays.And.Tallies (NewModes, NewStatuses);
+
+   if (New.Seq.Info & 1024) <> 0    /* check for button change quickly */
+   then do;                         /* restart from top if so          */
+      info.rcvd = 0;
+      goto restart;
+   end;
+
+end Check.Q.Screen.Remote.Control.Inputs;
+
+/* $page - Set up aee scroll points */
+
+/* This routine sees what mode the Big Time Display and the Sequence */
+/* panel are in.   It sets up the cursor begin and cursor end        */
+/* and screen begin and screen end variables so that we will get     */
+/* a play scroll event at the right time.                            */
+
+Set.Up.AEE.Play.Scroll.Points: proc PUBLIC swapable;
+   dcl begin.time(1) fixed;
+   dcl end.time  (1) fixed;
+   dcl code          fixed;
+   dcl real.begin(1) fixed;
+   dcl real.end  (1) fixed;
+   
+   call Check.Next.Event;
+
+   /* Set up Screen.Begin */
+
+   call STR32( 0,  0, Screen.Scroll.Begin);
+   call STR32(-1, -1, Screen.Scroll.End  );
+
+   if  (Seq.Group      <> 0)   /* if sequence panel is up               */
+   and (Seq.Scroll.Mode = 0)   /* and real time scrolling needed        */
+   then do;
+
+      /* Convert sequence times to real times for event routine:           */
+
+      call Map.Sequence.Time.To.Real.Time(Seq.Screen.Begin, Screen.Scroll.Begin);
+      if Seq.Screen.End(0) = (-1)
+      then call STR32(-1, -1, Screen.Scroll.End);
+      else call Map.Sequence.Time.To.Real.Time(Seq.Screen.End, Screen.Scroll.End);
+
+      code = 1;                /* allow dtd play scrolling              */
+   end;
+
+   /* now set up cursor times */
+
+   call STR32( 0,  0, begin.time);
+   call STR32(-1, -1, end.time  );
+
+   /* see if big time display is scrolling */
+
+   if (Big.Time.Display.Mode = BT#SEQ)
+   then do;
+      call COPY32(Big.Time.Begin, begin.time);
+      call COPY32(Big.Time.End,   end.time  );
+      code = 1;
+   end;
+
+   if  (Seq.Group <> 0)           /* if sequence panel up,  set up for */
+   then do;                       /* its scrolling                     */
+
+      /* Get corresponding real times for comparisons:                 */
+
+      call Map.Sequence.Time.To.Real.Time(Seq.Cursor.Begin, real.begin);
+      if Seq.Cursor.End(0) = (-1)
+      then call STR32(-1, -1, real.end);
+      else call Map.Sequence.Time.To.Real.Time(Seq.Cursor.End, real.end);
+
+      /* if real time scrolling is not happening,  and sequencer is    */
+      /* off the sequence panel time area,  then set scrolling limits  */
+      /* of 0 and infinity                                             */
+
+      if  (Seq.Scroll.Mode <> 0)        /* no real time scrolling      */
+      and (COM32(Seq.Cursor.Begin, Seq.Screen.Begin) <= lw#IEQ)
+      and (COM32(loc(addr(Sampled.Actual.Play.Time.Msb)), real.begin) = lw#ILT)
+      then do;
+         /* leave cursor.begin at 0.  set cursor.end only. */
+         if        COM32 (real.end, end.time) = lw#ilt
+         then call COPY32(real.end, end.time);
+      end;
+
+      else
+      if  (Seq.Scroll.Mode <> 0)        /* no real time scrolling      */
+      and (COM32(Seq.Cursor.End,   Seq.Screen.End  ) >= lw#IEQ)
+      and (COM32(loc(addr(Sampled.Actual.Play.Time.Msb)), real.end) = lw#IGT)
+      then do;
+         /* leave cursor.end at -1.  set cursor begin only */
+         if        COM32 (real.begin, begin.time) = lw#igt
+         then call COPY32(real.begin, begin.time);
+      end;
+
+      /* else use seq cursor begin and end if they provide a */
+      /* narrow range than the big time display              */
+
+      else do;
+
+         if        COM32 (real.begin, begin.time) = lw#igt
+         then call COPY32(real.begin, begin.time);
+
+         if        COM32 (real.end, end.time) = lw#ilt
+         then call COPY32(real.end, end.time);
+
+      end;
+
+      code = 1;
+
+   end;
+
+   Cursor.Scroll.Begin(0) = begin.time(0);
+   Cursor.Scroll.Begin(1) = begin.time(1);
+
+   Cursor.Scroll.End  (0) = end.time  (0);
+   Cursor.Scroll.end  (1) = end.time  (1);
+
+   /* now that the variables are set up,  enable or disable */
+   /* for the scrolling events,  and clear any bits that    */
+   /* may have been eroneously set during a call to check   */
+   /* next event.                                           */
+
+   Play.Scroll.State = code;
+
+   New.ABLE.Seq.Info = New.ABLE.Seq.Info & (not(32\64));
+
+end Set.Up.AEE.Play.Scroll.Points;
+
+/* $page - handle scrolling event */
+
+/* this routine is activated when a play scrolling event is received */
+/* by the AEE.  it parses out the event to either perform a big      */
+/* time display update,   a sequence panel cursor movement,          */
+/* or a sequence panel scroll.                                       */
+
+Handle.Play.Scroll.Event: proc PUBLIC swapable;
+   dcl code        fixed;
+   dcl seqtime (1) fixed;
+
+   call Check.Next.Event;
+
+   if (simulate_dtd) {
+      if (cur.dtd.ms.lsb != Sampled.Actual.Play.Time.Lsb) {
+         cur.dtd.ms.msb = Sampled.Actual.Play.Time.Msb;       /* create event for   */
+         cur.dtd.ms.lsb = Sampled.Actual.Play.Time.Lsb;       /* dtd scrolling      */
+         new.dtd.info   = new.dtd.info \ 8;                   /* messages.          */
+      }
+   }
+
+   /* check for screen scroll */
+
+   code = 0;
+
+   if (Screen.Event.Info & 64) <> 0   /* sampled play time msb is out of */
+   then do;                           /* screen begin and end ranges     */
+      if  (Seq.Group      <> 0)
+      and (Seq.Scroll.Mode = 0)
+      then do;
+
+         /* set bits to sample sequencer time,  and refresh screen */
+
+         Seq.Refresh = Seq.Refresh \ (1\4\8);
+
+         /* disable further scrolling events until we have taken a */
+         /* snapshot of the sequencer and set up the new scrolling */
+         /* windows:                                               */
+
+         get.item.enabled(Get.Play.Scrolling) = 0;
+
+         New.ABLE.Seq.Info = New.ABLE.Seq.Info & (not(32\64));
+
+         return;
+
+      end;
+
+   end;
+
+   /* Now see if cursor scroll occurred: */
+
+   if (Screen.Event.Info & 32) <> 0   
+   then do;
+
+      /* scroll seq panel time cursor if needed */
+
+      if  (Seq.Group <> 0)           /* if sequence panel up,  set up for */
+      then do;                       /* its scrolling                     */
+
+         call Map.Real.Time.To.Sequence.Time(loc(addr(Sampled.Actual.Play.Time.Msb)), seqtime);
+
+         if (COM32(seqtime, Seq.Cursor.Begin) = lw#ilt)
+         then do;
+            if (Seq.Scroll.Mode = 0)
+            or (COM32(Seq.Cursor.Begin, Seq.Screen.Begin) <> lw#IEQ)
+            then do;
+               call UPDATE.SEQ.TIME.CURSOR;
+               code = 1;
+            end;
+         end;
+
+         else if (COM32(seqtime, Seq.Cursor.End  ) = lw#igt)
+         then do;
+            if (Seq.Scroll.Mode = 0)
+            or (COM32(Seq.Cursor.End, Seq.Screen.End) <> lw#IEQ)
+            then do;
+               call UPDATE.SEQ.TIME.CURSOR;
+               code = 1;
+            end;
+         end;
+      end;
+
+      /* Scroll big time display if needed: */
+
+      if Big.Time.Display.Mode=BT#SEQ then do;
+         if (COM32(loc(addr(Sampled.Actual.Play.Time.Msb)), Big.Time.Begin) = lw#ilt)
+         or (COM32(loc(addr(Sampled.Actual.Play.Time.Msb)), Big.Time.End  ) = lw#igt)
+         then do;
+            call Refresh.Big.Time.Display;
+            code = 1;
+         end;
+      end;
+      
+   end;
+
+   /* If the scroll event is not needed by anyone,  then just */
+   /* calculate new limits.   This might happen as panels     */
+   /* are opened and closed, etc.                             */
+   
+   if code = 0
+   then call Set.Up.AEE.Play.Scroll.Points;
+
+end Handle.Play.Scroll.Event;

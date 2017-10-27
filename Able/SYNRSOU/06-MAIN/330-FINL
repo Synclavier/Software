@@ -1,0 +1,608 @@
+/* 330-FINL  -  CHECK NOTE LIST FOR FINAL DECAY STARTS
+
+   Modified:
+   12/15/91 - PF  - Added MIDISUST.MODE
+   02/07/91 - MWH - Combine 3200, 6400 and 9600 RTP's
+   11/07/90 - cj  - Reworked sustain pedal stuff.  Used B.GUI in SBITS
+                    field of note block to save real time.
+   11/06/90 - PF  - New sustain method
+   11/05/90 - CJ  - Improved accuracy of "play to"
+   03/14/90 - TSS - ONLY SEND NOTE OFF IF NOTE HAS STARTED
+   03/21/90 - PF  - Compressed CLAV.PTR to 43 sectors
+   08/24/89 - PF  - Added PATH argument to MIDI.NOTE.OFF
+   06/23/89 - TSS - Fixed problem where short MIDI notes did not play
+   11/04/88 - TSS - ADDED CODE TO SUPPORT 2 MODES OF HOLD SWITCH OPERATION
+   4/13/88 - PF - ADDED REFERENCE TO CHORIG
+   8/26/86 - EG - ADDED SUSTAIN PEDAL CODE FROM RELEASE L
+   8/14/86 - CJ - FIXED RESYNTH/RTE FDECAY BUG
+   7/15/86 - CJ,TS - CLEARED ABRT.RECORDING HERE
+   7/13/86 - CJ - ADDED NORIG
+   6/12/86 - TSS - Changes related to RECP
+   5/15/86 - "official" creation of release-M modules
+*/
+
+
+/* BEFORE STARTING NEW NOTES,  WE MUST FIRST START THE FINAL DECAYS */
+/* FOR OLD NOTES.   THIS MAKES THE CHANNEL STEALING STUFF WORK      */
+
+/* BEGIN BY CHECKING FOR ABORTED TRACKS */
+/* HAPPENS AT LOOP END                  */
+/* HAPPENS WHEN STOPPING                */
+/* HAPPENS WHEN CHANGING FF/REW         */
+
+IF (ABORT.SEQ.NOTES<>0)             /* FORCE AN END TO SEQUENCER NOTES ON STOP, DIRECTION CHANGE, LOOP , START PRESET */
+THEN DO;
+   NPTR=NOTELIST;                   /* PICK UP POINTER TO NOTE LIST */
+   DO WHILE NPTR<>0;                /* CHECK EACH ACTIVE NOTE       */
+      IF  (NORIG<>0)                /* SEQUENCER NOTE               */
+      AND (NSTAT=0)                 /* ONE THAT IS STILL GOING      */
+      THEN DO;                      /* MUST ABORT NOTE              */
+         NSTAT=3;                   /* ENTER FINAL DECAY CODE BELOW */
+      END;
+      NPTR=NFPTR;                   /* GET FORWARD POINTER          */
+   END;                             /* FOR LOOP OVER NOTE BLOCS     */
+   IF ABORT.SEQ.NOTES<>2 THEN DO;   /* IF NOT ABORT FROM LOOP POINT */
+      DO WHILE TIELIST<>0;          /* THEN CLEAN OUT TIE LIST      */
+         NPTR =TIELIST; TIELIST=NFPTR; /* SINCE TIME BASE JUMPS     */
+         NFPTR=NFREEP ; NFREEP =NPTR ;
+      END;
+      TIELAST=0;
+   END;
+END;                                /* OF ABRT.SEQ.NOTES BEGIN      */
+
+IF  (KEY.IS.TRIGGERED<>0)                   /* IF KEYBOARD NOTE TRIGGERED FROM EXT SYNC */
+AND (SAMPLED.KBD.MILLISECONDS>KEY.END.TIME) /* AND IT IS TIME FOR IT TO END */
+THEN CALL CLEAR.TRIGGERED.NOTES;            /* THEN STOP THEM               */
+
+/* CHECK NOTELIST FOR NEW NOTES */
+/* TO DECAY                     */
+
+NPTR=NOTELIST;             /* PICK UP POINTER TO NOTE LIST */
+
+DO WHILE NPTR<>0;          /* CHECK EACH ACTIVE NOTE */
+
+  IF NSTAT=0 THEN DO;      /* CHECK FOR STATE OF 0 - MEANS PRE-DECAY */
+
+    IF NORIG=0 THEN DO;           /* CHECK FOR END OF KEYBOARD/GUITAR NOTE */
+
+      IF (INC.AXE=0)\(GDATA=0) THEN DO;  /* KEYBOARD NOTE */
+
+         /* Set up mam/mal pointers to CLAV.PTR entry for this key:   */
+
+		 	LOAD CHORIG; ULOAD KEYN; MUL NUM.KEYS;
+         WRITE(MAM)=CLAV.PTR+SHR(RES,8);
+         WRITE(MAL)=RES;
+
+         /* If key is no longer active (ie key released or key        */
+         /* has been retriggered) then start final decay (unless      */
+         /* phrasing).                                                */
+
+         IF (READ(MD)&ACTIVE)=0 THEN DO; /* STOP NOTE IF KEY LIFTED (OR RETRIGGER) */
+           IF  ((PHRASESWITCH /* \MIDI.SWITCHDATA(R.PHRASE.SW) -NEEDS TO UPDATED FOR MOVE TO XMEM- */ )=0) /* CHECK FOR PHRASE SWITCH HELD */
+           AND (((OTIML-KBD.MILLISECONDS) IGT 50)              /* MAKE SURE SHORT MIDI NOTES GET PLAYED */
+           OR   (RRATE<>0))                                    /* KEEP REPEAT NOTES FROM GETTING STUCK */
+           THEN NSTAT=3;   /* NOT PHRASED - START DECAY */
+
+			  // Move time stamp to recw if any. Or toss time stamp if (for example) phrase switch is being used)
+			  if ((read(md) & 0xFF00) != 0)
+			  {
+			  	  if (recs<>0)
+			  	  		recw = recw | (read(md) & 0xFF00);
+			  	  		
+			  	  	write(md) = read(md) & 0xFF;							// make sure time stamp is cleared
+			  }
+         END;
+
+         /* Else if key is still active, see if we should abort the    */
+         /* note now because we just stopped recording:                */
+
+         ELSE IF (ABRT.RECORDING) AND (RECS<>0)
+         THEN DO;
+            NSTAT=3;       /* TERMINATE RECORDED NOTES ON LOOP RESTART */
+         END;
+
+         /* Else see if we should store the end time and send out      */
+         /* midi note offs because the key has been released but the   */
+         /* note is being held with the sustain pedal:                 */
+
+         ELSE IF ((READ(MD)&DOWN )=0)              /* NOTE IS NO LONGER HELD DOWN */
+         &       (MIDISUST.MODE=1)                 /* WE ARE IN THE MIDI SUSTAIN MODE */
+         &       ((SBITS   &B.UPD)=0)              /* BUT MIDI NOT SENT           */
+         THEN DO;
+
+            IF  (RECS<>0)                          /* END TIME HAS NOT BEEN RECORDED YET */
+            THEN CALL STORE.E.TIME;                /* STORE ENDING TIME OF NOTE. */
+
+            PPTR=PTLST;                            /* NOW SEND NOTE OFF TO MIDI */
+            DO WHILE PPTR<>0;
+               DISABLE;
+               I=MIDIRT;                           /* SAMPLE THE ROUTING */
+               MIDIRT=0;                           /* AND CLEAR IT */
+               IF (I<>0) AND (PSTAT<>DELAY.STATE)  /* NOTE HAS STARTED */
+               THEN CALL MIDI.NOTE.OFF(I, MIDIPATH, MIDIINFO);
+                  /******/;                 /* NOTE - INTERRUPTS ARE TURNED ON BY MIDI.NOTE.OFF */
+               ENABLE;
+               PPTR=PFPTR;
+            END;
+
+            SBITS = SBITS \ B.UPD;          /* SET BIT TO SAVE TIME  */
+
+         END;
+      END;
+      ELSE DO;             /* GUITAR NOTE */
+/* */    IF ((STRING.DONE&BITS(GDATA&255))<>0)
+/* */    THEN DO;
+/* */       IF (AXE.HOLD.MODE<>0) & (GHOLDSW<>0)
+/* */       THEN DO;                           /* PERFORM SUSTAIN FUNCTION */
+/* */          IF  (GDATA&255)<>6              /* IF NOT PROCESSING A HOLD PEDAL RELEASE RIGHT NOW */
+/* */          THEN DO;                        /* NOT HELD - SUSTAIN IT    */
+/* */             GDATA=SHL(GVOL,8)\6;         /* SAVE CURRENT VOLUME, SET STRING TYPE TO 6 */
+/* */             SBITS=(SBITS&"177770")\6;    /* ALSO IN NOTE BLOCK SO NO TIED STRINGS OCCUR */
+/* */          END;
+/* */          ELSE NSTAT=3;                   /* HOLD PEDAL RELEASED      */
+/* */       END;
+/* */       ELSE NSTAT=3;
+/* */    END;
+/* */    ELSE IF ((ABRT.RECORDING)  AND  (RECS<>0))
+/* */    THEN DO;
+/* */       NSTAT=3; 
+/* */    END;
+      END;
+    END;
+    ELSE DO;                      /* SEQUENCER - LOOK AT FEND */
+      IF MOVE.SPEED>=0 THEN DO;   /* FORWARD MOTION           */
+        IF  (ADVANCED.PLAY.TIME.LSB >= FENDL)
+        THEN DO;                  /* QUICK CHECK */
+           IF  ((ADVANCED.PLAY.TIME.MSB IGT FENDM))
+           OR  ((ADVANCED.PLAY.TIME.MSB  =  FENDM)
+           AND  (ADVANCED.PLAY.TIME.LSB IGE FENDL))
+           THEN DO;
+              WRITE(MAM)=TRK.HEAD;                   /* LOOKUP SUSTAIN STATUS FOR THIS TRACK */
+              WRITE(MAL)=TRACK;
+              WRITE(MAM)=READ(MD);
+              WRITE(MAL)=THD.SUSTAIN;
+              IF (READ(MD)&B.CURRENT.SUSTAIN)=0      /* NO SUSTAIN */
+              THEN NSTAT=3;                          /* OK TO GO TO FINAL DECAY */
+
+              /* Else if note is being sustained,  send the midi */
+              /* note offs at the end of the actual note time    */
+              /* but continue to hold the note:                  */
+
+              ELSE IF ((SBITS & B.UPD) = 0)
+              AND     (((SAMPLED.ACTUAL.PLAY.TIME.MSB IGT FENDM))
+              OR       ((SAMPLED.ACTUAL.PLAY.TIME.MSB  =  FENDM)
+              AND       (SAMPLED.ACTUAL.PLAY.TIME.LSB IGE FENDL)))
+              THEN DO;
+
+                 /* ELSE NOTE IS BEING HELD VIA SUSTAIN PEDAL */
+
+                 PPTR=PTLST;                            /* NOW SEND NOTE OFF TO MIDI */
+                 DO WHILE PPTR<>0;
+                    DISABLE;
+                    I=MIDIRT;                           /* SAMPLE THE ROUTING */
+                    MIDIRT=0;                           /* AND CLEAR IT */
+                    IF (I<>0) AND (PSTAT<>DELAY.STATE)  /* NOTE HAS STARTED */
+                    THEN CALL MIDI.NOTE.OFF(I, MIDIPATH, MIDIINFO); /* TURN NOTE OFF */
+                    /******/;                 /* NOTE - INTERRUPTS ARE TURNED ON BY MIDI.NOTE.OFF */
+                    ENABLE;
+                    PPTR=PFPTR;
+                 END;
+
+                 SBITS = SBITS \ B.UPD;          /* SET BIT TO SAVE TIME  */
+
+              END;
+           END;
+        END;
+      END;
+      ELSE DO;                    /* BACKWARDS MOTION */
+        IF  ((SAMPLED.ACTUAL.PLAY.TIME.MSB ILT FENDM))
+        OR  ((SAMPLED.ACTUAL.PLAY.TIME.MSB  =  FENDM)
+        AND  (SAMPLED.ACTUAL.PLAY.TIME.LSB ILE FENDL))
+        THEN NSTAT=3;
+      END;
+    END;
+  END; /* OF CASE FOR STATE 0 */
+
+  /* $PAGE - START FINAL DECAYS */
+
+
+  /* START DECAYS HERE IF REQUIRED */
+
+  IF NSTAT=3 THEN DO;     /* CYCLE THROUGH PT'S & START DECAYS */
+
+    TB=TIMBRE;            /* SET UP GLOBAL VARIABLES           */
+
+    WRITE(MAM)=TIM.HEAD;
+    WRITE(MAL)=TB;
+    TBP=READ(MD);
+
+    TRK=TRACK;
+
+    WRITE(MAM)=TRK.HEAD;
+    WRITE(MAL)=TRK;
+    THP=READ(MD);
+
+    IF STEALOK<>(-2) THEN DO;                    /* DO ACCOUNTING UNLESS TRACK HEAD IS GONE */
+       IF (STEALOK&256)=0 THEN CALL NEW.DECAYER; /* INDICATE A NEW DECAYING NOTE UNLESS WE HAVE ALREADY DONE SO */
+       STEALOK=256+TRK;                          /* SAVE INFO HERE TO ALLOW CHANNEL STEALING NOW, REGARDLESS OF SUST LEVELS */
+    END;
+
+    IF RECS<>0 THEN DO;
+       CALL STORE.E.TIME;                  /* STORE ENDING TIME OF NOTE. */
+    END;
+    
+    NSTAT=1; RRATE=0;                      /* CHANGE STATE TO DECAYING.  INDICATE NON-REPEATING */
+
+    WRITE(MAM)=THP;
+    WRITE(MAL)=THD.ARP;
+    IF READ(MD)=NPTR THEN DO;              /* REMOVE THIS ARPEGGIATE NOTE */
+       CALL BACK.ARP.PTR(TRK);             /* GET NEXT FORWARD BLOCK ON QUE - SO NEXT NEW NOTE TRIGGERS */
+    END;
+
+    IF NACT=0 THEN DO;                     /* NO ACTIVE PARTIALS LEFT */
+       /* DUPLICATE OF CODE IN 144-TIM3 -- FIXES BUG FOR PLUCKED TIMBRES */
+       IF D164_PRESENT THEN DO;            /* IF CLAVIER THERE         */
+          WRITE(D164)=5;                   /* SELECT KEYBOARD GATE DAC */
+          WRITE(D165)=0;                   /* REMOVE GATE              */
+       END;
+    END;
+    
+    ELSE DO;                               /* SOME ACTIVE PARTIALS LEFT */
+
+      WRITE(MAM)=TBP;
+      WRITE(MAL)=TIM.FD.SPLICING;
+      IF  (READ(MDI)<>0   )                /* TIM.FD.SPLICING - SPLICING DURING FINAL DECAY - LET NOTE FINISH INITIAL DECAYS TO LIMIT OF ZERO */
+      AND (READ(MD )=TFLAG)                /* TIM.CSEM        - AND NO OTHER TIMBRE WAS RECALLED */
+      THEN DO;                             /* LET INITIAL DECAY RUN ITS COURSE & TERMINATE NOTE */
+
+        QME=1;                             /* SET QME TO INDICATE FD SPLICING STATE IS OCCURRING */
+
+        PPTR=PTLST;                        /* CYCLE THROUGH EACH PARTIAL - QUE UP FOR FINAL DECAY */
+        DO WHILE PPTR<>0;                  /* COMPUTE FINAL DECAY INFO FOR EVERY PARTIAL */
+
+          IF PSTAT<>DONE.STATE THEN DO;    /* COMPUTE FINAL DECAY INFO,  UNLESS CHANNEL REACHED INITIAL DECAY LIMIT OF ZERO. */
+            IF MCHN<>0 THEN DO;            /* IF NOT A MIDI-ONLY, THEN COMPUTE FINAL DECAY INFO */
+              PTL=PARTL;                   /* LOOK UP PARTIAL NUMBER FOR CONVENIENCE */
+              EIDLIM=0;                    /* FORCE LIMIT OF ZERO - COULD BE NONZERO IF RECENT KNOB CHANGE BROUGHT LIMIT TO ZERO */
+              IF EQF=0 THEN DO;            /* IF NOT QUED - MAKE SURE C.E.L IS SET */
+                IF C.E.L=0 THEN DO;        /* NOT QUED, BUT SPLICING STOPPED - MUST FIND OUT WHY */
+                  IF (SMCHN=0)             /* NON-SPLICING PARTIAL - MUST HAVE STARTED INITIAL DECAY TO NONZERO LIMIT */
+                  OR (SSTAT=1)             /* OR INITIAL DECAY HAD STARTED - BUT MUST NOT HAVE BEEN TO LIMIT OF ZERO */
+                  THEN DO;                 /* MIGHT HAPPEN IF FUNNY KNOB CHANGES */
+                    PSTAT=DECAY.STATE;     /* PERFORM INITIAL DECAY TO LIMIT OF ZERO */
+                    P.E.E=0;               /* BUT NO  EXPONENTIATION */
+                  END;                     /* OTHERWISE SPLICING MUST HAVE STOPPED DUE TO SELF-LOOPING/TF SOLO - ALLOW TO CONTINUE */
+                  C.E.L=1;                 /* ALLOW SELF/LOOPING SPLICE POINT OR TIMBRE FRAME SOLO TO CONTINUE */
+                END;                       /* OF SMCHN<>0 CASE */
+              END;                         /* OF EQF=0 CASE    */
+
+              DISABLE;
+              I=MIDIRT;                    /* GET CURRENT MIDI ROUTING (WOULD REALLY ONLY HAPPEN IF EIDLIM HAD ORIGINALLY BEEN NONZERO) */
+              MIDIRT=0;                    /* ZERO HERE SINCE WE MAY BE QUED */
+
+              IF (I<>0)                    /* MIDI OFF IS NEEDED */
+              THEN DO;                     /* SEND HERE FOR NOW SINCE WE DO NOT QUE BLOCK BELOW */
+                 IF PSTAT<>DELAY.STATE     /* NOTE HAS STARTED */
+                 THEN CALL MIDI.NOTE.OFF(I, MIDIPATH, MIDIINFO); /* TURN NOTE OFF */
+                 /******/;                 /* NOTE - INTERRUPTS ARE TURNED ON BY MIDI.NOTE.OFF */
+              END;
+              ENABLE;
+            END;                           /* OF MCHN <>0 CASE  */
+            ELSE DO;                       /* MUST BE MIDI-ONLY */
+               FTIMER=FENDL;               /* SET FTIMER        */
+               DISABLE;                    /* QUE UP FINAL DECAY SO NOTE OFF GOES */
+               FQF=FINQF;                  /* SET UP OUR FORWARD PTR TO WHAT IS ON FINQ */
+               FQB=ADDR(FINQF);            /* SET UP OUR BACK    PTR TO QUE START */
+               FINQF=ADDR(FQF);            /* SET UP QUE POINTING TO US */
+               CORE(FQF+1)=ADDR(FQF);      /* SET UP BACK POINTER BACK TO US */
+               C.E.L=0;                    /* CLEAR POSSIBLY RANDOM C.E.L FLAG */
+               P.E.E=0;                    /* NO MORE EXPONENTIATION UNTIL FINAL DECAY HAS BEEN WRITTEN */
+               P.I.E=0;                    /* NO MORE INDEX EXPONENTIATION FOR A WHILE EITHER */
+               ENABLE;
+            END;
+
+          END;                             /* OF PSTAT<>DONE.STATE */
+          PPTR=PFPTR;                      /* MOVE ON TO NEXT PARTIAL */
+        END;                               /* OF PARTIAL LOOP */
+      END;                                 /* OF FD SPLICING CASE */
+
+
+      ELSE DO;                                 /* NO FD SPLICING */
+
+        PPTR=PTLST;                            /* CYCLE THROUGH EACH PARTIAL - QUE UP FOR FINAL DECAY */
+        DO WHILE PPTR<>0;                      /* COMPUTE FINAL DECAY INFO FOR EVERY PARTIAL */
+
+          FTIMER=FENDL;                        /* SET FINAL DECAY TIMER   */
+
+          IF PSTAT<>DONE.STATE THEN DO;        /* COMPUTE FINAL DECAY INFO,  UNLESS CHANNEL REACHED INITIAL DECAY LIMIT OF ZERO. */
+
+            IF MCHN<>0 THEN DO;                /* IF NOT A MIDI-ONLY BLOCK */
+
+              PTL=PARTL;                       /* LOOK UP PARTIAL NUMBER FOR CONVENIENCE */
+
+              WRITE(MAM)=TBP;
+              WRITE(MAL)=TIM.CSEM;
+
+              IF (TFLAG<>READ(MD)) THEN DO;    /* TIMBRE RECALLED - USE SHORT FINAL DECAY SINCE PRECOMPUTED INFO NO LONGER MATCHES THE PEAKS WE  MIGHT HAVE REACHED */
+                EFDINT=SHL(200,8)\200;         /* USE DEFAULT RATE OF APPROX .1 SECOND */
+                SFDINT=SHL(200,8)\200;         /* WE WOULD MOVE THIS BLOCK OF CODE */
+                IFDINT=SHL(200,8)\200;         /* ELSEWHERE WERE IT NOT FOR THE QUEING COMPLEXITIES BELOW */
+                ETMC  =(-1);                   /* NO ENV EXPONENTIATION */
+                ITMC  =(-1);                   /* NO INX EXPONENTIATION */ 
+              END;
+
+              ELSE DO;                         /* COMPUTE INTERPOLATOR INFO FOR FINAL DECAY */
+
+                IF (SMCHN     =0)              /* NO SPLICING BEING DONE    */
+                OR (FMPTR     =0)              /* OR SPLICING HAD NOT BEGUN */
+                THEN DO;                       /* USE SINGLE RATE FOR UCHN  */
+                  WRITE(MAL)=(TIM.EFDINT+EFDINT.LOC)+(PTL*TIM.EFDINT.STR);
+                  WRITE("300")=ADDR(EFDINT);
+                  WRITE("360")=READ(MD);         /* EFDINT */  /* NO INCRMENT !!! */
+                  WRITE("360")=READ(MDI);        /* SFDINT */  /* (=EFDINT) */
+                  WRITE("360")=READ(MDI);        /* IFDINT */
+                  ETMC        =READ(MDI);        /* EFDTMC */
+                  ITMC        =READ(MDI);        /* IFDTMC */
+                  WRITE(MAL)=TIM.OPTIONS+PTL;
+                  IF (READ(MD)&(ENV.DADJ\INX.HADJ\FD.RTES))<>0
+                  THEN CALL COMPUTE.FIN(0);      /* USE SUB CALL IF COMPLICATED - COMPUTE BOTH */
+                END;                             /* DONE WITH SET UP FOR FINAL DECAY */
+
+                ELSE IF SSTAT=1 THEN DO;         /* SPLICING HAD COMPLETED AND INITIAL DECAY HAD BEGUN */
+                  IF (DO.FM<>0) THEN DO;         /* FM DONE - LOOK UP STUFF */
+                    WRITE(MAL)=(TIM.EFDINT+IFDINT.LOC)+(PTL*TIM.EFDINT.STR);
+                    IFDINT=READ(MDI);            /* IFDINT */
+                    WRITE("300")=READ(MDI);
+                    ITMC  =READ(MDI);            /* ITMC   */
+                  END;
+                  ELSE DO;                       /* SKIP OVER FM STUFF */
+                    WRITE(MAL)=(TIM.EFDINT+SFDENV.LOC)+(PTL*TIM.EFDINT.STR);
+                  END;
+                  EFDINT=READ(MD);               /* EFDINT */  /* NO INCR!! */
+                  SFDINT=READ(MDI);              /* SFDINT */  /* (=EFDINT) */
+                  ETMC  =READ(MDI);
+
+                  WRITE(MAL)=TIM.OPTIONS+PTL;
+                  IF ((READ(MD)&(ENV.DADJ\INX.HADJ\FD.RTES))<>0)
+                  THEN CALL COMPUTE.FIN(0);      /* USE SUB CALL IF COMPLICATED - COMPUTE BOTH */
+                END;
+
+                ELSE BEGIN;                      /* FINAL DECAY FROM MID-SPLICE */
+
+                  DCL (E.SEG.FDN,E.SEG.FDNT,E.SEG.FUP,E.SEG.ATK,E.SEG.FCOE) FIXED;
+
+                  WRITE(MAL)=TIM.PARTIAL.POINTERS+PTL;
+                  M=FMPTR+READ(MD);              /* GET POINTER TO CURRENT FRAME */
+
+                  IF (DO.FM<>0) THEN DO;         /* CHECK FOR POSSIBLE RTES ON INDEX FINAL DECAYS */
+                     WRITE(MAL)=(TIM.EFDINT+IFDINT.LOC)+(PTL*TIM.EFDINT.STR);
+                     IFDINT=READ(MDI);            /* IFDINT */
+                     WRITE("300")=READ(MDI);
+                     ITMC  =READ(MDI);            /* ITMC   */
+                     WRITE(MAL)=TIM.OPTIONS+PTL;
+                     IF (READ(MD)&(ENV.DADJ\INX.HADJ\FD.RTES))<>0
+                     THEN CALL COMPUTE.FIN(1);   /* USE SUB CALL IF COMPLICATED - COMPUTE JUST FM FOR SPEED */
+                  END;                           /* OTHERWISE, FM IS ALL SET */
+
+                  Z=M+P.E.SEG.ATK;    /* POINTER TO SPLICE TIME FOR THIS FRAME */
+                  WRITE(MAM)=PAR.PTR+SHR(Z,8); WRITE(MAL)=Z;
+                  E.SEG.ATK=READ(MD);                   /* GET SPLICE TIME */
+
+                  Z=M+P.E.SEG.FDN;    /* POINTER TO PRECOMPUTED SPLICE INFO */
+                  WRITE(MAM)=PAR.PTR+SHR(Z,8); WRITE(MAL)=Z;
+                  E.SEG.FDN=READ(MDI); E.SEG.FDNT=READ(MDI);
+                  E.SEG.FUP=READ(MDI); E.SEG.FCOE=READ(MDI);
+
+                  J=E.SEG.FDN; I=SHR(J,8); J=J&255; K=E.SEG.FDNT;
+
+                  IF DADJ<>0 THEN DO;    /* CORRECT FOR DECAY ADJUST */
+                    LOAD J; MUL 1000; J=RES; DIV DADJ; J=RES;
+                    LOAD (-K); MUL 1000; K=RES; DIV DADJ;
+                    K=(-RES); IF K=0 THEN K=(-1);
+                  END;
+
+                  WRITE(MAM)=TBP;
+                  WRITE(MAL)=TIM.VE.FDEC.LOOK;
+
+                  IF READ(MD)<>0                     /* MUST SCALE    */
+                  THEN DO;                           /* SCALE DECAY */
+                    CALL NEW.SCALE.DIV;
+                    K=NEW.SCALE.TMC(K);
+                  END;
+
+                  X=I; Y=J;               /* SAVE IN CASE OF SPLICE CORRECTION BELOW */
+
+                  J=E.SEG.FUP; I=SHR(J,8); J=J&255;
+
+                  IF DADJ<>0 THEN DO;      /* ADJUST DECAYS */
+                    LOAD J; MUL 1000;
+                    J=RES; DIV DADJ; J=RES;
+                  END;
+
+                  WRITE(MAL)=TIM.VE.FDEC.LOOK;
+                  IF READ(MD)<>0                     /* MUST SCALE    */
+                  THEN CALL NEW.SCALE.DIV;
+
+                  IF C.E.L=2 THEN N=0;           /* SPLICE DELAY - TREAT AS 0 MSECS INTO ATTACK PORTION */
+                  ELSE DO;
+                     N=KBD.MILLISECONDS-PPTMB;   /* GET TIME FROM START OF SPLICE */
+                     IF NORIG<>0 THEN DO;           /* SEQUENCER NOTE - CHECK FURTHER */
+                        WRITE(MAL)=TIM.TOPTIONS;
+                        IF (READ(MD)&(SLAP.BASS\BIT.REPEAT\BIT.ARPEG))=0
+                        THEN N=N+PRESCAN;           /* MAKE CRUDE ESTIMATE OF TIME FINAL DECAY WILL ACTUALLY BEGIN - NO CORRECTION HERE FOR FUNKY NOTE STATES */
+                     END;
+                  END;
+
+                  P=E.SEG.ATK;          /* GET TIME */
+                  IF P>200 THEN DO;     /* ONLY CORRECT FOR PLAUSABLE SPLICES */
+                    IF N IGT P THEN N=P;
+                    LOAD 256; MUL N; R=RES; DIV P; R=RES; /* GET 0-256 (%OF SPLICE COMPLETED) */
+                    IF R<16 THEN R=16; /* LIMIT IN CASE OF ROUND OFF ERROR */
+                    Q=256-RES;         /* 0-256 % REMAINING */
+                    IF Q<16 THEN Q=16; /* LIMIT IN CASE OF ROUND OFF */
+                    S=E.SEG.FCOE;      /* LOOK UP S CURVE COEFFICIENT */
+                    IF S<>0 THEN DO;   /* S CURVE SPLICING - SUBTRACT CORRECTION */
+                      LOAD S; MUL CURVE(SHR(R,2));
+                      IF R<128 THEN R=R-READ(4);
+                      ELSE R=R+READ(4); /* APPLY CORRECTION */
+                      LOAD S; MUL CURVE(SHR(Q,2));
+                      IF Q<128 THEN Q=Q-READ(4);
+                      ELSE Q=Q+READ(4); /* COMPUTE NEW VALUE */
+                    END;
+                    LOAD J; MUL R; J=RES; DIV 256; J=RES; /* SCALE */
+                    LOAD Y; MUL Q; Y=RES; DIV 256; Y=RES; /* SCALE */
+                  END;
+
+                  EFDINT=X\SHL(Y,8);
+                  SFDINT=I\SHL(J,8);
+                  ETMC=K;
+
+                END;                   /* FINAL DECAY FROM MID-SPLICE */
+              END;                     /* OF COMPUTATION REQUIRED     */
+
+              IF (PLAY.SEQ.TO.A.TIME <> 0) /* PROVIDE 0 MILLISECOND FINAL */
+              &  (FENDM = SEQ.PLAY.TO.MSB) /* DECAY TO ACHIEVE 'PLAY TO'  */
+              &  (FENDL = SEQ.PLAY.TO.LSB) /* FUNCTION                    */
+              THEN DO;
+                 EFDINT = (-1);
+                 SFDINT = (-1);
+              END;
+
+            END;                       /* IF MCHN <>0 CASE            */
+          END;                         /* OF PSTAT<>DONE.STATE        */
+
+          PPTR=PFPTR;                  /* MOVE ON TO NEXT PARTIAL */
+
+        END;                           /* OF PARTIAL LOOP */
+
+        /* LINK BLOCK ON TO PROPER FINAL DECAY QUE */
+
+        /* FINAL DECAY QUEING:
+
+  KEYBOARD  NOTES  -  USE FINQ  -  FINAL DECAY STARTS IMMEDIATELY
+
+  SEQUENCER NOTES:
+
+  1  ABORT.SEQ.NOTES=0  PTRS.LOOPED=0  LOOP.RESTART=0 - USE FDLQ - NORMAL SCAN
+  2  ABORT.SEQ.NOTES=0  PTRS.LOOPED=0  LOOP.RESTART=1 - USE FINQ - MISSED THE BOAT.  LOOP CAME BEFORE PRESCAN
+  3  ABORT.SEQ.NOTES=0  PTRS.LOOPED=1  LOOP.RESTART=0 - USE FLPQ - SCANING SHORT NOTE AFTER LOOP START
+  4  ABORT.SEQ.NOTES=0  PTRS.LOOPED=1  LOOP.RESTART=1 - USE FDLQ - SCANNING AFTER BOTH LOOP POINTERS & TIME BASE HAS LOOPED
+
+  5  ABORT.SEQ.NOTES=1                                - USE FINQ - ABORT NOTES
+
+  6  ABORT.SEQ.NOTES=2  PTRS.LOOPED=0  LOOP.RESTART=0 - USE FINQ - LOOP RESTART WITH NO PRESCAN - MEANS WE MISSED THE BOAT
+  7  ABORT.SEQ.NOTES=2  PTRS.LOOPED=0  LOOP.RESTART=1 - USE FINQ - WOULD HAPPEN IF 5 MS LOOP OCCURS
+  8  ABORT.SEQ.NOTES=2  PTRS.LOOPED=1  LOOP.RESTART=0 - USE FDLQ - MEANS WE ARE TERMINATING THESE NOTES. ALL WILL.END ON LOOP.END
+  9  ABORT.SEQ.NOTES=2  PTRS.LOOPED=1  LOOP.RESTART=1 - USE FINQ - PRESCANNING BUT MISSED */
+
+        PPTR=PTLST;                        /* START WITH PARTIAL LIST */
+
+        DISABLE;                           /* FOR CHECK OF LOOP.RESTART, QUEING */
+
+        IF NORIG=0 THEN GOTO FINQ;         /* KEYBOARD NOTE - USE FINQ FOR IMMEDIATE FINAL DECAY */
+
+        WRITE(MAM)=TBP;
+        WRITE(MAL)=TIM.TOPTIONS;
+        IF (READ(MD)&(SLAP.BASS\BIT.REPEAT\BIT.ARPEG))<>0
+        THEN GOTO FINQ;                    /* IMMEDIATELY IF SLAP BASS OR REP/ARPEG */
+
+        IF (ABORT.SEQ.NOTES=0)             /* NORMAL SCAN */
+        THEN DO;                           /* TREAT MOST COMMON CASE QUICKLY */
+           IF (PTRS.LOOPED=LOOP.RESTART)   /* 1,4: MOST COMMON CASES - LINK TO NORMAL DELAY QUE */
+           THEN GOTO FDLQ;                 /*      USE GOTO FOR SPEEDY ENTRY */
+           IF (PTRS.LOOPED<>0)             /* 3  : POINTERS HAVE LOOPED - USE FLPQ TO WAIT FOR */
+           THEN GOTO FLPQ;
+           ELSE GOTO FINQ;                 /* 2  : MISSED THE BOAT - TIME BASE HAS LOOPED BUT POINTERS HAVE NOT - CAN NOT WAIT FURTHER */
+        END;
+
+        IF (ABORT.SEQ.NOTES=1)             /* 5  : ABORT ALL NOTES (STOP) */
+        THEN GOTO FINQ;
+
+        /* CASES FOR ABORT.SEQ.NOTES=2 */
+
+        IF (PTRS.LOOPED = 0)               /* 6,7: MISSED THE BOAT, OR 5 MS LOOP */
+        OR (LOOP.RESTART<>0)               /* 9  : PRESCANNING BUT MISSED */
+        THEN GOTO FINQ;
+        GOTO FDLQ;                         /* ABORT.SEQ.NOTES=2, PTRS.LOOPED=1 */
+                                           /* LINK NOTES TO FDL Q.  THEY WILL END ON TIME,  OR WHEN LOOP OCCURS */
+
+  FLPQ: DO WHILE PPTR<>0;                  /* CYCLE THROUGH EACH PARTIAL BLOCK   */
+          IF PSTAT<>DONE.STATE             /* IF FINAL DECAY REQUIRED */
+          THEN DO;                         /* LINK TO QUE */
+            K=FTIMER;                      /* SORT INTO QUE                      */
+            L=FLPQB;                       /* SEARCHING BACKWARDS FOR BEST SPEED */
+            DO WHILE (L<>ADDR(FLPQF))      
+            AND      (K<CORE(L+(FTLOC-FQFLOC)));
+               L=CORE(L+1);                /* BACKWARDS                          */
+            END;
+            FQB        =L;                 /* LINK US AFTER THE BLOCK ON QUE     */
+            FQF        =CORE(L);       
+            CORE(FQF+1)=ADDR(FQF);           
+            CORE(L)    =ADDR(FQF);           
+            C.E.L=0;                       /* CLEAR POSSIBLY RANDOM C.E.L FLAG */
+            P.E.E=0;                       /* NO MORE EXPONENTIATION UNTIL FINAL DECAY HAS BEEN WRITTEN */
+            P.I.E=0;                       /* NO MORE INDEX EXPONENTIATION FOR A WHILE EITHER */
+          END;
+          PPTR=PFPTR;                      /* MOVE ON TO NEXT PARTIAL */
+        END;                               /* OF LOOP OVER PARTIALS */
+        GOTO QDONE;
+
+  FINQ: DO WHILE PPTR<>0;                    /* CYCLE THROUGH EACH PARTIAL BLOCK   */
+          IF PSTAT<>DONE.STATE               /* IF FINAL DECAY REQUIRED */
+          THEN DO;                           /* LINK TO QUE */
+            FQF=FINQF;                       /* SET UP OUR FORWARD PTR TO WHAT IS ON FINQ */
+            FQB=ADDR(FINQF);                 /* SET UP OUR BACK    PTR TO QUE START */
+            FINQF=ADDR(FQF);                 /* SET UP QUE POINTING TO US */
+            CORE(FQF+1)=ADDR(FQF);           /* SET UP BACK POINTER BACK TO US */
+            C.E.L=0;                         /* CLEAR POSSIBLY RANDOM C.E.L FLAG */
+            P.E.E=0;                         /* NO MORE EXPONENTIATION UNTIL FINAL DECAY HAS BEEN WRITTEN */
+            P.I.E=0;                         /* NO MORE INDEX EXPONENTIATION FOR A WHILE EITHER */
+          END;
+          PPTR=PFPTR;                        /* MOVE ON TO NEXT PARTIAL */
+        END;
+        GOTO QDONE;
+
+  FDLQ: DO WHILE PPTR<>0;                  /* CYCLE THROUGH EACH PARTIAL BLOCK   */
+          IF PSTAT<>DONE.STATE             /* IF FINAL DECAY REQUIRED */
+          THEN DO;                         /* LINK TO QUE */
+            K=FTIMER;                      /* SORT INTO QUE                      */
+            L=FDLQB;                       /* SEARCHING BACKWARDS FOR BEST SPEED */
+            DO WHILE (L<>ADDR(FDLQF))      
+            AND      (K<CORE(L+(FTLOC-FQFLOC)));
+               L=CORE(L+1);                /* BACKWARDS                          */
+            END;
+            FQB        =L;                 /* LINK US AFTER THE BLOCK ON QUE     */
+            FQF        =CORE(L);       
+            CORE(FQF+1)=ADDR(FQF);           
+            CORE(L)    =ADDR(FQF);           
+            C.E.L=0;                       /* CLEAR POSSIBLY RANDOM C.E.L FLAG */
+            P.E.E=0;                       /* NO MORE EXPONENTIATION UNTIL FINAL DECAY HAS BEEN WRITTEN */
+            P.I.E=0;                       /* NO MORE INDEX EXPONENTIATION FOR A WHILE EITHER */
+          END;
+          PPTR=PFPTR;                      /* MOVE ON TO NEXT PARTIAL */
+        END;                               /* OF LOOP OVER PARTIALS */
+        GOTO QDONE;
+
+        QDONE: ENABLE;
+
+      END;                 /* OF NO FD SPLICING CASE  */
+    END;                   /* OF NACT<>0 CASE         */
+
+  END;                     /* OF NSTAT = 3 */
+
+  NPTR=NFPTR;              /* GET FORWARD POINTER */
+END;                       /* OF LOOP OVER NOTES */
+
+IF (ABORT.SEQ.NOTES=1)           /* WAIT FOR NEXT INTERRUPT SO ALL FINAL DECAYS GETS STARTED */
+THEN DO;                         /* OTHERWISE CHANNEL MIGHT GET STOLEN AND */
+   CALL MOVE.LOOP.QUES;          /* UNLINKED BEFORE FINAL DECAY ACTUALLY */
+                                 /* HAS STARTED.  HAPPENS IF CHANNEL STEAL PRODUCES NO GHOST BLOCKS */
+   CALL MOVE.LOOP.QUES;          /* WAIT FOR SECOND CLOCK INTERRUPT SO THAT */
+                                 /* LOOP QUE GETS COMPLETELY CLEANED OUT */
+END;                             /* PRODUCES NO GHOST BLOCK */
+
+ABORT.SEQ.NOTES=0;               /* WE HAVE ABORTED ANY SEQUENCER NOTES NEEDING SUCH TREATMENT */
+ABRT.RECORDING=0;                
+
+IF (INC.AXE<>0) 
+THEN STRING.DONE=0;              /* AND WE HAVE STOPPED ALL RELEVENT GUITAR NOTES */

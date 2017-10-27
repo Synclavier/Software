@@ -1,0 +1,198 @@
+/* 382-EXP - PROCESS EXPONENTIAL DECAYS/S-CURVE SPLICES */
+
+/*
+   4/04/91 - CJ - Handled p.e.e differently to fix Lee Kopp bugs
+   7/23/86 - KJC - changes for stereo playback
+   5/15/86 - "official" creation of release-M modules
+*/
+
+/* PERFORM NORMAL EXPONENTIAL DECAYS      */
+/* USED FOR BOTH INITIAL AND FINAL DECAYS */
+
+/* CASE 1 - SET TO 4 FOR DELAY                    */
+/* CASE 2 - PERFORM S-CURVE SPLICE                */
+/* CASE 3 - PERFORM S-CURVE SPLICE FROM T.F. LOOP */
+/* CASE 4 - PERFORM NORMAL EXP DECAY              */
+
+BEGIN;
+
+   IF (P.E.E<>0) THEN DO;                 /* PERFORM EXPONENTIATION IF DESIRED */
+
+      /* Provide a 1 loop-time delay to avoid to-fast exponentiation: */
+
+      IF P.E.E = 1 THEN DO;               /* CHECK FOR POSSIBLE       */
+         DISABLE;                         /* INTERRUPT OCCURRING      */
+         IF P.E.E = 1 THEN P.E.E = 4;     /* WHICH SETS P.E.E = 0     */
+         ENABLE;
+      END;
+
+      /* Else perform normal exponentiation:                          */
+
+      ELSE IF P.E.E=4 THEN DO;            /* NORMAL EXPONENTIAL DECAY */
+
+         IF  ((INC.MONO=0)                       /* IF NO SAMPLING AT ALL */
+         AND  (INC.POLY=0))
+         OR (MCHN&(B.MONO\B.POLY))=0 THEN DO;    /* OR ORIGINAL SYNTHESIZER - COMPUTE ITEMS */
+            DO I=PRIOR.TIME TO SAMPLED.REAL.MILLISECONDS-10 BY 10; /* CORRECT FOR LOST TIME */
+               LOAD EDAT; MUL ETMC; EDAT=READ(4);   /* PERFORM UNSIGNED FRACTIONAL MULTIPLY */
+            END;
+            DISABLE;
+            WRITE(CHA)=UCHN; WRITE(FUN)=EADD; 
+            IF (P.E.E <> 0) THEN WRITE(DAT)=SHR(EDAT,8);
+            ENABLE;
+            IF (SMCHN<>0) THEN DO;                     /* SPLICING ADDER AS WELL */
+               DO I=PRIOR.TIME TO SAMPLED.REAL.MILLISECONDS-10 BY 10; /* CORRECT FOR LOST TIME */
+                  LOAD PPTMB; MUL ETMC; PPTMB=READ(4);
+               END;
+               DISABLE;
+               WRITE(CHA)=SUCHN; WRITE(FUN)=EADD;
+               IF (P.E.E <> 0) THEN WRITE(DAT)=SHR(PPTMB,8);
+               ENABLE;
+            END;
+         END;
+
+         ELSE IF (INC.MONO<>0)&((MCHN&B.MONO)<>0) THEN DO;  /* MONO SAMPLING (W. DISK) */
+            DO I=PRIOR.TIME TO SAMPLED.REAL.MILLISECONDS-10 BY 10; /* CORRECT FOR LOST TIME */
+               LOAD EDAT; MUL ETMC; EDAT=READ(4);   /* PERFORM UNSIGNED FRACTIONAL MULTIPLY */
+            END;
+            DISABLE;
+            IF (MCHN=MONO.CHAN) THEN DO;                    /* US'MS */
+               LOAD (SHR(EDAT,8)+1); MUL 33333;
+               IF (READ(4) IGE MONO.DIVISOR)   /* CHECK FOR OVERFOW */
+               THEN MONO.INC="177777";         /* GO THERE ON NEXT INTERRUPT */
+               ELSE DO;                        /* COMPUTE RATE */
+                  DIV MONO.DIVISOR; MONO.INC=RES;
+               END;
+            END;
+            ENABLE;
+         END;
+
+         /* $PAGE - HANDLE EXPONENTIAL DECAYS FOR POLY SYNTH */
+
+         ELSE IF (INC.POLY<>0) THEN DO;               /* MEANS POLY SYNTH */
+            DISABLE;
+            WRITE(PSC)=MCHN;                          /* ENV CHAN        */
+            WRITE(PSF)=PSEVAL;                        /* CURRENT ENV VAL */
+            I=READ(PSD);                              /* READ CUR ENV VAL*/
+            IF I<256 THEN I=256;                      /* MIN SLOPE OF 1/16 */
+            LOAD (EDAT&255)+1; MUL I;                 /* FIRST SCALE DELTA IF POSSIBLE */
+            WRITE("300")=0; DIV 4096;                 /* DELTA*I/4096 */
+            IF RES<>0 THEN DO;                        /* CONTINUE TO USE DELTA AT MAX RATE */
+               J=SHR(EDAT&"177400",4)+15;             /* CALCULATE ORIGINAL ADDER */
+               IF UCHN<>0 THEN DO;                    /* SLAVE CHANNEL OF STEREO PAIR */
+                  WRITE(PSC)=UCHN;
+                  WRITE(PSF)=PSEDEL;
+                  WRITE(PSD)=RES;                        /* USE SLOWER RATE OF CHANGE */
+                  WRITE(PSF)=PSEINC;                     /* WHEN POSSIBLE */
+                  WRITE(PSD)=J;                          /* USE ORIGINAL ADDER */
+               END;
+               WRITE(PSC)=MCHN;
+               WRITE(PSF)=PSEDEL;
+               WRITE(PSD)=RES;                        /* USE SLOWER RATE OF CHANGE */
+               WRITE(PSF)=PSEINC;                     /* WHEN POSSIBLE */
+               WRITE(PSD)=J;                          /* USE ORIGINAL ADDER */
+            END;
+            ELSE DO;                                  /* USE DELTA OF 1, SMALLER ADDER */
+               LOAD (EDAT&"177400")  ;                /* GET BASIC ADDER */
+               MUL  (I)              ;                /* SCALE BY CURRENT VALUE */
+               LOAD (READ(4))        ;                /* ANSWER IS IN MSB */
+               MUL  (EDAT&"000377")+1;                /* SCALE BY HOW MUCH PDELTA IS DIFFERENT */
+               IF UCHN<>0 THEN DO;                    /* SLAVE CHANNEL OF STEREO PAIR */
+                  WRITE(PSC)=UCHN;
+                  WRITE(PSF)=PSEDEL;
+                  WRITE(PSD)=1;                          /* USE DELTA OF 1 */
+                  WRITE(PSF)=PSEINC;
+                  WRITE(PSD)=RES+15;                     /* USE THIS ADDER */
+               END;
+               WRITE(PSC)=MCHN;
+               WRITE(PSF)=PSEDEL;
+               WRITE(PSD)=1;                          /* USE DELTA OF 1 */
+               WRITE(PSF)=PSEINC;
+               WRITE(PSD)=RES+15;                     /* USE THIS ADDER */
+            END;
+            ENABLE;
+         END;
+      END;
+
+     /* $PAGE - S CURVE SPLICE COMPUTATION */
+
+     /* PERFORM S-CURVE SPLICES IF REQUESTED */
+
+      ELSE DO;
+
+         M=FMPTR+PTPTR;                  /* GET POINTER (HOPEFULLY) TO START OF TIMBRE FRAME */
+
+         WRITE(MAM)=PAR.PTR+SHR(M,8); 
+         WRITE(MAL)=M; 
+
+         IF READ(MDI)=MOR THEN BEGIN;    /* CHECK HERE IN CASE TIMBRE WAS RECALLED - SKIP WORD */
+            DCL (E.SEG.UDL,E.SEG.DDL) FIXED;
+
+            WRITE("300")=READ(MDI); 
+            WRITE("300")=READ(MDI);      /* SKIP TYPE, LEN */
+            I=READ(MDI)&255;             /* GET BASIC UP ADDER */
+            L=READ(MDI)&255;             /* AND ADDER FOR DOWN SEGMENT */
+            E.SEG.UDL=READ(MDI);
+            E.SEG.DDL=READ(MDI);
+            WRITE("300")=READ(MDI);
+            WRITE("300")=READ(MDI);      /* SKIP LIM, PDEL */
+
+            J=KBD.MILLISECONDS-PPTMB;    /* GET MILLISECONDS FROM START OF SPLICE */
+            K=READ(MDI);                 /* LOOK UP SPLICE TIME */
+            IF J IGE K THEN DO;          /* OOPS - PAST SPLICE TIME - LIMIT TO THERE,  STOP COMPUTATIONS */
+               J=K; P.E.E=0;             /* DONE WITH S CURVE SPLICE */
+            END;
+            IF J IGE SHR(K,1) THEN J=K-J;
+            J=SHL(J,1);                   /* COMPUTE TRIANGE 0 - K - 0 */
+            LOAD J; MUL E.SEG.UDL; N=RES;
+            DIV K; I=I+RES;               /* COMPUTE NEW ADDER */
+            IF P.E.E=3 THEN DO;           /* SPECIAL CHECK HERE IN CASE DOWN SPLICE IS FROM T.F. LOOP */
+               WRITE(MAM)=TBP;
+               WRITE(MAL)=TIM.LOOP.INTERP+PTL;
+               L=READ(MD)&255;            /* BUT USE THIS IF FROM LOOPING DOWN SPLICE */
+               WRITE(MAL)=TIM.LOOP.DELTAS+PTL;
+               LOAD J; MUL READ(MD);
+               N=RES; DIV K; L=L+RES;
+            END;
+            ELSE DO;                      /* NORMAL SPLICE */
+               LOAD J; MUL E.SEG.DDL;
+               N=RES; DIV K; L=L+RES;
+            END;
+            IF  (INC.POLY=0)
+            OR  ((MCHN&B.POLY)=0) THEN DO;    /* OR ORIGINAL SYNTHESIZER - COMPUTE ITEMS */
+               DISABLE;                       /* UPDATE SPLICE RATES HERE */
+               WRITE(CHA)=UCHN;               /* SET UP NEW DOWN R/C IN CHANNEL */
+               WRITE(FUN)=EADD; WRITE(DAT)=L; /* DOWN ADDER */
+               WRITE(CHA)=SUCHN;
+               WRITE(DAT)=I;                  /* UP ADDER */
+               ENABLE;
+            END;                              /* OF BEGIN FOR ORIGINAL SYNTHESIZER */
+            ELSE IF (INC.POLY<>0) THEN DO;    /* MEANS POLY SYNTH */
+               IF POLY.SPLICE THEN DO; END;   /* S- CURVE SPLICE */
+            END;
+         END;         /* OF BEGIN FOR FRAME STILL THERE */
+      END;            /* OF BEGIN FOR S/CURVE SPLICES */
+   END;               /* OF P.E.E NONZERO */
+
+   /* $PAGE */
+
+   IF (P.I.E<>0) THEN DO; /* PEFORM EXPONENTIATION ON INDEX DECAY */
+      IF P.I.E=1 THEN P.I.E=2;                /* DELAY FIRST */
+      ELSE DO;                                /* 2 - DO INDEX EXPONENTIATIN */
+         DO I=PRIOR.TIME TO SAMPLED.REAL.MILLISECONDS-10 BY 10; /* CORRECT FOR LOST TIME */
+            LOAD IDAT; MUL ITMC; IDAT=READ(4);   /* FRACTIONAL MULTIPLY */
+         END;
+         IF  ((INC.MONO=0)                       /* IF NO SAMPLING AT ALL */
+         AND  (INC.POLY=0))
+         OR (MCHN&(B.MONO\B.POLY))=0 THEN DO;    /* OR ORIGINAL SYNTHESIZER - COMPUTE ITEMS */
+            DISABLE;
+            WRITE(CHA)=MCHN; WRITE(FUN)=IADD; WRITE(DAT)=SHR(IDAT,8);
+            IF (SMCHN<>0) THEN DO;               /* UPDATE SPLICE CHANNEL TOO */
+               WRITE(CHA)=SMCHN; WRITE(DAT)=SHR(IDAT,8);
+            END;
+            ENABLE;
+         END;
+      END;
+   END;        /* OF P.I.E */
+
+END;           /* OF BEGIN FOR THIS FILE */

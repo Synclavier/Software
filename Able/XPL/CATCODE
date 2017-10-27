@@ -1,0 +1,1368 @@
+/* CATRTNS Code */
+
+/* These routines comprise the catalog management routines for the
+.  ABLE Series computer.  They include routines to read and write
+.  the catalog, look for files in the catalog, add files to the
+.  catalog, remove files from the catalog, etc.
+.
+.  These routines support the following catalog levels as well as
+.  explicitly addressed catalogs and cached catalogs:
+.    -2: Path catalog
+.    -1: Alternate catalog
+.     0: System catalog
+.     1: User catalog
+.     2: F0 (Leftmost floppy)
+.     3: F1 (Rightmost floppy)
+.     4: R0 (Remote floppy)
+.     5: R1 (Remote floppy)
+.     6: W0 (Winchester disk)
+.     7: W1 (Winchester disk)
+.     8: T0 (Cartridge tape)
+.     9: T1 (Cartridge tape)
+.
+.  These routines also support accessing files or catalogs by treename.
+.  The format of a treename is:
+.    <treename> := ( <pathname> ) <filename>
+.    <pathname> := ( (<devname>) :) { <catname> : }
+.    <devname>  := [ F0 | F1 | R0 | R1 | W0 | W1 | T0 | T1 ]
+.
+.  where spaces are inserted for readability (no spaces should appear in
+.  a treename), () represents optional productions, {} indicate zero
+.  or more repititions of the enclosed production, and [] represents
+.  "either" of the following productions (separated by |).
+.
+.  By:  Karim J. Chichakly on 30 October 1985
+.       from pieces of various other catalog routines by CWJ et al.
+.
+.  Modification history:
+.    15 Oct 1986:  Added TREENAMEs to level-oriented routines [KJC]
+.    28 May 1987:  Added TRUNCATE and SHORTENFILE [KJC]
+*/
+
+/* $subtitle Literal Declarations */
+
+   /* Catalog entry definitions */
+
+   dcl c#nm  lit '0'; /* filename (four words) */
+   dcl c#ls  lit '4'; /* LS starting sector */
+   dcl c#ll  lit '5'; /* LS sector length */
+   dcl c#wd  lit '6'; /* word length (modulo 64K) */
+   dcl c#ty  lit '7'; /* MS starting sector (8 bits)/MS sector length (4 bits)/file type (4 bits) */
+   dcl c#len lit '8'; /* number of words in a catalog entry */
+
+   dcl c#dir_max lit '1024'; /* maximum directory size (words) */
+
+
+   /* FCB definitions (used with GET_FCB and PUT_FCB) */
+
+   dcl f#nm  lit '0'; /* filename (four words) */
+   dcl f#ls  lit '4'; /* LS starting sector */
+   dcl f#ms  lit '5'; /* MS starting sector */
+   dcl f#ll  lit '6'; /* LS sector length */
+   dcl f#ml  lit '7'; /* MS sector length */
+   dcl f#wd  lit '8'; /* word length (modulo 64K) */
+   dcl f#ty  lit '9'; /* file type */
+   dcl f#len lit '10'; /* number of words in an FCB */
+
+   dcl f#name_len lit '4'; /* number of words in a filename */
+
+   /* $page */
+
+
+   /* File type definitions */
+
+   dcl t#text   lit '0'; /* text file */
+   dcl t#exec   lit '1'; /* executable binary */
+   dcl t#reloc  lit '2'; /* relocatable binary */
+   dcl t#data   lit '3'; /* data file */
+   dcl t#sync   lit '4'; /* synclavier sequence */
+   dcl t#sound  lit '5'; /* sound file */
+   dcl t#subc   lit '6'; /* subcatalog */
+   dcl t#lsubc  lit '7'; /* large subcatalog */
+   dcl t#dump   lit '8'; /* dump file */
+   dcl t#spect  lit '9'; /* spectral file */
+   dcl t#index  lit '10'; /* index file */
+   dcl t#timbre lit '11'; /* synclavier timbre */
+   dcl t#max    lit '11'; /* maximum defined filetype */
+
+
+   /* Errors returned in C#STATUS */
+
+   dcl e#none      lit '0'; /* no error encountered */
+   dcl e#OS        lit '1'; /* operating system error - magic number not set */
+   dcl e#buffer    lit '2'; /* no catalog buffer allocated */
+   dcl e#no_dir    lit '3'; /* no directory in memory */
+   dcl e#no_config lit '4'; /* device not configured */
+   dcl e#no_floppy lit '5'; /* no floppy in drive */
+   dcl e#FCB       lit '6'; /* FCB number out of bounds */
+   dcl e#level     lit '7'; /* level number out of bounds */
+   dcl e#storage   lit '8'; /* not enough available storage */
+   dcl e#cstorage  lit '9'; /* not enough contiguous storage available */
+   dcl e#dir_full  lit '10'; /* no entries left in the directory */
+   dcl e#invalid   lit '11'; /* invalid directory */
+   dcl e#name      lit '12'; /* invalid filename specified for operation requested */
+   dcl e#duplicate lit '13'; /* duplicate filename */
+   dcl e#no_file   lit '14'; /* file not found */
+   dcl e#not_cat   lit '15'; /* name specified is required to be a catalog, but isn't */
+   dcl e#treename  lit '16'; /* incorrect format for treename */
+   dcl e#no_path   lit '17'; /* intermediate catalog (in treename) not found */
+   dcl e#type      lit '18'; /* type mismatch between saved file and replaced file (ADDFILE/REPLACE only) */
+   dcl e#protect   lit '19'; /* write protected floppy */
+   dcl e#too_large lit '20'; /* file too large (>= 2^20 sectors) */
+   dcl e#truncate  lit '21'; /* truncation error - trying to expand a file (or truncate tape file) */
+	dcl e#diskerror lit '22'; /* disk error - could not read disk */
+
+   /* Caching literals */
+
+   dcl $_enabled   lit '0'; /* offset for cache enabled flag (lower eight bits) */
+   dcl $_bufmed    lit '0'; /* offset for cache media (upper 8 bits) */
+   dcl $_bufptr    lit '1'; /* offset for cache pointer */
+   dcl $_ms_sector lit '2'; /* offset for device/MS sector of catalog */
+   dcl $_ls_sector lit '3'; /* offset for LS sector of catalog */
+   dcl $_dir_size  lit '4'; /* offset for directory length (FLUSH_CACHE needs this) */
+   dcl $_vars      lit '5'; /* five variables/cache */
+   dcl $_default   lit '2'; /* number of default caches */
+
+   dcl max_depth lit '4'; /* number of treename levels we can cache */
+
+   /* $subtitle Global Variable Declarations */
+
+
+   /* Global catalog variables */
+
+   dcl c#status    fixed public; /* status of last catalog operation */
+   dcl c#bufptr    fixed public; c#bufptr = -1; /* pointer to the catalog buffer */
+   dcl c#bufmed    fixed public; /* catalog buffer media:  0 - main memory, 1 - external memory */
+   dcl c#ms_sector fixed public; /* device and MS starting sector of catalog */
+   dcl c#ls_sector fixed public; /* LS starting sector of catalog */
+   dcl c#ms_length fixed public; /* MS sector length of catalog (including directory) */
+   dcl c#ls_length fixed public; /* LS sector length of catalog (including directory) */
+   dcl c#dir_size  fixed public; /* size of catalog directory (in words) */
+	dcl c#err_level fixed public; /* level # of disk error */
+
+
+   /* Global file variables */
+
+   dcl f#name (f#name_len) fixed public; /* name of current subpart of scanned treename */
+
+   dcl f#ms_sector fixed public; /* device and MS starting sector of file */
+   dcl f#ls_sector fixed public; /* LS starting sector of file */
+   dcl f#ms_length fixed public; /* MS sector length of file */
+   dcl f#ls_length fixed public; /* LS sector length of file */
+   dcl f#words     fixed public; /* word length of file (modulo 64K) */
+   dcl f#type      fixed public; /* type of file */
+
+
+   /* Alternate catalog variables */
+
+   dcl a#name (f#name_len) fixed public; /* name of alternate catalog */
+
+   dcl a#ms_sector fixed public; /* device and MS starting sector of catalog */
+   dcl a#ls_sector fixed public; /* LS starting sector of catalog */
+   dcl a#ms_length fixed public; /* MS sector length of catalog (including directory) */
+   dcl a#ls_length fixed public; /* LS sector length of catalog (including directory) */
+   dcl a#dir_size  fixed public; /* size of catalog directory (in words) */
+
+
+   /* Caching variables */
+
+   dcl cache_vars ($_vars*$_default - 1) fixed; /* default support for two caches */
+   dcl caches        fixed; /* pointer to cache variable array */
+   dcl max_caches    fixed; /* size of cache variable array */
+   dcl catalog_cache fixed; catalog_cache = -1; /* cache number of catalog buffer (if used as a cache) */
+
+   dcl path_depth  fixed; /* depth (number of levels) of current pathname */
+   dcl path_cached boolean; path_cached = false; /* TRUE if the pathname is cached */
+
+   dcl names (max_depth*(f#name_len + 1) - 1) fixed; /* names of each level */
+   dcl name      (max_depth - 1) fixed; /* pointer to NAMES at each level */
+   dcl ms_sector (max_depth - 1) fixed; /* C#MS_SECTOR at each level */
+   dcl ls_sector (max_depth - 1) fixed; /* C#LS_SECTOR at each level */
+   dcl ms_length (max_depth - 1) fixed; /* C#MS_LENGTH at each level */
+   dcl ls_length (max_depth - 1) fixed; /* C#LS_LENGTH at each level */
+   dcl dir_siz   (max_depth - 1) fixed; /* C#DIR_SIZE at each level */
+   dcl topmost_level             fixed; /* level of catalog treename starts in */
+
+   dcl reinit_cache proc(fixed, fixed array) recursive;
+
+   call reinit_cache ($_default, cache_vars); /* set up for two caches */
+
+
+   /* Variables set by FIND_EXACT */
+
+   dcl last_free    fixed; /* FCB number of last free block */
+   dcl ms_lastfree  fixed; /* sector address of last free block */
+   dcl ls_lastfree  fixed;
+   dcl ms_remaining fixed; /* remaining sectors in catalog */
+   dcl ls_remaining fixed;
+
+
+   dcl fcb  (15)              fixed; /* global FCB (NOT preserved across calls!) [size must be max(F#LEN - 1, 15)] */
+   dcl fcb2 (f#len - 1)       fixed; /* global FCB (NOT preserved across calls!) [size must be max(F#LEN - 1, C#LEN - 1)] */
+   dcl entry (c#len - 1)      fixed; /* global catalog entry (set by GET_FCB and PUT_FCB only) */
+   dcl fname (f#name_len - 1) fixed; /* global cleaned up filename (set FINDFILE) */
+
+   /* $subtitle Filename Processing:  Valid_FileChar, Valid_Filename */
+
+
+   /* This procedure returns TRUE if the specified character is valid
+   .  in a filename.  Otherwise, it returns FALSE. */
+
+   valid_filechar: proc(c) returns (boolean) public; /* return TRUE if specified character is valid in a filename */
+      dcl c fixed; /* character to test */
+
+      if (c <= a.exclam) or (c = a.percent) or (c = a.and) or ((c >= a.star) and (c <= a.comma)) or (c = a.slash) /*  ctrl's space ! % & * + , /  */
+      or ((c >= a.colon) and (c <= a.at)) or (c = a.backslash) or (c = a.bar) or (c = a.star) or (c >= a.del) /*  : ; < = > ? @ \ | * DEL */
+      then return (false); /* these are invalid */
+      else return (true); /* valid filename character */
+   end valid_filechar;
+
+
+   /* This procedure returns TRUE if the specified NAME is a valid
+   .  filename.  Otherwise, it returns FALSE. */
+
+   valid_filename: proc(name) returns (boolean) public recursive swappable; /* return TRUE if passed filename is valid */
+      dcl name fixed array; /* filename to test */
+      dcl i    fixed;
+
+      if name (0) = 0 then return (false); /* there has to be a name */
+
+      do i = 0 to name (0) - 1; /* test the name */
+         if not valid_filechar (byte(name, i)) then return (false); /* no good */
+      end;
+
+      return (true); /* name is okay */
+   end valid_filename;
+
+   /* $subtitle Filename Processing:  Clean_Filename, Clean_FCBname */
+
+
+   /* This procedure converts the XPL string format NAME to an FCB format
+   .  name (starts at element 0, eight characters, uppercase, padded with
+   .  zeroes) and stores the result in the passed FCB_NAME. */
+
+   clean_filename: proc(name, fcb_name) public recursive swappable; /* convert XPL string format to FCB name format */
+      dcl name     fixed array; /* filename to clean */
+      dcl fcb_name fixed array; /* store result here */
+      dcl len      fixed; /* name length */
+      dcl (i, c)   fixed;
+
+      if name (0) ile shl(f#name_len, 1) then len = name (0); else len = shl(f#name_len, 1); /* len = min(name (0), f#name_len*2); restrict name to F#NAME_LEN*2 chars */
+
+      do i = 0 to shl(f#name_len, 1) - 1; /* clean up the name */
+         if i < len then do; /* get next character from name */
+            c = byte(name, i); /* get next character */
+            if c - l.a ile (l.z - l.a) then c = c - (l.a - a.a); /* uppercase it */
+         end; /* of get next character from name */
+         else c = a.null; /* pad with nulls */
+
+         call pbyte(loc(addr(fcb_name (0)) - 1), i, c); /* save in FCB_NAME */
+      end;
+   end clean_filename;
+
+
+   /* This procedure converts the FCB format name to an XPL string format
+   .  name and stores the result in the passed NAME.  The returned
+   .  NAME will be padded with spaces to F#NAME_LEN*2 characters,
+   .  but the length of the string (that is, NAME (0)) will be set
+   .  to the actual number of characters in the name. */
+
+   clean_fcbname: proc(fcb_name, name) public recursive swappable; /* convert FCB name to XPL string format */
+      dcl fcb_name fixed array; /* FCB name to convert */
+      dcl name     fixed array; /* store result here */
+      dcl len      fixed; /* name length */
+      dcl (i, c)   fixed;
+
+      len = 0; /* assume zero length */
+
+      do i = 0 to shl(f#name_len, 1) - 1; /* convert the name */
+         c = byte(loc(addr(fcb_name (0)) - 1), i); /* get next byte from FCB_NAME */
+
+         if c = a.null /* if it's a NULL */
+         then c = a.sp; /* convert to space */
+         else len = len + 1; /* found another filename character */
+
+         call pbyte(name, i, c); /* save in NAME */
+      end;
+
+      name (0) = len; /* save length */
+   end clean_fcbname;
+
+   /* $subtitle Logical FCB Handling:  Get_FCB */
+
+
+   /* This procedure extracts FCB number FCB# (where FCBs are numbered from
+   .  zero to C#DIR_SIZE/C#LEN - 1) from the catalog buffer.  If FCB# is
+   .  out of bounds (or there is no catalog buffer), a boolean FALSE is
+   .  returned.  Otherwise, the FCB is returned in the passed array FCB. */
+
+   get_fcb: proc(fcb#, fcb) returns (boolean) public; /* extract an FCB from the catalog buffer */
+      dcl fcb# fixed; /* FCB number of block to get */
+      dcl fcb  fixed array; /* fcb array */
+      dcl i    fixed;
+
+      c#status = e#none; /* no errors yet */
+
+      if c#bufptr = -1 then do; /* if no buffer */
+         c#status = e#buffer;
+         return (false);
+      end;
+
+      if ((c#ms_sector = -1) and (c#ls_sector = -1)) then do; /* if no catalog */
+         c#status = e#no_dir;
+         return (false);
+      end;
+
+      if fcb# ige shr(c#dir_size, 3) then do; /* if the FCB number's out of bounds */
+         c#status = e#FCB;
+         return (false);
+      end;
+
+      fcb# = shl(fcb#, 3); /* convert the FCB number into a pointer into the catalog buffer */
+
+      if c#bufmed = 0 then do; /* if the catalog's in main memory */
+         do i = 0 to f#name_len - 1; /* get the name */
+            fcb (f#nm + i) = core(c#bufptr + fcb# + c#nm + i);
+         end;
+
+         fcb (f#ms) = shr(core(c#bufptr + fcb# + c#ty), 8); /* get starting sector */
+         fcb (f#ls) = core(c#bufptr + fcb# + c#ls);
+         fcb (f#ml) = (shr(core(c#bufptr + fcb# + c#ty), 4) and "17"); /* get sector length */
+         fcb (f#ll) = core(c#bufptr + fcb# + c#ll);
+         fcb (f#wd) = core(c#bufptr + fcb# + c#wd); /* get word length */
+         fcb (f#ty) = (core(c#bufptr + fcb# + c#ty) and "17"); /* get file type */
+      end; /* of catalog in main memory */
+      else do; /* catalog's in external memory */
+         call import (c#bufptr, fcb#, entry, c#len); /* get the entry from external memory */
+
+         do i = 0 to f#name_len - 1; /* get the name */
+            fcb (f#nm + i) = entry (c#nm + i);
+         end;
+
+         fcb (f#ms) = shr(entry (c#ty), 8); /* get starting sector */
+         fcb (f#ls) = entry (c#ls);
+         fcb (f#ml) = (shr(entry (c#ty), 4) and "17"); /* get sector length */
+         fcb (f#ll) = entry (c#ll);
+         fcb (f#wd) = entry (c#wd); /* get word length */
+         fcb (f#ty) = (entry (c#ty) and "17"); /* get file type */
+      end; /* of catalog in external memory */
+
+      return (true); /* we got the FCB */
+   end get_fcb;
+
+   /* $subtitle Logical FCB Handling:  Put_FCB */
+
+
+   /* This procedure puts the contents of array FCB into FCB number FCB#
+   .  of the catalog buffer.  If FCB# is out of bounds (or there is no
+   .  catalog buffer), a boolean FALSE is returned. */
+
+   put_fcb: proc(fcb#, fcb) returns (boolean) public; /* replace an FCB into the catalog buffer */
+      dcl fcb# fixed; /* FCB number of block to get */
+      dcl fcb  fixed array; /* fcb array */
+      dcl i    fixed;
+
+      if c#bufptr = -1 then do; /* if no buffer */
+         c#status = e#buffer;
+         return (false);
+      end;
+
+      if ((c#ms_sector = -1) and (c#ls_sector = -1)) then do; /* if no catalog */
+         c#status = e#no_dir;
+         return (false);
+      end;
+
+      if fcb# ige shr(c#dir_size, 3) then do; /* if the FCB number's out of bounds */
+         c#status = e#FCB;
+         return (false);
+      end;
+
+      fcb# = shl(fcb#, 3); /* convert the FCB number into a pointer into the catalog buffer */
+
+      if c#bufmed = 0 then do; /* if the catalog's in main memory */
+         do i = 0 to f#name_len - 1; /* put the name */
+            core(c#bufptr + fcb# + c#nm + i) = fcb (f#nm + i);
+         end;
+
+         core(c#bufptr + fcb# + c#ls) = fcb (f#ls); /* put the LS starting sector */
+         core(c#bufptr + fcb# + c#ll) = fcb (f#ll); /* put the LS sector length */
+         core(c#bufptr + fcb# + c#wd) = fcb (f#wd); /* put the word length */
+         core(c#bufptr + fcb# + c#ty) = (shl(fcb (f#ms), 8) or shl(fcb (f#ml) and "17", 4) or (fcb (f#ty) and "17")); /* put MS sector/MS length/type */
+      end; /* of catalog in main memory */
+      else do; /* catalog's in external memory */
+         do i = 0 to f#name_len - 1; /* put the name */
+            entry (c#nm + i) = fcb (f#nm + i);
+         end;
+
+         entry (c#ls) = fcb (f#ls); /* put the LS starting sector */
+         entry (c#ll) = fcb (f#ll); /* put the LS sector length */
+         entry (c#wd) = fcb (f#wd); /* put the word length */
+         entry (c#ty) = (shl(fcb (f#ms), 8) or shl(fcb (f#ml) and "17", 4) or (fcb (f#ty) and "17")); /* put MS sector/MS length/type */
+
+         call export (c#bufptr, fcb#, entry, c#len); /* put the entry in external memory */
+      end; /* of catalog in external memory */
+
+      return (true); /* we put the FCB */
+   end put_fcb;
+
+   insert ':xpl:catsubs'; /* get utility subroutines */
+
+   /* $subtitle Cache Interface:  Cache, Cache_Treename */
+
+
+   /* This procedure caches the catalog buffer into the buffer pointed
+   .  to by BUFPTR and sets up the catalog routines to treat that buffer
+   .  as equivalent to whatever catalog was originally read into the
+   .  catalog buffer.  It returns the cache number for this buffer.  If
+   .  there are no available caches, a minus one (-1) is returned. */
+
+   cache: proc(bufptr, bufmed) returns (fixed) public recursive swappable; /* cache contents of catalog buffer */
+      dcl bufptr fixed; /* pointer to new cache */
+      dcl bufmed fixed; /* cache media:  0 - main memory, 1 - external memory */
+      dcl found  boolean; /* TRUE if we find a free cache */
+      dcl (i, j) fixed;
+
+      i = caches; j = 0; found = false;
+      do while ((j ilt max_caches) and (not found)); /* thumb through caches */
+         if core(i + $_enabled) then do; /* if this one's in use */
+            i = i + $_vars; /* look at next cache */
+            j = j + 1;
+         end;
+         else found = true; /* we found a cache for this catalog */
+      end; /* of thumbing through caches */
+
+      if found then do; /* if we found one */
+         if ((bufptr = c#bufptr) and (bufmed = c#bufmed)) then do; /* if we're turning the catalog buffer into a cache */
+            core(i + $_ms_sector) = -1; /* invalidate the entry so it caches after the next READCAT */
+            core(i + $_ls_sector) = -1;
+            core(i + $_dir_size)  = -1;
+            catalog_cache = j; /* remember which cache it is to keep it up-to-date */
+         end;
+         else do; /* not caching the catalog buffer in itself */
+            if ((c#bufptr = -1) or ((c#ms_sector = -1) and (c#ls_sector = -1))) /* we must have a catalog here */
+            then return (-1); /* oops */
+
+            core(i + $_ms_sector) = c#ms_sector; /* remember where it came from */
+            core(i + $_ls_sector) = c#ls_sector;
+            core(i + $_dir_size)  = c#dir_size; /* remember the directory length */
+
+            if j = catalog_cache then catalog_cache = -1; /* the catalog cache has been reassigned */
+         end;
+
+         core(i + $_enabled) = (shl(bufmed, 8) or 1); /* set media and enable it */
+         core(i + $_bufptr)  = bufptr; /* save cache address */
+
+         call write_cache (i); /* cache it */
+
+         return (j); /* return cache number */
+      end; /* of found a free cache */
+      else return (-1); /* no free caches */
+   end cache;
+
+
+   /* It is possible for the intermediate levels of a treename to be
+   .  cached so that successive searches down part or all of the same
+   .  treename can proceed without accessing the disk.  This procedure
+   .  enables or disables this feature (it is initially disabled).
+   .  Whenever this procedure is called with ENABLE set to TRUE,
+   .  the currently cached treename is forgotten. */
+
+   cache_treename: proc(enable) public recursive swappable; /* enable/disable treename caching */
+      dcl enable boolean; /* TRUE to enable treename caching */
+
+      path_cached = enable;
+
+      if path_cached /* if we just enabled caching */
+      then path_depth = 0; /* forget currently cached treename (if any) */
+   end cache_treename;
+
+   /* $subtitle Cache Interface:  Reinit_Cache, Flush_Cache */
+
+
+   /* The catalog routines can handle up to two caches normally.  This
+   .  is because the caching code uses a number of state variables to
+   .  maintain the caches and only allocates enough state variables for
+   .  two caches.  If more than two caches are needed, it is necessary
+   .  to provide the catalog routines with a buffer to store the state
+   .  variables for these caches.  This procedure allows you to provide
+   .  this buffer.  N is the number of caches desired and BUFFER is the
+   .  storage area for the state variables.  BUFFER must be N*$_VARS
+   .  words long. */
+
+   reinit_cache: proc(n, buffer) public recursive swappable; /* reinitialize caching to provide for N caches */
+      dcl n      fixed; /* number of caches to create */
+      dcl buffer fixed array; /* cache state variable storage area */
+      dcl (i, j) fixed;
+
+      max_caches = n; /* save the number of caches created */
+      caches = addr(buffer (0)); /* and pointer to the state variables */
+
+      i = caches;
+      do j = 0 to max_caches - 1; /* initialize all caches */
+         core(i + $_enabled) = (not 1); /* disable them all */
+         i = i + $_vars; /* look at next cache */
+      end;
+   end reinit_cache;
+
+
+   /* This procedure causes cache number N (set up with CACHE above) to
+   .  be flushed to disk/tape.  The cache remains "enabled".  If there
+   .  is no cache with number N, nothing happens.  If the cache cannot
+   .  be written a boolean FALSE is returned and C#STATUS contains the
+   .  error. */
+
+   flush_cache: proc(n) returns (boolean) public recursive swappable; /* flush cache N to disk/tape */
+      dcl n fixed; /* cache to flush */
+      dcl i fixed; /* pointer to cache N */
+
+      if n ilt max_caches then do; /* if it's in range */
+         i = caches + n*$_vars; /* compute pointer to cache N */
+
+         if core(i + $_enabled) then do; /* if the cache is enabled */
+            n = disk_check (shr(core (i + $_ms_sector), 8)); /* check floppy disk */
+
+            if n = 0 then do; /* no floppy in drive? */
+               c#status = e#no_floppy;
+               return (false);
+            end;
+
+            if (n and d#protect) <> 0 then do; /* write protected floppy? */
+               c#status = e#protect;
+               return (false);
+            end;
+
+            // Synclavier3 - protected W0
+            if ((interp_w0_write_protected(0) != 0)
+            &&  (shr(core (i + $_ms_sector), 8) == 6)
+            &&  ((((core (i + $_ms_sector) & 0xFF) ilt interp_w0_allow_write_ms(0)))
+            ||   (((core (i + $_ms_sector) & 0xFF) ieq interp_w0_allow_write_ms(0))
+            &&    ((core (i + $_ls_sector)       ) ilt interp_w0_allow_write_ls(0)))))
+            {
+               c#status = e#protect;
+               return (false);
+            }
+   
+            if shr(core(i + $_bufmed), 8) = 0 /* if cached in main memory */
+            then call writedata (core(i + $_ms_sector), core(i + $_ls_sector), loc(core(i + $_bufptr)), core(i + $_dir_size)); /* write from main to disk */
+            else do; /* cached in external memory */
+               fcb (0) = core(i + $_bufptr); fcb (1) = 0; /* set external memory sector */
+               fcb (2) = 0; fcb (3) = core(i + $_dir_size); /* set length to write */
+               call extwrite (core(i + $_ms_sector), core(i + $_ls_sector), fcb); /* write from external to disk */
+            end; /* of external memory */
+				interp_catalog_update(core(i + $_ms_sector), core(i + $_ls_sector));
+         end; /* of cache enabled */
+      end; /* of in range */
+
+      return (true); /* wrote it alright */
+   end flush_cache;
+
+   /* $subtitle Cache Interface:  Disable_Cache, Enable_Cache */
+
+
+   /* This procedure temporarily disables the caching function for
+   .  the catalog associated with cache number N.  If there is no
+   .  cache with number N, nothing happens.
+   .
+   .  Warning:  If CACHE is called while some cache is disabled, the
+   .            disabled cache may be reassigned the new catalog. */
+
+   disable_cache: proc(n) public recursive swappable; /* disable cache N */
+      dcl n fixed; /* cache to disable */
+
+      if n ilt max_caches /* if it's in range */
+      then core((caches + n*$_vars) + $_enabled) = (core((caches + n*$_vars) + $_enabled) and "177400"); /* disable it */
+   end disable_cache;
+
+
+   /* This procedure enables (after a disable) the caching function for
+   .  the catalog associated with cache number N.  If there is no cache
+   .  with number N, nothing happens. */
+
+   enable_cache: proc(n) public recursive swappable; /* enable cache N */
+      dcl n fixed; /* cache to enable */
+      dcl i fixed;
+
+      if n ilt max_caches then do; /* if it's in range */
+         i = caches + n*$_vars; /* get cache pointer */
+
+         if core(i + $_enabled) <> (not 1) then do; /* if the cache exists */
+            core(i + $_enabled) = ((core(i + $_enabled) and "177400") or 1); /* enable it */
+
+            if n = catalog_cache then do; /* if it's the catalog buffer cache */
+               core(i + $_ms_sector) = -1; /* invalidate the entry so it caches after the next READCAT */
+               core(i + $_ls_sector) = -1;
+               core(i + $_dir_size)  = -1;
+            end;
+         end; /* of cache exists */
+      end; /* of in range */
+   end enable_cache;
+
+   /* $subtitle Buffer Interface:  ReadCat */
+
+   /* This procedure causes the catalog at the specified MS_SECTOR|LS_SECTOR
+   .  to be read into the catalog buffer.  All of the catalog variables are
+   .  set by this routine.  If READCAT is unable to determine C#MS_LENGTH
+   .  and C#LS_LENGTH (e.g., for subcatalogs), they will be set to the
+   .  passed MS_LENGTH and LS_LENGTH.  If there is no catalog buffer, a
+   .  boolean FALSE is returned. */
+
+   readcat: proc(ms_sector, ls_sector, dir_size, ms_length, ls_length) returns (boolean) public recursive swappable; /* read in a catalog */
+      dcl ms_sector fixed; /* device/MS sector of catalog to read */
+      dcl ls_sector fixed; /* LS sector of catalog to read */
+      dcl dir_size  fixed; /* word length of catalog directory */
+      dcl ms_length fixed; /* MS sector length of catalog estimate */
+      dcl ls_length fixed; /* LS sector length of catalog estimate */
+      dcl (i, j)    fixed;
+
+      c#status = e#none; /* no errors yet */
+
+      if core(loc.magic) <> 12345 then do; /* check for correct operating system */
+         c#status = e#OS;
+         return (false);
+      end;
+
+      if c#bufptr = -1 then do; /* if no buffer yet, we're in trouble */
+         c#status = e#buffer;
+         return (false);
+      end;
+
+      if shr(ms_sector, 8) = 0 then do; /* disallow generic read of system catalog for now */
+         c#status = e#no_config;
+         return (false);
+      end;
+
+      if find_device (shr(ms_sector, 8)) = 0 then do; /* not configured? */
+         c#status = e#no_config;
+         return (false);
+      end;
+
+      if not read_cache (ms_sector, ls_sector, dir_size) then do; /* if it isn't cached */
+         if disk_check (shr(ms_sector, 8)) = 0 then do; /* no floppy in drive? */
+            c#status = e#no_floppy;
+            return (false);
+         end;
+
+			disk.io.setup();
+			
+         if c#bufmed = 0 /* if buffer in main memory */
+         then call readdata (ms_sector, ls_sector, loc(c#bufptr), dir_size); /* read from disk to main */
+         else do; /* buffer in external memory */
+            fcb (0) = c#bufptr; fcb (1) = 0; /* set external memory sector */
+            fcb (2) = 0; fcb (3) = dir_size; /* set length to read */
+            call extread (ms_sector, ls_sector, fcb); /* read from disk to external */
+         end; /* of external memory */
+			
+			if (disk.io.cleanup() != 0)					/* if could not read the catalog... */
+			{
+				c#err_level = shr(ms_sector, 8);
+				c#status    = e#diskerror;
+				return (false);
+			}
+  		end; /* of isn't cached */
+
+      if catalog_cache <> -1 then do; /* if the catalog buffer is being used as a cache */
+         i = caches + catalog_cache*$_vars; /* get cache pointer */
+         if core(i + $_enabled) then do; /* if enabled */
+            core(i + $_ms_sector) = ms_sector; /* remember where it came from */
+            core(i + $_ls_sector) = ls_sector;
+            core(i + $_dir_size) = dir_size; /* remember the directory length */
+         end;
+      end; /* of catalog buffer being used as a cache */
+
+      c#ms_sector = ms_sector; /* remember device/MS sector */
+      c#ls_sector = ls_sector; /* and LS sector */
+      c#dir_size = dir_size; /* and the directory length */
+
+      i = 0;
+      do while ((c#status = e#none) and (i < shr(c#dir_size, 3))); /* check validity - do BEFORE size for floppies */
+         call get_fcb (i, fcb); /* get next FCB */
+
+         do j = f#nm to f#nm + f#name_len - 1;  /* check the name */
+            if (fcb (j) and "100200") <> 0 		/* make sure the name's okay */
+            then c#status = e#invalid; 			/* invalid catalog */
+            if (fcb (j) = 0x6363)					/* blank optical media */
+            then c#status = e#invalid; 			/* invalid catalog */
+         end;
+
+         i = i + 1;
+      end; /* of checking validity */
+
+      call set_size (ms_length, ls_length); /* try to figure out the size */
+
+      return (c#status = e#none); /* we got the catalog (it may be valid) */
+   end readcat;
+
+   /* $subtitle Buffer Interface:  Set_CatBuf, WriteCat */
+
+
+   /* This sets the catalog buffer for all subsequent catalog operations to
+   .  the buffer pointed to by BUFPTR.  It is the user's responsibility to
+   .  make sure the buffer is large enough to hold the catalog being read.
+   .  After this is called, C#BUFPTR points to the catalog buffer. */
+
+   set_catbuf: proc(bufptr, bufmed) public recursive swappable; /* set the catalog buffer pointer */
+      dcl bufptr fixed; /* catalog buffer pointer */
+      dcl bufmed fixed; /* catalog buffer media:  0 - main memory, 1 - external memory */
+
+      c#bufptr = bufptr; /* set up pointer */
+      c#bufmed = bufmed; /* set media */
+      c#ms_sector = -1; c#ls_sector = -1; /* no catalog in memory yet */
+      f#ms_sector = -1; f#ls_sector = -1; /* be paranoid */
+   end set_catbuf;
+
+
+   /* This procedure writes the catalog buffer to the MS_SECTOR|LS_SECTOR
+   .  it was last read from.  It returns FALSE if there's no buffer. */
+
+   writecat: proc returns (boolean) public recursive swappable; /* write out the catalog buffer */
+      dcl i fixed;
+
+      if c#bufptr = -1 then do; /* if no buffer */
+         c#status = e#buffer;
+         return (false);
+      end;
+
+      if ((c#ms_sector = -1) and (c#ls_sector = -1)) then do; /* if no catalog */
+         c#status = e#no_dir;
+         return (false);
+      end;
+
+      if not write_cache (-1) then do; /* if it isn't cached */
+         i = disk_check (shr(c#ms_sector, 8)); /* check floppy disk */
+
+         if i = 0 then do; /* no floppy in drive? */
+            c#status = e#no_floppy;
+            return (false);
+         end;
+
+         if (i and "2") <> 0 then do; /* write protected floppy? */
+            c#status = e#protect;
+            return (false);
+         end;
+
+         // Synclavier3 - protected W0
+         if ((interp_w0_write_protected(0) != 0)
+         &&  (shr(c#ms_sector, 8) == 6)
+         &&  ((((c#ms_sector & 0xFF) ilt interp_w0_allow_write_ms(0)))
+         ||   (((c#ms_sector & 0xFF) ieq interp_w0_allow_write_ms(0))
+         &&    ((c#ls_sector       ) ilt interp_w0_allow_write_ls(0)))))
+         {
+            c#status = e#protect;
+            return (false);
+         }
+   
+         if c#bufmed = 0 /* if buffer in main memory */
+         then call writedata (c#ms_sector, c#ls_sector, loc(c#bufptr), c#dir_size); /* write from main to disk */
+         else do; /* buffer in external memory */
+            fcb (0) = c#bufptr; fcb (1) = 0; /* set external memory sector */
+            fcb (2) = 0; fcb (3) = c#dir_size; /* set length to write */
+            call extwrite (c#ms_sector, c#ls_sector, fcb); /* write from external to disk */
+         end; /* of external memory */
+			interp_catalog_update(c#ms_sector, c#ls_sector);
+      end; /* of isn't cached */
+
+      return (true); /* we wrote it okay */
+   end writecat;
+
+   /* $subtitle Buffer Interface:  FindFile */
+
+
+   /* This procedure searches the catalog buffer for the file with name
+   .  NAME.  If it is found, the FCB number for the file is returned and
+   .  all the file variables are set.  Otherwise, a minus one (-1) is
+   .  returned (and C#STATUS may contain an error).  After calling
+   .  FINDFILE, the global variable FNAME contains the passed NAME
+   .  in FCB format. */
+
+   findfile: proc(name) returns (fixed) public recursive swappable; /* find a file in the catalog buffer */
+      dcl name   fixed array; /* name of file to find */
+      dcl found  boolean; /* TRUE if we find it */
+      dcl (i, j) fixed;
+
+      if name (0) = 0 then do; /* null filename not allowed */
+         c#status = e#name; /* bad filename */
+         return (-1); /* not found */
+      end;
+
+      call clean_filename (name, fname); /* clean up the name */
+
+      i = -1; found = false;
+      do while ((not found) and (i < shr(c#dir_size, 3) - 1)); /* search the entire catalog */
+         i = i + 1; /* look at next FCB */
+         if not get_fcb (i, fcb) then return (-1); /* get the next FCB */
+
+         found = true; /* assume it matches */
+         do j = 0 to f#name_len - 1; /* check entire name */
+            if fname (j) <> fcb (f#nm + j) then found = false; /* does this entry match? */
+         end;
+      end; /* of searching entire catalog */
+
+      if found then do; /* if we found it */
+         f#ms_sector = c#ms_sector + fcb (f#ms); /* set starting sector */
+         f#ls_sector = c#ls_sector + fcb (f#ls);
+         if f#ls_sector ilt c#ls_sector then f#ms_sector = f#ms_sector + 1;
+
+         f#ms_length = fcb (f#ml); /* set sector length */
+         f#ls_length = fcb (f#ll);
+         f#words = fcb (f#wd); /* set word length */
+         f#type = fcb (f#ty); /* set file type */
+         return (i); /* return the FCB number */
+      end; /* of found it */
+      else do; /* didn't find it */
+         c#status = e#no_file;
+         return (-1);
+      end;
+   end findfile;
+
+   /* $subtitle Buffer Interface:  ReadDir, RemoveFile */
+
+
+   /* This procedure searches the catalog buffer for the file with the name
+   .  NAME.  If it is found and the file is a catalog, its directory is
+   .  read into the catalog buffer and a boolean TRUE is returned.  All
+   .  of the catalog variables are set by this routine. */
+
+   readdir: proc(name) returns (boolean) public recursive swappable; /* read directory */
+      dcl name fixed array; /* name of directory to read */
+      dcl i    fixed;
+
+      if findfile (name) = -1 then do; /* search for the named catalog */
+         if c#status = e#no_file then c#status = e#no_path; /* change file not there to catalog not there */
+         return (false);
+      end;
+
+      if      f#type = t#subc  then i = 256; /* determine directory size */
+      else if f#type = t#lsubc then i = 1024;
+      else do; /* not a directory! */
+         c#status = e#not_cat;
+         return (false);
+      end;
+
+      return (readcat (f#ms_sector, f#ls_sector, i, f#ms_length, f#ls_length)); /* read it in */
+   end readdir;
+
+
+   /* This procedure removes the file named NAME from the catalog buffer.
+   .  If the file isn't found, a boolean FALSE is returned.  All the file
+   .  variables are set (according to the file being removed). */
+
+   removefile: proc(name) returns (boolean) public recursive swappable; /* remove file NAME from catalog */
+      dcl name fixed array; /* name of file to remove */
+      dcl fcb# fixed; /* FCB number for file to remove */
+      dcl i    fixed;
+
+      fcb# = findfile (name); /* search for file */
+      if fcb# = -1 then return (false); /* no such file */
+
+      call check_polycache (f#type); /* zap polycache if necessary */
+      call get_fcb (fcb#, fcb); /* extract the FCB for this file */
+
+      do i = f#nm to f#nm + f#name_len - 1; fcb (i) = 0; end; /* zap name */
+      fcb (f#wd) = 0; /* zap word length (but leave sector length for hole) */
+
+      if ((shr(c#ms_sector, 8) = 8) or (shr(c#ms_sector, 8) = 9)) then do; /* for tape drives, deleted blocks are gone for good */
+         fcb (f#ms) = 0; fcb (f#ls) = 0; fcb (f#ml) = 0; fcb (f#ll) = 0; /* free FCB */
+      end;
+
+      call put_fcb (fcb#, fcb); /* write block back out */
+
+      return (true); /* we removed the file */
+   end removefile;
+
+   /* $subtitle Buffer Interface:  AddFile */
+
+
+   /* This procedure adds (or replaces) the file named NAME with type TYPE,
+   .  sector length MS_SECTORS|LS_SECTORS, and word length (mod 64K) LENGTH
+   .  to the catalog buffer.  If there is no room in the catalog for the
+   .  file, a boolean FALSE is returned and C#STATUS contains the reason
+   .  for failure.  Otherwise, a boolean TRUE is returned and all the file
+   .  variables are set. */
+
+   addfile: proc(name, type, ms_sectors, ls_sectors, length) returns (boolean) public recursive swappable; /* add file NAME to catalog */
+      dcl name       fixed array; /* name of file to add */
+      dcl type       fixed; /* type of new file */
+      dcl ms_sectors fixed; /* MS sector length of new file */
+      dcl ls_sectors fixed; /* LS sector length of new file */
+      dcl length     fixed; /* word length of new file */
+      dcl hole       fixed; /* FCB number of correct size hole */
+      dcl i          fixed;
+
+      if findfile (name) <> -1 then do; /* see if file's already there */
+         if f#type <> type then do; /* does the type match? */
+            c#status = e#type; /* no, this is serious */
+            return (false);
+         end;
+      end;
+
+      if not removefile (name) then do; /* remove the file if already there */
+         if not valid_filename (name) then do; /* new file - make sure it's name is valid */
+            c#status = e#name; /* bad filename */
+            return (false);
+         end;
+      end; /* of removing the file */
+
+      hole = findfree (ms_sectors, ls_sectors); /* look for a free block of the correct size */
+      if hole = -1 then return (false); /* not enough space */
+
+      if ((ms_sectors = 0) and (ls_sectors ilt 256) /* if less than 64K words */
+      and (length igt shl(ls_sectors, 8))) /* and LENGTH implies more sectors than requested */
+      then length = shl(ls_sectors, 8); /* restrict length */
+
+      call get_fcb (hole, fcb); /* get the hole's FCB */
+
+      do i = 0 to f#name_len - 1; fcb (f#nm + i) = fname (i); end; /* save name (FNAME was set by REMOVEFILE) */
+      fcb (f#wd) = length; /* save word length */
+      fcb (f#ty) = type; /* save file type */
+
+      call put_fcb (hole, fcb); /* put altered FCB back */
+
+      f#ms_sector = c#ms_sector + fcb (f#ms); /* return starting sector and device */
+      f#ls_sector = c#ls_sector + fcb (f#ls);
+      if f#ls_sector ilt c#ls_sector then f#ms_sector = f#ms_sector + 1;
+
+      f#ms_length = fcb (f#ml); /* return number of sectors */
+      f#ls_length = fcb (f#ll);
+      f#words = fcb (f#wd); /* return word length */
+      f#type = fcb (f#ty); /* return file type */
+      call check_polycache (f#type); /* zap polycache if necessary */
+
+      return (true); /* we've added the file */
+   end addfile;
+
+   /* $subtitle Buffer Interface:  ShortenFile */
+
+
+   /* This procedure truncates a block in the catalog buffer.  The
+   .  rest of the block is returned to free storage.  A boolean TRUE
+   .  is returned if the operation is successful.  Otherwise, FALSE
+   .  is returned and C#STATUS contains the reason for failure. */
+
+   shortenfile: proc(name, ms_sectors, ls_sectors, length) returns (boolean) public recursive swappable; /* shorten file NAME */
+      dcl name       fixed array; /* name of file to truncate */
+      dcl ms_sectors fixed; /* new MS sector length of file */
+      dcl ls_sectors fixed; /* new LS sector length of file */
+      dcl length     fixed; /* new word length of file */
+      dcl fcb#       fixed; /* FCB number for file to truncate */
+      dcl hole       fixed; /* FCB number of a hole */
+
+      fcb# = findfile (name); /* search for file */
+      if fcb# = -1 then return (false); /* no such file */
+
+      if ((shr(c#ms_sector, 8) = 8) or (shr(c#ms_sector, 8) = 9)) then do; /* is this the tape drive? */
+         c#status = e#truncate; /* cannot truncate a tape file */
+         return (false);
+      end; /* of tape drive */
+
+      call check_polycache (f#type); /* zap polycache if necessary */
+      call get_fcb (fcb#, fcb); /* get file block */
+
+      if ((ms_sectors igt fcb (f#ml)) /* if too large */
+      or ((ms_sectors = fcb (f#ml)) and (ls_sectors igt fcb (f#ll)))) then do;
+         c#status = e#truncate; /* cannot expand a file with truncate */
+         return (false);
+      end; /* of too large */
+
+      if ((ms_sectors <> fcb (f#ml)) or (ls_sectors <> fcb (f#ll))) then do; /* if sector length's changed */
+         if not consolidate then return (false); /* consolidate free blocks */
+         hole = find_exact (-1, -1, false); /* see if there are any free blocks */
+         if hole = -1 then return (false); /* no room for it in directory */
+
+         call get_fcb (fcb#, fcb); /* get file block again (above calls trash FCB) */
+         call get_fcb (hole, fcb2); /* get hole */
+
+         fcb2 (f#ms) = fcb (f#ms) + ms_sectors; /* start free block after this */
+         fcb2 (f#ls) = fcb (f#ls) + ls_sectors;
+         if fcb2 (f#ls) ilt ls_sectors then fcb2 (f#ms) = fcb2 (f#ms) + 1;
+
+         fcb2 (f#ml) = fcb (f#ml) - ms_sectors; /* set up free block's length */
+         if fcb (f#ll) ilt ls_sectors then fcb2 (f#ml) = fcb2 (f#ml) - 1;
+         fcb2 (f#ll) = fcb (f#ll) - ls_sectors;
+
+         call put_fcb (hole, fcb2); /* write out free block */
+
+         fcb (f#ml) = ms_sectors;  fcb (f#ll) = ls_sectors; /* update file's sector length */
+      end; /* of sector length has changed */
+
+      fcb (f#wd) = length; /* update word length */
+      call put_fcb (fcb#, fcb); /* and update file */
+
+      return (true); /* we've shortened the file */
+   end shortenfile;
+
+   /* $subtitle Buffer Interface:  RenameFile, FindStorage, FindMax */
+
+
+   /* This procedure renames the file named OLD_NAME to NEW_NAME in the
+   .  catalog buffer.  If the file named OLD_NAME is not found, a boolean
+   .  FALSE is returned.  Otherwise, a boolean TRUE is returned and the
+   .  file variables are set. */
+
+   renamefile: proc(old_name, new_name) returns (boolean) public recursive swappable; /* rename OLD_NAME to NEW_NAME */
+      dcl old_name fixed array; /* name of file to look for */
+      dcl new_name fixed array; /* new name for that file */
+      dcl fcb#     fixed; /* FCB number of file to rename */
+      dcl i        fixed;
+
+      fcb# = findfile (old_name); /* search for file */
+      if fcb# = -1 then return (false); /* no such file */
+
+      if not valid_filename (new_name) then do; /* make sure the new name is valid */
+         c#status = e#name; /* bad filename */
+         return (false);
+      end;
+
+      if findfile (new_name) <> -1 then do; /* make sure it isn't already there */
+         c#status = e#duplicate; /* duplicate filename */
+         return (false);
+      end;
+
+      call check_polycache (f#type); /* zap polycache if necessary */
+      call get_fcb (fcb#, fcb); /* get the FCB */
+      do i = 0 to f#name_len - 1; fcb (f#nm + i) = fname (i); end; /* change the name (FNAME was set by FINDFILE) */
+      call put_fcb (fcb#, fcb); /* put back the altered FCB */
+
+      return (true); /* we've renamed the file */
+   end renamefile;
+
+
+   /* This procedure searches the catalog buffer for a free contiguous
+   .  block of storage that has a size of MS_SECTORS|LS_SECTORS.  If
+   .  such a block is found, the FCB number of that block is returned.
+   .  Otherwise, a minus one (-1) is returned and C#STATUS contains
+   .  the reason for failure.  All the file variables are set. */
+
+   findstorage: proc(ms_sectors, ls_sectors) returns (fixed) public recursive swappable; /* find storage */
+      dcl ms_sectors fixed; /* MS sector length of block to find */
+      dcl ls_sectors fixed; /* LS sector length of block to find */
+      dcl hole       fixed; /* FCB number of correct size hole */
+
+      hole = findfree (ms_sectors, ls_sectors); /* look for a hole of the correct size */
+
+      if hole <> -1 then do; /* if we have the storage */
+         call get_fcb (hole, fcb); /* read in the hole's FCB */
+
+         f#ms_sector = c#ms_sector + fcb (f#ms); /* return starting sector and device */
+         f#ls_sector = c#ls_sector + fcb (f#ls);
+         if f#ls_sector ilt c#ls_sector then f#ms_sector = f#ms_sector + 1;
+
+         f#ms_length = fcb (f#ml); /* return number of sectors */
+         f#ls_length = fcb (f#ll);
+         f#words = shl(f#ls_length, 8); /* return maximum file length */
+      end; /* of if we have the storage */
+
+      return (hole); /* return the FCB number of the hole */
+   end findstorage;
+
+
+   /* This procedure searches the catalog buffer for the largest free
+   .  block.  If such a block is found, the file variables are set to
+   .  contain the relevant information and TRUE is returned.  Otherwise,
+   .  FALSE is returned and C#STATUS contains the reason for failure. */
+
+   findmax: proc returns (boolean) public recursive swappable; /* find maximum storage available */
+
+      return (maxfree); /* just use MAXFREE */
+   end findmax;
+
+   /* $subtitle Level Interface:  Read_Cat */
+
+
+   /* This procedure reads the catalog on the specified LEVEL into the
+   .  catalog buffer.  All of the catalog variables are set by this
+   .  routine.  If READ_CAT is passed an invalid LEVEL number (or
+   .  there is no catalog buffer), it will return a boolean FALSE. */
+
+   read_cat: proc(level) returns (boolean) recursive swappable; /* read catalog LEVEL */
+      dcl level fixed; /* level of catalog to read */
+
+      if level + 2 ige 12 then do; /* largest level number is 9 at the moment */
+         c#status = e#level;
+         return (false);
+      end;
+
+      if level < 2 /* if special level */
+      then do case (level + 2); /* branch on level number */
+         do; /* path catalog */
+            c#ms_sector = core(loc.pcat + 1); /* actual device/MS sector (this can optimize catalog buffering) */
+            c#ls_sector = core(loc.pcat); /* LS sector */
+            c#dir_size  = core(loc.pctl); /* length of user directory */
+            c#ms_length = core(loc.pmax + 1); /* estimate sector length */
+            c#ls_length = core(loc.pmax);
+         end;
+         do; /* alternate catalog */
+            c#ms_sector = a#ms_sector; /* actual device/MS sector (this can optimize catalog buffering) */
+            c#ls_sector = a#ls_sector; /* LS sector */
+            c#dir_size  = a#dir_size; /* length of user directory */
+            c#ms_length = a#ms_length; /* estimate sector length */
+            c#ls_length = a#ls_length;
+         end;
+         do; /* system catalog */
+            c#ms_sector = core(loc.scat + 1); /* actual device/MS sector (this can optimize catalog buffering) */
+            c#ls_sector = core(loc.scat); /* LS sector */
+            c#dir_size  = core(loc.sctl); /* length of system directory */
+            c#ms_length = core(loc.smax + 1); /* estimate sector length */
+            c#ls_length = core(loc.smax);
+         end;
+         do; /* user catalog */
+            c#ms_sector = core(loc.ucat + 1); /* actual device/MS sector (this can optimize catalog buffering) */
+            c#ls_sector = core(loc.ucat); /* LS sector */
+            c#dir_size  = core(loc.uctl); /* length of user directory */
+            c#ms_length = core(loc.umax + 1); /* estimate sector length */
+            c#ls_length = core(loc.umax);
+         end;
+      end; /* of special level numbers */
+      else do; /* for other levels, it is easier: */
+         c#ms_sector = shl(level, 8); /* save the device number (same as level number here) */
+         c#ls_sector = 0; /* the catalog is at the start of the device */
+         if ((level = 6) or (level = 7)) then c#dir_size = 1024; /* for winchester */
+         else if ((level = 8) or (level = 9)) then c#dir_size = dir_size; /* for tape drive */
+         else c#dir_size = 256; /* otherwise 256 words (floppies) */
+         c#ms_length = 0; /* estimate sector length */
+         c#ls_length = shr(c#dir_size, 8); /* restrict to directory size */
+      end;
+
+      return (readcat (c#ms_sector, c#ls_sector, c#dir_size, c#ms_length, c#ls_length)); /* read in the catalog */
+   end read_cat;
+
+   /* $subtitle Level Interface:  Read_Catalog, Write_Catalog */
+
+
+   /* This procedure reads the named catalog on the specified LEVEL into
+   .  the catalog buffer.  If a null name is passed, the catalog on the
+   .  specified level will be read.  All of the catalog variables are set
+   .  by this routine.  A boolean TRUE is returned if the catalog is
+   .  successfully read. */
+
+   read_catalog: proc(treename, level) returns (boolean) public recursive swappable; /* read catalog TREENAME on LEVEL */
+      dcl treename fixed array; /* name of catalog to read */
+      dcl level    fixed; /* level to start searching for the catalog on */
+
+      if treename (0) = 0 then do; /* if no name specified */
+         f#name (0) = 0; /* TREENAME routines must always set this */
+
+         do case (level + 2); /* try to set the name */
+            call blockmove (loc(loc.pcnm), f#name, f#name_len + 1); /* path */
+            call blockmove (a#name, f#name, f#name_len + 1); /* alternate */
+            ; /* system */
+            call blockmove (loc(loc.ccnm), f#name, f#name_len + 1); /* current */
+         end; /* of trying to set the name */
+
+         return (read_cat (level)); /* just read that level */
+      end; /* of no name specified */
+      else return (get_catalog (treename, level, true)); /* need to find the catalog */
+   end read_catalog;
+
+
+   /* This procedure writes the catalog buffer to the place it was read
+   .  from.  It returns FALSE if there's no buffer. */
+
+   write_catalog: proc returns (boolean) public recursive swappable; /* write out the catalog buffer */
+
+      return (writecat); /* just use WRITECAT */
+   end write_catalog;
+
+   /* $subtitle Level Interface:  Delete, Replace, Truncate */
+
+
+   /* This procedure removes the file named TREENAME from the catalog on the
+   .  specified LEVEL.  If the file isn't found, a boolean FALSE is returned.
+   .  All the file variables are set (according to the file being deleted).
+   .  Note that this procedure overwrites the contents of the catalog buffer
+   .  and the catalog variables. */
+
+   delete: proc(treename, level) returns (boolean) public recursive swappable; /* delete file TREENAME on LEVEL */
+      dcl treename fixed array; /* treename of file to delete */
+      dcl level    fixed; /* level of catalog to delete it from */
+
+      if not get_catalog (treename, level, false) then return (false); /* read the catalog */
+      if not removefile (f#name) then return (false); /* remove the file */
+
+ 		interp_file_unsaved(f#ms_sector, f#ls_sector);				// A file has been unsaved
+     
+	  return (write_catalog); /* write out the new catalog */
+   end delete;
+
+
+   /* This procedure adds (or replaces) the file named TREENAME with type TYPE,
+   .  sector length MS_SECTORS|LS_SECTORS, and word length (mod 64K) LENGTH
+   .  to the catalog on the specified LEVEL.  If there is no room in the
+   .  catalog for the file, a boolean FALSE is returned and C#STATUS
+   .  contains the reason for failure.  Otherwise, a boolean TRUE is
+   .  returned and all the file variables are set.  Note that this procedure
+   .  overwrites the contents of the catalog buffer and the catalog variables. */
+
+   replace: proc(treename, type, ms_sectors, ls_sectors, length, level) returns (boolean) public recursive swappable; /* replace file TREENAME on LEVEL */
+      dcl treename   fixed array; /* treename of file to replace */
+      dcl type       fixed; /* type of new file */
+      dcl ms_sectors fixed; /* MS sector length of new file */
+      dcl ls_sectors fixed; /* LS sector length of new file */
+      dcl length     fixed; /* word length of new file */
+      dcl level      fixed; /* level of catalog to replace it in */
+
+      if not get_catalog (treename, level, false) then return (false); /* read in the catalog */
+      if not addfile (f#name, type, ms_sectors, ls_sectors, length) then return (false); /* add the file */
+
+      return (write_catalog); /* write out the new catalog */
+   end replace;
+
+
+   /* This procedure truncates the file named TREENAME to sector length
+   .  MS_SECTORS|LS_SECTORS and word length (mod 64K) LENGTH in the catalog
+   .  on the specified LEVEL.  If the file is truncated, a boolean TRUE
+   .  is returned and all the file variables are set.  Otherwise, a
+   .  boolean FALSE is returned and C#STATUS contains the reason for
+   .  failure.  Note that this procedure overwrites the contents of the
+   .  catalog buffer and the catalog variables. */
+
+   truncate: proc(treename, ms_sectors, ls_sectors, length, level) returns (boolean) public recursive swappable; /* truncate file TREENAME on LEVEL */
+      dcl treename   fixed array; /* treename of file to truncate */
+      dcl ms_sectors fixed; /* new MS sector length of file */
+      dcl ls_sectors fixed; /* new LS sector length of file */
+      dcl length     fixed; /* new word length of file */
+      dcl level      fixed; /* level of catalog containing file */
+
+      if not get_catalog (treename, level, false) then return (false); /* read in the catalog */
+      if not shortenfile (f#name, ms_sectors, ls_sectors, length) then return (false); /* add the file */
+
+      return (write_catalog); /* write out the new catalog */
+   end truncate;
+
+   /* $subtitle Level Interface:  Rename, Locate, LookStorage, LookMax */
+
+
+   /* This procedure renames the file named OLD_NAME to NEW_NAME in the
+   .  catalog on the specified LEVEL.  If the file named OLD_NAME is not
+   .  found, a boolean FALSE is returned.  Otherwise, a boolean TRUE is
+   .  returned and the file variables are set.  Note that this procedure
+   .  overwrites the contents of the catalog buffer and the catalog variables. */
+
+   rename: proc(old_name, new_name, level) returns (boolean) public recursive swappable; /* rename OLD_NAME to NEW_NAME on LEVEL */
+      dcl old_name fixed array; /* treename of file to look for */
+      dcl new_name fixed array; /* new name for that file */
+      dcl level    fixed; /* level of catalog to search */
+
+      if not get_catalog (old_name, level, false) then return (false); /* read in the catalog */
+      if not renamefile (f#name, new_name) then return (false); /* rename the file */
+
+		interp_file_renamed(f#ms_sector, f#ls_sector);
+
+      return (write_catalog); /* write out the new catalog */
+   end rename;
+
+
+   /* This procedure searches the catalog on the specified LEVEL for the file
+   .  with name TREENAME.  If it is found, a boolean TRUE is returned and all
+   .  the file variables are set.  Otherwise, a boolean FALSE is returned (and
+   .  C#STATUS may contain an error).  Note that this procedure overwrites
+   .  the contents of the catalog buffer and the catalog variables. */
+
+   locate: proc(treename, level) returns (boolean) public recursive swappable; /* locate file TREENAME on LEVEL */
+      dcl treename fixed array; /* treename of file to look for */
+      dcl level    fixed; /* level of catalog to search */
+
+      if get_catalog (treename, level, false) /* if we can read the catalog */
+      then return (findfile (f#name) <> -1); /* search it */
+      else return (false); /* can't even read the catalog */
+   end locate;
+
+
+   /* This procedure looks for a free FCB of size MS_SECTORS|LS_SECTORS in
+   .  catalog TREENAME on the specified LEVEL.  If it finds the space, it sets
+   .  the file variables (according to the hole) and returns a boolean TRUE.
+   .  Otherwise, it returns a boolean FALSE and C#STATUS is set to the
+   .  reason for failure.  Note that this procedure overwrites the catalog
+   .  buffer and the catalog variables. */
+
+   lookstorage: proc(treename, ms_sectors, ls_sectors, level) returns (boolean) public recursive swappable; /* look for storage on TREENAME/LEVEL */
+      dcl treename   fixed array; /* treename of catalog to look for storage on */
+      dcl ms_sectors fixed; /* MS sector length of block to find */
+      dcl ls_sectors fixed; /* LS sector length of block to find */
+      dcl level      fixed; /* level of catalog to search */
+
+      if read_catalog (treename, level) /* if we can read the catalog */
+      then return (findstorage (ms_sectors, ls_sectors) <> 0); /* search it */
+      else return (false); /* can't even read the catalog */
+   end lookstorage;
+
+
+   /* This procedure searches for the largest free block in catalog TREENAME
+   .  on the specified LEVEL.  If such a block is found, the file variables
+   .  are set to contain the relevant information and TRUE is returned.
+   .  Otherwise, FALSE is returned and C#STATUS contains the reason for
+   .  failure. */
+
+   lookmax: proc(treename, level) returns (boolean) public recursive swappable; /* lookup maximum storage available on TREENAME/LEVEL */
+      dcl treename fixed array; /* treename of catalog to look for max storage on */
+      dcl level    fixed; /* level of catalog to search */
+
+      if read_catalog (treename, level) /* if we can read the catalog */
+      then return (findmax); /* search it */
+      else return (false); /* can't even read the catalog */
+   end lookmax;
+
+   /* $subtitle Level Interface:  Enter_Catalog, Enter_Alternate */
+
+
+   /* This procedure changes the current catalog to be the catalog with
+   .  the specified TREENAME on the specified LEVEL.  If a null name is passed,
+   .  the current catalog is changed to be the specified LEVEL.  If the
+   .  catalog is successfully entered, the catalog variables contain the
+   .  relevent information about the catalog and TRUE is returned.  Otherwise,
+   .  FALSE is returned and C#STATUS contains the error.  The file variables
+   .  are overwritten by this routine. */
+
+   enter_catalog: proc(treename, level) returns (boolean) public recursive swappable; /* enter catalog TREENAME on LEVEL */
+      dcl treename fixed array; /* treename of catalog to enter */
+      dcl level    fixed; /* level of catalog to search */
+      dcl i        fixed;
+
+      if not read_catalog (treename, level) then return (false); /* read in the catalog */
+
+      call clean_filename (f#name, fname); /* clean up the name to save in high memory */
+
+      core(loc.ccnm) = f#name (0); /* save length of name in high memory */
+      do i = 1 to f#name_len; /* copy the name to high memory */
+         core(loc.ccnm + i) = fname (i - 1);
+      end;
+
+      core(loc.ucat + 1) = c#ms_sector; core(loc.ucat) = c#ls_sector; /* set high memory variables */
+      core(loc.umax + 1) = c#ms_length; core(loc.umax) = c#ls_length;
+      core(loc.uctl)     = c#dir_size;
+
+      call set_curdev (shr(core(loc.ucat + 1), 8)); /* set current device in configuration */
+      core(loc.ctab + c#curdev - c#offset) = core(c#contab + c#curdev); /* and copy to high memory */
+
+      return (true);
+   end enter_catalog;
+
+
+   /* This procedure changes the alternate catalog to be the catalog with the
+   .  specified TREENAME on the specified LEVEL.  If a null name is passed,
+   .  the alternate catalog is changed to be the specified LEVEL.  If the
+   .  catalog is successfully entered, the catalog variables contain the
+   .  relevent information about the catalog and TRUE is returned.  Otherwise,
+   .  FALSE is returned and C#STATUS contains the error.  The file variables
+   .  are overwritten by this routine. */
+
+   enter_alternate: proc(treename, level) returns (boolean) public recursive swappable; /* enter alternate catalog TREENAME on LEVEL */
+      dcl treename fixed array; /* treename of catalog to enter */
+      dcl level    fixed; /* level of catalog to search */
+      dcl i        fixed;
+
+      if not read_catalog (treename, level) then return (false); /* read in the catalog */
+
+      call clean_filename (f#name, fname); /* clean up the name to save in A#NAME */
+
+      a#name (0) = f#name (0); /* save length of name */
+      do i = 1 to f#name_len; /* copy the name to A#NAME */
+         a#name (i) = fname (i - 1);
+      end;
+
+      a#ms_sector = c#ms_sector; a#ls_sector = c#ls_sector; /* set alternate catalog variables */
+      a#ms_length = c#ms_length; a#ls_length = c#ls_length;
+      a#dir_size  = c#dir_size;
+
+      return (true);
+   end enter_alternate;
+

@@ -1,0 +1,1301 @@
+/* $Title STRECSOU Sample To Memory software */
+
+/*
+   11/18/91 - PF  - More quick update support
+   12/09/88 - SGS - Added READ.STM.CONFIG
+   10/21/88 - TSS - Keep button panel and protocol running during stm record
+   06/27/88 - MWH - Remove unused inserts
+   05/18/88 - LSS - added insert -XPL:SYSLITS
+   03/02/88 - LSS - changed header set up in SIM3 for recorded file
+   12/17/87 - MWH - Merge poly updates with N-Final plus AEE sources
+   11/12/87 - MWH - Make timer comparisons unsigned to fix "30 sec hang"
+   08/24/87 - MWH - Fix minor bug in AD_INIT
+   08/17/87 - MWH - Update all to support max 4 poly bins, 512mb/bin
+   08/07/87 - MWH - Merge with CWJ's changes
+   07/14/87 - MWH - new interface for PS.SETUP
+   07/06/87 - MWH - kbd lookup table literals; restructured for 32 bit poly
+   02/10/87 - BSW - Created this Module
+*/
+
+Module STRECMOD;
+   insert ':-xpl:syslits';      /* for mouse stuff */
+   insert ':-xpl:intrprtr';
+
+   insert ':synlits:comlits';   /* compilation literals */
+   insert ':synlits:asciilit';  /* ASCII literals */
+   insert ':synlits:globlits';  /* good globals */
+   insert ':synlits:fcodlits';  /* function code literals for FM and POLY synths (i.e., psd)*/
+   insert ':synlits:samplits';  /* sound file and sampling literals */
+   insert ':synlits:quelits';   /* literals for note block and partial block defs (i.e., b.poly) */
+   insert ':synlits:timlits';   /* timbre head literal definitions */
+   insert ':synlits:thdlits';   /* track head and note list segment literal definitions */
+   insert ':synauxs:stmlits';   /* STM specific literals */
+
+   insert ':synmods:stutldcl';  /* sample to memory utility routines */
+   insert ':synmods:steddcl';   /* editing functions including CREATE.SOUND.FILE */
+   insert ':synmods:stdrdcl';   /* for plotting limits */
+   insert ':synmods:globdcl';   /* globals, such as trd.ptr */
+   insert ':synmods:polydcl';   /* for accessing poly memory */
+   insert ':synmods:mathdcl';   /* math routines */
+   insert ':synmods:errdcl';    /* error routines */
+   insert ':synmods:plotdcl';   /* plotting package for envelope plot */
+   insert ':synmods:mousrdcl';  /* mouse routines */
+   insert ':synmods:moussdcl';
+   insert ':synmods:ttydcl';    /* terminal i/o routines */
+   insert ':synmods:getvdcl';   /* for new.poly.contents               */
+   insert ':synmods:tprimdcl';  /* for draw and erase message */
+
+   insert ':synmods:prodcl';    /* used to keep protocol going */
+   insert ':synmods:loddcl';    /* live from New York! */
+
+   insert ':synrdcls:03-pdcls';
+   insert ':synrdcls:04-sdcls';
+   insert ':synrdcls:05-bdcls';
+   insert ':synrdcls:10-intdc';
+   insert ':synrdcls:11-tdcls';
+   insert ':synrdcls:12-edcls';
+   insert ':synlits:synclits';   /* get rtp literals */
+
+   begin;
+
+      dcl (i,j,k,l) fixed;
+      dcl force.meter fixed;
+      dcl envx      fixed;
+      dcl lenvx     fixed;
+      dcl nenvx     fixed;
+      dcl sec#      fixed;
+      dcl max# (1)  fixed;
+      dcl base (1)  fixed;
+      dcl tbase (1) fixed;
+      dcl smax      fixed;
+      dcl rmax      fixed;
+      dcl edis      fixed;
+      dcl pedis     fixed;
+      dcl redis     fixed;
+      dcl predis    fixed;
+      dcl last      fixed;
+      dcl trig      fixed;
+      dcl dcoffset  fixed;
+      dcl keepit    fixed;
+      dcl pindex    fixed;
+      dcl envchg    fixed;  /* true when an envelope display is plotted */
+      dcl envcomp   fixed;  /* 1 - plot env in compressed; 0 - normal */
+
+      dcl clip      fixed;
+      dcl clip.disp fixed;
+      dcl meter.time fixed;
+      dcl meter.blocks (9) fixed;
+      dcl mmax      fixed;
+
+      dcl (tossed.d66.sectors)                 fixed;
+
+      dcl (adc.start.msb,adc.start.lsb)        fixed;
+      dcl (adc.stop.msb, adc.stop.lsb)         fixed;
+
+      dcl (stm.track)                          fixed;
+
+      dcl prev.recd                            fixed;
+      dcl record.from.button                   fixed;
+
+      dcl width  lit '100';
+      dcl master lit '0'; /* master poly channel */
+      dcl slave  lit '(master + 1)'; /* slave poly channel */
+
+      dcl c lit 'write(psd)=read(d67)';            /* D67 to D157 - used for sampling */
+      dcl d lit 'c;c;c;c;c;c;c;c;c;c;c;c;c;c;c';   /* 15 writes to poly memory */
+      dcl e lit 'write("300")=read(d67)';          /* d67 to nop */
+      dcl f lit 'e;e;e;e;e;e;e;e;e;e;e;e;e;e;e;';  
+
+      insert ':synsou:stmmod:strecsoa';   /* insert the rest of the sample-to-memory code */
+
+      /* $Subtitle Sample Into Memory procedure #1 - initialization */
+
+      SIM1: proc swapable; /* initialize and set up to record */
+
+         if stm.record.device=stm.record.device.d66 then do;  /* mono hardware    */
+            load 300; mul 1000; pindex = res;   				  /* calculate period index for D66 */
+            div stm.record.rate; pindex = res;
+            if rem ige shr(pindex, 1) then pindex = pindex + 1;
+
+            if (pindex<600) or (pindex>4095)    				  /* cannot be larger than 50 kHz or less than 7.32 kHz */
+            then do;
+               call range.error;
+               sample.to.memory=0;              				  /* now press escape      */
+               return 1;
+            end;
+         end;
+
+         call SET.CUR.BIN(0);                   /* recording only done into poly bin 0 */
+ 
+         if SAMPLE.TO.MEMORY<>0 then do;        /* this is the real thing - set up space in poly memory */
+            if (keepit=0)
+            &  (record.from.button = 0)         /* only when from terminal */
+            then do;                            /* keyboard timbre not played - discard it temporarily */
+               call dealloc(0);                 /* free up keyboard files for a moment */
+               call FIND.RECORDING.BASE(base);  /* find recording base   */
+               call alloc.timbre(0);            /* restore in case error */
+            end;
+            else call FIND.RECORDING.BASE(base);/* else find base with out tossing keyboard timbre */
+
+            call sub32(psmax,base,max#);        /* get sectors available */
+            if com16(50,max#) = lw#igt then do; /* not enough memory     */
+               sample.to.memory=0;              /* now press escape      */
+               call not.enough.memory;          /* not enough for record */
+               if record.from.button <> 0       /* clean up if we were   */
+               then do;
+                  call button.record.abort;
+                  call DISPLAY.ERR(42);               /* out of memory error in kbd window */
+               end;
+               return 1;
+            end;
+
+            l=0;                                      /* assume keep kbd timbre */
+
+            if (keepit=0)                             /* if keyboard timbre was not used during level check */
+            &  (record.from.button = 0)               /* record activated from term */
+            then do i=0 to num.partials-1;            /* then check each kbd partial for sound files */
+               j=TIM.HEAD.LOOKUP(0,tim.kbdtab.ptr+i); /* see if a look up table  */
+               if j<>0 then do;                       /* if so,  must check it   */
+                  if (inc.mono=0)                     /* if poly only            */
+                  or (TIM.HEAD.LOOKUP(0,tim.synth.typ+i)=tim#poly)  /* or is a poly timbre    */
+                  then do;                            /* check kbdtab for files  */
+                     write(mam)=j;                    /* it sits in ext memory   */
+                     do k=0 to num.keys-1;            /* look at it              */
+                        if read(mdi)<>0 then do;      /* klt.patch.tim.ptr there */
+                           tbase(lw#msb)=read(mdi)&base#only;   /* get klt.base.msb        */
+                           tbase(lw#lsb)=read(md);              /* get klt.base.lsb */
+                           if (tbase(lw#msb) & base#bin_b) = 0  /* bin 0 */
+                           and com32(tbase,base) <> lw#ilt
+                           then l=1;                  /* must erase kbd timbre   */
+                        end;
+                        else write("300")=read(mdi);  /* skip klt.base.msb       */
+                        write("300")=read(mdi);       /* skip klt.base.lsb       */
+                     end;        /* of loop over keys */
+                  end;           /* if synth.type     */
+               end;              /* of kbdtab there   */
+            end;                 /* of partial loop   */
+
+            if l<>0 then call ERASE.KEYBOARD.TIMBRE;      /* get rid of sf if user does not want it */
+
+            call FIND.RECORDING.BASE(base);     /* now find actual recording base */
+
+            call sub32(psmax,base,max#);        /* check again           */
+            if com16(50,max#) = lw#igt then do; /* not enough memory     */
+               sample.to.memory=0;              /* now press escape      */
+               call not.enough.memory;          /* not enough for record */
+               if record.from.button <> 0       /* clean up if we were   */
+               then do;
+                  call button.record.abort;
+                  call DISPLAY.ERR(42);            /* out of memory error in kbd window */
+               end;
+               return 1;
+            end;
+
+            call PS.LOCK;                       /* lock reload when changing */
+            call copy32(base,pslast);           /* assign new PSLAST         */
+            call copy32(pslast,pshere);         /* create new sound file at end of memory */
+            if com16(65535,max#) = lw#ilt       /* limit a sound file to 32 meg */
+            then call str32(0,65535,max#);      /* (16 bits worth of sectors) */
+
+            /*$page */
+
+            if CREATE.SOUND.FILE(max#(lw#lsb),stm.record.rate,1,stm.record.stereo)=0 then do;
+               call PS.UNLOCK;
+               sample.to.memory=0;              /* now press escape      */
+               call not.enough.memory;          /* error message         */
+               if record.from.button <> 0       /* clean up if we were   */
+               then do;
+                  call button.record.abort;
+                  call DISPLAY.ERR(42);            /* out of memory error in kbd window */
+               end;
+               return 1;
+            end;
+
+            call copy32(sfile.base,base);       /* for consistency - should be same as original base */
+
+            call PS.LOCK;                       /* leave locked for recording process */
+
+         end;   
+         else do;                            /* not sampling */
+            call str32(0,0,base);            /* one word available in sector zero */
+            call str32(0,1,max#);
+         end;
+
+         /* allocate poly memory channels */
+
+         if stm.record.device = stm.record.device.stm then do;     /* stm hardware */
+            if allocate_channels = 0 then do; 							 /* allocate poly channels */
+               sample.to.memory = 0;
+               if record.from.button <> 0
+               then call button.record.abort;
+               return 1;
+            end;
+         end;
+         
+         /* set up for signal level or envelope plot */
+
+         call viewport(left.rect.minx+1,left.rect.maxx-1,left.rect.miny+1,left.rect.maxy-1);
+         call window  (0,display.width,1,pixel.samples+1);
+
+         if sample.to.memory=0 then do;     /* set up signal level plot only */
+            call display.recording.time;    /* display recording time available in case something changes */
+            call cpos( 5,40);
+            call ps('Performing level check...');
+            call cpos(7,40);
+            if stm.record.notrigger=0 then do;
+               call ps('Press <RETURN> to activate trigger');
+            end;
+            else do;
+               call ps('Press <RETURN> to start recording');
+            end;
+            call cpos(0,0);            /* put cursor in inoccuous place */
+            vector_mode;
+            call data_level(2);
+            call connect(0,display.origin,width,display.origin);
+
+            if stm.record.stereo then do;   /* stereo */
+               call viewport(right.rect.minx+1,right.rect.maxx-1,right.rect.miny+1,right.rect.maxy-1);
+               call connect(0,display.origin,width,display.origin);
+               call viewport(left.rect.minx+1,left.rect.maxx-1,left.rect.miny+1,left.rect.maxy-1);
+            end;
+            keepit=0;                  /* assume no notes played */
+            trig=0;
+         end;
+         /* $page */
+
+         else do;                                       /* OK: Actually recording.  If waiting for trigger, present message */
+            if stm.record.notrigger=0 then do;          /* put waiting for trigger message */
+               call display.recording.time;             /* display recording time available in case something changes */
+               call cpos( 5,40);
+               call ps('Waiting for trigger...');       /* stay in transparent mode until trigger received */
+               call cpos( 5,39);                        /* position for erase rest of line */
+               trig=(-1);                               /* measure dc offset       */
+            end;
+            else do;                                    /* go into vector mode here */
+               trig=1;                                  /* start right now */
+            end;
+            vector_mode;
+            call data_level(2);
+         end;
+
+         /* initialize for record loop */
+
+			dcoffset = 0;
+         envx = 0;                      /* initialize envx (testing)  */
+         lenvx= 0;                      /* last envx                  */
+         nenvx= 0;                      /* for erasing                */
+         sec# = shr(bl.poly,8);         /* start where poly data goes */
+         last = shl(base(lw#lsb),8)+bl.poly;  /* set last sample count to the base address */
+         smax = 0;  rmax = 0;
+         edis = 0;  pedis = 0;          /* in case signal level disp   */
+         redis = 0; predis = 0;         /* right envelope display      */
+         clip = 0;                      /* reset clip detect           */
+         new.poly.contents = 0;         /* must ignore new.poly.contents from ps.unlock */
+         tossed.d66.sectors = 0;        /* initialize                  */
+
+         call run.syn.tty.wait;         /* wait for empty output buffer for speedy erase */
+
+         /* **** start ADC here **** */
+
+         if (stm.record.device == stm.record.device.stm)    			// sample-to-memory hardware
+            call start.poly.adc (base, max#(lw#lsb)); 			     	// start sampling
+
+			else if (stm.record.device == stm.record.device.d66)			// d66 sampling
+			{
+            call start.mono.adc;        /* start adc sampling */
+            if sample.to.memory<>0
+            then suppress_lod_scan = 1; /* stop lod search for stm */
+         }
+			else if (stm.record.device == stm.record.device.dig)			 // stm digital
+            call start.digital.adc;     
+
+         force.meter = 1;               /* turn meter on no matter what */
+
+         return 0;
+      END SIM1;
+
+      /* $Subtitle Sample Into Memory Procedure #2 */
+
+      erase.left:proc(mamptr,malptr,nenvx) swapable;
+         dcl mamptr  fixed;
+         dcl malptr  fixed;
+         dcl nenvx   fixed;
+         dcl (j,k,l) fixed;
+
+         write(mam)=mamptr;
+         write(mal)=malptr;
+
+         j = read(md);
+         write(md) =0;
+
+         k=j&255;                   /* set minimum left value */
+         l=shr(j,8);                /* set maximum value */
+         run.syn = 0;  
+         call connect(nenvx,k,nenvx,l);   /* erase the vertical line in the window */
+         run.syn = 1;
+      end erase.left;
+
+      erase.right:proc(mamptr,malptr,nenvx) swapable;
+         dcl mamptr  fixed;
+         dcl malptr  fixed;
+         dcl nenvx   fixed;
+         dcl (j,k,l) fixed;
+
+         write(mam)=mamptr;
+         write(mal)=malptr;
+
+         j=read(md);     /* get minimum right sample of image(x) */
+         write(md) =0;
+         k=j&255;        /* set minimum right value */
+         l=shr(j,8);     /* set maximum value */
+         /* don't need to turn off run.syn because of poly */
+         call viewport(right.rect.minx+1,right.rect.maxx-1,right.rect.miny+1,right.rect.maxy-1);
+         call connect(nenvx,k,nenvx,l);   /* erase the vertical line in the window */
+         call viewport(left.rect.minx+1,left.rect.maxx-1,left.rect.miny+1,left.rect.maxy-1);
+
+      end erase.right;
+
+      plot.env.vectors:Proc swapable;
+         i=shr(smax,9);              /* get 0 to 64   */
+         smax=0;                     /* for next time */
+         run.syn=0;       
+         envchg = 1;                         /* flag env on */
+         call connect(lenvx,display.origin-i+1,lenvx,display.origin+i); /* avoid clip by drawing in bounds of 1 and 128 */
+         run.syn=1;       
+         write(mam)=trd.ptr+shr(lenvx,8);
+         write(mal)=lenvx;
+         write(md)=(display.origin-i+1)\shl(display.origin+i,8);
+         if stm.record.stereo then do; /* stereo - plot right channel as well */
+            i=shr(rmax,9);           	/* get 0 to 64   */
+            rmax=0;                  	/* for next time */
+            call viewport(right.rect.minx+1,right.rect.maxx-1,right.rect.miny+1,right.rect.maxy-1);
+            call connect(lenvx,display.origin-i+1,lenvx,display.origin+i); /* avoid clip by drawing in bounds of 1 and 128 */
+            call viewport(left.rect.minx+1,left.rect.maxx-1,left.rect.miny+1,left.rect.maxy-1);
+            write(mam)=trd.ptr+4+shr(lenvx,8);
+            write(mal)=lenvx;
+            write(md)=(display.origin-i+1)\shl(display.origin+i,8);
+         end;                        /* of right channel */
+         if nenvx<=envx
+         then nenvx=envx+1;
+      end plot.env.vectors;
+
+      SIM2: proc swapable; /* record data into poly until exit condition occurs */
+		   dcl got.any     fixed;
+			dcl which.chans fixed;
+			
+         get.stm.maxes:proc;    /* ***** call with interrupts off ******  */
+            write(psc) = master;            /* select master poly channel */
+            write(psf) = psadenv;           /* get most recent peak value */
+            k = read(psd);
+            k = shl(k, 7);                  /* convert to a sample value */
+            if k igt smax then smax = k;    /* save max */
+
+            if stm.record.stereo then do;   /* stereo? */
+               write(psc) = slave;          /* select slave poly channel */
+               write(psf) = psadenv;        /* get most recent peak value */
+               k = read(psd);
+               k = shl(k, 7);               /* convert to a sample value */
+               if k igt rmax then rmax = k; /* save max */
+            end;
+         end get.stm.maxes;
+
+			if (stm.record.device == stm.record.device.dig)						// See which channels we are recording from to detect changes
+				which.chans = interp_get_dig_stm_chan();
+
+			while ((new.poly.contents&1) == 0)
+			{
+            /* read 256 samples */
+            /* find min/max     */
+            if stm.record.device == stm.record.device.stm then do;     /* sample-to-memory hardware */	
+					got.any = true;
+               disable;
+               call get.stm.maxes;
+               enable;
+
+               if trig<0 then do;              /* measure dc offset */
+                  i=last;
+                  do while (i-last) ilt 6;     /* wait for 6 samples */
+							i = interp_usleep(10);    // Delay for PPC
+                     disable;
+                     write(psc) = 0;
+                     write(psf) = psadsc0;      /* get sample count */
+                     i = read(psd);
+                     enable;
+                     if i=0 then i=last;        /* in case no samples yet */
+                  end;
+                  call psmread(base,sec#,2);    /* ignore first two zeroes */
+                  dcoffset=(read(psd)+read(psd)+read(psd)+read(psd))/4; /* use signed divide */
+                  if abs(dcoffset) igt 2000 then dcoffset=0;
+                  trig=0;
+               end;
+            end;                                   /* of stm hardware    */
+           
+			   else if stm.record.device == stm.record.device.d66 then do; /* mono hardware      */
+
+               // Wait for data to avoid hanging mac
+				   if  ((read(d66)&"400")==0)   			/* if not 256 samples in buffer */
+					{
+						interp_run_host_non_timer();
+						got.any = false;
+					}
+					
+					else
+					{
+						got.any = true;
+						if sample.to.memory<>0 then do;     /* recording - store        */
+							if ((read(d66)&"1000")<>0)       /* check for underflow      */
+							then do;                         /* toss bad samples         */
+								if trig<>0 then call io.error;/* only if sampling         */
+								write(d66)="11";              /* select control register  */
+								write(d67)=0;                 /* terminate the adc        */
+								call start.mono.adc;          /* restart with new samples */
+							end;
+							call psmwrite(base,sec#,0);      /* set up for memory write  */
+							write(d66)="10";                 /* select data register */
+							do j=0 to 15;                    /* copy to poly and find min/max */
+								d;                            /* 15 data words to poly memory */
+								k=read(d67);                  /* get 16th sample */
+								write(psd)=k;                 /* store 16th      */
+								k=abs(k);                     /* check min/max   */
+								if k igt smax then smax=k;
+							end;
+							if trig<0 then do;              /* measure dc offset */
+								call psmread(base,sec#,2);
+								dcoffset=(read(psd)+read(psd)+read(psd)+read(psd))/4; /* use signed divide */
+								if abs(dcoffset) igt 2000 then dcoffset=0;
+								trig=0;
+							end;
+						end;
+						else do;                            /* not recording - measure peak only */
+							write(d66)="10";                 /* select data register */
+							do j=0 to 15;                    /* find min/max */
+								f;                            /* skip 15 data words   */
+								k=abs(read(d67));             /* get 16th sample      */
+								if k igt smax then smax=k;
+							end;
+						end;
+					}
+            end;
+
+			   else do; 												// digital STM
+               
+					// Wait for data to avoid hanging mac
+				   if (interp_dig_stm_samples() < 256)  		// if not 256 samples in buffer (512 if stereo)
+					{
+						interp_run_host_non_timer();
+						got.any = false;
+						
+						if  (sample.to.memory == 0)					// if not actually recording and rate changes, retry
+						{
+							if (stm.record.rate != interp_get_dig_stm_rate())
+							|| (which.chans     != interp_get_dig_stm_chan())
+								new.poly.contents = new.poly.contents | 1;
+						}
+					}
+					
+					else
+					{
+						got.any = true;
+						if sample.to.memory<>0 then do;     		// recording - store
+							if (interp_dig_stm_underflowed()<>0)   // check for underflow
+							then do;                         		// toss bad samples
+								if trig<>0 then call io.error;		// only if sampling
+								interp_stop_dig_stm();					// clean up underflowed recording
+								start.digital.adc();          		// restart with new samples
+							end;
+							call psmwrite(base,sec#,0);
+							interp_dig_stm_do_import();				// import 256 (512 if stereo) samples into poly memory
+							smax = interp_dig_stm_lmax();				// get maxes
+							rmax = interp_dig_stm_rmax();
+							if trig<0 then do;              			// measure dc offset
+								dcoffset = 0;								// use 0 for dc offset computation from digital STM
+								trig=0;
+							end;
+						end;
+						else do;                            		/* not recording - measure peak only */
+							interp_dig_stm_toss_data();				// scan and toss 256 (512 if stereo) samples
+							smax = interp_dig_stm_lmax();				// get maxes
+							rmax = interp_dig_stm_rmax();
+						end;
+					}
+            end;
+
+            /* $page */
+
+            if (sample.to.memory != 0)        		/* if actually recording, account for data writes */
+				{
+               /* check trigger */
+               if (trig==0)                  		/* if waiting for trigger */
+					{
+						if (got.any == false)				// if got no max or data, chill
+							;
+							
+                  else if ((smax ige (STM.THRESHOLD+abs(dcoffset)))     										// If signal appears on left channel
+                  or       ((stm.record.stereo == 1) and (rmax ige (STM.THRESHOLD+abs(dcoffset)))))	// Or is stereo and signal appears on right channel
+                  then do;                         /* start recording        */
+                     trig=1;                       /* set flag to continue   */
+
+                     if stm.record.device == stm.record.device.stm then do; /* stm hardware           */
+                        disable;
+                        write(psc) = 0;
+                        write(psf) = psadsc0;      /* get sample count */
+                        i = read(psd);
+                        enable;
+                        sec# = sec# + shr(i - last, 8); 			/* keep track of full sectors captured */
+                        last = (i and (not "377"));
+                     end;                          				/* of stm hardware */
+                     else sec#=sec#+1+stm.record.stereo;       /* d66/digital STM - always 1 sector per channel */
+
+                     transparent_mode;
+                     call pc(ESC);                 /* erase rest of line     */
+                     call ps('[K');
+                     call cpos(0,0);               /* pos cursor quickly     */
+                     vector_mode;                  /* now vector mode        */
+                  end;
+                
+					   else do;                         /* still waiting for trig */
+                     if stm.record.device == stm.record.device.stm then do; /* stm hardware */
+
+                        disable;                      /* for resync   */
+
+                        if d16there<>0 then do;       /* wait here for d16 */
+                           do while (read(1)&128)=0;
+                              interp_check_interrupts();
+									end;
+                        end;
+
+                        call get.stm.maxes;        /* see if trigger came in while we were waiting for the d16 */
+
+                        if (smax ilt (STM.THRESHOLD+abs(dcoffset)))     											// if no signal on left channel
+                        and  ((stm.record.stereo == 0) or (rmax ilt (STM.THRESHOLD+abs(dcoffset))))		// and (is mono or no signal on right channel
+                        then do;																									// then restart STM hardware to toss partial data
+
+                           write(psc) = master;    /* select master poly channel */
+                           write(psf) = pson;      /* turn the channel off */
+                           write(psd) = 0;
+
+                           do i = 0 to 10;
+                              interp_usleep(2);
+                           end;                    /* wait (was 10, now 20) us */
+
+                           write(psc) = master;    			/* select master poly channel */
+                           write(psf) = pson;      			/* turn the channel on */
+                           write(psd) = 1;         			/* without looping */
+
+                           adc.start.msb = play.time.msb;  	/* sample start time */
+                           adc.start.lsb = play.time.lsb;  	/* for use later     */
+
+                           adc.start.lsb=adc.start.lsb+1;         /* increment to reflect  */
+                           if adc.start.lsb=0                     /* correct playback time */
+                           then adc.start.msb=adc.start.msb+1;
+
+                        end;
+
+                        last = shl(base(lw#lsb),8)+bl.poly; /* either case - keep all of samples for next time */
+
+                        enable;                    /* process d16 here */
+
+                     end;                          /* of stm hardware */
+							
+                     else if stm.record.device == stm.record.device.d66 do;                   /* D66 hardware */
+                        tossed.d66.sectors = tossed.d66.sectors + 1;
+                        if tossed.d66.sectors=0 then do;  /* start over if guy waits 5 minutes for trigger */
+                           write(d66)="11";        /* select control register  */
+                           write(d67)=0;           /* terminate the adc        */
+                           call start.mono.adc;    /* restart with new samples */
+                        end;
+                     end;
+							
+							else do;																			// dig stm
+                        tossed.d66.sectors = tossed.d66.sectors + 1;
+                        if tossed.d66.sectors=0 then do;  		// start over if guy waits 5 minutes for trigger
+									interp_stop_dig_stm();					// clean up underflowed recording
+									start.digital.adc();          		// restart with new samples
+                        end;
+							end;
+                  end;                             /* of still waiting for trig */
+               }
+              
+				  
+				   // Else not waiting for trigger but actually recording
+				   else if stm.record.device == stm.record.device.stm then do; /* already recording (stm hardware) */
+                  disable;
+                  write(psc) = 0;
+                  write(psf) = psadsc0;            /* get sample count */
+                  i = read(psd);
+                  enable;
+                  sec# = sec# + shr(i - last, 8); /* keep track of full sectors captured */
+                  last = (i and (not "377"));
+               end;                               /* of already recording (stm hardware) */
+              
+				   else if (got.any == true) do;      /* already recording (mono/dig hardware) */
+                  sec#=sec#+1+stm.record.stereo;  /* advance sector count */
+               end;
+
+					else											// else didn.t get any data (d66/dig stm case only)
+						;
+						
+               /* $page */
+
+               /* plot envelope display */
+
+               /* first see if we have computer time to plot or erase */
+
+               if  (num.of.d50.out.chars=0)  																				// if output has caught up
+					and (((stm.record.device == stm.record.device.d66) && ((read(d66)&"400")==0))					// and using d66 and 256 samples not ready
+					or   ((stm.record.device == stm.record.device.stm))													// or  using stm
+					or   ((stm.record.device == stm.record.device.dig) && (interp_dig_stm_samples() < 256)))	// or using d66 and fewer than 256 samples ready
+               then do;    
+
+                  /* yes we have some computer time */
+
+                  /* now check to see if we must erase */
+                  /* something from the left display   */
+
+                  write(mam) = trd.ptr + shr(nenvx,8);
+                  write(mal) = nenvx;
+                 
+					   if (nenvx < display.width)
+                  &  (read(md) <> 0) then do;
+                     call erase.left(read(mam),read(mal),nenvx);
+                  end;
+
+                  /* now check to see if we must erase */
+                  /* something from the right display  */
+
+                  else do;                            /* check for signal plot */
+                     write(mam) = trd.ptr + 4 + shr(nenvx,8);  /* compute right sample sector */
+                     write(mal) = nenvx;                       /* compute right sample word */
+                    
+						   if (nenvx < display.width)       /* if we are still in display */
+                     &  (read(md) <> 0)               /* and something is plotted */
+                     &  (stm.record.stereo = 1)       /* and we are stereo recording */
+                     then do;                         /* then erase a sample */
+                        call erase.right(read(mam),read(mal),nenvx);
+                     end;
+
+							// If no erasing to do, see if we should draw something
+                     else do;                               /* plot envelope */
+                        if (nenvx < display.width)          /* inc erase x position */
+                        then nenvx = nenvx + 1;
+
+                        envx=sec# - shr(bl.poly,8);         /* # of sectors of valid data received */
+                        if stm.record.stereo == 0 then do;  /* mono recording   */
+                           if stm.record.rate<=505          /* 50.5 khz or less */
+                           then envx=shr(envx,2);           /* every 4 sectors (1024) */
+                           else envx=shr(envx,3);           /* every 8 sectors (2048) */
+                        end;
+                        else do;                            /* stereo           */
+                           if stm.record.rate<=505          /* 50.5 khz or less */
+                           then envx=shr(envx,4);           /* every 8 sectors (2048) */
+                           else envx=shr(envx,5);           /* every 16 sectors (4096) */
+                        end;
+
+                        if (envcomp <> 0)                  /* when an envelope is there */
+                        or (record.from.button <> 0)       /* or button record */
+                        then envx = shr(envx,1);           /* plot in compressed mode */
+                        
+                        if (envx<>lenvx) then do;         /* plot new max   */
+                           if (lenvx < display.width) then do;
+                              call plot.env.vectors;
+                           end;                           /* of output buffer empty */
+                           lenvx=envx;                    /* save last plotted      */
+                        end;                              /* of envx to plot        */
+                     end;                                 /* plot envelope */
+                  end;
+               end;                                    	/* of if output has caught up */
+            }				                                 /* of actually recording  */
+
+
+				// Not recording - construct signal plot
+				
+            else if (got.any != false)   	  /* testing only - construct signal level plot if we got anything to plot */
+				{
+               envx=envx+1;                 /* draw vector every 16 sectors because of limit of terminal speed */
+               if envx=16 then do;
+                  if stm.record.stereo == 0 then envx=0; /* start again unless stereo */
+                  edis=edis-4;
+                  if edis<0 then edis=0;
+                  i=shr(smax,9);            /* get max 0 to 64 */
+                  smax=0;
+                  if i > edis then edis=i;  /* pop up quickly  */
+                  if edis<>pedis then do;
+                     if edis<>0
+                     then call connect(0,display.origin+edis,width,display.origin+edis);
+                     if pedis<>0
+                     then call connect(0,display.origin+pedis,width,display.origin+pedis);
+                     pedis=edis;
+                  end;
+               end;                         /* of left or mono channel */
+               else if envx=32 then do;     /* do right channel every 32 sectors */
+                  envx=0;
+                  redis=redis-4;
+                  if redis<0 then redis=0;
+                  i=shr(rmax,9);            /* get max 0 to 64 */
+                  rmax=0;
+                  if i > redis then redis=i;  /* pop up quickly  */
+                  if redis<>predis then do;
+                     call viewport(right.rect.minx+1,right.rect.maxx-1,right.rect.miny+1,right.rect.maxy-1);
+                     if redis<>0
+                     then call connect(0,display.origin+redis,width,display.origin+redis);
+                     if predis<>0
+                     then call connect(0,display.origin+predis,width,display.origin+predis);
+                     call viewport(left.rect.minx+1,left.rect.maxx-1,left.rect.miny+1,left.rect.maxy-1);
+                     predis=redis;
+                  end;
+               end;                          /* of right channel */
+
+               write(mam)=TRK.HEAD;     		/* point to look up table      */
+               write(mam)=read(md);     		/* point to track head for kbd */
+               write(mal)=thd.nact;   
+
+               if (read(mdi)+read(md))<>0    
+               then keepit=1;           		/* note played on keyboard, split keyboard,  or from MIDI */
+	         }
+
+            if smax igt mmax then mmax = smax;     /* sample peak samples */
+            if (stm.record.stereo == 1)            /* for keyboard meter */
+            &  (rmax igt mmax)                     /* display -- composite */
+            then mmax = rmax;                      /* left and right when stereo */
+
+            if (new.pan <> 0)                      /* new keyboard */
+            &  (display.ebl <> 0)                  /* display enabled */
+            &  (((real.milliseconds-meter.time) igt 2000)  /* time to update meter */
+            or  (force.meter <> 0))                /* or forced meter disp */
+            then call meter.display;               /* update the meter */
+
+            /* call run.syn.loop if adc is caught up */
+
+            if stm.record.device == stm.record.device.stm then do;         /* sample-to-memory hardware */
+               call run.syn.loop;
+               if INC.PRO            					/* Update termulator via D50 here */
+               then call Send.Events.To.D50.Termulator;
+					chill.out.and.run.syn();
+            end;
+            else if stm.record.device == stm.record.device.d66 then do;    /* mono hardware */
+               if ((read(d66)&"400")=0) then do;   /* if not 256 samples in buffer */
+                  call RUN.SYN.LOOP;
+                  if INC.PRO                       /* Update termulator via D50 here */
+                  then call Send.Events.To.D50.Termulator;
+               end;
+            end;
+				else do;											/* dig hardware */
+					if (interp_dig_stm_samples() < 256)
+					{
+                  call RUN.SYN.LOOP;
+                  if INC.PRO                       /* Update termulator via D50 here */
+                  then call Send.Events.To.D50.Termulator;
+					}
+				end;
+
+         /* $page */
+
+            if (inc.mouse) 
+            and (not termulator)                   /* no need to do this on the MAC */
+            and (sample.to.memory <> 0)            /* if we are going to record */
+            and (mouse.cursor.type <> 0)           /* turn off the mouse        */
+            then call mouse.switch(0);             /* mouse.cursor.type=0 if no mouse in system */
+
+            if  (inc.mouse) 
+            and (mouse.cursor.on) 
+            and ((real.milliseconds - mouse.cursor.time) igt mouse.refresh.rate) 
+            and (sample.to.memory = 0)  /* not recording */
+            then do;                    /* update the mouse every 20 or 60 milliseconds */
+
+               mouse.cursor.time = real.milliseconds;
+
+               if D44_PRESENT
+               then do;
+                 call mouse.cursor.update;
+                  if mouse(button.check)<>0 then do;
+                     new.mouse.button = 1;
+                     new.poly.contents = new.poly.contents \ 1;
+                  end;
+               end;
+            end;
+
+            if (num.of.d50.in.chars<>0)                    /* check for end of recording */
+            or ((sample.to.memory<>0)&(sec# ige (max#(lw#lsb)-1)))
+            or ((sample.to.memory<>0)&(prev.recd <> 0) & (recd = 0))
+            or ((sample.to.memory=0 )&(prev.recd = 0)  & (recd <> 0))
+            then new.poly.contents = new.poly.contents \ 1;
+
+            force.meter = 0;          /* don't need to force */
+         }										// End of SIM2 exit condition
+
+         suppress_lod_scan = 0;
+
+         return 0;
+      END SIM2;
+
+      /* $Subtitle Sample Into Memory Procedure #3 - set up file in poly */
+
+      SIM3: proc swapable; /* set up file and poly memory after recording */
+         dcl (scount,m) fixed;              /* sample count */
+         dcl (msw,lsw,i) fixed;             /* used for scaling computations */
+         dcl rec(POLY.HIST.REC.LEN-1) fixed;
+
+         if sec#=4 then sec#=5;             /* min of 256 samples */
+
+         if stm.record.device == stm.record.device.stm then do;     /* sample-to-memory hardware */
+            disable;
+            if stm.record.stereo = 1 then do; /* if stereo sampling */
+               write(psc) = slave;          /* select slave poly channel */
+               write(psf) = pson;           /* turn the channel off */
+               write(psd) = 0;
+               write(psf) = pspi;           /* reset phase increment */
+               write(psd) = 0;   write(psd) = 0; /* phase increment of zero */
+               write(psd) = 255; write(psd) = 0; /* inc of 256/mod of 256 */
+            end;
+            
+            write(psc) = master;            /* select master poly channel */
+            write(psf) = pson;              /* turn the channel off */
+            write(psd) = 0;
+            write(psf) = psadmc;            /* turn off the A/D channel(s) */
+            write(psd) = 0;
+            write(psf) = pspi;              /* reset phase increment */
+            write(psd) = 0;   write(psd) = 0; /* phase increment of zero */
+            write(psd) = 255; write(psd) = 0; /* inc of 256/mod of 256 */
+            adc.stop.msb = sampled.actual.play.time.msb;   /* sample stop time for use */
+            adc.stop.lsb = sampled.actual.play.time.lsb;   /* by button panel recording */
+            enable;
+            call free_channels;             /* free the poly channels */
+
+         end;
+			
+         else if stm.record.device == stm.record.device.dig then do;     /* digital stm */
+				interp_stop_dig_stm();
+            disable;                        /* record the stop time */
+            adc.stop.msb = sampled.actual.play.time.msb;   /* so we can compute */
+            adc.stop.lsb = sampled.actual.play.time.lsb;   /* adc duration for button */
+            enable;                         /* panel recording */
+			end;
+			
+         else do;                           /* mono hardware */
+            write(d66)="11";                /* select control register */
+            write(d67)=0;                   /* terminate the adc */
+            disable;                        /* record the stop time */
+            adc.stop.msb = sampled.actual.play.time.msb;   /* so we can compute */
+            adc.stop.lsb = sampled.actual.play.time.lsb;   /* adc duration for button */
+            enable;                         /* panel recording */
+         end;
+
+         /* if actually recording, trim sound file */
+
+         if (sample.to.memory<>0)               /* if we did a recording */
+         then do;                               /* then trim sound file for recorded data */
+            if trig<=0 then do;                 /* detect case if trigger never happend */
+               transparent_mode;
+               call pc(ESC);                    /* erase rest of line     */
+               call ps('[K');
+               vector_mode;                     /* now vector mode        */
+               call data_level(2);              /* correct data level     */
+            end;
+
+            sample.to.memory=0;                 /* done with recording now */
+
+            if (recd <> 0)
+            &  (record.from.button <> 0)        /* we have stopped recording */
+            then do;
+               call STOP.RECORD;                /* w/o user pressing stop; so stop sequencer */
+               if sec# ige (max#(lw#lsb)-1) then
+               call display.err(42);            /* we ran out of memory */
+            end;
+
+            if num.of.d50.in.chars<>0           /* if character typed while recording */
+            then call get.next.d50.in.char;     /* just stop recording then ignore character */
+
+            do i=0 to 4;                        /* make sure file did not move */
+               FNBUF(i)=NEWFNAME(i);            /* during run synloop call     */
+            end;
+            FNBUF(0)=8;
+            LNBUF(0)=0;
+
+            /* $page */
+
+            if ps.search<>0 then do;            /* find file (in case it moved? during run.syn.loop */
+               call copy32(sfile.base,base);    /* reset base in case moved */
+
+               if (stm.record.notrigger=0)      /* if we recorded w/trigger */
+               then do;                         /* then trim end of sound file if trigger active */
+                  call DRAW.MESSAGE('Trimming Sound File...');
+                  smax=0;
+                  do while (smax ilt STM.THRESHOLD)
+                  and      (sec# igt 8);
+                     call psmread(base,sec#-1,0);
+                     do j=0 to 255;
+                        k=abs(read(psd)-dcoffset);
+                        if k igt smax then smax=k;
+                     end;
+                     if smax ilt STM.THRESHOLD then sec#=sec#-1;
+							timeshare_with_host();
+                  end;
+               end;
+               
+               if sec# ilt max#(lw#lsb) then do;   /* see if finished early   */
+                  call ps.lock;                    /* lock in case 'load' pressed */
+                  call psmread(base,0,bl.len);
+                  i=read(psd);                     /* get block length */
+                  j=read(psd);                     /* get users        */
+                  if j<>0 then do;
+                     call add16(i,psfree);         /* count more free */
+                     call sub16(sec#,psfree);
+                  end;
+                  call psmwrite(base,0,0);
+                  write(psd)=sec#;                 /* set recorded file length */
+                  // Create a blank space in poly
+                  call psmwrite(base,sec#,BL.LEN);
+                  write(psd)=i-sec#;               // Number of free sectors
+                  // Less than 4 sectors - 0 it all
+                  if ((i-sec#)<4) {
+                     do j=bl.users to shl(i-sec#,8)-1;     /* zero out entire management and sound file header area */
+                        write(psd)=0;
+                     end;
+                  }
+                  // Else zero out management and sound file header
+                  else {
+                     do j=bl.users to shl(SF.SYM+SF.SYM,8)-1;     /* zero out entire management and sound file header area */
+                        write(psd)=0;
+                     end;
+                  }
+                  call copy32(base,tbase);        /* get local copy for comparison */
+                  call add16(i,tbase);
+                  if com32(pslast,tbase) = lw#ieq then do;   /* eliminate block if at end of memory */
+                     call copy32(base,pslast);
+                     call add16(sec#,pslast);
+                     call copy32(pslast,pshere);
+                  end;
+               end;
+
+               /* $page Now fix up sound file - find MARK.START */
+
+               if (stm.record.stereo = 1) /* stereo */
+               then scount=2;
+               else scount=1;
+
+               if  (sec# ige (shr(bl.poly,8)+40))    /* if long (?) sound file */
+               and (stm.record.notrigger=0)          /* and trigger on         */
+               and (record.from.button = 0)          /* and we didn't record from butt panel */
+               then do;                              /* try to find mark.start */
+                  i=0;
+                  j=shr(bl.poly,8);           /* get sector offset */
+                  call psmread(base,j,0);     /* look at data samples */
+                  do while (i<8192)&(abs(read(psd)-dcoffset) ilt STM.THRESHOLD); /* find first sample >=STM.THRESHOLD */
+                     i=i+1;                   /* look on either channel for threshold */
+                  end;
+                  if  (i>1)                      /* if not at first point */
+                  and (i<8192)                   /* and not at last point */
+                  then do;                       /* if sample found,  look for mark start */
+                     if i>=256 then do;          /* get word to start      */
+                        k=i-255;                 /* reading poly memory    */
+                        i=255;                   /* from                   */
+                     end;
+                     else k=0;
+                     call psmread(base,j,k);
+                     call poly.in(addr(misc.buf(0)),256);
+                     l=misc.buf(i)-dcoffset;     /* get sample that abs > STM.THRESHOLD  */
+                     do while (i>scount)         /* back up until zero crossing */
+                     and (((misc.buf(i-1)-dcoffset)&"100000")=(l&"100000")); /* and same sign */
+                        i=i-scount;
+                        l=misc.buf(i)-dcoffset;
+                     end;
+                     if abs(misc.buf(i-scount)-dcoffset) ilt abs(misc.buf(i)-dcoffset)
+                     then i=i-scount;           /* back up to previous sample if closer to zero */
+                     k=k+i;                     /* point to misc.buf(i) */
+                     j=j+shr(k,8); k=k&255;     /* normalize            */
+
+                     call INDEX_TO_TIME(0,j-shr(bl.poly,8),k,stm.record.rate,stm.record.stereo);
+                     call psmwrite(base,sf.hdr,sf.mark.start);
+                     write(psd)=TIME.SECONDS;
+                     write(psd)=TIME.MILLISECONDS;
+                     write(psd)=TIME.MICROSECONDS;
+                     call psmwrite(base,sf.sym,symbol_length);  /* # symbol time */
+                     write(psd)=TIME.SECONDS;
+                     write(psd)=TIME.MILLISECONDS;
+                     write(psd)=TIME.MICROSECONDS;
+                  end;       /* of valid mid.threshold found */
+               end;          /* of should mark start         */
+
+               /* $page - Find the end of file and set up header info */
+
+               call psmread(base,sec#-1,0);         /* find smallest point in last sector */
+               call poly.in(addr(misc.buf(0)),256);
+               l=abs(misc.buf(0)); J=0;
+               if scount=2                          /* stereo */
+               then l=shr(l,1)+shr(abs(misc.buf(1)),1);  /* get sum of left and right values */
+               do k=scount to 255 by scount;
+                  m=abs(misc.buf(k));
+                  if scount=2                          /* stereo */
+                  then m=shr(m,1)+shr(abs(misc.buf(k+1)),1);  /* get sum of left and right values */
+                  if m ilt l then do;
+                     l=m;
+                     j=k;
+                  end;
+               end;
+
+               call psmwrite(base,SF.HDR,sf.valid.data); /* move to VALID.DATA in header */
+
+               write(psd)=0;                      /* VALID.DATA is length of sound data */
+               write(psd)=sec#-5+shr((j+1),8);
+               write(psd)=((j+1)&255);
+
+               write(psd)=0;                       /* unused           */
+
+               write(psd)=0;                       /* TOTAL.DATA is sector len */
+               write(psd)=sec#-4;
+               write(psd)=0;
+
+               call INDEX_TO_TIME(0,sec#-5,j,stm.record.rate,stm.record.stereo);
+               write(psd)=TIME.SECONDS;            /* DATA.END */
+               write(psd)=TIME.MILLISECONDS;  
+               write(psd)=TIME.MICROSECONDS;
+
+               call psmwrite(base,SF.HDR,sf.mark.end);
+               write(psd)=TIME.SECONDS;           /* MARK.END is the same */
+               write(psd)=TIME.MILLISECONDS;
+               write(psd)=TIME.MICROSECONDS;
+
+               call psmwrite(base,SF.SYM,2*symbol_length); /* set time for end play marker */
+               write(psd)=TIME.SECONDS;           /* $ symbol */
+               write(psd)=TIME.MILLISECONDS;
+               write(psd)=TIME.MICROSECONDS;
+
+               call psmwrite(base,SF.SYM,3*symbol_length); /* set time for end symbol */
+               write(psd)=TIME.SECONDS;           /* END symbol */
+               write(psd)=TIME.MILLISECONDS;
+               write(psd)=TIME.MICROSECONDS;
+
+               /* Set data type */
+               call psmwrite(base,SF.HDR,sf.file.data.type);
+               write(psd)=1;   /* raw sampled data */
+
+               /* Set caption */
+               call psmwrite(base,SF.HDR,sf.id.field.bytes);
+               call copy_out_string(samcap);
+
+               call ps.setup(base);                /* set up new syncl info     */
+
+               if trig>0 then do;                  /* if sound was actually triggered, link it up */
+                  call ERASE.KEYBOARD.TIMBRE;      /* get rid of kbd timbre for sure */
+                  call SELECT.PARTIAL(0);          /* select the first partial */
+                  call CREATE.PATCH.PARTIAL(0,NEWFNAME);          /* turn this partial into a patch partial */
+                  call CLEAR.PARAMETERS;           /* get rid of active parms */
+               end;
+               call ERASE.MESSAGE;
+
+               call BUILD.POLY.HIST.REC(base,0,rec);   /* show a new file created */
+               call ADD.POLY.TO.HIST(rec);
+
+            end;              /* of file still in poly memory */
+
+            /* $page */
+
+            /* set up for new display */
+
+            vector_mode;
+            call DATA_LEVEL(0);
+            transparent_mode;
+
+            prev.stm.vert.factor=stm.vert.factor;
+            stm.vert.factor=0;
+            call DRAW.SOUND.FILE.VERT.FACTOR;
+
+            call look.up.sf.info;
+
+            lsw = sec#-4;
+            if stm.record.stereo               /* stereo file */
+            then lsw = shr(lsw,1);             /* halve sectors to get mono length */
+            load  lsw;                         /* load valid # sectors */
+            mul   256;                         /* mul to get samples       */
+            lsw = res;                         /* dummy read           */
+            div   display.width;               /* divide by display width */
+            lsw = res;                         /* which yields new stm hor scale */
+            if rem > 0 then lsw = lsw + 1;     /* round up on any uneven divide */
+            i = 0;
+            do while (i < 25) & (hor.zoom.table(i) < lsw);  /* search for closest equivalent */
+               i = i + 1;                      /* in the scale table */
+            end;
+
+            prev.stm.hor.scale=stm.hor.scale;
+            prev.stm.hor.factor=stm.hor.factor; /* save previous for erasing */
+            stm.hor.factor = i;
+            stm.hor.scale = hor.zoom.table(i);
+
+            call DRAW.SOUND.FILE.HOR.FACTOR;
+            call DRAW.LANDSCAPE.CONTROL;
+            
+            if  (not termulator)                 /* if MAC, then mouse is still on */
+            and (D44_PRESENT)
+            then call mouse.switch(1);           /* turn mouse back on */
+
+            envcomp = envchg;                    /* sample disp mode for next envelope */
+            envchg = 0;                          /* reset change flag */
+
+            do i=0 to 2;
+               start.time(i)=0;
+            end;
+
+            call PS.UNLOCK;                       /* unlock after record */
+
+            if (record.from.button = 0)               /* redraw the screen or just refresh record menu */
+            then call SED.COMMAND.ATTRIBUTE.DEPOSIT;  /* terminate record process */
+            else do;                                  /* recorded from button */
+               if nenvx < display.width               /* if erasing not finished */
+               then call erase.samples(nenvx,display.width,2); /* finish it now */
+               call display.recording.time;           /* display recording time available */
+
+            end;
+         end;                                    /* if sample.to.memory <> 0 */
+
+         else do;                                /* erase origin line & previous line */
+            if pedis<>0 then do;
+               call connect(0,display.origin+pedis,width,display.origin+pedis);
+            end;
+            call connect(0,display.origin,width,display.origin);
+
+            if stm.record.stereo = 1 then do;   /* stereo */
+               call viewport(right.rect.minx+1,right.rect.maxx-1,right.rect.miny+1,right.rect.maxy-1);
+               if predis<>0 then do;
+                  call connect(0,display.origin+predis,width,display.origin+predis);
+               end;
+               call connect(0,display.origin,width,display.origin);
+            end;
+
+            vector_mode;
+            call DATA_LEVEL(0);
+            transparent_mode;
+            call cpos(5,40);
+            call pc(ESC);                    /* erase rest of line     */
+            call ps('[K');
+            call cpos(7,40);
+            call pc(ESC);                    /* erase rest of line     */
+            call ps('[K');
+            if  (num.of.d50.in.chars<>0)
+            and (next.d50.in.char>=asc.call.convert)
+            then do;
+               call SED.COMMAND.ATTRIBUTE.DEPOSIT;    /* terminate record process on break */
+            end;
+            else call POS.STM.ALPHA.CURSOR;           /* repos cursor */
+         end;
+
+         /* $page */
+
+         if  (num.of.d50.in.chars<>0)
+         and (next.d50.in.char>=asc.call.convert)
+         then do;
+            call get.next.d50.in.char;
+         end;
+
+         /*** DETERMINE WHETHER TO LEAVE OR LOOP ***/
+
+         if (num.of.d50.in.chars<>0) then do;         /* character was pressed */
+            stm.record.active = 0;                    /* go back to normal record */
+            if (record.from.button <> 0)              /* if recding from button then */
+            then call button.record.abort;            /* abort button record */
+            call clear.upper;                         /* erase meter */
+            return 1;                                 /* leave loop */
+         end;
+
+         if (prev.recd = 0)                           /* record button was pressed */
+         &  (recd      <>0)
+         then do;
+            sample.to.memory = 1;                     /* flag starts sample-to-memory */
+            prev.recd = recd;                         /* sample so we can detect change */
+            new.poly.contents  = 0;                   /* for next time */
+            record.from.button = 1;                   /* for scaling env disp */
+            stm.track = recd.trk;                     /* sample track number */
+         end;
+
+         else
+         if (prev.recd <> 0)                           /* record halted */
+         &  (recd      = 0)
+         then do;
+            prev.recd = recd;                          /* sample recd */
+            new.poly.contents = 0;                     /* for next time */
+            record.from.button = 0;                    /* set back to normal scaling */
+            call button.record.note;                   /* set recording on a track */
+         end;
+
+         else do;
+            stm.record.active = 0;                     /* cancel stm record mode */
+            return 1;                                  /* leave loop */
+         end;
+
+         if ertyp <> 0 then do;                        /* check for errors */
+            call ps.error(ertyp);                      /* and print them */
+            call POS.STM.ALPHA.CURSOR;
+         end;
+
+         return 0;
+      END SIM3;
+
+      /* $Subtitle Sample-To-Memory */
+
+      SAMPLE.INTO.MEMORY:  proc public swapable;
+
+         /************* START OF STM MAIN LOOP *******************/
+
+         record.from.button = 0;                   /* no button press yet */
+         prev.recd          = recd;                /* sample recd */
+         stm.record.active  = 1;                   /* we are in stm record */
+         envcomp            = 0;                   /* do not display compressed */
+
+         do i = 1 to 8;                            /* initialize meter string */
+            meter.blocks(i) = shl(9,8)\9;          /* with block characters */
+         end;
+
+         meter.time = real.milliseconds - 2000;    /* meter will happen on first pass */
+
+         do while 1;
+            if SIM1 <> 0 then return; 					/* set up to record */
+            if SIM2 <> 0 then return; 					/* record data */
+            if SIM3 <> 0 then return; 					/* set up file in poly after record */
+         end;     											/* of do while 1 */
+      end SAMPLE.INTO.MEMORY;
+
+   end;
+
+   /* $subtitle AD Initialization */
+
+   AD_INIT: PROC PUBLIC SWAPABLE;                      /* REINITIALIZE A/D IN CASE CABLE WAS CHANGED */
+      DCL (I,J,L) FIXED;
+      DCL BIN     FIXED;
+
+      DISABLE;
+
+      DO I=0 TO 64 * (PSMAXBINS - 1) BY 64;     /* ZERO EACH OF 4 SUBSYSTEMS  */
+         WRITE(PSC)=I+1;                        /* CHECK FOR SYSTEM EXISTS    */
+         IF (READ(PSC)&"377")=I+1 THEN DO;      /* SUBSYSTEM EXISTS           */
+            BIN=I/64;                           /* GET BIN NUMBER             */
+            WRITE(PSF)=PSNUMV;
+            L=READ(PSD);                        /* SAVE NUMVOICES FOR A/D CHECKS */
+            IF (L&"100")<>0 THEN DO;            /* RESET A/D CONTROLLER    */
+               POLYADCS(BIN) = 1;               /* A/D CONTROLLER PRESENT  */
+               WRITE(PSF) = PSADMC;             /* NUM  SAMPLING CHANS = 0 */
+               WRITE(PSD) = 0;
+            END;
+            ELSE POLYADCS(BIN) = 0;             /* NO A/D CONTROLLER       */
+            IF (L&"200")<>0 THEN DO;            /* RESET SAMPLING UNITS    */
+// Very interesting that the read.stm.config line is commnted out.
+// Don't know the history behind that
+// CJ 2015-04-06
+/*             ADCONFIGS(BIN) = READ.STM.CONFIG(I); */ /* GET STM CONFIGURATION */
+               WRITE(PSC) = I;                  // ACCESS CHANNEL 0 IN THIS BIN
+               WRITE(PSF) = PSADMODE;           /* SET STEREO MODE, NO AUTOGAIN */
+               WRITE(PSD) = 0;                  /* RELAYS DO NOTHING       */
+               DO J = I TO I+15;                /* INIT ALL 16 CHANS       */
+                  WRITE(PSC) = J;
+                  WRITE(PSF) = PSADVOL;         /* SET GAIN TO UNITY       */
+                  WRITE(PSD) = 0;
+                  WRITE(PSF) = PSADACT;         /* NO ACTIVE CHANNELS      */
+                  WRITE(PSD) = 0;
+               END;
+            END;
+            ELSE ADCONFIGS(BIN) = 0;            /* NO A/D MOTHERS OR DAUGHTERS */
+         END;      /* OF SUBSYST EXISTS       */
+      END;         /* OF LOOP OVER SUBSYSTEMS */
+
+      ENABLE;
+   END AD_INIT;
+
+end STRECMOD;

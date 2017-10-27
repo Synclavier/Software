@@ -1,0 +1,971 @@
+/* AUD-CUE9 - Routines for presenting symbols in Cue Edit flag area */
+
+/* MODIFIED:
+
+   07/29/88 - cj  - changed enables for actually.draw.shuttle.flags.and.edits
+   05/31/88 - TSS - Split up ACTUALLY.DRAW.SHUTTLE.FLAGS.AND.EDITS to reduce size of swap area
+
+*/
+
+/* Present.AEE.Symbol draws the passed name at the x,y position */
+/* passed.   In Complement mode, it will either erase or draw   */
+/* the symbol                                                   */
+
+Present.AEE.Symbol: proc(xpix,ypos,ybase,nam) swapable;
+   dcl xpix   fixed;         /* x coordinate pixel       */
+   dcl ypos   fixed;         /* y position   of symbol   */
+   dcl ybase  fixed;         /* y value (top of shuttle) */
+   dcl nam   array;          /* the symbol characters    */
+
+   if ypos = 0 then ypos = 51;  /* logical position 0 = pixel 51  (top) */
+   else             ypos = 42;  /*                  1         42  (mid) */
+
+   call MOVE_TO(xpix - shr(Hor.Char.Field(0)-Hor.Char.Gap(0),1), ybase + ypos);
+   call enter.nonalias.text();
+   call PS(nam);
+   call CONNECT(xpix, ybase + 1, xpix, ybase + ypos - 3);
+end Present.AEE.Symbol;
+
+
+/* Erase.AEE.Symbol is passed the y position and a pointer */
+/* to the symbol stack.   it draws the symbol (to erase    */
+/* it)  and then stores the symbol information in          */
+/* the stack                                               */
+
+Erase.AEE.Symbol:proc (ybase,ptr) swapable;
+   dcl ybase    fixed;     /* y coordinate of interest    */
+   dcl ptr      fixed;     /* ptr to symbol stack         */
+   dcl xpix     fixed;     /* x pixel where it was drawn  */
+   dcl ypos     fixed;     /* y logical position          */
+   dcl nam (16) fixed;     /* holds namei                 */
+   dcl i        fixed;
+   dcl j        fixed;
+
+   write(mam) = Cue.Symbol.Ptr;
+   write(mal) = ptr;
+
+   xpix = read(mdi);         /* read pixel position from ext mem  */
+   ypos = read(mdi);         /* and logical position              */
+   do i=0 to 16;             /* and read the symbol alphanumerics */
+      nam(i) = read(mdi);
+   end;
+
+   call Present.AEE.Symbol(xpix, ypos, ybase, nam);   /* erase the symbol by drawing it */
+
+   j = shr(nam(0)+3,1) + 2;    /* compute # of words in name, plus pixel word */
+
+   /* garbage collext symbol stack: */
+
+   call Copy.Ext.Mem(Cue.Symbol.Ptr, ptr+j,
+                     Cue.Symbol.Ptr, ptr,
+                     Symbol.Stack.Size - ptr - j);
+
+   Symbol.Stack.Size = Symbol.Stack.Size - j;
+
+end Erase.AEE.Symbol;
+
+
+/* DRAW.AEE.SYMBOL presents a symbol on the terminal */
+/* and also stores the information in the symbol     */
+/* stack                                             */
+
+Draw.AEE.Symbol:proc (xpix, ypos, ybase, nam, ptr) swapable;
+   dcl xpix     fixed;     /* x pixel of interest       */
+   dcl ypos     fixed;     /* logical y position (0,1)  */
+   dcl ybase    fixed;     /* base of flag area         */
+   dcl nam      array;     /* the symbol itself         */
+   dcl ptr      fixed;     /* ptr to symbol stack       */
+   dcl i        fixed;
+   dcl j        fixed;
+
+   call Present.AEE.Symbol(xpix, ypos, ybase, nam);   /* draw the symbol */
+
+   j = shr(nam(0)+3,1) + 2;    /* compute # of words in name, plus pixel word */
+
+   // Copy symbol data up in memory to make room for this symbol
+   call Copy.Ext.Mem(Cue.Symbol.Ptr, ptr,
+                     Cue.Symbol.Ptr, ptr+j,
+                     Symbol.Stack.Size - ptr);
+
+   Symbol.Stack.Size = Symbol.Stack.Size + j;
+
+   write(mam) = Cue.Symbol.Ptr;
+   write(mal) = ptr;
+
+   write(mdi) = xpix;         /* save pixel position in ext mem     */
+   write(mdi) = ypos;         /* both of them                       */
+   do i=0 to j-3;             /* and store the symbol alphanumerics */
+      write(mdi) = nam(i);
+   end;
+
+end Draw.AEE.Symbol;
+
+/* $page - routine to draw symbols in flag area */
+
+/* $page - symbol drawing */
+
+
+/* One sector of ext memory is used to keep track of what      */
+/* symbols are displayed on the screen.   this area contains   */
+/* a pixel position and a string.  the string is displayed     */
+/* in that pixel position                                      */
+
+Draw.All.AEE.Symbols:proc (y,mins,maxs) swapable;
+   dcl y         fixed;    /* pass y position of coarse bar */
+   dcl mins      fixed;    /* pass min sbar box center pos  */
+   dcl maxs      fixed;    /* pass max sbar box center pos  */
+
+   dcl i         fixed;
+   dcl j         fixed;
+   dcl k         fixed;
+   dcl l         fixed;
+
+   dcl base      fixed;    /* holds base, len of cue seg     */
+   dcl len       fixed;    /* list                           */
+
+   dcl stime (1) fixed;    /* holds segment sync time        */
+   dcl in    (1) fixed;    /* holds segment in   time        */
+   dcl out   (1) fixed;    /* holds segment out  time        */
+   dcl slen  (1) fixed;    /* holds segment length           */
+   dcl sgnd  (1) fixed;    /* holds segment ending sync time */
+
+   dcl sin   (1) fixed;    /* holds symbol in time           */
+   dcl shin  (1) fixed;    /* shuttle in time, samples       */
+   dcl shout (1) fixed;    /* shuttle out time, samples      */
+
+   dcl newn(16)  fixed;
+   dcl oldn(16)  fixed;
+
+   dcl oldx      fixed;
+   dcl oldy      fixed;
+   dcl max1      fixed;
+   dcl max2      fixed;
+   dcl last      fixed;
+
+   dcl sptr      fixed;
+
+   Check.For.Flag.Exit:proc;
+      if  (Check.Next.Event   = 0)  /* if no system event pending */
+      and (new.in.char        = 0)  /* and no inchar pending      */
+      and (new.mouse.button  >= 0)  /* and no mouse press pending */
+      and (m$Presses         =  0)  /* or stacked                 */
+      then return 0;                /* then keep going            */
+
+      CALL DATA_LEVEL(0);           /* back to transp mode        */
+      TRANSPARENT_MODE;
+
+      return 1;
+   end Check.For.Flag.Exit;
+   
+
+   /* pick up with drawing of flag area symbols */
+
+   if Draw.New.AEE.Flags.And.Edits = 4     /* now plot Symbols    */
+   then do;                                
+      /* look up base and length of cue segment info           */
+
+      write(mam) = Current.Cue.Ptr;
+      write(mal) = Cue.List.Ptr;
+      base       = read(md);
+      write(mal) = Cue.List.Len;
+      len        = read(md);
+
+      sptr       = 0;                  /* start at top of list for */
+                                       /* compare                  */
+      max1 = mins;                     /* initialize symbol        */
+      max2 = mins;                     /* overlap information      */
+
+
+      /* algorithm - go through and process each segment.  fetch   */
+      /* any cues that are defined within the segment area         */
+      /* draw or erase labels as we need to                        */
+
+      if Display.Symbols = 0        /* see if symbol display     */
+      then do;
+
+         call SET.DTD.SCROLL.RANGE (0); /* will scroll over whole disk */
+
+         /* get sample #s handy for shutle in and out times */
+
+         call MSEC.To.DTD.Sample.# (AEE.Shuttle.In.Time, CF#Time, S$Speed, 
+         AEE.Current.Project.Rate, Zero.Zero, SHIn);
+         if COM16(128,Shin) = lw#ilt  /* round down by 1/2 sector to catch */
+         then call SUB16(128,SHin);   /* all symbols                       */
+         else call STR32(0,0,SHin);
+
+         call MSEC.To.DTD.Sample.# (AEE.Shuttle.Out.Time, CF#Time, S$Speed, 
+         AEE.Current.Project.Rate, Zero.Zero, SHOut);
+         call ADD16(128,SHOut);       /* round up by 1/2 sector     */
+
+         if base = 0 then do;         /* if no segments, then must  */
+            call STR32( 0, 0,in   );  /* default segment to all     */
+            call STR32(-1, 0,out  );  /* of disk                    */
+            call STR32( 0, 0,stime);
+            len = Cue.Seg.Stride;
+         end;
+
+         do i = base to base+len-1 by Cue.Seg.Stride;
+
+            if i <> 0 then do;
+               write(mam) = Current.Cue.Ptr + shr(i+S#Sync.Msb,8);
+               write(mal) = (i+S#Sync.Msb);
+               stime(0) = read(mdi);       /* get sync time of segment */
+               stime(1) = read(mdi);
+               in   (0) = read(mdi);       /* in time                  */
+               in   (1) = read(mdi);       /* S#In.Msb                 */
+               out  (0) = read(mdi);       /* out time                 */
+               out  (1) = read(mdi);       /* S#Out.Msb                */
+            end;
+
+            if out(0) = (-1)             /* special handling if at end of disk */
+            then do;                     /* to avoid overflow                  */
+               out(1) = ( 0);            /* give us some breathing room        */
+               if COM32(stime, in) = lw#igt
+               then do;                  /* must limit further                 */
+                  call SUB32(out, stime, slen);   /* compute new out time */
+                  call ADD32(in,  slen,  out );   /* that won't overflow  */
+               end;
+            end;
+            
+            call SUB32(out,     in, slen); /* get segment length handy */
+            call ADD32(stime, slen, sgnd); /* and sync end time handy  */
+
+            if  (COM32(stime,SHOut) <= lw#ieq) /* if segment area overlaps */
+            and (COM32(sgnd, SHIn)   = lw#igt) /* shuttle area, then must  */
+            then do;                           /* look in it for symbols   */
+            
+               /* limit area of interest to that covered by the */
+               /* shuttle bar so we don't scan the whole cue    */
+               /* list all the time                             */
+
+               if COM32(stime, SHIn) = lw#ilt /* if this segment trigger  */
+               then do;                       /* before shuttle, limit    */
+                  call SUB32(Shin,  Stime, Sin);  /* get offset           */
+                  call ADD32(In,    Sin,   In);   /* add to in time       */
+                  call SUB32(Slen,  Sin,   Slen); /* and subtract fr len  */
+                  call COPY32(SHIn, Stime);       /* to keep sync correct */
+               end;
+
+               /* Fetch first cue that is after start of segment */
+               /* and after start of scroll bar                  */
+
+               call Fetch.ABS.Time.DTD.Cue(in);   /* get first cue at in point */
+               if DTD.CUE# = 0                    /* if none there             */
+               then call Fetch.Next.Time.DTD.Cue; /* then get next one         */
+
+               write(mam) = Scsi.Ptr;             /* look up symbol in time    */
+               write(mal) = Cue.Name;             /* read possible name        */
+               call COPY.IN(addr(newn(0)),17);
+               write(mal) = Cue.In.S#.Msb;        /* if any                    */
+               sin(0) = read(mdi);                /* read random #'s if dtd.cue# = 0 */
+               sin(1) = read(mdi);
+               write(mal) = Cue.Trks;             /* check out tracks cue is on */
+               l          = read(md);             /* get track bits for check below  */
+
+               if (simulate_dtd) {
+                  DTD.CUE# = 1;
+                  l        = 0xF;
+                  Copy.String('D-T-D Cue 01', newn);
+                  sin(0) = 0;
+                  sin(1) = 50000;
+                  
+                  // Advance to first simulated cue that is in range
+                  while (DTD.CUE# != 0 && COM32(sin, in) == lw#ilt) {
+                     if (DTD.CUE# == 30)
+                        DTD.CUE# = 0;
+                     
+                     else {
+                        DTD.CUE# = DTD.CUE# + 1;
+                        do case DTD.CUE#;
+                           ;
+                           ;
+                           Copy.String('D-T-D Cue 02', newn);
+                           Copy.String('D-T-D Cue 03', newn);
+                           Copy.String('D-T-D Cue 04', newn);
+                           Copy.String('D-T-D Cue 05', newn);
+                           Copy.String('D-T-D Cue 06', newn);
+                           Copy.String('D-T-D Cue 07', newn);
+                           Copy.String('D-T-D Cue 08', newn);
+                           Copy.String('D-T-D Cue 09', newn);
+                           Copy.String('D-T-D Cue 10', newn);
+                           Copy.String('D-T-D Cue 11', newn);
+                           Copy.String('D-T-D Cue 12', newn);
+                           Copy.String('D-T-D Cue 13', newn);
+                           Copy.String('D-T-D Cue 14', newn);
+                           Copy.String('D-T-D Cue 15', newn);
+                           Copy.String('D-T-D Cue 16', newn);
+                           Copy.String('D-T-D Cue 17', newn);
+                           Copy.String('D-T-D Cue 18', newn);
+                           Copy.String('D-T-D Cue 19', newn);
+                           Copy.String('D-T-D Cue 20', newn);
+                           Copy.String('D-T-D Cue 21', newn);
+                           Copy.String('D-T-D Cue 22', newn);
+                           Copy.String('D-T-D Cue 23', newn);
+                           Copy.String('D-T-D Cue 24', newn);
+                           Copy.String('D-T-D Cue 25', newn);
+                           Copy.String('D-T-D Cue 26', newn);
+                           Copy.String('D-T-D Cue 27', newn);
+                           Copy.String('D-T-D Cue 28', newn);
+                           Copy.String('D-T-D Cue 29', newn);
+                           Copy.String('D-T-D Cue 30', newn);
+                        end;
+                     }
+                     l        = 0xF;
+                     write(5) = 50000; write(6) = DTD.CUE#; sin(0) = read(4); sin(1) = read(5);
+                  }
+               }
+
+               do while (DTD.CUE#  <> 0)          /* do while any more cues    */
+               and (COM32(sin, out) = lw#ilt);    /* that are in this segment  */
+
+                  call SUB32(sin, in, sin);       /* get dist from in to symbol */
+                  call ADD32(stime, sin, sin);    /* add to sync time to get shuttle position */
+
+                  if COM32(sin, SHOut) = lw#igt   /* if next symbol past end of shuttle */
+                  then DTD.CUE# = 0;              /* then done here                     */
+
+                  else do;                        /* check further                      */
+
+                     if  (byte(newn,0)           <> DOT)   /* if symbol does not begin with a dot */
+                     and ((l&Shuttle.Drive.Bits) <> 0  )   /* and audio overlaps these trks */
+                     then do;                              /* then show it                  */
+
+                        call DTD.Sample.#.To.Msecs(Sin, CF#Time, S$Speed, AEE.Current.Project.Rate, Zero.Zero, Sin);
+
+                        j = Times.To.Percent(AEE.Shuttle.In.Time,Sin,AEE.Shuttle.Out.Time);
+                        j = COMPUTE.SCROLL.BAR.BOX.POSITION (Shuttle.Coarse.Bar,j);
+
+                        /* limit symbol length to what will fit in */
+                        /* flag  area                              */
+
+                        k = j + newn(0)*Hor.Char.Field(0);  /* get rightmost pixel */
+                        if k > maxs + shr(SB.Hwidth,1)
+                        then do;                            /* limit to edge of sbar box area */
+                           load (maxs + shr(SB.Hwidth,1) - j);
+                           div  (Hor.Char.Field(0));
+                           newn(0) = res;
+                        end;
+
+                        /* compute y position to use to minimize */
+                        /* symbol overlap.   If no overlap would */
+                        /* occur on top row, use it.   If no     */
+                        /* overlap would occur on second row,    */
+                        /* use it.  else use which ever row      */
+                        /* is shorter                            */
+
+                        if j >= max1 then k = 0;       /* prefer top      */
+                        else if j >=max2 then k = 1;   /* use middle      */
+                        else if max1 <= max2 then k=0;
+                        else                      k=1;
+
+                        l = j + newn(0)*Hor.Char.Field(0);  /* save final rightmost pixel */
+
+                        /* plot it         */
+
+                        /* check for prior symbol to erase */
+
+                        check.next.symbol:;
+
+                        oldn(0) = 0;   /* assume no prior name is found */
+                        oldx    = 0;   /* initialize old pixel info     */
+                        oldy    = 0;
+
+                        if sptr < Symbol.Stack.Size
+                        then do;
+
+                           write(mam) = Cue.Symbol.Ptr;
+                           write(mal) = sptr;
+
+                           if read(md) < j then do;        /* must be this symbol no longer needed */
+                              call Erase.AEE.Symbol(y,sptr);
+                              if Check.For.Flag.Exit then return;
+                              goto check.next.symbol;
+                           end;
+
+                           if read(md) = j then do;        /* read name of symbol at this pixel, if any */
+                              oldx = read(mdi);            /* get its pixel position (may by > us) */
+                              oldy = read(mdi);            /* and old logical position             */
+                              call COPY.IN(addr(oldn(0)),17);
+                           end;
+
+                        end;
+
+                        /* plot new symbol if identical one */
+                        /* is not there already             */
+
+                        if  (j <> oldx)
+                        or  (k <> oldy)
+                        or  ( EQSTR(newn,oldn) <> 0)
+                        then do;
+                           // Delete all trailing symbols once we run out of room. Result is less confusing for the easily-confused
+                           // aging developers...
+                           if ((sptr < Symbol.Stack.Size) && ((Symbol.Stack.Size + 2 + shr(newn(0)+3,1)) > 256)) {
+                              call Erase.AEE.Symbol(y,sptr);
+                              if Check.For.Flag.Exit then return;
+                           }
+                           if (Symbol.Stack.Size + 2 + shr(newn(0)+3,1)) <= 256
+                           then do;
+                              call Draw.AEE.Symbol (j, k, y, newn, sptr);
+                              sptr = sptr + 2 + shr(newn(0)+3,1);
+                              if (k=0)&(l>max1) then max1=l;
+                              if (k=1)&(l>max2) then max2=l;
+                           end;
+                        end;
+                        else do; /* else incr sptr if our desired name is on the stack in the right position */
+                           sptr = sptr + 2 + shr(newn(0)+3,1);
+                           if (k=0)&(l>max1) then max1=l;
+                           if (k=1)&(l>max2) then max2=l;
+                        end;
+
+                     end;
+
+                     if Check.For.Flag.Exit then return;
+
+                     call Fetch.Next.Time.DTD.Cue; /* then get next one         */
+
+                     write(mam) = Scsi.Ptr;           /* look up symbol in time    */
+                     write(mal) = Cue.Name;           /* read possible name        */
+                     call COPY.IN(addr(newn(0)),17);
+                     write(mal) = Cue.In.S#.Msb;      /* if any                    */
+                     sin(0) = read(mdi);              /* read random #'s if dtd.cue# = 0 */
+                     sin(1) = read(mdi);
+                     write(mal) = Cue.Trks;           /* check out tracks cue is on */
+                     l          = read(md);
+
+                     if (simulate_dtd) {
+                        if (DTD.CUE# == 30)
+                           DTD.CUE# = 0;
+
+                        else {
+                           DTD.CUE# = DTD.CUE# + 1;
+                           do case DTD.CUE#;
+                              ;
+                              ;
+                              Copy.String('D-T-D Cue 02', newn);
+                              Copy.String('D-T-D Cue 03', newn);
+                              Copy.String('D-T-D Cue 04', newn);
+                              Copy.String('D-T-D Cue 05', newn);
+                              Copy.String('D-T-D Cue 06', newn);
+                              Copy.String('D-T-D Cue 07', newn);
+                              Copy.String('D-T-D Cue 08', newn);
+                              Copy.String('D-T-D Cue 09', newn);
+                              Copy.String('D-T-D Cue 10', newn);
+                              Copy.String('D-T-D Cue 11', newn);
+                              Copy.String('D-T-D Cue 12', newn);
+                              Copy.String('D-T-D Cue 13', newn);
+                              Copy.String('D-T-D Cue 14', newn);
+                              Copy.String('D-T-D Cue 15', newn);
+                              Copy.String('D-T-D Cue 16', newn);
+                              Copy.String('D-T-D Cue 17', newn);
+                              Copy.String('D-T-D Cue 18', newn);
+                              Copy.String('D-T-D Cue 19', newn);
+                              Copy.String('D-T-D Cue 20', newn);
+                              Copy.String('D-T-D Cue 21', newn);
+                              Copy.String('D-T-D Cue 22', newn);
+                              Copy.String('D-T-D Cue 23', newn);
+                              Copy.String('D-T-D Cue 24', newn);
+                              Copy.String('D-T-D Cue 25', newn);
+                              Copy.String('D-T-D Cue 26', newn);
+                              Copy.String('D-T-D Cue 27', newn);
+                              Copy.String('D-T-D Cue 28', newn);
+                              Copy.String('D-T-D Cue 29', newn);
+                              Copy.String('D-T-D Cue 30', newn);
+                           end;
+                        }
+                        l        = 0xF;
+                        write(5) = 50000; write(6) = DTD.CUE#; sin(0) = read(4); sin(1) = read(5);
+                     }
+
+                  end;
+               end;
+
+               if Check.For.Flag.Exit then return;
+
+            end;
+         end;
+
+      end;
+
+      /* remove any remaining undesired symbols */
+
+      do while sptr < Symbol.Stack.Size;  /* erase symbols.  wait for         */
+         call Erase.AEE.Symbol(y,sptr);   /* symbol.stack.size to get smaller */
+         if Check.For.Flag.Exit then return;
+      end;                                /* smaller                  */
+
+      Draw.New.AEE.Flags.And.Edits = 5;    /* and now done        */
+
+   end;
+
+   /* done with flag update */
+
+   CALL DATA_LEVEL(0);                  /* back to transp mode */
+   TRANSPARENT_MODE;
+
+   Draw.New.AEE.Flags.And.Edits = 0;    /* and now done        */
+
+end Draw.All.AEE.Symbols;
+
+
+/* $page - routine to draw flags at all splice points */
+
+dcl #bmwrds    lit '64';           /* # of bit map words */
+
+Draw.All.Edit.Point.Flags:proc(y,mins,maxs) swapable;;
+   dcl y         fixed;             /* pass y position of coarse bar */
+   dcl mins      fixed;             /* pass min sbar box center pos  */
+   dcl maxs      fixed;             /* pass max sbar box center pos  */
+
+   dcl i         fixed;
+   dcl j         fixed;
+
+   dcl base      fixed;             /* holds base, len of cue seg     */
+   dcl len       fixed;             /* list                           */
+
+   dcl stime (1) fixed;             /* holds segment sync time        */
+   dcl itime (1) fixed;             /* holds segment in   time        */
+   dcl otime (1) fixed;             /* holds segment out  time        */
+   dcl new       fixed;
+   dcl old       fixed;
+
+   Check.For.Flag.Exit:proc;
+      if  (Check.Next.Event   = 0)  /* if no system event pending */
+      and (new.in.char        = 0)  /* and no inchar pending      */
+      and (new.mouse.button  >= 0)  /* and no mouse press pending */
+      and (m$Presses         =  0)  /* or stacked                 */
+      then return 0;                /* then keep going            */
+
+      CALL DATA_LEVEL(0);           /* back to transp mode        */
+      TRANSPARENT_MODE;
+
+      return 1;
+   end Check.For.Flag.Exit;
+
+
+   /* Description of algorithm:                             */
+   /* One sector of ext memory (Cue.Flag.Ptr) holds         */
+   /* two interleaved bit maps.  these maps contain 1 bit   */
+   /* for each of 1024 pixels                               */
+   /*                                                       */
+   /* The algorithm works by going through the segment      */
+   /* list and computing which pixels should be showing     */
+   /* edit flags.   those bits are set in the 'new'         */
+   /* display bit map.   after the computations are         */
+   /* completed,  the new and old bit maps are compared.    */
+   /* Edit flags are added or removed from the display      */
+   /* as needed                                             */
+
+   /* Complement mode makes this easy                       */
+
+
+   if Draw.New.AEE.Flags.And.Edits = 2     /* first time through here    */
+   then do;                                /* compute bit map            */
+
+      /* begin by zeroing out the new bit map                  */
+
+      write(mam) = Cue.Flag.Ptr;
+      do i = 0 to #bmwrds - 1;
+         write(mal) = shl(i,1);
+         write(md ) = 0;
+      end;
+
+
+      /* look up base and length of cue segment info           */
+
+      write(mam) = Current.Cue.Ptr;
+      write(mal) = Cue.List.Ptr;
+      base       = read(md);
+      write(mal) = Cue.List.Len;
+      len        = read(md);
+
+
+      /* set bits for pixels desiring edit flags               */
+
+      if  (Display.Edits = 0)           /* if edit flags desired          */
+      and (base         <> 0)           /* if any segments, then set bits */
+      then do i = base to base+len-1 by Cue.Seg.Stride;
+
+         write(mam) = Current.Cue.Ptr + shr(i+S#SPixelPointer,8);
+         write(mal) = (i+S#SPixelPointer);
+         write(mdi) = 0;           /* clean out s#SpixelPointer */
+         write(mdi) = 0;           /* clean out s#EPixelPointer */
+
+         write(mam) = Current.Cue.Ptr + shr(i+S#Sync.Msb,8);
+         write(mal) = (i+S#Sync.Msb);
+         Stime(0) = read(mdi);          /* S#Sync.Msb */
+         Stime(1) = read(mdi);          /* S#Sync.Lsb */
+
+         call DTD.Sample.#.To.Msecs(Stime, CF#Time, S$Speed, AEE.Current.Project.Rate, Zero.Zero, Stime);
+
+         /* if edit time is on scroll bar, then */
+         /* draw an E flag                      */
+
+         if  (COM32(Stime,AEE.Shuttle.In.time ) >= lw#ieq)
+         and (COM32(Stime,AEE.Shuttle.Out.time) <= lw#ieq)
+         then do;
+
+            j = Times.To.Percent(AEE.Shuttle.In.Time,Stime,AEE.Shuttle.Out.Time);
+            j = COMPUTE.SCROLL.BAR.BOX.POSITION (Shuttle.Coarse.Bar,j);
+
+            if j ILT (#bmwrds*16)      /* if desired position is in */
+            then do;                   /* bit map, then set bit     */
+               load j; div 16;         /* compute word, bit         */
+               write(mam) = Cue.Flag.Ptr;
+               write(mal) = shl(res,1);
+               write(md ) = read(md) \ bits(rem);
+
+               write(mam) = Current.Cue.Ptr + shr(i+S#SPixelPointer,8);
+               write(mal) = (i+S#SPixelPointer);
+               write(md ) = j;         /* save pixel back pointer   */
+
+            end;
+         end;
+
+         if Check.For.Flag.Exit then return;
+
+         /* draw e flag at segment end as well */
+
+         write(mam) = Current.Cue.Ptr + shr(i+S#Sync.Msb,8);
+         write(mal) = (i+S#Sync.Msb);
+         Stime(0) = read(mdi);          /* S#Sync.Msb */
+         Stime(1) = read(mdi);          /* S#Sync.Lsb */
+         Itime(0) = read(mdi);          /* S#In.Msb   */
+         Itime(1) = read(mdi);          /* S#In.Lsb   */
+         Otime(0) = read(mdi);          /* S#Out.Msb  */
+         Otime(1) = read(mdi);          /* S#Out.Lsb  */
+
+         if Otime(0) <> (-1)            /* if seg ends before inifinity */
+         then do;                       /* then check ending e flag     */
+
+            call SUB32(Otime, Itime, Itime);  /* compute seg length        */
+            call ADD32(Stime, Itime, Stime);  /* compute seg sync end      */
+
+            call DTD.Sample.#.To.Msecs(Stime, CF#Time, S$Speed, AEE.Current.Project.Rate, Zero.Zero, Stime);
+
+            /* if segment ends in scroll bar       */
+            /* draw an E flag                      */
+
+            if  (COM32(Stime,AEE.Shuttle.In.time ) >= lw#ieq)
+            and (COM32(Stime,AEE.Shuttle.Out.time) <= lw#ieq)
+            then do;
+
+               j = Times.To.Percent(AEE.Shuttle.In.Time,Stime,AEE.Shuttle.Out.Time);
+               j = COMPUTE.SCROLL.BAR.BOX.POSITION (Shuttle.Coarse.Bar,j);
+
+               if j ILT (#bmwrds*16)      /* if desired position is in */
+               then do;                   /* bit map, then set bit     */
+                  load j; div 16;         /* compute word, bit         */
+                  write(mam) = Cue.Flag.Ptr;
+                  write(mal) = shl(res,1);
+                  write(md ) = read(md) \ bits(rem);
+
+                  write(mam) = Current.Cue.Ptr + shr(i+S#EPixelPointer,8);
+                  write(mal) = (i+S#EPixelPointer);
+                  write(md ) = j;         /* save pixel back pointer   */
+
+               end;
+            end;
+         end;
+
+         if Check.For.Flag.Exit then return;
+
+      end;
+
+      Draw.New.AEE.Flags.And.Edits = 3;    /* and now done        */
+
+   end;
+
+
+   /* now compare new and old bit maps */
+
+   if Draw.New.AEE.Flags.And.Edits = 3     /* now plot E flags     */
+   then do;                                
+
+      do i = 0 to #bmwrds-1;
+
+         write(mam) = Cue.Flag.Ptr;
+         write(mal) = shl(i,1);
+
+         if read(mdi) <> read(mdi)        /* difference detected */
+         then do;
+
+            write(mal) = shl(i,1);        /* get desired new settings   */
+            new        = read(mdi);       /* (where we want them) and   */
+            old        = read(mdi);       /* current settings (where    */
+                                          /* they are)                  */
+            do j = 0 to 15;               /* check each bit             */
+               if ((new xor old) & bits(j)) <> 0  /* if flag in this pixel */
+               then do;                           /* pos needs to be drawn */
+
+                  call Plot.Flag(i*16+j,y,4,0,0); /* or erased, then do so */
+                  old = old xor bits(j);          /* mark new state        */
+                  write(mam) = Cue.Flag.Ptr;      /* and save in bit map   */
+                  write(mal) = shl(i,1)+1;
+                  write(md ) = old;
+
+                  if Check.For.Flag.Exit then return;
+
+               end;
+            end;
+         end;
+      end;
+
+      Draw.New.AEE.Flags.And.Edits = 4;    /* and now done        */
+
+   end;
+
+
+   /* now draw flag area symbols */
+
+   call Draw.All.AEE.Symbols(y,mins,maxs);
+
+end Draw.All.Edit.Point.Flags;
+
+/* $SUBTITLE */
+
+Check.For.Flag.Exit:proc swapable;
+   if  (Check.Next.Event   = 0)  /* if no system event pending */
+   and (new.in.char        = 0)  /* and no inchar pending      */
+   and (new.mouse.button  >= 0)  /* and no mouse press pending */
+   and (m$Presses         =  0)  /* or stacked                 */
+   then return 0;                /* then keep going            */
+
+   CALL DATA_LEVEL(0);           /* back to transp mode        */
+   TRANSPARENT_MODE;
+
+   return 1;
+end Check.For.Flag.Exit;
+
+Update.Cue.In.Out.Flags: proc (miny,minsx,maxsx) fixed swapable;
+   dcl (miny,minsx,maxsx,i) fixed;
+
+   /* Draw Cue In Flag */
+
+   i = Times.To.Percent(AEE.Shuttle.In.Time,Cue.In.Time,AEE.Shuttle.Out.Time);
+   i = COMPUTE.SCROLL.BAR.BOX.POSITION (Shuttle.Coarse.Bar,i);
+
+   if i <> Coarse.Bar.In.Flag   /* if flag is needed in new position */
+   then do;                     /* then move it to there             */
+
+      if Coarse.Bar.In.Flag <> 0      /* erase old cue in flag       */
+      then do;                        /* if one was there            */
+         call Plot.Flag(Coarse.Bar.In.Flag,miny,0,0,0);
+      end;
+
+      Coarse.Bar.In.Flag = i;         /* now draw new one            */
+      call Plot.Flag(Coarse.Bar.In.Flag,miny,0,0,0);
+
+   end;
+
+   if Check.For.Flag.Exit<>0 then return 1;
+
+
+   /* Draw box around In Flag (maybe) */
+
+   i = (COM32(Cue.In.Time,AEE.Shuttle.In.Time) = lw#ilt);
+
+   if i <> Coarse.Bar.In.Box    /* if box is needed in new position  */
+   then do;                     /* then move it to there             */
+
+      call CONNECT(minsx + SB.Harrowpix            +1, miny+30,
+                   minsx + SB.Harrowpix + SB.HWidth-2, miny+30);
+      call CONNECT(minsx + SB.Harrowpix + SB.HWidth-1, miny+1,
+                   minsx + SB.Harrowpix + SB.HWidth-1, miny+30);
+
+      Coarse.Bar.In.Box = Coarse.Bar.In.Box xor 1;
+
+   end;
+
+   if Check.For.Flag.Exit<>0 then return 1;
+
+
+   /* Draw Cue Out flag */
+
+   i = Times.To.Percent(AEE.Shuttle.In.Time,Cue.Out.Time,AEE.Shuttle.Out.Time);
+   i = COMPUTE.SCROLL.BAR.BOX.POSITION (Shuttle.Coarse.Bar,i);
+
+   if i = Coarse.Bar.In.Flag       /* if in flag and out flag would be */
+   then i = 0;                     /* on top of each other, then skip  */
+
+   if i <> Coarse.Bar.Out.Flag     /* see if we should move/erase      */
+   then do;                        /* the cue out flag                 */
+
+      if Coarse.Bar.Out.Flag <> 0  /* erase the old out flag           */
+      then do;                     /* if there was one                 */
+         call Plot.Flag(Coarse.Bar.Out.Flag,miny,1,0,0);
+      end;
+
+      Coarse.Bar.Out.Flag = i;
+
+      if Coarse.Bar.Out.Flag <> 0  /* draw the new cue out flag        */
+      then do;                     /* if we want one                   */
+         call Plot.Flag(Coarse.Bar.Out.Flag,miny,1,0,0);
+      end;
+   end;
+
+   if Check.For.Flag.Exit<>0 then return 1;
+
+   
+   /* Draw box around Out Flag (maybe) */
+
+   i = (COM32(Cue.Out.Time,AEE.Shuttle.Out.Time) = lw#igt);
+
+   if i <> Coarse.Bar.Out.Box    /* if box is needed in new position  */
+   then do;                      /* then move it to there             */
+
+      call CONNECT(maxsx - SB.Harrowpix            -1, miny+30,
+                   maxsx - SB.Harrowpix - SB.HWidth+2, miny+30);
+      call CONNECT(maxsx - SB.Harrowpix - SB.HWidth+1, miny+1,
+                   maxsx - SB.Harrowpix - SB.HWidth+1, miny+30);
+
+      Coarse.Bar.Out.Box = Coarse.Bar.Out.Box xor 1;
+
+   end;
+
+   return Check.For.Flag.Exit;
+
+end Update.Cue.In.Out.Flags;
+
+Update.Edit.In.Out.Flags : proc (miny,minsx,maxsx,mins,maxs) swapable;
+   dcl (miny,minsx,maxsx     ) fixed;
+   dcl (mins,maxs,i) fixed;
+
+   /* Draw Edit In Flag */
+
+   /* store scisors in inactive area when edit time is not being used */
+
+   if COM32(Cue.Edit.In.Time,Cue.In.Time) = lw#ieq
+   then i = minsx + Edit.In.Out.Idle;
+   else do;
+      i = Times.To.Percent(AEE.Shuttle.In.Time,Cue.Edit.In.Time,AEE.Shuttle.Out.Time);
+      i = COMPUTE.SCROLL.BAR.BOX.POSITION (Shuttle.Coarse.Bar,i);
+   end;
+
+   if i <> Coarse.Bar.EIn.Flag       /* move the edit in flag if   */
+   then do;                          /* it is not where we want it */
+
+      if Coarse.Bar.EIn.Flag <> 0    /* erase old flag if there    */
+      then do;                       /* was one                    */
+         call Plot.Flag(Coarse.Bar.EIn.Flag,miny,2,0,0);
+      end;
+
+      Coarse.Bar.EIn.Flag = i;       /* draw the new edit in flag  */
+      call Plot.Flag(Coarse.Bar.EIn.Flag,miny,2,0,0);
+
+   end;
+
+   if Check.For.Flag.Exit<>0 then return 1;
+
+
+   /* Draw Edit Out flag */
+
+   if COM32(Cue.Edit.Out.Time,Cue.Out.Time) = lw#ieq
+   then i = maxsx - Edit.In.Out.Idle;
+   else do;
+      i = Times.To.Percent(AEE.Shuttle.In.Time,Cue.Edit.Out.Time,AEE.Shuttle.Out.Time);
+      i = COMPUTE.SCROLL.BAR.BOX.POSITION (Shuttle.Coarse.Bar,i);
+   end;
+
+   if i = Coarse.Bar.EIn.Flag      /* if in flag and out flag would be */
+   then i = 0;                     /* on top of each other, then skip  */
+
+   if i <> Coarse.Bar.EOut.Flag    /* move or erase flag if we want    */
+   then do;                        /* it in a different position now   */
+
+      if Coarse.Bar.EOut.Flag <> 0 /* erase the old flag if there      */
+      then do;                     /* was one                          */
+         call Plot.Flag(Coarse.Bar.EOut.Flag,miny,3,0,0);
+      end;
+
+      Coarse.Bar.EOut.Flag = i;
+
+      if Coarse.Bar.EOut.Flag <> 0 /* draw the new flag                */
+      then do;                     /* if we want one                   */
+         call Plot.Flag(Coarse.Bar.EOut.Flag,miny,3,0,0);
+      end;
+   end;
+
+   if Check.For.Flag.Exit<>0 then return 1;
+
+
+   /* Draw Edit line    */
+
+   call Restore.Edit.Line.If.Possible(mins,maxs,miny);
+
+   return 0;
+
+end Update.Edit.In.Out.Flags;
+
+/* $page - routine to actually draw shuttle flags and edit markers */
+
+Actually.Draw.Shuttle.Flags.And.Edits:proc PUBLIC swapable;
+   dcl i                fixed;
+
+   dcl (miny,maxy)      fixed;  /* miny, maxy of FLAG AREA         */
+
+   dcl (minsx,maxsx)    fixed;  /* min x, max x of SHUTTLE         */
+   dcl (minfx,maxfx)    fixed;  /* min x, max x of FLAG AREA       */
+   dcl (mins,maxs)      fixed;  /* min, max sbar box center pixel  */
+
+   /* Enter vector mode and set char size */
+   /* upon entry:                         */
+
+   /* Get info on flag region handy */
+
+   minfx = FETCH.OBJECT.INFO(Shuttle.Flag.Region,O#ULX);
+   maxfx = FETCH.OBJECT.INFO(Shuttle.Flag.Region,O#LRX);
+
+   miny  = FETCH.OBJECT.INFO(Shuttle.Flag.Region,O#LRY);
+   maxy  = FETCH.OBJECT.INFO(Shuttle.Flag.Region,O#ULY);
+
+   minsx = FETCH.OBJECT.INFO(Shuttle.Coarse.Bar,O#ULX);
+   maxsx = FETCH.OBJECT.INFO(Shuttle.Coarse.Bar,O#LRX);
+
+   mins = minsx + SB.HArrowpix + shr(SB.HWidth,1);
+   maxs = maxsx - SB.HArrowpix - shr(SB.HWidth,1);
+
+
+   /* set vector mode; stay in it */
+
+   VECTOR_MODE;               /* vector      */
+   CALL DATA_LEVEL(2);        /* compl       */
+
+
+   /* Initialize Graphics Area first time through */
+
+   if GID(AEE.Shuttle.Graphics.Code) = 0 then do;
+
+      call Plot.Flag (minfx + Magnifier.Park.X, miny, 11, 0, 0); /* left mag */
+      call Plot.Flag (maxfx - Magnifier.Park.X, miny, 12, 0, 0); /* rite mag */
+
+      Magnifier.Shadow.Len = maxs - (minfx + Magnifier.Park.X);
+
+      call PID(AEE.Shuttle.Graphics.Code,1);
+
+   end;
+
+   if Check.For.Flag.Exit<>0 then return;
+
+   /* check flags */
+
+   alpha_mode;                /* Set char size   */
+   call pc(ESC); 
+   call pc(SCOLON);
+
+   if Draw.New.AEE.Flags.And.Edits = 1    /* check in/out and edit in/out */
+   then do;                               /* times if needed              */
+
+      if Update.Cue.In.Out.Flags (miny,minsx,maxsx          )<>0 then return;
+      if Update.Edit.In.Out.Flags(miny,minsx,maxsx,mins,maxs)<>0 then return;
+
+      /* done with this phase: */
+      
+      Draw.New.AEE.Flags.And.Edits = 2;
+
+   end;
+
+   /* Now draw E flags on all edit points */
+   
+   call Draw.All.Edit.Point.Flags(miny,mins,maxs);
+
+end Actually.Draw.Shuttle.Flags.And.Edits;

@@ -1,0 +1,123 @@
+/*
+
+Title           : Poly memory addressing test module  - inserted in LOGGER
+Project Engineer: William Leathers
+Project Start   : Feb 1986
+New England Digital Corporation
+
+Modification History:
+
+    01/13/89   WSL - general clean-up
+*/
+
+/***************************************************************************/
+/************     Required for stand - alone compilation    ****************/
+/*
+insert ':-xpl:asciidef';
+insert ':-xpl:termutil';
+insert ':-xpl:intrprtr';
+insert ':NEWDIAGS:sysinit';
+
+dcl status_line1 lit '18,10';  dcl status_line2 lit '19,10'; 
+dcl status_line3 lit '20,10';  dcl status_line4 lit '21,10'; 
+
+dcl erase_status_lines lit 'call clr_status';
+clr_status: proc;
+  pos(status_line4); erase_line;  pos(status_line3); erase_line;
+  pos(status_line2); erase_line;  pos(status_line1); erase_line;
+end clr_status;
+*/
+/***************************************************************************/
+/***************************************************************************/
+
+
+dcl test_addressing lit 'call cad_test';
+dcl addressing_errors(psmaxbins) fixed;
+
+/***************************************************************************/
+cad_test:proc(bin#);
+   dcl bin# fixed;
+   dcl bin_base fixed;
+
+   dcl (i,j,cahi) fixed;
+
+   /***********************************************************************/
+   dcl log_cad_error lit 'call #log_cad_error';
+   #log_cad_error: proc;
+
+      if addressing_errors(bin#) = 0 then do;
+         pos(status_line3); erase_line;
+         pstring('  - Error in poly memory addressing ');
+         pos(status_line3);
+      end;
+      if addressing_errors(bin#) <> "HFFFF" then 
+         addressing_errors(bin#) = addressing_errors(bin#) + 1;
+
+   end #log_cad_error;
+   /************************************************************************/
+   bin_base = bin# * 64;
+   erase_status_lines;
+   pstring('Testing Poly memory addressing bits in bin ');
+   pnum(bin#+1,1); pstring('...');
+   pos(status_line2);
+   flush_term;
+   Really.Run.Host();
+
+   /************************************************************************/
+   /*
+      The PSCAT (Computer Addressing Test) function code allows bits 16-23
+      of the address bus to be written/read. At this time (1/13/89) it seems
+      that there is no way to test the new additional 4 bits (24-27) without
+      using a PST.  - WSL
+   */
+   /************************************************************************/
+
+   /* Part 1 - Test the high addressing bits by writing and reading */
+   write(psc) = bin_base;
+   do i = 0 to 255;
+      if Really.Peek() >= 0 then return;
+      write(psf) = psrma;             /* poly read memory address        */
+      write(psd) = shl(i,8);          /* clear fifo and set ca high bits */
+      write(psf) = pscat;             /* set up comp addr high test      */
+      Really.Do.Delay(2);
+      cahi = shr(read(psd),8);        /* read comp addr high byte        */
+      if cahi <> i then log_cad_error;
+   end;
+   Really.Run.Host();
+
+   /* Part 2 - Set the lower byte of the sector count to "FF" so that after
+      256 reads, the carry circuitry on the PSF will increment the higher 
+      byte. */
+
+   do i = 0 to 255;
+      if Really.Peek() >= 0 then return;
+      write(psf) = psrma;
+      write(psd) = shl(i,8) or "H00FF"; /* clear fifo and set sector to 255 */
+      write(psf) = pscat;               /* set up comp addr high test       */
+      Really.Do.Delay(2);
+      do j = 0 to 255;
+        cahi = shr(read(psd),8);        /* read comp addr high byte         */
+        if cahi <> i then log_cad_error;
+      end;
+
+      cahi = shr(read(psd),8);
+      if cahi <> ((i+1) & "H00FF") then log_cad_error;
+   end;
+   
+   flush_term;
+   Really.Run.Host();
+end cad_test;
+
+/***************************************************************************/
+/*
+begin;
+  dcl i fixed;
+
+  clear_screen;
+  do i = 0 to #_poly_bins - 1;
+    test_addressing(i); 
+    crlf; pnum(addressing_errors(i),5);
+  end;
+  flush_term;
+end;
+*/

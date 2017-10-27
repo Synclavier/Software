@@ -1,0 +1,840 @@
+/* $title 'PSPACK -- I/O package for asychronous printerQ communication with PostScript' */
+/*
+PSPACK -- I/O package for asynchrounous printerQ communication with PostScript
+
+AUTHOR:  Larry Gallagher, New England Digital Co.
+
+DESCRIPTION:
+
+This module contains all of the interrupt handlers and low-level
+communications software for driving the printer and an attached PostScript
+device.
+
+
+PROCEDURE DESCRIPTION:  
+
+  PS_INIT                -- procedure to initialize IO package -- called once
+  PS_ENABLE(dev_num)     -- procedure enables IO for a particular device
+  PS_DISABLE(dev_num)    -- procedure disables I/O for a particular device.
+  PS_SET_BAUD(dev_num,baud) -- sets baud rate for particular device.
+  PS_FLUSH               -- procedure waits until all output sent to device
+  PS_WCHAR(char)      -- procedure to time a write to printer.
+  PS_RCHAR             -- procedure returns character from printer, but times out.
+  PS_RMCHAR         -- reads a character in message buffer.
+  PS_IDLE               -- procedure returns TRUE if no incoming characters
+  PS_MIDLE              -- procedure returns TRUE if no incoming message characters.
+
+USAGE:
+
+To use this package, you must have the following statement
+in the program declarations:
+
+     insert 'PS_INCL';
+
+MODIFICATION HISTORY:
+   Date      Who         What
+   ----      ---         ----
+   6/25/87   LPG         Initial Development
+   6/29/87   LPG         Added XON/XOFF processing
+   7/2/87    LPG         Fixed minor structural bugs
+   7/6/87    LPG         Added Timed Read, printer/modem selectivity
+   7/7/87    LPG         Added Reset_IO, generalized PS_ENABLE and PS_DISABLE
+   7/7/87    LPG         ... added Timed Write.
+   7/8/87    LPG         Added PS_FLUSH, printer_Peek, PS_IDLE
+   ------    ---         --------------------------------------------
+   7/8/87    LPG         Began modifications of IOPACK to handle PostScript
+   7/8/87    LPG         Added Message buffer and latched Swallow.
+   7/9/87    LPG         Added PS_MIDLE
+   7/10/87   LPG         Removed Swallowing due to reentrancy problems.
+   7/10/87   LPG         Streamlined and removed old modem stuff.
+   7/10/87   ADT         Fixed ps_enable, ps_wchar and timing in general
+*/
+
+/* $subtitle 'Declarations' */
+
+module PSPACK;
+
+/* DECLARATIONS */
+
+/* Insert all necessary Operating System literals explicitly */
+insert ':mplt:lits';
+insert ':-xpl:asciilit';
+insert ':-xpl:termutil';
+insert ':-xpl:strings';
+insert ':mplt:qpack';
+insert ':mplt:ps_lits';
+
+/* Music Printing Option routines */
+dcl CHECK_PS_ERRORS procedure external,
+    CATCH_PS_ERRORS boolean external;
+
+dcl ps_process_msg lit 'CHECK_PS_ERRORS';
+
+BEGIN;    /* dummy begin block to help with interface */
+
+dcl to_device     rot_buf,                /* buffer for characters to the printer */
+    from_device   rot_buf,                /* buffer for data from printer */
+    msg_device    big_rot_buf;            /* buffer for messages from PostScript */
+
+dcl write_busy boolean;    /* TRUE if we're currently writing to printer */
+dcl xoff_received boolean; /* TRUE if we've received an XOFF from printer */
+dcl xoff_sent boolean;     /* TRUE if we want to halt printer's transmission */
+dcl chars_read fixed;
+
+dcl ps$status fixed public;
+dcl ps$error fixed public;
+dcl ps$msg_text (80) fixed public;
+dcl ps$device fixed public;
+dcl ps$catch_errors boolean public;
+
+dcl $Clock fixed public;
+dcl $rm_clock fixed public;
+dcl $wclock fixed public;
+
+dcl buf_margin lit '25';          /* think about xoffing when 25 chars left */
+
+dcl D41 lit '"41"';
+dcl D43 lit '"43"';
+dcl D54 lit '"54"';
+
+
+
+/* $subtitle 'PS_INIT -- procedure to initialize the printer I/O package' */
+
+/*
+PS_INIT -- procedure to initialize the printer I/O package
+
+This procedure sets up the I/O buffers using the QPACK Initialization
+procedures.  It also initializes all globals.
+*/
+
+PS_INIT: procedure;
+
+   /* init the queues and clocks for the printer */
+
+   call Init_Queue(to_device,rot_buf_size);               /* initialize the to_device buffer */
+   call Init_Queue(from_device,rot_buf_size);             /* and from_device buffer */
+   call Init_Queue(msg_device,big_rot_buf_size);              /* and message buffer */
+
+   write_busy = false;                     /* we're initially not transmitting anything */
+   xoff_received = false;               /* no pause in effect */
+   xoff_sent = false;                /* ... in either direction */
+   chars_read = 0;
+   $Clock = 0;
+   $rm_clock = 0;
+   $wclock = 0;
+
+   ps$error = ps#okay;
+   ps$device = ps#null;
+   ps$catch_errors = true;
+
+end PS_INIT;
+
+/* $subtitle 'PS_ENABLE & PS_DISABLE -- enable/disable I/O on the printer or modem' */
+/*
+PS_ENABLE enables interrupts on the correct device by writing the
+appropriate bits to device "54".  If the device number is invalid,
+no enabling is performed, and an error is returned through pserror.
+*/
+
+PS_ENABLE: procedure(dev_num) public;            /* enable io on a device */
+
+   dcl dev_num fixed;                     /* will be "40" or "42" */
+   dcl devflags fixed;                   /* flags for current D54 state */
+
+   call PS_INIT; /* Initialize ps package */
+
+   devflags = read(D54);                 /* get current settings */
+
+        if dev_num = printer then devflags = devflags or 1;
+   else if dev_num = modem then devflags = devflags or 2;
+
+   if (dev_num <> printer) and (dev_num <> modem)
+   then ps$error = ps#invalid_dev;
+   else do;
+      write(D54) = devflags;
+      ps$error = ps#okay;
+      ps$device = dev_num;
+      enable;
+   end;
+
+   if PS_PRINTER_WRITE_ONLY == 0
+   {
+	   $clock = 20; /* Wait for .1 sec */
+	   do while $clock > 0;
+  	   	interp_run_host_non_timer();
+	   end;
+   }
+
+   call ps_clear_typeahead; /* Clear data buffer */
+   do while ~ps_midle;      /* Clear message buffer */
+      call ps_rmchar;
+   end;
+
+end PS_ENABLE;
+
+/*
+PS_DISABLE disables interrupts on the correct device by writing the
+appropriate bits to device "54".  If the device number is invalid,
+nothing is performed, and error returned through pserror.
+*/
+
+PS_DISABLE: procedure public;            /* disable io on a device */
+
+   dcl devflags fixed;                   /* flags for current D54 state */
+
+   devflags = read(D54);                 /* get current settings */
+
+        if ps$device = printer then devflags = devflags and (not 1);
+   else if ps$device = modem then devflags = devflags and (not 2);
+
+   if ps$device = ps#null
+   then ps$error = ps#invalid_dev;
+   else do;
+      write(D54) = devflags;
+      ps$error = ps#okay;
+   end;
+
+end PS_DISABLE;
+
+/* $subtitle 'PS_ID_D40Q -- procedure returns TRUE if we have a d40q card' */
+
+/* 
+PS_ID_D40Q -- procedure returns true if the appropriate flags are set in
+memory to confirm the presence of a D40Q.
+*/
+
+PS_ID_D40Q: procedure returns (boolean) public;
+   dcl rtn_stat boolean;
+
+   rtn_stat = false;
+   if (read("51") and "100000") <> 0
+   then if (read("57") and "2") <> 0
+      then rtn_stat = true;
+
+   return(rtn_stat);
+
+end PS_ID_D40Q;
+
+
+/* $subtitle 'PS_FLUSH -- procedure to wait for all characters to send to device. '*/
+/*
+PS_FLUSH
+
+This procedure simply waits for the output queue to empty, and returns
+it is.  THERE ARE NO TIMEOUTS IN THIS PROCEDURE RIGHT NOW.
+*/
+
+PS_FLUSH: procedure public;
+   do while (not Queue_Empty(to_device));
+      interp_run_host_non_timer(); /* nothing */
+   end; /* do while */
+
+end PS_FLUSH;
+
+/* $subtitle 'PS_IDLE -- peek tail character in Rx buffer, and check for Rx empty' */
+
+/*
+PS_IDLE
+
+This procedure returns TRUE if the from_device buffer is empty.  Simply
+calls Queue_Empty on from_device and returns the result.
+*/
+
+PS_IDLE: procedure returns (boolean) public;
+
+   return (from_device(head) = from_device(tail));
+
+end PS_IDLE;
+
+PS_MIDLE: procedure returns (boolean) public;
+
+   return (msg_device(head) = msg_device(tail));
+
+end PS_MIDLE;
+
+PS_CLEAR_TYPEAHEAD: procedure public;
+
+   do while (not ps_idle);
+      call ps_rchar;
+   end;
+
+end PS_CLEAR_TYPEAHEAD;
+
+/* $subtitle 'PS_SET_BAUD -- set baud rate for the printer or modem' */
+/*
+PS_SET_BAUD attempts to alter the baud rate for communication with the
+printer or modem.  If an illegal baud rate is selected, or one that is
+not available for the particular device, pserror is set to ps#bad_baud.
+*/
+
+PS_SET_BAUD: procedure(dev_num,baud_code) public;
+   dcl dev_num fixed;
+   dcl baud_code fixed;        /* bit pattern to write */
+
+   if (baud_code ilt 0) or (baud_code igt 7)  /* baud codes are from 0 to 7 */
+   or ((dev_num = printer) and (baud_code = 3))  /* ... and the printer cannot run at 4800 */
+   then do;
+      ps$error = ps#bad_baud;
+   end;
+   else do;
+      write(dev_num + 1) = shl(baud_code,8) or "100000" ; /* shift into proper position */
+      ps$error = ps#okay;
+   end;
+end PS_SET_BAUD;
+
+
+/*
+prime_device -- procedure to initiate interrupt-driven output to printer
+
+   This procedure simply writes the tail byte of output  to the printer,
+   and sets a busy flag.  The rest of the output should be handled in
+   the interrupt routine.
+   This procedure is internal to the module.
+*/
+
+prime_device: procedure ;
+   dcl out_char fixed;  /* character to write */
+
+   out_char = byte(to_device, to_device(tail));
+   to_device(tail) = to_device(tail) + 1;
+   if to_device(tail) igt to_device(size) then to_device(tail) = qbegin;
+
+   write_busy = true; /* ??? in right order ??? */    
+   write(ps$device) = out_char;
+  
+end prime_device;
+
+/* $subtitle 'PS_WCHAR -- perform a timed character write to active device port' */
+
+/*
+PS_WCHAR -- procedure to do a timed write to the active device
+                                                  
+This procedure sends a single character to the active device.
+It performs several error checks:
+
+   1.  It first checks the free bytes available in the queue.  If
+       there are not enough bytes available, then the queue is currently
+       emptying into the printer.  We wait only for our given timeout
+       for the queue to clear.
+
+   2.  If we timeout, then we query the printer with a status check.
+       If the printer has a legitamate excuse (ie, not idle or error)
+       we wait for another timeout interval.  Otherwise we return
+       the error through pserror.
+
+   3.  Assuming that this condition is passed, we load the character,
+       prime the tail character if the printer is not busy, and exit.
+*/
+
+#PS_WCHAR: procedure (my_char) returns (boolean) public;
+
+   dcl my_char fixed;                 /* our character to send */
+
+   if not queue_empty(msg_device)
+   then call ps_process_msg;
+   do while queue_free(to_device) = 0;
+     if not queue_empty(msg_device)
+     then call ps_process_msg;
+   end;
+
+   /* Next, load the queue */
+
+   call Enqueue(to_device, my_char);   /* enqueue a character */
+
+   /*
+   Interrupts should already be enabled.  If the D40 is not
+   busy, we'll prime it by writing the tail character, and flag
+   it busy.  We might call PS_WCHAR twice in a row before
+   the next interrupt comes through, and we don't want to force-
+   feed it characters out of order.
+   */
+   
+   if (not write_busy) and (not xoff_received)
+   then call PRIME_device;
+
+end #PS_WCHAR;
+
+#PS_PSTRING: procedure(message) public;
+   dcl message fixed array;
+   dcl i       fixed;
+
+   do i = 1 to message(0);
+      ps_wchar(byte(message, i - 1));
+   end;
+
+end #PS_PSTRING;
+
+#PS_PSTRINGR:  procedure(message) public;
+   dcl message fixed array;
+
+   ps_pstring(message);
+   ps_wchar(a.cr);
+   ps_wchar(a.lf);
+end #PS_PSTRINGR;
+
+#PS_PNUM: procedure(number) public;
+   dcl number fixed;
+   dcl new_num fixed;
+   dcl digit fixed;
+   dcl m fixed;
+   dcl show_char boolean;
+
+   new_num = number;
+
+   if number < 0
+   then do;
+      ps_wchar(a.minus);
+      if ps$status = ps#no_response then return;
+      new_num = - number;
+   end;
+
+   m = 10000; show_char = false;
+
+   do while (m > 0);
+      digit = new_num / m;
+      new_num = new_num - digit * m;
+      m = m / 10;
+      if (digit <> 0) or show_char or (m = 0)
+      then do;
+         ps_wchar(digit + a.0);
+         if ps$status = ps#no_response then return;
+         show_char = true;
+      end;
+   end;
+
+end #ps_pnum;
+
+/* $subtitle 'PS_RCHAR -- Procedure to time a read from the device buffer.' */
+
+/*
+PS_RCHAR -- Procedure to do timed read from the device message buffer.
+
+This procedure simply pulls a character off of the device queue.
+If no character is available, we wait.  If we timeout, we query the
+printer for status.  If the status is unacceptable (ie, idle or error),
+we return, and pserror contains the error code.  Otherwise we continue
+waiting, and return the character from the tail of the queue.
+*/
+
+PS_RCHAR: procedure returns (fixed) public;
+
+   /* if the queue is empty, wait for timeout */
+
+   if (queue_free(from_device) igt 50) and xoff_sent
+   then do;
+      write(ps$device) = a.xon;
+      xoff_sent = false;
+   end;
+   
+   if not queue_empty(msg_device)   /* Check incoming message queue */
+   then call ps_process_msg;
+
+   do while queue_empty(from_device); /* Loop while no chars in buffer */
+     if not queue_empty(msg_device)
+     then call ps_process_msg;
+   end;
+
+   return(Dequeue(from_device)); /* skip down to here if queue not empty */
+
+end PS_RCHAR;
+
+ps_get_num: procedure returns (fixed) public;
+   dcl result fixed;
+   dcl minus boolean;
+   dcl c fixed;
+
+   result = 0;
+   minus = false;
+   c = ps_rchar;
+
+   if c = a.minus
+   then do;
+      minus = true;
+   end;
+
+   do while (c <> a.cr);
+      result = result * 10;
+      result = result + c - a.0;
+      c = ps_rchar;
+   end;
+   
+   /* swallow the line feed */
+   call ps_rchar;
+
+   if minus then result = - result;
+   return(result);
+
+end ps_get_num;
+
+#ps_get_string: procedure(message) public;
+   dcl message fixed array;
+   dcl c fixed;
+
+   message(0) = 0;
+   c = ps_rchar;
+   do while (c <> a.lf);
+      call pbyte(message, message(0), c);
+      message(0) = message(0) + 1;
+      c = ps_rchar;
+   end;
+
+   /* delete the cr */
+   message(0) = message(0) - 1;
+
+end #ps_get_string;
+
+/* $subtitle 'PS_RMCHAR -- Procedure to time a read from the device message buffer.' */
+
+/*
+PS_RMCHAR -- Procedure to do timed read from the printer message buffer.
+
+This procedure simply pulls a character off of the printer message queue.
+If no character is available, we wait.  If we timeout, we return a -1,
+and pserror = ps#no_response.  Otherwise we continue
+waiting, and return the character from the tail of the queue.
+*/
+                                                                 
+PS_RMCHAR: procedure returns (fixed) public;
+
+   /* if the queue is empty, wait for timeout */
+   if (yqueue_free(msg_device) igt 50) and xoff_sent
+   then do;
+      write(ps$device) = a.xon;
+      xoff_sent = false;
+   end;
+
+   if queue_empty(msg_device)
+   then do;
+
+      /* compute the actual time to wait in clock ticks */
+      
+      $rm_clock = 100;       /* 100 ticks = .5 seconds */
+
+      do while ($rm_clock > 0);
+         if not Queue_Empty(msg_device) 
+         then return(Dequeue(msg_device));
+      end;    /* do while ... */
+
+      return(-1);   /* timed out ! */
+
+   end;  /* if queue_empty... */
+
+   else Return(Dequeue(msg_device)); /* skip down to here if queue not empty */
+
+end PS_RMCHAR;
+
+/* $subtitle 'ps_query -- procedure queries status from the PostScript device' */
+
+/*
+ps_query -- procedure queries status from the PostScript device.
+
+This procedure sends a ctrl/T via PS_WCHAR down to the PostScript device.
+It waits a short amount of time, and if nothing returns up the message
+buffer, returns with ps$status = ps#no_response
+
+If a message does come back, it is handled in ps_process_msg, and
+the ps$status variable is loaded in that procedure.
+*/
+
+ps_query: procedure public;
+
+   dcl old_ps_errors boolean;             /* preserve value of ps$catch_errors */
+
+   /* Immediately force a ctrl/t to the printer */
+
+   old_ps_errors = ps$catch_errors;
+   flush_term;
+   ps$catch_errors = true;
+   write(ps$device) = c.t;
+
+   /* wait for the printer to respond .  If nothing's come over
+   in the last 5 seconds, we know the printer's not connected */
+
+   ps$status = ps#null;
+   
+   $clock = 5 * 200;         /* 200 ticks = 5.0 seconds */
+
+   do while (($clock igt 0) and (queue_empty(msg_device)));
+      interp_run_host_non_timer(); /* nothing */
+   end;
+
+   call ps_process_msg;
+
+   ps$catch_errors = old_ps_errors;        /* restore flag */
+
+   if ps$status = ps#null 
+   then ps$status = ps#no_response;
+
+end ps_query;
+
+my_index: procedure(text, sub_text, location) returns (fixed) public;
+   dcl text fixed array;
+   dcl sub_text fixed array;
+   dcl location fixed;
+   dcl (i,j)    fixed;
+   dcl match    boolean;
+
+   do i = location to (text(0) - sub_text(0));
+      if byte(text, i) = byte(sub_text,0)
+      then do;
+         match = true;
+         do j = 0 to sub_text(0) - 1;
+            if byte(text, i + j) <> byte(sub_text, j)
+            then match = false;
+         end;
+         if match then return (i);
+      end;
+   end;
+
+   return(-1);
+
+end my_index;
+
+
+/* $subtitle 'PS_PROCESS_MSG -- routine for parsing status and error messages' */
+/*
+PS_PROCESS_MSG
+
+This routine is triggered in the D40 when block upon receipt of a '%'
+sign.  It pulls characters off of the message queue, and builds a
+string out of them.  Once the string is built, it checks to see
+if it was a status message or error.  If error, it simply prints
+the string on the screen.  If status, is sets the global variable
+ps$status accordingly.
+
+NOTE:  Since this routine is called from within an interrupt handler,
+it must not call any of the queueing routines.  All buffer manipulation
+will have to be done by hand (yuck!)
+
+*/
+
+XPS_PROCESS_MSG: procedure public;
+
+   dcl c               fixed;        /* character from buffer */
+   dcl stat_pos        fixed;        /* position of 'status:' in string */
+   dcl err_pos         fixed;
+   dcl perr_pos        fixed;
+   dcl tmp_status        fixed;
+
+   c = ps_rmchar;      /* get a character */
+   ps$msg_text(0) = 0;  /* init. the string */
+
+   do while (c <> -1);
+
+      do while ((c <> -1) and (c <> a.lf));
+         call pbyte(ps$msg_text, ps$msg_text(0), c);
+         ps$msg_text(0) = ps$msg_text(0) + 1;
+         c = ps_rmchar;
+      end;
+
+      if c = -1        /* message interrupted */
+      then do;
+         ps$status = ps#no_response;
+         return;
+      end;
+
+      /* add in te line feed (even if we will ignore the last one ) */
+      call pbyte(ps$msg_text, ps$msg_text(0), c);
+      ps$msg_text(0) = ps$msg_text(0) + 1;
+
+      /* begin scanning for the word 'status:' */
+
+      stat_pos = my_index(ps$msg_text, 'tatus:',0);
+      if stat_pos <>  -1
+      then do;                     /* find the status */
+              if my_index(ps$msg_text, 'idle', stat_pos) <> -1
+         then tmp_status = ps#idle;
+         else if my_index(ps$msg_text, 'busy', stat_pos) <> -1
+         then tmp_status = ps#busy;
+         else if my_index(ps$msg_text, 'waiting', stat_pos) <> -1
+         then tmp_status = ps#waiting;
+         else if my_index(ps$msg_text, 'printing', stat_pos) <> -1
+         then tmp_status = ps#printing;
+         else if my_index(ps$msg_text, 'PrinterError', stat_pos) <> -1
+         then tmp_status = ps#print_error;
+         else if my_index(ps$msg_text, 'initializing', stat_pos) <> -1
+         then tmp_status = ps#init;
+         else if my_index(ps$msg_text, 'printing test page', stat_pos) <> -1
+         then tmp_status = ps#ptp;
+      end;
+
+      err_pos = my_index(ps$msg_text, 'Error:' ,0);
+      if err_pos <> -1
+      then do;
+         if my_index(ps$msg_text, 'stackoverflow', err_pos) <> -1
+         then tmp_status = ps#stackoverflow;
+         else if my_index(ps$msg_text, 'invalidaccess', err_pos) <> -1
+         then tmp_status = ps#invalidaccess;
+         else if my_index(ps$msg_text, 'rangecheck', err_pos) <> -1
+         then tmp_status = ps#rangecheck;
+         else if my_index(ps$msg_text, 'stackunderflow', err_pos) <> -1
+         then tmp_status = ps#stackunderflow;
+         else if my_index(ps$msg_text, 'typecheck', err_pos) <> -1
+         then tmp_status = ps#typecheck;
+      end;
+
+      perr_pos = my_index(ps$msg_text, 'PrinterError', 0);   
+      if perr_pos <> -1
+      then tmp_status = ps#Print_Error;
+
+      c = ps_rmchar;    /* start next message */
+      ps$status = tmp_status;    /* set after entire message has been loaded */
+   end;              /* do while not -1 */
+
+   ps$msg_text(0) = ps$msg_text(0) - 2; /* erase last cr/lf */
+
+end XPS_PROCESS_MSG;
+
+/* $subtitle 'Interrupt Handler for D40Q Rx interrupts ' */
+/* WHEN clauses for D40 interrupts */
+/* 
+In the case of transmit, we pull from the buffer and send along.
+If there are no characters left, we write the required '0' to D41,
+and turn off the flag write_busy.  If we received an XOFF from the
+D40, we stop transmitting and flag write_busy as false.  When we receive
+the XON, if there are characters in the output queue we re-prime
+the Tx process.
+
+In the case of receive, we stuff the character in the input buffer.
+If the buffer fills near capacity, we send an XOFF to the D40.
+When the receive buffer empties, we check to see if we've sent
+an XOFF to the D40, and follow it with an XON if this is the case.
+
+We make a special exception for messages beginning with '%'.
+Upon encountering this sequence of charcters, we shunt input into
+a special message buffer for PostScript status messages and call
+a routine to handle them.  This message swallowing routine is latched
+to not be reentrant.  Upon receiving a closing '<LF>' we re-route input
+back into the normal input data buffer.
+*/
+
+when D40INT then begin;
+
+   dcl Read_Flag lit '2',            /* RX INTRP bit */
+       Xmit_Flag lit '1';            /* TX INTRP bit */
+
+   dcl rcv_char  fixed,              /* received character */
+       xmit_char fixed;              /* character to transmit */
+
+   dcl state fixed;              /* current state of status delimiter check */
+
+   /* $subtitle 'Interrupt Handler for D40Q Tx interrupts' */
+   
+   /* 
+   Check the XMIT bit.  If set, try to dequeue a character to write.
+   If no characters are available, send the '0' to D41 and turn off
+   the busy flag.  Otherwise, dequeue the character and send it along,
+   maintaining our busy status.
+   */
+
+   if (read(D41) and Xmit_flag) <> 0
+   then do;
+      if ((to_device(tail) = to_device(head)) or xoff_received) /* if queue empty or we were xoffed */
+      then do;
+         write_busy = false;                    /* flag us not writing any more */
+         write(D41) = 0;
+      end;   /*  do */
+      else do;
+         xmit_char = byte(to_device,to_device(tail));          /* otherwise get the character */
+         to_device(tail) = to_device(tail) + 1;            /* manually massage the queue pointer */
+         if to_device(tail) > to_device(size) then to_device(tail) = qbegin;
+         write_busy = true;                     /* and flag us busy */
+         write(printer) = xmit_char;              /* send the character */
+      end;   /* else do */
+   end;      /* if read(d41)... */
+
+   /* Check the Read bit.  If set, pull a character and stuff into queue */
+
+   if (read(D41) and Read_Flag) <> 0 
+   then do;
+      rcv_char = read(printer);           /* get the character */
+      rcv_char = rcv_char and "177";  /* mask the parity */
+
+      if rcv_char = a.xoff            /* receive an xoff? */
+      then do;
+        xoff_received = true;      /* then set status flag */
+        return;
+      end;
+
+      if (rcv_char = a.xon) and (xoff_received = true)
+      then do;
+         xoff_received = false;       /* turn off the pause flag */
+         if not (to_device(tail) = to_device(head))
+         then do;
+            write_busy = true;         /* and prime if output available */
+            write(printer) = byte(to_device, to_device(tail));
+            to_device(tail) = to_device(tail) + 1;
+            if to_device(tail) > to_device(size) 
+            then to_device(tail) = qbegin;
+         end;
+         return;                      /* ??? return in time to catch Tx int? */
+      end;
+      /* $page */
+
+      /* 
+      Check the state of status messages.  We step through a two-state
+      finite state automata to parse the message.  When we're in state 0,
+      no messages are coming through, and all characters are stored as data.
+      State 1 indicates we've received a '%' sign, and are shunting the
+      message through to a special message buffer (with the delimiters
+      intact.)  Upon receipt of a LineFeed character ("12"), we return
+      to state 0.
+      */
+ 
+      do case (state);
+
+         /* state 0, initial state */
+
+         if rcv_char = a.percent         /* did we receive a percent ? */
+         then do;
+            state = 1;                   /* yes, change states and swallow message */
+            call pbyte(msg_device, msg_device(head), rcv_char); /* manually massage the queue */
+            msg_device(head) = msg_device(head) + 1;
+            if msg_device(head) > msg_device(size) then msg_device(head) = qbegin;
+
+   /************************************************** 
+            if ps$catch_errors then do;
+               ps$catch_errors = false;
+               enable;
+               call ps_process_msg;
+               ps$catch_errors = true;
+            end;
+   ***************************************************/
+
+         end;      /* if rcv = a.percent */
+         else do;                        /* no, enqueue it as a normal data character */
+            if (rcv_char <> a.xon) and (rcv_char <> a.xoff)
+            then do;
+               chars_read = chars_read + 1;
+               call pbyte(from_device, from_device(head), rcv_char); /* manually massage the queue */
+               from_device(head) = from_device(head) + 1;
+               if from_device(head) > from_device(size) then from_device(head) = qbegin;
+               if xqueue_free(from_device) < buf_margin
+               then do;               /* time to send an xoff */
+                  xoff_sent = true;  /* flag to indicate we've paused rcv. */
+                  write(printer) = a.xoff;   /* send the xoff */
+                  return;                /* and return */
+               end; /* if queue free */
+            end;   /* if not xon/xoff */
+         end;   /* else do */
+
+         /* state 1, have received '%' */
+
+         do;
+            if rcv_char = a.lf  /* did we receive a linefeed? */
+            then state = 0;             /* and go to state 0 */
+            call pbyte(msg_device, msg_device(head), rcv_char); /* manually massage the queue */
+            msg_device(head) = msg_device(head) + 1;
+            if msg_device(head) > msg_device(size) then msg_device(head) = qbegin;
+         end;
+
+      end ; /* do case (state) */
+
+   end; /* if read(d41) */
+
+end;  /* when d40int */
+
+END;  /* of dummy begin block at start of module */
+
+end PSPACK;

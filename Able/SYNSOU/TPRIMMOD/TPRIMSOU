@@ -1,0 +1,584 @@
+/* tprimsou - module containing utility routines needed */
+/* by many synclavier screens                           */
+
+/*
+   Modified:
+
+   05/10/88 - EEG - Modified icon fills to work faster with termulator
+   2-11-87 - cj - created
+*/
+
+Module TPRIMMOD;
+	insert ':-xpl:intrprtr';
+
+   insert ':synlits:comlits';   /* compilation literals */
+   insert ':synlits:globlits';  /* global literals      */
+   insert ':synlits:syslits';   /* system lits          */
+   insert ':synlits:asciilit';  /* ascii                */
+
+   insert ':synauxs:tprimlit';  /* special lit file     */
+   insert ':synauxs:odisklit';  /* opt disk             */
+   insert ':synauxs:mouselit';  /* for termulator flag  */
+
+   insert ':synmods:globdcl';   
+   insert ':synmods:ttydcl';    
+   insert ':synmods:plotdcl';
+   insert ':synmods:scrndcl';
+   insert ':synmods:tformdcl';
+   insert ':synmods:errdcl';
+   insert ':synmods:mousrdcl';  /* for mouse.port.is.d50 */
+
+   dcl O$Volume_Name array external;
+
+   /* A few string constants used over and over again by this code */
+
+   dcl dir.device   fixed public;  /* device code for synclavier screens */
+   dcl beep.status  fixed public;  /* nonzero causes beep on error message */
+
+   dcl  DELETE.STR  data  public  ('DELETE'); 
+   dcl  RUBOUT      data  public  ('RUB');
+   dcl  ENTER.STR   data  public  ('ENTER');  
+   dcl  DBL.ESC     data  public  ('ESC><ESC');
+   dcl  CURCAT.STR  data  public  ('Current Catalog:  ');
+
+   /* displays message for how to leave screen */
+   /* based upon terminal type:                */
+
+   PRINT.EXIT.SCREEN.PROMPT:  proc public swapable; 
+      call ps('Press <');
+      if vt100<>0 then call ps(ENTER.STR); else call ps(DBL.ESC);
+      call ps('> when done with this screen.');
+		flush_termulator_output_to_host();
+   end PRINT.EXIT.SCREEN.PROMPT;
+
+   Get.Device.Name: proc (LogicalDev,OutStr) fixed public swapable;
+      dcl LogicalDev  fixed;
+      dcl OutStr      array; /* output string */
+      dcl PhysicalDev fixed;
+
+      OutStr(0)=0;      /* start with empty string */
+
+      if LogicalDev=LaserDev then do;
+         if O$Volume_Name(0)=0
+         then call Append.To.Str(OutStr,'Optical Disk');
+         else do;
+            call Append.To.Str(OutStr,'Volume ');
+            /* call AppendC(OutStr,A.QUOTE); */ /* will cause subscript error if we use quotes */
+            call Append.To.Str(OutStr,O$Volume_Name);
+            /* call AppendC(OutStr,A.QUOTE); */
+         end;
+      end;
+      else if LogicalDev=PolyCacheDev then call Append.To.Str(OutStr,'All Winchesters');
+      else if LogicalDev=PolyMemDev   then call Append.To.Str(OutStr,'Poly Memory');
+      else do;
+         if      LogicalDev=0 then PhysicalDev=shr(SDEV,8);
+         else if LogicalDev=1 then PhysicalDev=shr(UDEV,8);
+         else                      PhysicalDev=LogicalDev;
+      
+         do case shr(PhysicalDev-2,1); /* decode drive type */
+            call AppendC(OutStr,"106"); /* F */
+            call AppendC(OutStr,"122"); /* R */
+            call AppendC(OutStr,"127"); /* W */
+         end;
+
+         if ((PhysicalDev-2)&1)=0
+         then call AppendC(OutStr,"60"); /* 0 */
+         else call AppendC(OutStr,"61"); /* 1 */
+
+         call AppendC(OutStr,COLON);     /* : */
+
+         if (LogicalDev=1) & (core(LOC.CCNM)<>0) then do; /* have a current cat name */
+            call Append.To.Str(OutStr,Loc(LOC.CCNM));
+         end;
+      end;
+
+      return OutStr(0); /* return length of string */
+   end Get.Device.Name;
+
+   Get.Normalized.Device.Name: proc (LogicalDev, OutStr) fixed public swapable;
+      dcl LogicalDev  fixed;
+      dcl OutStr      array; /* output string */
+		
+		Get.Device.Name(LogicalDev, OutStr);
+		
+		if (LogicalDev=1) & (core(LOC.CCNM)<>0) then do; /* have a current cat name */
+         call AppendC(OutStr,COLON);     /* : */
+		end;
+		
+   end Get.Normalized.Device.Name;
+
+   Get.Complete.Tree.Name: proc (InStr, OutStr) fixed public swapable;	/* for level 1 only */
+		dcl (Instr, OutStr) array;
+   	dcl device_specified proc(array) returns (fixed) external;		/* get any remote device specification */
+
+      OutStr(0)=0;      /* start with empty string */
+
+		if (device_specified(InStr) != 0)										/* if device is specified */
+		{																					/* then is complete name  */
+  			COPY.STRING(InStr,OutStr);
+			return;
+		}
+		
+		if (byte(InStr, 0) == a.colon)										   /* if name starts with colon */
+		{																					/* then get device only		  */
+			dcl PhysicalDev fixed;
+         
+			PhysicalDev=shr(UDEV,8);												/* get user device           */
+      
+         do case shr(PhysicalDev-2,1); /* decode drive type */
+            call AppendC(OutStr,"106"); /* F */
+            call AppendC(OutStr,"122"); /* R */
+            call AppendC(OutStr,"127"); /* W */
+         end;
+
+         if ((PhysicalDev-2)&1)=0
+         then call AppendC(OutStr,"60"); /* 0 */
+         else call AppendC(OutStr,"61"); /* 1 */
+		}
+		
+		else
+			Get.Normalized.Device.Name(1, OutStr);							   /* else get complete tree    */
+
+      Append.To.Str(OutStr,InStr);												/* name of current catalog   */
+	end Get.Complete.Tree.Name;
+	
+   /* print.current.catname - pass device code           */
+   /* prints current cat name at current screen position */
+
+   PRINT.CURRENT.CATNAME:  proc (dev) public swapable; /* prints name and device of current cat */
+      dcl (dev,i)      fixed;
+      dcl (name ) (8)  fixed;
+
+      call Get.Device.Name(dev,name);
+      call ps(name);
+      do i= name(0) to 10; call pc(sp); end; /* erase to end */
+
+   end PRINT.CURRENT.CATNAME;
+
+
+   /* print.ccat - common case:  position cursor at 23,51.  print */
+   /* current cat name of current cat                             */
+
+   PRINT.CCAT:  proc public swapable;
+      call cpos(23,ccatpos);
+      call ps(curcat.str); 
+
+      call PRINT.CURRENT.CATNAME(1);
+   end PRINT.CCAT;
+
+
+   /* print.dir.device.catname - print catalog name based */
+   /* on dir.device.   used by those screens that use     */
+   /* dir.device to access other devices                  */
+
+   PRINT.DIR.DEVICE.CATNAME: proc public swapable;
+      call cpos(23,ccatpos);
+      call ps(curcat.str); 
+
+      if  (inc.poly)
+      and ((dir.device=sndcache.dev)               /* using psuedo-device */
+      or   (dir.device=polymem.dev))
+      then call PRINT.CURRENT.CATNAME(1);          /* show "real" current cat */
+      else call PRINT.CURRENT.CATNAME(dir.device); /* show current device */
+   end PRINT.DIR.DEVICE.CATNAME;
+
+
+   /* print.current.timbre.name - handy routine to */
+   /* print keyboard timbre name on        */
+   /* lower edge of screen                 */
+
+   dcl LOOKUP.TIMBRE.NAME proc(fixed,array) external; /* put here so test programs can use dummy instead of real time code */
+
+   PRINT.CURRENT.TIMBRE.NAME:  PROC public swapable;  /* draws current timbre name at bottom of screen */
+      dcl i            fixed;
+      dcl namearray(8) fixed;
+
+      call cpos(22,ccatpos);
+      call ps('Current Timbre:   ');
+      call LOOKUP.TIMBRE.NAME(0,namearray);
+      if namearray(0)<>0 then do;
+         call ps(namearray); 
+         do i=namearray(0)+1 to 16; call pc(sp); end;
+      end;
+      else do;
+         call ps(' No Name');
+         do i=9 to 18; call pc(sp); end;
+      end;
+   END PRINT.CURRENT.TIMBRE.NAME;
+
+
+   /* print timbre bank entry name subroutine - prints out  */
+   /* bank, entry, timbre name (local procedure only)       */
+
+   PRINT.TIMBRE.BANK.ENTRY.NAME.SUBROUTINE:proc(bank,entry,name) swapable; /* PRESENT TIMBRE BANK/ENTRY, NAME */
+      dcl (bank,entry)   fixed;
+      dcl (name)         array;
+      dcl (i)            fixed;
+
+      call pc(asc.0+1);    call pc(asc.min); 
+      call pc(asc.1+bank); call pc(asc.min);
+      call pc(asc.1+entry);
+
+      if name(0)<>0 then do; /* name exists */
+         call ps(':  "');
+         call ps(name);
+         call ps('"');
+         do i=name(0) to 15; call pc(sp); end; /* erase rest of earlier name */
+      end;
+
+      else do i=0 to 20; call pc(sp); end; /* erase rest of earlier name */
+   END PRINT.TIMBRE.BANK.ENTRY.NAME.SUBROUTINE;
+
+
+
+   /* print timbre name - prints current timbre name at passed x,y */
+   /* position in 1-1-1 "name" format                              */
+
+   dcl (our.bank,our.timbre) fixed external; /* user must declare in dummy main program,  or insert real time code */
+
+   PRINT.TIMBRE.NAME:PROC (y,x) public swapable; /* PRESENT TIMBRE BANK/ENTRY, NAME */
+      dcl (x,y)           fixed; /* screen pos to print name at */
+      dcl (namearray) (8) fixed;
+
+      call LOOKUP.TIMBRE.NAME(0,namearray);
+      call cpos(y,x);
+      call PRINT.TIMBRE.BANK.ENTRY.NAME.SUBROUTINE(our.bank,our.timbre,namearray);
+   END PRINT.TIMBRE.NAME;
+
+
+   /* draw timbre name, erase timbre - used to draw and erase */
+   /* current timbre name in graphics characters              */
+
+   dcl previous.tn(8)   fixed; /* STRING CONTAINING PREVIOUS TIMBRE NAME */
+   dcl previous.bank    fixed; /* STRING CONTAINING PREVIOUS TIMBRE BANK */
+   dcl previous.timbre  fixed; /* STRING CONTAINING PREVIOUS TIMBRE ENTRY*/
+
+   DRAW.TIMBRE.NAME:proc(x,y,size) public swapable; /* draw timbre bank, entry, and name */
+      dcl (x,y)  fixed;       /* starting location */
+      dcl size   fixed;       /* size of text: 0=normal, 1=medium, 2=large, 3=xlarge */
+      dcl i      fixed;
+
+      previous.bank=our.bank;
+      previous.timbre=our.timbre;
+      call LOOKUP.TIMBRE.NAME(0,previous.tn);
+      call move_to(x,y);
+      call char_size(size);
+      alpha_mode;
+      call PRINT.TIMBRE.BANK.ENTRY.NAME.SUBROUTINE(previous.bank,previous.timbre,previous.tn);
+      vector_mode;
+      call char_size(0);  /* return to normal size characters */
+   end DRAW.TIMBRE.NAME;
+
+   ERASE.TIMBRE.NAME:proc(x,y,size) public swapable;
+      dcl (x,y)  fixed;       /* starting location */
+      dcl size   fixed;       /* size of text: 0=normal, 1=medium, 2=large, 3=xlarge */
+      dcl i      fixed;
+
+      call move_to(x,y);
+      call char_size(size);
+      call data_level(1);           /* erase pixels */
+      alpha_mode;
+      call PRINT.TIMBRE.BANK.ENTRY.NAME.SUBROUTINE(previous.bank,previous.timbre,previous.tn);
+      vector_mode; call char_size(0); call data_level(0); /* return to normal size characters */
+   end ERASE.TIMBRE.NAME;
+
+
+   /* draw and erase partial # - used to display on terminal */
+   /* in graphics mode                                       */
+
+   dcl previous.partial fixed; /* string containing previous partial number */
+
+   DRAW.PARTIAL.NUMBER:proc(par#,x,y,size) public swapable; /* draw partial number */
+      dcl (par#) fixed;       /* pass partial #    */
+      dcl (x,y)  fixed;       /* starting location */
+      dcl size   fixed;       /* size of text: 0=normal, 1=medium, 2=large, 3=xlarge */
+
+      previous.partial=par#;  /* look up part#; save for later erase */
+      call move_to(x,y); call char_size(size); alpha_mode;
+      call pnum(previous.partial+1,0);    /* print partial timbre number */
+      vector_mode; call char_size(0);     /* return to normal size characters */
+   end DRAW.PARTIAL.NUMBER;
+
+   ERASE.PARTIAL.NUMBER:proc(x,y,size) public swapable;
+      dcl (x,y)  fixed;       /* starting location */
+      dcl size   fixed;       /* size of text: 0=normal, 1=medium, 2=large, 3=xlarge */
+      dcl pt#    fixed;       /* partial timbre number */
+
+      call move_to(x,y);
+      call char_size(size);  
+      call data_level(1);  /* erase pixels */
+      alpha_mode; call pnum(previous.partial+1,0); 
+      vector_mode;
+      call data_level(0);  /* draw pixels */
+      call char_size(0);   /* return to normal size characters */
+   END ERASE.PARTIAL.NUMBER;
+
+   /* remove.err is used to remove an error message from the */
+   /* screen                                                 */
+
+   dcl error.x fixed;                 /* local recollection of where error was printed */
+   dcl error.y fixed;
+
+   REMOVE.ERR:  proc public swapable; /* removes the error message from the screen */
+      if err.displayed=0 then return; /* nothing to remove */
+      call ERASE.REST.OF.LINE(error.y,error.x);   
+      err.displayed=0;                /* no longer displayed */
+   end REMOVE.ERR;
+
+
+   /* display.error is used to print an error message on the screen.  */
+   /* it is passed an error code and anx and y position.              */
+
+   DISPLAY.ERROR.MESSAGE: proc(code,y,x) public swapable;
+      dcl (code,i,x,y) fixed;
+
+      if code=0 then return;                    /* no error waiting */
+
+      if beep.status<>0 then call pc(bel);      /* at least beep if error occurs */
+
+      if (x=0)&(y=0) then return;               /* no place for error */
+
+      if err.displayed<>0 then call remove.err; /* remove any earlier error */
+
+      err.displayed=1;      /* new error message is now displayed */
+      error.x=x;            /* save where for removal             */
+      error.y=y;
+
+      call cpos(y,x);       /* position cursor */
+      CUR.ERR.LEN=x;        /* initialize to start of error position */
+
+      if vt100<>0 then call REVERSE.VIDEO(1);
+
+      call ps.error(code);  /* display error message */
+
+      if vt100<>0 then call REVERSE.VIDEO(0);
+
+      if CUR.ERR.LEN >= 45           /* erase probable half glommed */
+      then do;                       /* current catalog info        */
+         call ERASE.REST.OF.LINE(error.y,error.x+cur.err.len);   
+      end;
+
+      CUR.ERR.LEN=0;
+
+		flush_termulator_output_to_host();							// Flush all D50 output to termulator screen
+   end DISPLAY.ERROR.MESSAGE;
+
+   /* Routine to handle display of error message on lines 24 and 25 */
+   /* of pericom terminal and mac.                                  */
+
+   Handle.System.Error.Codes: proc (code) public swapable;
+      dcl code fixed;    /* pass bits from new.ertyp 1: latched.ertyp  */
+      dcl tmp(1) fixed;  /*                          2: AEE message    */
+
+      
+      dcl DISPLAY.LINE.25.ERROR proc (fixed,fixed,array,fixed,fixed,fixed) external;
+      dcl latched.ertyp         fixed external;
+
+      /* get synclavier error in line 24: */
+
+      if (code&1)<>0
+      then call Display.Error.Message(Latched.Ertyp, 23, 0);
+
+      if (code&2)<>0 then do;
+         if MG600        /* if pericom/mac then display line 25        */
+         then do;        /* as well                                    */
+            call Display.Line.25.Error(Protocol.Error.Id,
+                                       Protocol.Error.Attr,
+                                       Protocol.Error.Arg0,
+                                       Protocol.Error.Arg1,
+                                       Protocol.Error.Arg2, 
+                                       Protocol.Error.Arg3);
+
+            /* But if we are using the termulator, the error message	*/
+            /* actually appears on line 24.  So set err.displayed		*/
+            /* so it gets erased properly:									*/
+
+            if termulator then do;
+               err.displayed=  1;  /* new error message is now displayed */
+               error.x      =  0;  /* save where for removal             */
+               error.y      = 23;
+            end;
+
+         end;
+      end;
+   end Handle.System.Error.Codes;
+
+   /* return to prev state - called by an input   */
+   /* routine to set a flag to cause exit         */
+
+   dcl EXIT.MY.SCREEN   fixed public;
+   dcl GOTO.THIS.SCREEN fixed public;
+
+   RETURN.TO.PREV.STATE:proc public swapable;
+      exit.my.screen = 1;
+   end RETURN.TO.PREV.STATE;
+
+
+   /* PLOT MOUSE HOLE - PLOT MOUSE HOLE ON XY POSITION */
+   /* ON SCREEN                                        */
+
+   DCL MOUSE.HOLE.X           FIXED PUBLIC;
+   DCL MOUSE.HOLE.Y           FIXED PUBLIC;
+
+   PLOT.MOUSE.HOLE: PROC(X,Y) PUBLIC SWAPABLE;
+      DCL (X,Y) FIXED;
+
+      /* SAVE ALL GRAPHIC ATTRIBUTES SO WE DON'T MESS UP CALLING ROUTINES */
+      CALL PUSH.GRAPHICS.ATTRIBUTES;
+      CALL VIEWPORT(0,SCREEN.WIDTH,0,SCREEN.HEIGHT);   
+      CALL WINDOW  (0,SCREEN.WIDTH,0,SCREEN.HEIGHT);
+
+      IF MG600 THEN DO;
+         vector_mode;
+         CALL PC(esc); CALL PS('|P_');
+         if termulator then do;
+            call pc(esc); call ps('\P');
+         end;
+
+         CALL MOVE_TO(X,Y);
+
+         CALL PLOT(X,Y+30);          /* left side  */
+         CALL PLOT(X+30,Y+30);       /* top        */
+         CALL PLOT(X+30,Y);          /* right side */
+         CALL PLOT(X+25,Y);          /* bottom right */
+         CALL PLOT(X+25,Y+20);       /* right side of "mouse hole" */
+
+         /*** CALL MOVE_TO(X+15,Y+10);    ***/ /* top curve */
+         /*** CALL PC(esc); CALL PS('\)J@%T'); ***/
+         /*** CALL MOVE_TO(X+5,Y+10);     ***/
+
+         CALL PLOT(X+5,Y+20);        /* top of "mouse hole"  */
+                                      
+         CALL PLOT(X+5,Y);           /* left side of "mouse hole" */
+         CALL PLOT(X,Y);             /* bottom left  */
+
+         if termulator then do;
+            call pc(esc); call ps('\p');
+         end;
+         else do;
+            CALL MOVE_TO(X+1,Y+29);
+            CALL PC(esc); CALL PS('|FF');
+         end;
+
+         CALL MOVE_TO(X,Y);
+         CALL PLOT(X+30,Y);
+      END;
+      IF (VT640) OR (DQ640) THEN DO;
+         CALL MOVE_TO(X,Y);
+         CALL PLOT(X,Y+25);
+         CALL PLOT(X+25,Y+25);
+         CALL PLOT(X+25,Y);
+         CALL PLOT(X,Y);
+         CALL MOVE_TO(X+5,Y);
+         CALL PLOT(X+5,Y+15);
+         CALL PLOT(X+20,Y+15);
+         CALL PLOT(X+20,Y);
+      END;
+      CALL POP.GRAPHICS.ATTRIBUTES;
+      MOUSE.HOLE.X = X;
+      MOUSE.HOLE.Y = Y;
+   END PLOT.MOUSE.HOLE;
+
+
+   /* mouse.hole - routine determines if passed position */
+   /* is in the mouse hole                               */
+
+   MOUSE.HOLE: PROC(X,Y) RETURNS(FIXED) PUBLIC SWAPABLE;
+      DCL (X,Y) FIXED;
+
+      IF (X >= MOUSE.HOLE.X) & (X <= MOUSE.HOLE.X + 30)
+      &  (Y >= MOUSE.HOLE.Y) & (Y <= MOUSE.HOLE.Y + 30)
+      THEN RETURN(1);
+      ELSE RETURN(0);
+   END MOUSE.HOLE;
+
+
+   /* draw message - handy routine to draw a temporary message */
+   /* at position 23,0                                         */
+
+   draw.message.setup:proc swapable;
+      if gtype<>0 then do;
+         call PUSH.GRAPHICS.ATTRIBUTES;
+         transparent_mode;
+      end;
+      call ERASE.REST.OF.LINE(23,0); /* erase the bottom line */    
+      call cpos(23,0);               /* back to beginning of line */
+      error.x = 0;
+      error.y = 23;
+      err.displayed = 1;
+   end draw.message.setup;
+
+   DRAW.MESSAGE: proc (string) public recursive;  				/* NON-SWAP SO STRING IS IN EXT MEMORY : writes out a specified message on the bottom line of the screen */
+      dcl string fixed array;
+
+      call draw.message.setup;
+
+      call ps(string);               								/* print the message */
+      if gtype<>0 then do;
+         call POP.GRAPHICS.ATTRIBUTES;
+      end;
+
+		tty_wait();															// Flush all D50 output to termulator screen
+   end DRAW.MESSAGE;
+
+   ERASE.MESSAGE: proc public swapable;   						/* erases a message printed the bottom line of the screen*/
+
+      call PUSH.GRAPHICS.ATTRIBUTES;
+      transparent_mode;
+      call ERASE.REST.OF.LINE(23,0);
+      call PRINT.CCAT;      											/* restore the current catalog */
+      call POP.GRAPHICS.ATTRIBUTES;
+
+      if    (error.x = 0)
+      and   (error.y = 23)
+      and   (err.displayed <> 0)
+      then err.displayed=0;
+
+		tty_wait();														 	// Flush all D50 output to termulator screen
+   end ERASE.MESSAGE;
+
+   Display_Update_Status: proc(mode,count,total) public swapable; /* display status message on screen from laser disk update */
+      dcl mode  fixed; /* mode to display */
+      dcl count fixed; /* no. items processed so far */
+      dcl total fixed; /* total no. items to process */
+      dcl i     fixed;
+
+      if mode = 0 then do; /* intitialize */
+         /* reserve for initilize */
+      end;
+      else do;
+
+         if total = 0 then i = 100; 								/* deal with divide by zero */
+         else do;
+            write("5") = count; 										/* calculate percent complete */
+            write("6") = 100;
+            write("324") = read("5");
+            write("7") = total; 										/* percent = (count / total) * 100 */
+            i = read("5");
+         end;
+
+         run.syn = 0;           										/* keep synclav from running since laser update is using all of external/poly memory */
+
+         call cpos(23,0); 												/* position cursor */
+         call Set.Term.Attr(Attr#Normal);
+
+         do case mode - 1; 											/* print different messages */
+            call ps('Reading category list: ');
+            call ps('Reading optical disk: ');
+            call ps('Updating file list: ');
+            call ps('Updating category list: ');
+         end;
+         call pnum(count,0); call ps(' processed out of ');
+         call pnum(total,0); call ps(', ');
+         call pnum(i,0); call ps('% complete');
+         call erase.to.end.of.line;
+
+         run.syn = 1;           
+
+			tty_wait();														// Flush all D50 output to termulator screen
+      end;
+   end Display_Update_Status;
+
+end TPRIMMOD;
+
+

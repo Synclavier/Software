@@ -1,0 +1,141 @@
+/* 144-TIM4 - END OF TIME.BASE.SCAN.QUE.AND.SCAN.INPUTS */
+
+/*
+   08/24/89 - PF - Changed reference to MIDI.THERE to allow for MIDInet bit
+   03/14/89 - PF - Added DISABLE/ENABLE logic to Ext Trigger
+   10/9/86 - CJ,TS - ADDED SYNC.DELAY TO DRUM REPLACEMENT NOTES
+   7/13/86 - CJ - NEW BEAT.NUMBER WITH EXTERNAL CLICK TRACK
+   7/10/86 - CJ - 50 HZ SYNC INPUT, BEAT SYNC INPUT
+   7/09/86 - CJ - ADDED SYNC.DELAY TO KEY.END.TIME
+   7/07/86 - CJ - EXT.CLOCK.CASE CODE
+   6/28/86 - CJ - ADDED EXTERNAL CLOCK CHECK
+   5/15/86 - "official" creation of release-M modules
+*/
+
+
+   /* CHECK EXTERNAL CLOCK INPUT FOR ITEMS */
+
+   IF INC.FM
+   AND (CLOCK.DATA <> (READ("160")&2))     
+   THEN DO; 
+
+      CLOCK.DATA=CLOCK.DATA XOR 2;    /* EXTERNAL CLOCK PULSE    */
+
+      IF (CLOCK.DATA=0)               /* IF RISING EDGE          */
+      THEN DO CASE(EXT.CLOCK.CASE);   /* THEN BRANCH ON CASE     */
+
+         DO;                          /* 0: NOTHING              */
+         END;
+
+         DO;                          /* 1: EXT CLICK TRACK      */
+            BEAT.NUMBER=BEAT.NUMBER+1;   /* COUNT BEATS          */
+            NEW.BEAT.NUMBER=1;           /* NEW BEAT #           */
+            EST.RATE=PLAY.TIME.LSB-LAST.CLICK;
+            LAST.CLICK=PLAY.TIME.LSB;    /* RECORD TIME OF EXTERNAL CLICK */
+            NEXT.CLICK=LAST.CLICK+EST.RATE;
+         END;
+
+         DO;                          /* 2: EXTERNAL REPEAT/ARPEG */
+            NEW.EXT.PULSE =1;            
+            EXT.PULSE.TIME=OUR.MILLISECONDS;
+         END;
+
+         DO;                          /* 3: DRUM REPLACEMENT      */
+            DISABLE;                         /* WE COULD GET A MIDI NOTE ON DURING THE D115 INTERRUPT */
+            DO I=1 TO EXT.TRIG.STAK(0);      /* COPY NOTES ON TO STACK */
+               IF NEW.NOTE.STAK(0)<NEW.NOTE.LIST.SIZE /* IF ROOM                */
+               THEN DO;
+                  NEW.NOTE.STAK(0)=NEW.NOTE.STAK(0)+1;
+                  NEW.NOTE.STAK(NEW.NOTE.STAK(0))="20"\1;  /* INDICATE FROM EXT TRIGGER */
+                  NEW.NOTE.KEY#(NEW.NOTE.STAK(0))=EXT.TRIG.STAK(I)&255;
+                  NEW.NOTE.VEL (NEW.NOTE.STAK(0))=SHR(EXT.TRIG.STAK(I),8);
+                  NEW.NOTE.TIME(NEW.NOTE.STAK(0))=OUR.MILLISECONDS+SYNC.DELAY;
+               END;
+            END;
+            ENABLE;
+            KEY.IS.TRIGGERED=1;                /* SET FLAG SO RELEASE HAPPENS */
+            KEY.END.TIME=OUR.MILLISECONDS+KEY.REL.TIME-KEY.TRIG.TIME+SYNC.DELAY;  /* COMPUTE ENDING TIME BASED ON KEY HELD DURATION */
+				if (newkey == 0)
+				  interp_newkey_pending(true);
+            NEWKEY=1;                          /* SET FLAG FOR SPEEDY SOFTWARE RESPONSE */
+         END;
+
+         DO;                          /* 4: 50 HZ SYNC     */
+            CLOCK.ADVANCES=CLOCK.ADVANCES+20;  /* ADVANCE FOR 20 MILLISECONDS */
+         END;
+
+         DO;                          /* 5: BEAT SYNC         */
+            CLOCK.RECEIVED=1;         /* CLOCK PULSE RECEIVED */
+            CLOCK.DELAY.TIME=OUR.MILLISECONDS+SYNC.DELAY;
+         END;
+      END;                         /* OF DO CASE           */
+   END;                            /* OF CLOCK.DATA CHANGE */
+
+   /* SCAN MIDI INPUT */
+
+   DISABLE;
+
+   IF ((MIDI.THERE & MIDI.THERE.ORIG)<>0) /* HAVE SOME OLD MIDI SUBSYSTEMS */
+   THEN DO;                           		/* SCAN OUR KBD AND MIDI KBD DURING INTERRUPT */
+      WRITE(SYSSEL)=MIDI.SUBSYS;      		/* SELECT MIDI SUBSYSTEM 0 */
+      IF READ(MSTA)<>0 THEN DO;       		/* HAVE SOME BYTES TO PROCESS */
+         ENABLE;
+         CALL SCAN.MIDI;              		/* SCAN FROM MIDI INPUT FIFO */
+         DISABLE;
+      END;
+      ELSE DO;                        		/* NOTHING TO READ FROM MAIN INPUT JACK */
+         IF (EXT.CLOCK.MODE=4)        		/* LOOKING FOR SYNC INFO FROM AUX INPUT JACK */
+         THEN DO;                     		/* EXPLICITLY CHECK THIS JACK TOO */
+            WRITE(SYSSEL)=MIDI.SUBSYS+1; 	/* SELECT THE SUBSYSTEM */
+            IF READ(MSTA)<>0 THEN DO; 		/* HAVE SOME BYTES TO SCAN OFF */
+               ENABLE;
+               CALL SCAN.MIDI;        		/* GO GET THEM */
+               DISABLE;
+            END;
+         END;
+      END;
+   END;                               /* OF LOOK AT MIDI INPUTS */
+
+	// Scan for OMS Midi Sync
+	while (ANY.OMS.MIDI.SYNC.BYTES != 0)
+		call PROCESS.MIDI.AUX.BYTE(interp_fetch_oms_sync_byte());
+		
+	// Scan for OMS note on/off message
+	// Here is a thumbnail sketch of how this all works
+	//		1) We informed the interpreter of addr(ANY.OMS.MIDI.BULK.BYTES) and OMSMIDI.PTR using
+	//		2) If the interpreter receives any OMS MIDI input data, it stores the data at OMSMIDI.PTR (or OMSMIDI.PTR+1; see below) and sets ANY.OMS.MIDI.BULK.BYTES nonzero.
+	//		3) We poll ANY.OMS.MIDI.BULK.BYTES here; if set we call interp_toggle_oms_midi() which returns which xmem sector has the bytes in it and toggles which xmem sector is currently in use.
+	//		4) PROCESS.MIDI.BULK.PACKET does the dirty work.
+	while (ANY.OMS.MIDI.BULK.BYTES != 0)
+	{
+		dcl where.xmem fixed;
+		dcl where.wlen fixed;
+		
+		where.xmem = interp_toggle_oms_midi();			// Toggle A/B buffer. return ext sector # of our buffer. At this point where.xmem is OMSMIDI.PTR or OMSMIDI.PTR
+		
+		write(mam) = where.xmem;							// Access it
+		write(mal) = P#Len;
+		
+		where.wlen = shr(read(md) + 1, 1);				// Byte length to word length
+
+		write(mal) = P#DATA;									// Index to start of data
+
+		PROCESS.MIDI.BULK.PACKET(where.xmem, where.wlen, 0);
+		
+		write(mam) = where.xmem;							// Access it
+		write(mal) = P#Source;
+		write(md ) = where.wlen;
+
+		// Inform OMS how much data from this packet we processed.  This allows OMS to detect when we interrupted
+		// adding data to the
+	}
+
+   WITHIN.SCAN=0;
+	
+	// If interpreting at timer task, return to host here (e.g. return from
+	// timer task). Eventually we will get here on the deferred task and do a return
+	
+	if (interp_is_at_timer_level(0) != 0)
+		interp_exit_real_time_thread();
+
+END TIME.BASE.SCAN.QUE.AND.SCAN.INPUTS; 

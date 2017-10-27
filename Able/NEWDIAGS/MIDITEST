@@ -1,0 +1,281 @@
+/*
+
+New England Digital Corporation 
+MIDI (MU70 & MI70) subsystem test -rev 2.0
+Bill Leathers,  April 16, 1986
+
+
+This test determines how many MIDI subsystems exist and tests each 
+subsystem by dumping a byte pattern thru each output channel and 
+verifying that the same pattern is received at the input channel.  A 
+data loop is established thru a MIDI cable connected from output to 
+input.  The byte pattern is sent thru all of the output ports, so the 
+channel being tested depends on which is patched to input thru the 
+MIDI cable.
+
+*/
+
+insert ':newdiags:datelit';
+
+configuration modelc, MULDIV;
+
+/***************************************************************/
+insert ':-xpl:asciidef';          /* ascii literal definitions */
+insert ':-xpl:termutil';          /* terminal utility routines */
+insert ':-xpl:intrprtr';
+insert ':newdiags:dtdchk';
+
+dcl milliseconds fixed;
+when d03int then milliseconds = milliseconds + 5;
+
+Really.Do.Delay: proc(n);
+    dcl n fixed;
+    dcl x fixed;
+
+    x = milliseconds;
+
+    while (n > 0) {
+        interp_do_interrupts();         // Gobble interrupts here
+        
+        while (x == milliseconds) {
+            interp_run_host_non_timer();
+            interp_do_interrupts();     // Gobble interrupts here
+        }
+        
+        x = milliseconds;
+        
+        n = n - 1;
+    }
+
+    if (interp_is_running != 0) {
+        // Wait for deferred task.
+        while (interp_current_level(0) != 2)
+            interp_run_host_non_timer();
+    }
+end Really.Do.Delay;
+
+/***************************************************************/
+dcl byte_list data                /* Byte pattern used to test */
+    (1,2,4,8,16,32,64,128,        /* MIDI uarts                */
+    "HFE","HFD","HFB","HF7",
+    "HEF","HDF","HBF","H7F",
+    "H55","HAA","HFF",0);
+
+dcl (i,j,k) fixed;          /* counters                          */
+dcl subsys fixed;           /* MIDI subsystem number (0-7)       */
+dcl loop_est boolean;       /* True if data loop established     */
+dcl old_status boolean;     /* value of loop_est last loop pass  */
+dcl prompt lit '20,10';     /* cursor position for prompt line   */
+dcl chr fixed;              /* receives character from terminal  */
+dcl sys_found boolean;      /* True if MIDI subsystem found      */
+dcl garbage_str(1) fixed;   /* garbage string -contents ignored  */
+dcl err_flg boolean;        /* True if receive error detected    */
+dcl ubyte fixed;            /* gets byte from uart in proc uread */
+dcl num_fails fixed;        /* holds number of test failures     */
+
+/*******************************************************************/
+show_status: proc;                /* Display data path status      */
+  pos(12,10);
+  erase_line;
+  reverse(true);
+  if loop_est then pstring('Data loop established');
+  else do; pos(12,50); pstring('No data loop established'); end;
+  reverse(false);
+  erase_command;
+end show_status;
+
+/*******************************************************************/
+clear_prompt: proc;                           /* clear prompt line */
+  pos(prompt);
+  erase_line;
+end;
+/*******************************************************************/
+send_pattern: proc;               /* sends a 20-byte test pattern  */            
+  dcl (i,j) fixed;                /* pattern out the selected uart */              
+                                                  
+  do i = 0 to 19;                 /* i counts 20 bytes             */
+    write("72") = byte_list(i);   /* send next byte thru uart      */
+  end;
+end send_pattern;   
+/*******************************************************************/
+uread: proc returns (fixed);       /* read byte from selected uart */
+
+  if read("71") = 0 then return false;     /* if no byte in buffer */
+  else do;                                 /* at least 1 byte      */
+    ubyte = read("72");                    /* ubyte <- next byte   */
+    return true;                           /* show byte received   */
+  end;  /* else */
+end uread;
+
+/*******************************************************************/
+receive_pattern: proc;     /* Verify that pattern received matches */
+                           /*   pattern sent by proc send_pattern  */
+  dcl i fixed;
+  dcl byte_cnt fixed;      /* counts bytes received correctly      */
+
+  err_flg = false;         /* assume no error                      */
+  write("71") = 4;         /* select uart #4 (INPUT)               */
+  loop_est = true;         /* assume data loop established         */
+  byte_cnt = 1;            /* waiting for first byte               */
+  Really.Do.Delay(10);
+
+  i = 0;                                      /* index byte_list array  */
+  do while (i < 20) & (not err_flg);          /* 20 bytes unless error  */
+    if uread then                             /* if byte from uart then */
+      if ubyte <> byte_list(i) then do;       /* if byte doesnt match   */
+        err_flg = true;                       /* flag -error & no loop  */
+        loop_est = false;
+        /* allow for failures while switching MIDI cable */
+        if num_fails < 5 then num_fails = num_fails + 1; /* let 5 go by */ 
+        else do;                              /* byte match failure     */
+          loop_est = false;      call clear_prompt;
+          pstring('Receive error on byte pattern');
+          pnum(byte_cnt,3);      pstring('.  Sent');
+          pnum(byte_list(i),5);  pstring(' but received');
+          pnum(ubyte,5);
+          pos(21,10); pstring('Press Q and RETURN to quit');
+          pos(22,10); get_string('Press RETURN to try again...',false,garbage_str,1);
+          if (garbage_str(0) == 1 && (byte(garbage_str, 0) == asc.q || byte(garbage_str, 0) == lower.q)) {
+             flush_term;
+             exit_to_firmware;                      /* abort test */
+          }
+          call clear_prompt;     pos(20,10);
+          pstring('Hit the space bar to go to the next MIDI subsystem.');  
+          pos(21,10);            erase_line;
+          erase_command;
+        end;  /* else */
+      end;  /* if */
+      else byte_cnt = byte_cnt + 1;     /* count byte received correctly */
+    else do;                            /* no data in uart input buffer  */
+      loop_est = false;                 /* flag -no loop established     */
+      err_flg = true;                   /* flag -data loop error         */
+      num_fails = 0;                    /* not a mis-match, clear #fails */
+    end; /* else */
+    i = i + 1;                          /* i indexes next byte           */
+  end;
+
+  if loop_est then num_fails = 0;       /* data loop, so no fails        */
+end receive_pattern;
+/*************************************************************************/
+init_uarts: proc;                       /* initialize subsystem uarts    */
+  dcl i fixed;
+
+  do i = "10" to "14";                  /* do for uarts 0-4              */
+    write("71") = i;                    /* reset and initialize pointers */
+    write("72") = read("72");
+  end;
+end init_uarts;
+/*************************************************************************/
+show_subsys: proc;                   /* display current subsystem #(1-8) */
+  pos(10,5);  erase_line;
+  pstring('Subsystem #'); pnum(subsys+1,2);
+  erase_command;
+end show_subsys;
+/*******************************************************************/
+menu: proc;                            /* display MIDI test screen */
+  dcl (i,j) fixed;
+  dcl aux fixed;
+
+  clear_screen;
+  pos(3,25); pstring('MIDI DATA LOOP TEST '); display_release_date;
+  pos(4,25); pstring('------------------------------');
+  pos(6,25); pstring('Existing subsystems: ');
+
+  j = 0;                              /* j counts existing subsys's */
+  write("70") = 16;                   
+  if read("70") = 16 then do;         /* verify subsys #1 exists    */
+    pnum(1,1);  j = j + 1;
+  end;
+  do i = 1 to 7;                      /* check for subsys's 2-8     */
+    write("70") = i + 16;
+    if read("70") = i + 16 then do;   /* subsystem exists           */
+      pstring(','); pnum(i+1,1); j = j + 1;
+    end;  /* if */
+  end;
+  if j = 0 then pstring(' NONE');
+  write("70") = subsys+16;
+
+  pos(15,10);
+  aux = subsys & 1;
+  if aux then do;
+    pstring('Connect the MIDI cable from each output channel (5-8) to the');
+    pos(16,10);
+    pstring('AUX input channel and verify that a data loop is established');
+  end;
+  else do;
+    pstring('Connect the MIDI cable from each output channel (1-4) to the');
+    pos(16,10);
+    pstring('INPUT channel and verify that a data loop is established.');
+  end;  /* else */
+
+  pos(20,10); pstring('Hit the space bar to go to the next MIDI subsystem.');  
+  call show_subsys;   call show_status;   erase_command;
+end menu;
+
+/***********************************************************************/
+/*********************    MAIN PROGRAM     *****************************/
+/***********************************************************************/
+loop_est = false;
+old_status = false;
+num_fails = 0;
+
+if ((interp_is_running != 0)
+&&  (interp_hardware_avail(0) == 0)) {
+    pstring('No hardware to test.');
+    flush_term;
+    exit_to_firmware;
+}
+
+interp_activate_real_time(true);             // Set interpret_at_interrupt_prior == true
+interpret_set_timebase_mode(0);              // Set rtp_is_playing == true; set interpret_at_defrd_prior == true
+tty.no.host = true;
+Really.Do.Delay(10);                         // Jump to hyperspace (re-enter on deferred thread)
+
+if (read("51") & 256) = 0 then do;   /* if no SMPTE or MIDI units then */
+  clear_screen;
+  pos(5,0);  pstring('No MIDI units found!  Test Aborted.');
+  flush_term;
+  exit_to_firmware;                      /* abort test */
+end;
+
+subsys = 0;  /* MIDI subsystem 1 */
+loop_est = false;
+write("70") = subsys + 16;              /* select subsystem                */
+if (read("70") <> subsys + 16) then do;
+  pstringr('Error! No subsystem #0;  Test aborted.');
+  flush_term;
+  exit_to_firmware;
+end;
+call menu;  /* display test screen */
+
+do forever;
+  if not term_idle then do;               /* if character at terminal */
+    chr = rchar;                          /* chr <- character         */
+    if chr = sp then do;                  /* if space, go to next     */
+      sys_found = false;                  /*    subsystem.            */
+      do while not sys_found;
+        subsys = (subsys + 1) mod 8;
+        write("70") = subsys + 16;
+        if (read("70") = subsys + 16) then sys_found = true;
+      end;  /* do */
+      call menu;    
+    end;  /* if */
+
+    if chr = 0 then do;                  /* if chr = BREAK then exit   */
+       clear_screen; flush_term;
+       exit_to_firmware;
+    end;
+  end; /* if not term idle */
+
+  call init_uarts;                       /* initialize subsystem uarts  */
+  do j = 0 to 3;                         /* do for each output channel  */
+    write("71") = j;                     /* select output uart          */
+    call send_pattern;                   /* send test pattern thru uart */
+  end;
+
+  call receive_pattern;
+  if loop_est <> old_status then do;
+    old_status = loop_est;
+    call show_status;
+  end;
+end;

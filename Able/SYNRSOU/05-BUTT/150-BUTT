@@ -1,0 +1,1630 @@
+/* :SYNRSOU:05-BUTT:150-BUTT  $TITLE  HIGHER LEVEL PANEL ROUTINES USED FOR BOTH OLD & NEW PANELS */
+
+/*
+MODIFIED:
+1998/06/26 - TY  - Changed TURN.ON.PARAMS so that the click button will remain lit/unlit based
+						 solely on the status of CLICKON.
+1998/06/24 - TY  - Updated expressions containing (CLICK.TRACK.MODE & 511) to account for
+						 the independence of CLICK.TRACK.MODE from CLICKON.
+1998/06/22 - TY  - Added code to DISPLAY.SEQUENCER.STATUS to accommodate the new Transpose Lock
+						 (blinking) feature.
+1998/06/01 - TY  - Modified POP.TBUT.SOLOS to clear the pushed bit (B.PUSHD.TRK) after restoring
+						 solos.  Previously this was not done which was the cause of the nasty bug which
+						 lit up renegade tracks after an S-page paste/merge/fill.
+					  - Made PUSH.TBUT.SOLOS and POP.TBUT.SOLOS operate on the same range of tracks
+						 (NUM.KBD.TRACKS TO LAST.LOD.TRACK-1).  Previously they were not consistent and
+						 also checked tracks not assignable to buttons.
+1998/05/15 - TY  - Added FIND.FIRST.NONREST for use by SLIDE.TRACKS in :SYNRSOU:05-BUTT:181UPD1A.
+					  - Sreamlined CLEAR.GRP.SEL.BITS and RECURS.TRACK.GROUP by letting them check
+						 only the groupable tracks (2-217) rather than 0-255.
+1990/10/23 - PF  - Add HELD.SPEED.BUTTON
+1989/07/28 - CJ  - COMBINED LOGIC IF DISPLAY.ENABLED.TRACKS AND DISPLAY.TRACK.BUTTONS
+1989/04/19-MWH/EEG-bug fix in POP.TBUT.SOLOS was setting mute bit
+1988/10/21 - TSS - FIXED BUG WHERE ON,OFF,BLINK GLOMMED BUTTON 0 INFO
+1988/09/22 - CJ  - MADE FIND.FIRST.HELD.TRACK.BUTTON PUBLIC
+1988/09/22 - TSS - OPTIMIZED CLAVIER STATUS BIT SETTING
+1988/09/16 - TSS - ADDED TINY OPTIMIZATION TO PANEL.SCAN
+1988/09/15 - TSS - ADDED CODE TO KEEP TRACK OF CLAVIER BUTTON LIT STATUS
+1988/04/12 - PF  - CREATED DISPLAY.ENABLED.TRACKS FOR MULTI RECORD INTERFACE
+1988/04/12 - PF  - CHANGED DISPLAY.TRACK.BUTTONS FOR MULTI RECORD INTERFACE
+1988/04/12 - PF  - CHANGED DISPLAY.ACTIVE.TRACKS FOR NEW INFO LOGIC
+1987/11/12 - MWH - Make timer comparisons unsigned to fix "30 sec hang"
+1987/06/30 - eg  - bug fix in push.tbut.solos
+1986/11/21 - CJ  - INVERTED PARTIAL/RTE CODE
+1986/11/13 - TS  - CHAIN!!!
+1986/11/04 - TS  - MOVED HELD.INSERT.BUTTON & HELD.DELETE.BUTTON DCLS HERE
+1986/10/30 - TS  - ADD CODE TO TURN OFF/ON CHAIN/INSERT/DELETE LIGHTS & DISPLAY.ACTIVE.TRACKS
+1986/09/11 - TS  - DO BOUNCE AND JUSTIFIED RECD BETTER FOR NEW KBD
+1986/09/10 - TS  - MODIFIED CODE TO LIGHT STARTLOOP/ENDLOOP PROPERLY
+1986/08/25 - TS  - MODIFIED CODE TO DISPLAY THD.ACTIVE.MIDI.RTES LIGHTS
+1986/08/06 - TS  - ADDED CODE TO FLICKER OVERWRITE EXPRESSION LIGHTS
+1986/08/03 - CJ  - CHANGED LOD TRACK BUTTON DISPLAY LOGIC
+1986/07/31 - EEG - CHANGED COMPUTE.START.TIME.DISPLAY TO HANDLE LOD RECORDING
+1986/07/31 - EEG - CHANGED DISPLAY.TRACK.BUTTONS TO HANDLE LOD RECORDING
+1986/06/25 - TSS - ADDED CODE FOR FIND.ANY.NOTE
+1986/06/20 - CJ  - SMPTE DECLARATIONS MOVED
+1986/06/11 - TSS - Deleted references to RECORD.SEC,RECORD.WRD,CONTINUE.SEC,CONTINUE.WRD
+1986/05/15 - "official" creation of release-M modules
+*/
+
+/* The following routines scan button changes from the Synclavier II
+.  panel, and control the off/on/blinking state of each button.
+.  The following routines are passed a *** LOGICAL PARAMETER NUMBER ***
+.  when they are called from the main program.   These routines look up
+.  the corresponding physical button numbers from a lookup table,  and
+.  then call the corresponding hardware driver to set/blink/clear that
+.  button. */
+
+
+/* Global Variables */
+
+DCL (NUM.OF.HELD.TRACK.BUTTONS) FIXED PUBLIC;	/* NUMBER OF CURRENTLY HELD TRACK BUTTONS */
+DCL (HELD.TRINF.BUTTON)         FIXED PUBLIC;	/* TRACK INFO BUTTON HELD (ROUTING, VOLUME) */
+DCL (HELD.STARTLOOP.BUTTON)     FIXED PUBLIC;
+DCL (HELD.ENDLOOP.BUTTON)       FIXED PUBLIC;
+DCL (HELD.INSERT.BUTTON)        FIXED PUBLIC;
+DCL (HELD.DELETE.BUTTON)        FIXED PUBLIC;
+DCL (HELD.CLIK.BUTTON)          FIXED PUBLIC;
+DCL (HELD.SPEED.BUTTON)         FIXED PUBLIC;
+DCL (HELD.SEQNAME.BUTTON)       FIXED;
+DCL (TROUT.TRK#)                FIXED PUBLIC;	/* BUTTON # (0 TO NUM.TRACK.BUTTONS-1) OR (-1) FOR KBD/OVERALL LOOP */
+
+/* These routines are used for both the old and new panel */
+
+doctor.vkp.button.list:proc(ptr) SWAPABLE;	/* convert phys button numbers to logical */
+	dcl (ptr) fixed;
+	dcl (i,j) fixed;
+
+	do i=ptr+1 to new.button.list(0);	/* map each new button to logical button */
+		/* use same stack for now to save memory */
+		j=new.button.list(i);				/* look up pbn + "100000" */
+		new.button.list(i)=(j&BUTTON.LIST.HELD)\lpn.lookup(j&BUTTON.LIST.MASK);	/* map pbns to lpns on stack */
+	end;
+end;
+
+doctor.ork.button.list:proc(ptr) SWAPABLE;	/* convert phys button numbers to logical */
+	dcl (ptr) fixed;
+	dcl (i,j) fixed;
+
+	do i=ptr+1 to new.button.list(0);	/* map each new button to logical button */
+		/* use same stack for now to save memory */
+		j=new.button.list(i);				/* look up pbn + "100000" */
+		new.button.list(i)=(j&(BUTTON.LIST.HELD|BUTTON.LIST.ORK))\ork.lookup(j&BUTTON.LIST.MASK);	/* map pbns to lpns on stack */
+	end;
+end;
+
+panel.scan:proc /*public*/;	/* scan button panel and map to logical parm numbers */
+	/* NOTE: for old keyboard, this procedure also displays the lit button data */
+	dcl (i) fixed;
+
+	i=new.button.list(0);		/* save current stack pointer in case of second call */
+
+   if (NEW.ORK == 0) {
+      call scan.new.vkp.buttons; /* call hardware driver to store changes on stack */
+      if new.button.list(0)<>i	/* only doctor if new buttons from above scan */
+      then call doctor.vkp.button.list(i);
+   }
+   else {
+      call scan.new.ork.buttons; /* call hardware driver to store changes on stack */
+      if new.button.list(0)<>i	/* only doctor if new buttons from above scan */
+      then call doctor.ork.button.list(i);
+   }
+end panel.scan;
+
+stack.on.panel:proc(lpncode) PUBLIC SWAPABLE;	/* store info on panel stack - used by upper routine to simulate certain switches */
+	dcl (lpncode) fixed;
+
+	if new.button.list(0)>=BUTTON.LIST.SIZE then return;	/* oops - won't fit */
+	new.button.list   (0) =new.button.list(0)+1;		/* increment        */
+	new.button.list(new.button.list(0))=lpncode;		/* save lpn & code  */
+
+	any.misc.functions = true;
+end stack.on.panel;
+
+/* $SUBTITLE  BUTTON LED DISPLAY ROUTINES FOR OLD SYNCLAVIER II PANEL */
+
+DCL (NEW.GDISPLAY)     FIXED PUBLIC;	/* SET TRUE WHEN BUTTON CHANGES SO GUITAR PANEL WILL BE UPDATED */
+
+OFF:PROC(LPN) PUBLIC;	/* SET LPN TO BLINK MODE */
+	DCL (LPN,I)   FIXED;
+   DCL (VKP.BUT) FIXED;
+
+	WRITE(MAM)=PBN.PTR+SHR(LPN,8);		/* SET UP XMEM ADDR INTO PBN TABLE */
+	WRITE(MAL)=LPN;
+	VKP.BUT=READ(MD);                   /* FIND PHYSICAL BUTTON FOR THIS LPN */
+
+	IF (VKP.BUT&"020000")<>0 THEN DO;   /* IF BUTTON EXISTS */
+      if (NEW.ORK == 0)
+         CLEAR.VKP.LIGHT(VKP.BUT&"017777");
+
+      NEW.GDISPLAY =1;						/* SET FLAG TO RECOMPUTE GUITAR DISPLAY AS WELL */
+
+		WRITE(MAM)=BSTAT.PTR;
+		WRITE(MAL)=VKP.BUT;
+		I=READ(MD);								/* SAVE CURRENT VALUE */
+		WRITE(MD )=READ(MD)&(NOT (B.LIT.BUTTON|B.BLINK.BUTTON));	/* CLEAR STATUS BITS */
+		IF I <> READ(MD)						/* VALUE CHANGED, SET UPDATE BIT */
+		THEN NEW.CLAVIER.INFO = NEW.CLAVIER.INFO | BITS(SHR(VKP.BUT,4)&15);	/* SET FLAG FOR BUTTON STATE CHANGES */
+	END;
+
+   // Handle buttons on ORK only
+   if (NEW.ORK == 1) {
+      DCL (ORK.BUT) FIXED;
+      
+      WRITE(MAM)=ORK.PTR+SHR(LPN,8);		/* SET UP XMEM ADDR INTO PBN TABLE */
+      WRITE(MAL)=LPN;
+      ORK.BUT=READ(MD);                   /* FIND PHYSICAL BUTTON FOR THIS LPN */
+      
+      IF ((ORK.BUT&"020000") != 0)
+         CLEAR.ORK.LIGHT(ORK.BUT&"017777");	/* USE DRIVER */
+   }
+END OFF;
+
+ON:PROC(LPN) PUBLIC;	/* SET LPN TO ON MODE */
+	DCL (LPN,I) FIXED;
+   DCL (VKP.BUT) FIXED;
+
+	WRITE(MAM)=PBN.PTR+SHR(LPN,8);		/* SET UP XMEM ADDR INTO PBN TABLE */
+	WRITE(MAL)=LPN;
+	VKP.BUT=READ(MD);                   /* FIND PHYSICAL BUTTON FOR THIS LPN */
+
+	IF (VKP.BUT&"020000")<>0 THEN DO;   /* IF BUTTON EXISTS */
+      if (NEW.ORK == 0)
+         SET.VKP.LIGHT(VKP.BUT&"017777");	/* USE DRIVER TO TURN ON    */
+
+      NEW.GDISPLAY=1;						/* SET FLAG TO RECOMPUTE GUITAR DISPLAY AS WELL */
+
+		WRITE(MAM)=BSTAT.PTR;
+		WRITE(MAL)=VKP.BUT;
+		I=READ(MD);								/* SAVE CURRENT VALUE */
+		WRITE(MD )=(READ(MD)&(NOT B.BLINK.BUTTON)) | B.LIT.BUTTON;	/* CLEAR BLINK STATUS, SET LIT STATUS */
+
+		IF I <> READ(MD)						/* VALUE CHANGED, SET UPDATE BIT */
+		THEN NEW.CLAVIER.INFO = NEW.CLAVIER.INFO | BITS(SHR(VKP.BUT,4)&15);	/* SET FLAG FOR BUTTON STATE CHANGES */
+	END;
+
+   // Handle buttons on ORK only
+   if (NEW.ORK == 1) {
+      DCL (ORK.BUT) FIXED;
+      
+      WRITE(MAM)=ORK.PTR+SHR(LPN,8);		/* SET UP XMEM ADDR INTO PBN TABLE */
+      WRITE(MAL)=LPN;
+      ORK.BUT=READ(MD);                   /* FIND PHYSICAL BUTTON FOR THIS LPN */
+      
+      IF ((ORK.BUT&"020000") != 0)
+         SET.ORK.LIGHT(ORK.BUT&"017777");	/* USE DRIVER */
+   }
+END ON;
+
+BLINK:PROC(LPN) PUBLIC;						/* SET LPN TO BLINK MODE */
+	DCL (LPN,I) FIXED;
+   DCL (VKP.BUT) FIXED;
+
+	WRITE(MAM)=PBN.PTR+SHR(LPN,8);		/* SET UP XMEM ADDR INTO PBN TABLE */
+	WRITE(MAL)=LPN;
+	VKP.BUT=READ(MD);                   /* FIND PHYSICAL BUTTON FOR THIS LPN */
+
+	IF (VKP.BUT&"020000")<>0 THEN DO;   /* IF BUTTON EXISTS */
+      if (NEW.ORK == 0)
+         BLINK.VKP.LIGHT(VKP.BUT&"017777");	/* USE DRIVER */
+
+      NEW.GDISPLAY=1;						/* SET FLAG TO RECOMPUTE GUITAR DISPLAY AS WELL */
+
+		WRITE(MAM)=BSTAT.PTR;
+		WRITE(MAL)=VKP.BUT;
+		I=READ(MD);								/* SAVE CURRENT VALUE */
+		WRITE(MD )=(READ(MD)&(NOT B.LIT.BUTTON)) | B.BLINK.BUTTON;	/* CLEAR LIT STATUS, SET BLINK STATUS */
+
+		IF I <> READ(MD)						/* VALUE CHANGED, SET UPDATE BIT */
+		THEN NEW.CLAVIER.INFO = NEW.CLAVIER.INFO | BITS(SHR(VKP.BUT,4)&15);	/* SET FLAG FOR BUTTON STATE CHANGES */
+	END;
+
+   // Handle buttons on ORK only
+   if (NEW.ORK == 1) {
+      DCL (ORK.BUT) FIXED;
+      
+      WRITE(MAM)=ORK.PTR+SHR(LPN,8);		/* SET UP XMEM ADDR INTO PBN TABLE */
+      WRITE(MAL)=LPN;
+      ORK.BUT=READ(MD);                   /* FIND PHYSICAL BUTTON FOR THIS LPN */
+      
+      IF ((ORK.BUT&"020000") != 0)
+         BLINK.ORK.LIGHT(ORK.BUT&"017777");	/* USE DRIVER */
+   }
+END BLINK;
+
+ASSIGN:PROC(LPN,STATE) PUBLIC;	/* ASSIGN OFF, ON, BLINKING TO LPN */
+	DCL (LPN,STATE) FIXED;
+
+	DO CASE (STATE);	/* BRANCH */
+		CALL OFF  (LPN);
+		CALL ON   (LPN);
+		CALL BLINK(LPN);
+	END;
+END ASSIGN;
+
+ASSIGN.MULTIPLE:PROC(STARTING.LPN,ENDING.LPN,STATE) PUBLIC;	/* ASSIGN SAME STATE TO MANY BUTTONS */
+	DCL (I,STARTING.LPN,ENDING.LPN,STATE) FIXED;
+
+	DO I=STARTING.LPN TO ENDING.LPN-1;	/* ASSIGN EACH ONE */
+		DO CASE (STATE);	/* BRANCH */
+			CALL OFF  (I);
+			CALL ON   (I);
+			CALL BLINK(I);
+		END;
+	END;
+END ASSIGN.MULTIPLE;
+
+// Sets state for Termulator in all cases, and VK if attached. Leaves ORK unaffected.
+ASSIGN.MULTIPLE.VKP.ONLY:PROC(STARTING.LPN,ENDING.LPN,STATE) PUBLIC;	/* ASSIGN SAME STATE TO MANY BUTTONS */
+	DCL (I,J,STARTING.LPN,ENDING.LPN,STATE,VKP.BUT) FIXED;
+
+	DO I=STARTING.LPN TO ENDING.LPN-1;	/* ASSIGN EACH ONE */
+      WRITE(MAM)=PBN.PTR+SHR(I,8);		/* SET UP XMEM ADDR INTO PBN TABLE */
+      WRITE(MAL)=I;
+      VKP.BUT=READ(MD);                   /* FIND PHYSICAL BUTTON FOR THIS LPN */
+
+		WRITE(MAM)=BSTAT.PTR;
+		WRITE(MAL)=VKP.BUT;
+		J=READ(MD);								/* SAVE CURRENT VALUE */
+
+      IF ((VKP.BUT&"020000") != 0) DO CASE (STATE);	/* BRANCH IF BUTTON EXISTS */
+         DO;IF (NEW.ORK == 0) CALL CLEAR.VKP.LIGHT(VKP.BUT&"017777");WRITE(MD)=READ(MD)&(NOT(B.LIT.BUTTON|B.BLINK.BUTTON))   ;END;
+         DO;IF (NEW.ORK == 0) CALL SET.VKP.LIGHT  (VKP.BUT&"017777");WRITE(MD)=(READ(MD)&(NOT B.BLINK.BUTTON))|B.LIT.BUTTON  ;END;
+         DO;IF (NEW.ORK == 0) CALL BLINK.VKP.LIGHT(VKP.BUT&"017777");WRITE(MD)=(READ(MD)&(NOT B.LIT.BUTTON  ))|B.BLINK.BUTTON;END;
+		END;
+
+      IF J <> READ(MD)						/* VALUE CHANGED, SET UPDATE BIT */
+      THEN NEW.CLAVIER.INFO = NEW.CLAVIER.INFO | BITS(SHR(VKP.BUT,4)&15);	/* SET FLAG FOR BUTTON STATE CHANGES */
+	END;
+END ASSIGN.MULTIPLE.VKP.ONLY;
+
+TBUT.MAPPING:  PROC(BUT) PUBLIC;		/* RETURNS LOGICAL TRK # CORRESPONDING TO BUTTON # */
+	DCL BUT FIXED;							/* BUTTON # (0 TO NUM.TRACK.BUTTONS-1) OR (-1) FOR KBD */
+
+	IF BUT=(-1) THEN RETURN 0;			/* (-1) MEANS KEYBOARD WHICH IS TRK 0 */
+
+	WRITE(MAM)=TBUT.PTR;					/* LOOK UP BUTTON TO TRK # MAPPING */
+	WRITE(MAL)=BUT;						/* FROM EXT MEM ARRAY              */
+
+	RETURN READ(MD)&255;					/* INFO IS IN LOW BYTE             */
+END TBUT.MAPPING;
+
+
+/* Routines for track grouping */
+
+/* clear.grp.sel.bits clears all of the grpsel bits in tbut. */
+/* Very handy!																 */
+
+clear.grp.sel.bits: proc public swapable;			/* clears grpsel bits in tbut array */
+	dcl i fixed;
+
+	write(mam) = tbut.ptr;
+	write(mal) = 0;
+
+	do i = 0 TO MAX.TRACKS-1;							/* DO FOR ALL tracks including the keyboard */
+		write(mdi) = read(md) & (not(b.grpsel.trk));
+	end;
+end clear.grp.sel.bits;
+
+
+/* expand.track.group sets the grpsel bits in tbut for all		*/
+/* tracks in a group.  It returns a status word that indicates	*/
+/* what other tracks may need to be examined to follow down		*/
+/* the hierarchy of a track group										*/
+
+dcl b.expand.any		lit '1';	/* grp sel bit was set for another master track	*/
+dcl b.expand.lower	lit '2';	/* grp sel bit was set for another master track	*/
+										/* whose track number is < then track#				*/
+
+expand.track.group: proc(track#) returns (fixed) public swapable;
+	dcl (track#) fixed;
+
+	DCL THE_TRACK FIXED;
+	DCL GRP_LIST  FIXED;
+	DCL NUM_ENTS  FIXED;
+	DCL STATUS	  FIXED;
+
+	dcl (i,j)     fixed;
+
+	GRP_LIST = 0;										/* ASSUME NO TRACK GROUP CREATED YET		*/
+	NUM_ENTS = 0;
+	STATUS   = 0;
+
+	write(mam) = tbut.ptr;							/* always light bit for the master track	*/
+	write(mal) = track#;
+	write(md ) = read(md) | b.grpsel.trk;
+
+	WRITE(MAM) = TRK.HEAD;
+	WRITE(MAL) = track#;
+	IF (READ(MD) != 0)								/* IF TRACK HEAD DOES EXIST, LOOK FURTHER	*/
+	{
+		GRP_LIST = TRK.HEAD.LOOKUP(track#, THD.GROUPLIST);
+
+		IF (GRP_LIST != 0)							/* IF GROUP EXISTS, EXPAND IT					*/
+		{
+			GRP_LIST = NAH.PTR + GRP_LIST;
+
+			WRITE(MAM) = GRP_LIST;
+			WRITE(MAL) = GRPAUX.NUM;
+			NUM_ENTS   = READ(MD);
+
+			DO i = 0 TO NUM_ENTS-1;					/* set bits for members of group				*/
+				WRITE(MAM) = GRP_LIST;
+				WRITE(MAL) = GRPAUX.LST + i;
+
+				j = read(md) & 0xFF;					/* get track number								*/
+
+				write(mam) = tbut.ptr;
+				write(mal) = j;
+
+				if ((read(md) & b.grpsel.trk) == 0)
+				{
+					write(md) = read(md) | b.grpsel.trk;
+
+					if (TRK.HEAD.LOOKUP(j, THD.GROUPLIST) != 0)
+					{
+						status = status | b.expand.any;			/* set bit if any other group	*/
+																			/* brought in...					*/
+						if (j < track#)								/* if is lower track#, need	*/
+							status = status | b.expand.lower;	/* to start again from top...	*/
+					}
+				}
+			END;
+		}
+	}
+
+	return (status);
+end expand.track.group;
+
+
+/* recurs.track.group traverses the hierarchy of a track group and sets the	*/
+/* grpsel bit for all members of all groups												*/
+
+recurs.track.group: proc(track#) public swapable;
+	dcl (track#) fixed;
+	dcl (status) fixed;
+	dcl (i)		 fixed;
+
+	status = expand.track.group(track#);		/* expand the master track							*/
+
+	if ((status & b.expand.any) != 0)			/* if any members set, must expand them		*/
+	{
+		status = b.expand.lower;					/* always enter loop once; then iterate as	*/
+															/* lower track numbers are encountered...		*/
+		while ((status & b.expand.lower) != 0)
+		{
+			status = 0;									/* assume this will be last loop					*/
+
+			do i = 0 TO LAST.LOD.TRACK-1;			/* do for all tracks and the keyboard			*/
+				write(mam) = tbut.ptr;
+				write(mal) = i;						/* check this track									*/
+
+				if ((read(md) & b.grpsel.trk) != 0)
+					status = status | expand.track.group(i);
+			end;
+		}
+	}
+end recurs.track.group;
+
+
+/* count.groups.on.panel counts the number of track groups available on the button panel	*/
+
+count.groups.on.panel: proc returns (fixed) swapable;
+	dcl (i,j)     fixed;
+	dcl num		  fixed;
+
+	num = 0;
+
+	do i = 0 to num.track.buttons - 1;
+		write(mam) = tbut.ptr;
+		write(mal) = i;
+
+		j = read(md) & 0xFF;
+
+		if (TRK.HEAD.LOOKUP(j, THD.GROUPLIST) != 0)
+			num = num + 1;
+	end;
+
+	return (num);
+end count.groups.on.panel;
+
+
+/* find.significant.track.head is used to find the track head in a group that	*/
+/* might contain some useful information, such as whether the group is			*/
+/* a cue track or not...																		*/
+
+find.significant.track.head:proc(track#) public swapable;
+	dcl (track#) fixed;
+	dcl (i     ) fixed;
+
+	if (track# < NUM.KBD.TRACKS)								/* never any groups for kbd or split kb */
+		return (track#);
+
+	if (trk.head.lookup(track#, THD.GROUPLIST) == 0)	/* if is not a group track, then this	 */
+		return (track#);											/* track head has useful stuff			 */
+
+	if ((trk.head.lookup(track#, THD.NN.MSB) != 0)		/* if has any notes on master track,	 */
+	||  (trk.head.lookup(track#, THD.NN.LSB) != 0))		/* that it is useful							 */
+		return (track#);
+
+	clear.grp.sel.bits();										/* else expand the group					 */
+
+	recurs.track.group(track#);
+
+	do i = num.kbd.tracks to 255;								/* and find first track with some		 */
+		write(mam) = TBUT.ptr;									/* notes...										 */
+		write(mal) = i;
+
+		if ((read(md) & b.grpsel.trk) != 0)					/* this track is member of group			 */
+		{
+			if ((trk.head.lookup(i, THD.NN.MSB) != 0)		/* if has any notes							 */
+			||  (trk.head.lookup(i, THD.NN.LSB) != 0))
+				return (i);
+		}
+	end;
+
+	return (track#);												/* else no useful info avail				 */
+
+end find.significant.track.head;
+
+
+/* $SUBTITLE  HIGHER LEVEL BUTTON DISPLAY ROUTINES */
+
+/* THE FOLLOWING ROUTINES ARE CALLED TO LIGHT UP CERTAIN BUTTONS ON
+.  THE SYNCLAVIER II BUTTON PANEL.  THESE ROUTINES ARE DEFINED HERE
+.  SO THAT DIFFERENT INTERACTIONS IN THE OLD AND NEW PANELS CAN BE
+.  MORE EASILY ACCOMMODATED. */
+
+DCL (HELD.PSEL.BUTTONS) FIXED PUBLIC;				/* BITS FOR PARTIAL BUTTONS THAT ARE HELD */
+
+DISPLAY.PARTIAL.BUTTONS:PROC PUBLIC SWAPABLE;
+	DCL TINFO.PTR FIXED;
+	DCL (I,J,K)   FIXED;
+
+	IF HELD.MIDI.BUTTON<>0								/* MIDI BUTTON HELD */
+	THEN DO I=0 TO 3; CALL OFF(PSEL.L+I); END;
+
+	ELSE IF HELD.RTE.BUTTONS<>0						/* RTE BUTTON HELD */
+	THEN DO I=0 TO 3;										/* RTE HELD - PRESENT RTE DISPLAY */
+		CALL OFF(PSEL.L+I);								/* TURN OFF PARTIAL DISPLAY */
+
+		TINFO.PTR=TIM.HEAD.LOOKUP(0,TIM.TINFO.POINTER);	/* GET TINFO PTR FOR KBD TIMBRE */
+
+		IF (TINFO.PTR<>0)									/* TINFO BLOCK EXISTS */
+		THEN DO J=0 TO 7;									/* CHECK EACH SOURCE - ELSE LEAVE OFF WITH ERR11 DISPLAY */
+			IF (HELD.RTE.BUTTONS&(BITS(J)\256))<>0
+			THEN DO;											/* IF HELD, (OR CLEAR FUNCTION) DISPLAY PARTIAL */
+				K = P.LOOKUP(TINFO.PTR+TI.RTE+J*5);	/* GET PARTIAL BITS */
+				IF (K&BITS(I))<>0							/* NORMAL PARTIAL SENSING */
+				THEN CALL ON(PSEL.L+I);					/* TURN ON PARTIAL IF ACTIVE IN ONE SELECTED SOURCE */
+				ELSE IF (K&BITS(I+NUM.PARTIALS))<>0	/* INVERTED SENSING */
+				THEN CALL BLINK(PSEL.L+I);				/* BLINK FOR INVERTED TO PARTIAL ONLY */
+			END;
+		END;
+	END;
+
+	ELSE DO I=0 TO 3;										/* TEST EACH PARTIAL - STORE ON LIST, LIGHT BUTTONS AS REQD */
+		IF (SOLOED.PARTIALS&BITS(I))<>0
+		THEN CALL BLINK(PSEL.L+I);						/* PARTIAL IS SOLOED */
+		ELSE IF (SELECTED.PARTIALS&BITS(I))<>0		/* SEE IF PARTIAL IS SELECTED */
+		THEN CALL    ON(PSEL.L+I);
+		ELSE CALL   OFF(PSEL.L+I);						/* TURN OFF UNSELECTED PARTIALS */
+	END;
+END DISPLAY.PARTIAL.BUTTONS;
+
+DCL (TB.ENABLED)             FIXED PUBLIC;		/* SET TRUE IF TONE BEND ACTIVE */
+
+DISPLAY.TONE.BEND.BUTTON:PROC PUBLIC SWAPABLE;	/* SET TONE.BEND LIGHT IN SCALE.RESET.BUTTON */
+	IF (TB.ENABLED<>0)&((HELD.RTE.BUTTONS\HELD.MIDI.BUTTON)=0)
+	THEN CALL BLINK(TBDEPTH.L);						/* USES SCALE RESET BUTTON ON OLD PANEL */
+	ELSE CALL   OFF(TBDEPTH.L);						/* NO TONE BEND */
+END DISPLAY.TONE.BEND.BUTTON;
+
+DCL (ACTIVE.PARMS) (20)  FIXED PUBLIC;				/* ALLOW 20 ACTIVE PARAMETERS */
+DCL (IN.BLINK.MODE)      FIXED PUBLIC;
+
+TURN.OFF.PARAMS:PROC PUBLIC SWAPABLE;				/* CALL ROUTINE TO TURN OFF ALL PARAMETER LITES */
+	DCL (I) FIXED;
+	DO I=0 TO 64+64-1;									/* ERASE UP TO 64 PARAMETER LIGHTS AND 64 MISC PARAMETER LIGHTS */
+		CALL OFF(PAR.L+I);								/* TURN OFF LIGHTS FOR KNOWN PARAMETERS */
+	END;
+	CALL OFF( SLOOP.L);									/* SHOULD MAKE THIS A PARM BUTTON SOMEDAY */
+	CALL OFF(INSERT.L);
+	CALL OFF(DELETE.L);
+	CALL OFF( CHAIN.L);
+	IF (HELD.RTE.BUTTONS&512)<>0 THEN DO;			/* ERASE THE EXPRESSION LIGHTS WHEN OVERWRITE BUTTON HELD */
+		DO I=0 TO 5;										/* LOOP OVER 6 OVERWRITE-ABLE EXPRESSIONS */
+			IF I<>R.PWHEEL									/* PTUNING LIGHT GOT TURNED OFF ABOVE */
+			THEN CALL OFF(OVERWRITE.LOOKUP(I));		/* TURN ALL THE OTHERS OFF */
+		END;
+	END;
+	ELSE IF HELD.MIDI.BUTTON<>0 THEN DO;			/* ERASE EXPRESSION LIGHTS USED FOR ACTIVE MIDI RTES */
+		DO I=0 TO 7;										/* LOOP OVER 8 EXPRESSION INPUTS */
+			IF I<>R.PWHEEL									/* PTUNING LIGHT GOT TURNED OFF ABOVE */
+			THEN CALL OFF(OVERWRITE.LOOKUP(I));		/* TURN ALL THE OTHERS OFF */
+		END;
+	END;
+END TURN.OFF.PARAMS;
+
+FLICKER.PARAMETER.BUTTONS:PROC PUBLIC SWAPABLE;	/* CALL TO QUICKLY LIGHT ALL PARAMETER BUTTONS */
+	DCL (I) FIXED;
+
+	IF HELD.MIDI.BUTTON<>0 THEN DO;
+		DO I=0 TO 7; CALL ON(OVERWRITE.LOOKUP(I)); END;
+	END;
+	ELSE IF (HELD.RTE.BUTTONS&512)<>0	/* FLICKER PARAMS FOR OVERWRITE BUTTON */
+	THEN DO I=0 TO 5; CALL ON(OVERWRITE.LOOKUP(I)); END;	/* TURN ON OVERWRITE EXPRESSION LIGHTS */
+	ELSE DO I=0 TO 15;						/* FLICKER PARAMS FOR EXPRESSION INPUT PATCHING */
+		IF SAMPLED.LOOKUP(I)   <>0 THEN CALL ON(SAMPLED.LOOKUP(I)&255);	/* TURN ON */
+		IF CONTINUOUS.LOOKUP(I)<>0 THEN CALL ON(CONTINUOUS.LOOKUP(I)&255);	/* TURN ON */
+		IF (I<4)                   THEN CALL ON(SPECIAL.LOOKUP(I));	/* TURN ON */
+	END;
+
+END FLICKER.PARAMETER.BUTTONS;
+
+/* $PAGE - LIGHT PARAMETER BUTTONS */
+
+TURN.ON.PARAMS:PROC PUBLIC SWAPABLE;	/* LIGHT THOSE REQUIRED */
+	DCL (I,J) FIXED;
+
+	PARSUB:PROC(ARR,WRD,VAL);				/* SUBROUTINE FOR RTE DISPLAY SETUP */
+		DCL (ARR) ARRAY;
+		DCL (I,J,WRD,VAL) FIXED;
+
+		MODEASSIGN:PROC(LPN,VAL);
+			DCL (I,LPN,VAL) FIXED;
+			IF IN.BLINK.MODE<>0 THEN DO;
+				I=0;
+				DO WHILE BLINKTABLE(I)<>0;					/* REMAP LPNS TO BLINKING ONES IF NECESSARY */
+					IF BLINKTABLE(I+1)=(LPN-PAR.L)
+					THEN LPN=BLINKTABLE(I)+PAR.L;			/* REMAP BLINKING MODE FUNCTIONS */
+					ELSE IF BLINKTABLE(I)=(LPN-PAR.L)	/* BUT IGNORE NON-BLINKING */
+					THEN RETURN;								/* FUNCTIONS */
+					I=I+2;
+				END;
+			END;
+			CALL ASSIGN(LPN,VAL);
+		END;
+
+		IF WRD=0 THEN RETURN;						/* NO BITS ON */
+		DO I=0 TO 15;									/* TEST EACH BIT */
+			IF (WRD&BITS(I))<>0						/* IF BIT SET */
+			THEN DO;										/* SET TO ON OR BLINKING */
+				CALL MODEASSIGN(ARR(I)&255,VAL);	/* SET TO ON OR BLINK AS REQD */
+				IF (ARR(I)&"177400")<>0 THEN DO;	/* TEST TO SEE IF MULTIPLE BUTTONS SHOULD LIGHT */
+					DO J=0 TO 7;
+						IF (ARR(I)&BITS(J+8))<>0
+						THEN CALL MODEASSIGN(SPECIAL.LOOKUP(J),VAL);
+					END;
+				END;
+			END;
+		END;
+	END PARSUB;
+
+	IF HELD.MIDI.BUTTON<>0 THEN DO;				/* ACTIVE MIDI RTES DISPLAY */
+
+		CALL ON(MIDI.L);								/* LIGHT THE MIDI LIGHT */
+
+		J=TRK.HEAD.LOOKUP(0,THD.ACTIVE.MIDI.RTES);	/* GET MIDI RTE BITS */
+
+		DO I=0 TO 7;
+			IF (J&BITS(I))<>0							/* THIS EXPRESSION IS ENABLED */
+			THEN CALL ON(OVERWRITE.LOOKUP(I));	/* TURN ON OVERWRITE EXPRESSION LIGHTS */
+		END;
+
+		RETURN;											/* ALL DONE                 */
+	END;
+
+	ELSE IF (HELD.RTE.BUTTONS<>0)					/* RTE BUTTON HELD */
+	THEN DO;												/* MUST PRESENT RTE DISPLAY */
+
+		IF (HELD.RTE.BUTTONS&512)<>0 THEN DO;	/* OVERWRITE EXPRESSION DISPLAY */
+			DO I=0 TO 5;
+				IF (RTE.OVERWRITE.BITS&BITS(I))<>0	/* THIS EXPRESSION IS ENABLED FOR OVERWRITE */
+				THEN CALL ON(OVERWRITE.LOOKUP(I));	/* TURN ON OVERWRITE EXPRESSION LIGHTS */
+			END;
+		END;
+
+		ELSE DO;											/* NORMAL EXPRESSION INPUT DISPLAY */
+			CALL TIM.HEAD.LOOKUP(0,TIM.TINFO.POINTER);	/* SET UP PTR TO TINFO PTR */
+
+			IF (READ(MD)<>0) THEN DO;				/* IF BLOCK WAS SUCCESSFULLY ALLOCATED */
+				J=READ(MD)+TI.RTE;					/* INIT PTR TO FIRST EXRESSION INPUT */
+				DO I=0 TO 7;							/* PROCESS EACH BLOCK */
+					IF (HELD.RTE.BUTTONS&(BITS(I)\256))<>0
+					THEN DO;								/* THIS ONE HELD */
+						CALL PARSUB(SAMPLED.LOOKUP,   P.LOOKUP(J+1),1);	/* TURN THESE ON */
+						CALL PARSUB(CONTINUOUS.LOOKUP,P.LOOKUP(J+2),1);
+						CALL PARSUB(SAMPLED.LOOKUP,   P.LOOKUP(J+3),2);	/* BLINK THESE */
+						CALL PARSUB(CONTINUOUS.LOOKUP,P.LOOKUP(J+4),2);
+					END;
+					J=J+5;								/* STEP PTR TO NEXT EXPRESSION */
+				END;
+			END;
+		END;
+		RETURN;											/* ALL DONE WITH RTE DISPLAY */
+	END;
+
+	IF (CLICKON <> false)							/* CLICK IS ON						 */
+	THEN CALL ON(CLICK.L);							/* LIGHT CLICK BUTTON IF ON	 */
+
+	IF SMPTE.ONOFF<>0									/* SMPTE IS ACTIVE */
+	THEN CALL BLINK(SMPTE.L);						/* LEAVE BLINKING EVEN IF NOT SELECTED */
+
+	DO I=1 TO ACTIVE.PARMS(0);						/* NORMAL DISPLAY - DISPLAY THE ACTIVE ONES */
+
+		J=(ACTIVE.PARMS(I)&255)+PAR.L;			/* LOOK UP INDEX NUMBER IN LOWER HALF - COMPUTE LPN */
+
+		IF ((J = MARK.L)								/* PARAM IS MARK START		*/
+		AND (MARK.BUTTON.DISABLED <> 0))			/* MARK START IS DISABLED	*/
+		THEN CALL BLINK(J);							/* BLINK MARK BUTTON			*/
+
+		ELSE IF (J = CLICK.L)						/* PARAM IS CLICK RATE		*/
+		THEN DO; /* Zilch */ END;					/* BUTTON IS LIT SOLELY ON STATUS OF CLICKON, NOT ON WHETHER PARAMETER IS SELECTED */
+
+		ELSE IF (J=LOOP.L)							/* ONE OF THE 3 LOOP PARAMETERS */
+		THEN CALL ON(SLOOP.L);						/* TURN ON STARTLOOP BUTTON     */
+
+		ELSE DO;
+			IF J=SHR(ACTIVE.PARMS(I),8)+PAR.L	/* IF UPPER & LOWER HALVES EQUAL */
+			THEN DO;										/* UPPER AND LOWER HALVES EQUAL - PROBABLY NOT A BLINK MODE */
+				IF  (IN.BLINK.MODE<>0)				/* IF IN BLINK MODE */
+				AND (J>=COEF.L)
+				AND (J< COEF.L+24)
+				THEN CALL BLINK(J);					/* BLINK COEF BUTTONS IF IN PHASE ADJUST MODE */
+				ELSE CALL ON   (J);					/* NOT A BLINKING PARAMETER */
+			END;
+			ELSE CALL BLINK(J);						/* MUST BE BLINK MODE IF UPPER & LOWER HALVES DISAGREE */
+		END;
+	END;
+	CALL DISPLAY.TONE.BEND.BUTTON;				/* TONE BEND BLINKING MAY OVERRIDE STEADY ON OF PARAMETER BUTTON */
+
+END TURN.ON.PARAMS;
+
+DISPLAY.PARAMETER.BUTTONS:proc public;			/* SET PARAMETER BUTTONS */
+	CALL TURN.OFF.PARAMS;							/* CALL ROUTINE TO TURN OFF ALL PARAMETER LITES */
+	CALL TURN.ON.PARAMS;								/* LIGHT THOSE THAT ARE ACTIVE */
+END DISPLAY.PARAMETER.BUTTONS;
+
+/* $SUBTITLE  TIMBRE BANK AND SEQUENCE DISPLAYS */
+
+DISPLAY.BOUNCE.AND.RECD.JUST.BUTTONS:PROC PUBLIC SWAPABLE;	/* SET APPROPRIATE STATE OF BOUNCE BUTTON AND JUSTIFIED RECORDING BUTTON */
+	IF NEW.PAN<>0 THEN DO;
+		IF BOUNCE<>0				/* BOUNCE IS ACTIVE */
+		THEN CALL ON (BOUNCE.L);
+		ELSE CALL OFF(BOUNCE.L);
+
+		IF RECD.JUST<>0			/* JUSTIFIED RECORDING IS ACTIVE */
+		THEN CALL ON (JUST.L);
+		ELSE CALL OFF(JUST.L);
+
+		IF CHAIN<>0					/* CHAIN IS ACTIVE */
+		THEN CALL ON (CHAIN.L);
+		ELSE CALL OFF(CHAIN.L);
+	END;
+	ELSE DO;							/* ORIGINAL PANEL */
+		IF      BOUNCE   <>0 THEN CALL ON   (BOUNCE.L);
+		ELSE IF RECD.JUST<>0 THEN CALL BLINK(BOUNCE.L);
+		ELSE                      CALL OFF  (BOUNCE.L);
+	END;
+END DISPLAY.BOUNCE.AND.RECD.JUST.BUTTONS;
+
+DISPLAY.BMODE:PROC PUBLIC SWAPABLE;						/* DISPLAY CORRECT BMODE BUTTON (new panel only) */
+	DCL TABLE DATA (ENTRYB.L,BANKB.L,SEQB.L);
+	CALL OFF(BANKB.L); CALL OFF(ENTRYB.L); CALL OFF(SEQB.L);	/* TURN OFF */
+	IF HELD.RTE.BUTTONS<>0 THEN RETURN;					/* OFF IF RTE MODE */
+	IF (BUTMODE>=0) THEN CALL ON(TABLE(BUTMODE));	/* LIGHT THE SELECTED FUNCTION */
+END DISPLAY.BMODE;
+
+DISPLAY.TIMBRE.RECALL.BUTTONS:PROC PUBLIC SWAPABLE;	/* SET CORRECT TIMBRE RECALL BUTTONS (CHANGES WITH SKT/SMT) */
+   CALL DISPLAY.BMODE;
+
+   // ORK,  with VK showing SEQ or BANK - show timbre buttons on ORK only
+   IF (NEW.ORK == 1 && BUTMODE<>0) {
+      IF (HELD.RTE.BUTTONS<>0)				/* OFF IF RTE MODE */
+         ASSIGN.ORK.MULTIPLE(TIMB.L,TIMB.L+8,0);
+      ELSE IF (RECALL.STATE<>0)           /* BLINK - SMT or recall to upper keyboard only */
+         ASSIGN.ORK.MULTIPLE(TIMB.L,TIMB.L+8,2);
+      ELSE {
+         ASSIGN.ORK.MULTIPLE(TIMB.L,TIMB.L+8,0);
+         ASSIGN.ORK.MULTIPLE(TIMB.L+OUR.TIMBRE,TIMB.L+OUR.TIMBRE+1,1);
+      }
+      
+      RETURN;
+   }
+
+   IF (BUTMODE<>0) THEN RETURN;        /* NEW PANEL, TIMBRE BUTTONS NOT DISPLAYED */
+
+   // VK showing timbre buttons - show on VK and ORK
+   IF (HELD.RTE.BUTTONS<>0)				/* OFF IF RTE MODE */
+      ASSIGN.MULTIPLE(TIMB.L,TIMB.L+8,0);
+   ELSE IF (RECALL.STATE<>0)           /* BLINK - SMT or recall to upper keyboard only */
+      ASSIGN.MULTIPLE(TIMB.L,TIMB.L+8,2);
+   ELSE {
+      ASSIGN.MULTIPLE(TIMB.L,TIMB.L+8,0);
+      ASSIGN.MULTIPLE(TIMB.L+OUR.TIMBRE,TIMB.L+OUR.TIMBRE+1,1);
+   }
+END DISPLAY.TIMBRE.RECALL.BUTTONS;
+
+DISPLAY.BANK.BUTTONS:PROC PUBLIC SWAPABLE;
+   CALL DISPLAY.BMODE;
+
+   // ORK
+   IF (NEW.ORK == 1) {
+      IF (HELD.RTE.BUTTONS<>0)				/* OFF IF RTE MODE */
+         ASSIGN.ORK.MULTIPLE(BANK.L,BANK.L+8,0);
+      ELSE {
+         ASSIGN.ORK.MULTIPLE(BANK.L,BANK.L+8,0);
+         ASSIGN.ORK.MULTIPLE(BANK.L+OUR.BANK,BANK.L+OUR.BANK+1,1);
+      }
+   }
+
+   IF BUTMODE<>1 THEN RETURN;						/* BANKS NOT SELECTED */
+   CALL ASSIGN.MULTIPLE.VKP.ONLY(TIMB.L,TIMB.L+8,0);	/* CLEAR TIMBRE BUTTONS */
+   IF HELD.RTE.BUTTONS<>0 THEN RETURN;			/* OFF IF RTE MODE */
+   CALL ASSIGN.MULTIPLE.VKP.ONLY(TIMB.L+OUR.BANK,TIMB.L+OUR.BANK+1,1);
+END DISPLAY.BANK.BUTTONS;
+
+DISPLAY.SEQUENCER.RECALL.BUTTONS:PROC PUBLIC SWAPABLE;
+   CALL DISPLAY.BMODE;
+
+   // ORK
+   IF (NEW.ORK == 1) {
+      IF ((HELD.RTE.BUTTONS\HELD.MIDI.BUTTON)<>0)  /* OFF IF RTE MODE */
+         ASSIGN.ORK.MULTIPLE(SEQR.L,SEQR.L+6,0);
+      ELSE {
+         ASSIGN.ORK.MULTIPLE(SEQR.L,SEQR.L+6,0);
+         IF (OUR.SEQ >= 0)
+            ASSIGN.ORK.MULTIPLE(SEQR.L+OUR.SEQ,SEQR.L+OUR.SEQ+1,1);
+      }
+   }
+
+   IF BUTMODE<>2 THEN RETURN;                         /* NOT US */
+   CALL ASSIGN.MULTIPLE.VKP.ONLY(TIMB.L,TIMB.L+8,0);	/* CLEAR 8 TIMBRE BUTTONS */
+   IF (HELD.RTE.BUTTONS\HELD.MIDI.BUTTON)<>0 THEN RETURN;	/* OFF IF RTE MODE */
+   IF (OUR.SEQ < 0) RETURN;                           /* leave off if no sensible value */
+   CALL ASSIGN.MULTIPLE.VKP.ONLY(TIMB.L+OUR.SEQ,TIMB.L+OUR.SEQ+1,1);
+END DISPLAY.SEQUENCER.RECALL.BUTTONS;
+
+/* $SUBTITLE  PRESENT SEQUENCER STATUS TO USER VIA BUTTON PANEL:          */
+
+FIND.FIRST.HELD.TRACK.BUTTON:PROC PUBLIC SWAPABLE;
+	DCL BUT FIXED;
+
+	BUT=0;
+	DO WHILE BUT ILT NUM.TRACK.BUTTONS;	/* LOOP OVER BUTTONS AND CHECK ILP FLAG */
+
+		WRITE(MAM)=TBUT.PTR;					/* LOOK UP ABS. TRACK NUMBER   */
+		WRITE(MAL)=BUT;						/* FOR THIS TRACK BUTTON       */
+
+		IF (READ(MD)&B.HELD.TRK)<>0
+		THEN RETURN BUT;
+
+		BUT=BUT+1;
+	END;
+	RETURN 0;	/* SIGNIFIES BUG WITH NUM OF HELD TRACK BUTTONS */
+END FIND.FIRST.HELD.TRACK.BUTTON;
+
+DISPLAY.SEQUENCER.STATUS:PROC PUBLIC SWAPABLE;	/* SETS UP CORRECT SEQUENCER DISPLAY LIGHTS */
+	DCL (BUT,I,J,K) FIXED;
+
+	/* Create a system event whenever the sequencer motion changes: */
+
+	NEW.SEQ.INFO = NEW.SEQ.INFO \ 128;
+
+	CALL OFF (START.L);	/* TURN OFF START & FF/REW ALWAYS */
+	CALL OFF (FF.L);
+	CALL OFF (REW.L);
+	CALL OFF (RECORD.L);
+	CALL OFF (PUNCH.L);
+	CALL OFF (CONT.L);
+	CALL OFF (ERASE.L);	/* NOT ERASING */
+	CALL OFF (ELOOP.L);
+	CALL OFF (TRANSP.L);
+	CALL OFF (EXT.L);
+
+	IF (HELD.MIDI.BUTTON != 0)			/* IF MIDI HELD, BLINK EXT SYNC IF USING EXT	*/
+	{											/* MIDI SYNC											*/
+		IF (EXT.CLOCK.MODE >= 3)
+			BLINK(EXT.L);
+	}
+
+	ELSE IF (HELD.RTE.BUTTONS == 0)	/* LIGHT SEQUENCER BUTTONS IF NOT RTE PATHCING MODE */
+	{
+		IF  (PLAY<>0)
+		AND (MOVE=0) THEN  CALL ON    (START.L);	/* START LIGHT ON,  UNLESS FF/REW */
+
+		IF ((RECD        )<>0)							/* IF RECORDING, LIGHT RECORD BUTTON */
+		OR ((SMPTE.RECD&1)<>0)
+		THEN               CALL ON    (RECORD.L);	/* ALSO IF SMPTE FF/REW */
+
+		IF ((PNCH        )<>0)							/* ALWAYS BLINK FOR PUNCH IN */
+		OR ((SMPTE.RECD&2)<>0)
+		THEN               CALL ON    (PUNCH.L);	/* ALSO IF SMPTE FF/REW */
+
+		IF CONT<>0   THEN  CALL ON    (CONT.L);	/* IF CONTINUE IS ACTIVE, LIGHT IT */
+
+		IF (MOVE<>0) THEN DO;							/* FF OR REW */
+			IF MOVE.SPEED<0
+			THEN            CALL ON    (REW.L);		/* REWIND */
+			ELSE            CALL ON    (FF.L);		/* FAST FORWARD */
+		END;
+
+		IF ERAS<>0    THEN  CALL BLINK (ERASE.L);	/* ALWAYS BLINK ERASE LIGHT */
+
+		IF NUM.OF.HELD.TRACK.BUTTONS=0 THEN DO;	/* NO TRACK BUTTONS HELD */
+			IF OVERALL.LOOP<>0 THEN DO;				/* LIGHT LOOP BUTTONS IF HAVE AN OVERALL LOOP */
+				WRITE(MAM)=BAS.PTR;
+				WRITE(MAL)=SEQ.S.P.T;
+				IF (READ(MDI)           <>LOOP.START.LSB)
+				OR (READ(MD )           <>LOOP.START.MSB)
+				OR (GOBACK.SEQ.TIME.MSB <>LOOP.END.MSB)
+				OR (GOBACK.SEQ.TIME.LSB <>LOOP.END.LSB)
+				THEN CALL BLINK(ELOOP.L);	/* BLINK IF OVERALL DIFFERENT FROM LOOP PARMS */
+				ELSE CALL ON   (ELOOP.L);	/* OTHERWISE JUST LIGHT        */
+			END;
+
+			IF XPOS<>0 THEN DO;
+				IF XPOS=1
+				THEN CALL ON	(TRANSP.L);	/* LIGHT TRANSPOSE BUTTON IF STEPPED FROM 0 (WILL TURN OFF AUTOMATICALLY WHEN KEY IS PRESSED) */
+				ELSE CALL BLINK(TRANSP.L);	/* BLINK TRANSPOSE BUTTON IF STEPPED FROM 1 (TRANSPOSE BUTTON LOCKED ON) */
+			END;
+
+		END;
+		ELSE DO;										/* COMPUTE LOOP BUTTON FOR ILP INFO */
+			BUT=0;									/* START WITH FIRST TRK BUTTON */
+
+			IF (HELD.TRINF.BUTTON    <>0)		/* TRACK ROUTING/VOLUME HELD */
+			OR (HELD.STARTLOOP.BUTTON<>0)		/* OR START LOOP BUTTON */
+			THEN BUT=TROUT.TRK#;
+
+			ELSE IF (HELD.CLIK.BUTTON<>0)		/* CLICK BUTTON HELD */
+			AND     (CLICK.TRACK.MODE igt 3)	/* LIVE CLICK        */
+			THEN BUT=(CLICK.TRACK.MODE-4);
+
+			ELSE BUT=FIND.FIRST.HELD.TRACK.BUTTON;
+
+			WRITE(MAM)=TBUT.PTR;					/* LOOK UP ABS. TRACK NUMBER   */
+			WRITE(MAL)=BUT;						/* FOR THIS TRACK BUTTON       */
+
+			I=READ(MD);								/* GET ABS TRACK NUMBER        */
+			WRITE(MAM)=TRK.HEAD;
+			WRITE(MAL)=I;							/* THEN LOOK UP THE ILP FLAG   */
+			WRITE(MAM)=READ(MD);					/* FROM THE TRACK HEADER       */
+			WRITE(MAL)=THD.ILP;
+
+			IF READ(MDI)<>0 THEN DO;			/* ILP BIT IS SET              */
+
+				J=READ(MDI); K=READ(MDI);		/* READ IN THD.COUNTIN.MSB/LSB */
+				J=J+READ(MDI);						/* ADD THD.LOOPLEN.MSB */
+				K=K+READ(MD );						/* AND THD.LOOPLEN.LSB */
+				IF K ILT READ(MD) THEN J=J+1;
+				WRITE(MAL)=THD.COUNTIN.MSB;
+
+				IF (READ(MDI)<>LOOP.START.MSB)
+				OR (READ(MD )<>LOOP.START.LSB)
+				OR (J        <>LOOP.END.MSB)
+				OR (K        <>LOOP.END.LSB)
+				THEN CALL BLINK(ELOOP.L);	/* BLINK IF ILP DIFFERS FROM LOOP PARMS */
+				ELSE CALL ON   (ELOOP.L);	/* OTHERWISE JUST LIGHT        */
+
+			END;
+
+			IF ((TRK.HEAD.LOOKUP(I, THD.IGNORE) & THD.IGNORE.XPOS) != 0)
+				CALL ON   (TRANSP.L);		/* LIGHT TRANSPOSE LIGHT IF TRANSPOSING */
+
+		END;
+
+		IF (EXT.CLOCK.MODE=1)
+		THEN                CALL ON   (EXT.L);	/* ON FOR 50 HZ */
+		ELSE IF (SMPTE.ONOFF\EXT.CLOCK.MODE)<>0
+		THEN                CALL BLINK(EXT.L);	/* BLINK FOR ANY EXTERNAL SYNC (SMPTE, MIDI) */
+	}
+
+	CALL SET.CLOCK.CASE;								/* SET UP ANY EXTERNAL CLOCK FLAGS */
+END DISPLAY.SEQUENCER.STATUS;
+
+DISPLAY.ACTIVE.TRACKS: PROC PUBLIC SWAPABLE;	/* AN INFO MODE FUNCTION TO SHOW WHICH TRKS HAVE NOTES */
+	DCL (BUT,TRK,PTR,FOUND) FIXED;
+
+	DO BUT=0 TO NUM.TRACK.BUTTONS-1;		/* CHECK EACH TRACK BUTTON      */
+
+		WRITE(MAM)=TBUT.PTR;					/* LOOK UP ABS. TRACK NUMBER    */
+		WRITE(MAL)=BUT;						/* FOR THIS TRACK BUTTON        */
+
+		TRK=READ(MD)&255;						/* SAVE ABS TRK NUMBER FOR BUTTON */
+
+		IF  (TRK >= FIRST.LOD.TRACK)		/* THIS IS A LOD TRACK */
+		AND (TRK <  LAST.LOD.TRACK )
+		THEN CALL ON(TRAK.L+BUT);			/* LIGHT IT            */
+		ELSE DO;									/* THIS A NORMAL TRK   */
+			FOUND=0;								/* ASSUME TRK IS NOT ON EVENT QUEUE */
+
+			PTR=NEXT.EVENT.QUEUE;			/* POINT TO HEAD OF EVENT QUEUE */
+			DO WHILE PTR<>0;					/* LOOP UNTIL WE HIT END */
+				WRITE(MAM)=NAH.PTR+PTR;		/* POINT AT TRK HEADER   */
+				WRITE(MAL)=THD.TRK;
+				IF READ(MDI)=TRK THEN DO;	/* THIS IS OUR TRK HEADER */
+					CALL ON(TRAK.L+BUT);		/* TURN ON LIGHT          */
+					FOUND=1;						/* WE FOUND IT            */
+					PTR=0;						/* DONE WITH THIS BUTTON  */
+				END;
+				ELSE PTR=READ(MD);			/* READ THD.NEVF (STEP TO NEXT TRK HEAD) */
+			END;
+
+			IF FOUND=0 THEN DO;				/* OUR TRK IS NOT ON THE EVENT QUEUE */
+				/* SEE IF TRK HAS A TRACK HEAD */
+				WRITE(MAM)=TRK.HEAD;			/* GET PTR TO TRK HEAD */
+				WRITE(MAL)=TRK;
+				IF READ(MD)<>0 THEN DO;		/* WE HAVE A TRK HEAD */
+					FOUND=1;						/* SET FLAG FOR BELOW */
+					CALL BLINK(TRAK.L+BUT);	/* SO BLINK TRK BUTTON */
+				END;
+				IF FOUND=0						/* TRK IS COMPLETELY EMPTY */
+				THEN CALL OFF(TRAK.L+BUT);	/* TURN OFF TRK BUTTON LIGHT */
+			END;
+
+		END;
+	END;
+
+END DISPLAY.ACTIVE.TRACKS;
+
+
+DISPLAY.TRACK.BUTTONS:proc public swapable;	/* SET UP CORRECT TRACK BUTTONS */
+	DCL (I,J) FIXED;
+
+	/* Create a system event whenever the soloing/muting of a track */
+	/* is changed:                                                  */
+
+	NEW.SEQ.INFO = NEW.SEQ.INFO \ 256;
+
+	/* Begin by clearing all the track buttons:                     */
+
+	CALL ASSIGN.MULTIPLE(TRAK.L,TRAK.L+NUM.TRACK.BUTTONS, 0);
+
+	/* Light no track buttons if setting up RTE routing:            */
+
+	IF (HELD.RTE.BUTTONS<>0) THEN RETURN;	/* LEAVE OFF IF RTE PATCHING */
+
+	/* If midi button held,  show only synclavier tracks */
+	/* that are readied:                                 */
+
+	IF (HELD.MIDI.BUTTON<>0) THEN DO;
+
+		DO I=0 TO NUM.TRACK.BUTTONS-1;	/* CHECK EACH TRACK BUTTON      */
+
+			WRITE(MAM)=TBUT.PTR;				/* LOOK UP ABS. TRACK NUMBER    */
+			WRITE(MAL)=I;						/* FOR THIS TRACK BUTTON        */
+			WRITE(MAL)=READ(MD);				/* LOOK AT THIS TRACK           */
+
+			IF  (READ(MAL)<FIRST.LOD.TRACK)	/* DON'T CHECK LOD TRACKS    */
+			THEN DO;
+				IF ((READ(MD)&B.READY.TRK)<>0)
+				THEN CALL BLINK(TRAK.L+I);		/* ARMED FOR RECORD */
+			END;
+		END;
+		RETURN;
+	END;
+
+	IF (HELD.TRINF.BUTTON    <>0)	/* TRACK ROUTING/VOLUME HELD */
+	OR (HELD.STARTLOOP.BUTTON<>0)	/* OR START LOOP BUTTON */
+	THEN DO;
+		IF TROUT.TRK#>=0				/* ONE OF US */
+		THEN CALL BLINK(TRAK.L+TROUT.TRK#);
+		RETURN;
+	END;
+
+	IF  (HELD.CLIK.BUTTON<>0)		/* CLICK BUTTON HELD */
+	AND (CLICK.TRACK.MODE igt 3)	/* LIVE CLICK        */
+	THEN DO;
+		CALL BLINK(TRAK.L+CLICK.TRACK.MODE-4);
+		RETURN;
+	END;
+
+	IF (TGRP != 0)							/* IF DEFINING A GROUP, DISPLAY GROUP AND				*/
+	{											/* MEMBERS														*/
+		dcl the_track fixed;
+
+		clear.grp.sel.bits();			/* clear all grpsel bits first							*/
+
+		expand.track.group(TGRP.TRACK.SELECT);	/* expand the master only (no recursion)	*/
+
+		/* LOOP OVER TRACK BUTONS.  BLINK THE MASTER TRACK; LIGHT THE BUTTON IF IT IS		*/
+		/* A MEMBER OF THE GROUP																			*/
+
+		DO I = 0 TO NUM.TRACK.BUTTONS - 1;
+			WRITE(MAM) = TBUT.PTR;
+			WRITE(MAL) = I;
+			THE_TRACK  = READ(MD) & 0xFF;
+
+			IF (THE_TRACK == TGRP.TRACK.SELECT)	/* IF TRACK IS THE MASTER, BLINK IT			*/
+				BLINK(TRAK.L +  I);
+
+			ELSE DO;										/* ELSE SEE IF IS A MEMBER TRACK				*/
+				WRITE(MAM) = TBUT.PTR;
+				WRITE(MAL) = THE_TRACK;
+
+				IF ((READ(MD) & B.GRPSEL.TRK) != 0)
+					ON(TRAK.L + I);
+			END;
+		END;
+
+		RETURN;
+	}
+
+	IF (TPAN != 0)							/* TRACK PAN (E.G. BUTTON ASSIGNMENT IS ACTIVE		*/
+	{
+		IF (TRACK.STATE == TRACK.STATE.SELECT.TPAN.ROW)
+		{										/* FIRST STATE OF TRACK PAN (E.G. ROW SELECTION)	*/
+			BLINK(TRAK.L +  0 );			/* BLINK FIRST BUTTON ON EACH ROW						*/
+			BLINK(TRAK.L +  8 );
+			BLINK(TRAK.L + 16 );
+			BLINK(TRAK.L + 24 );
+		}
+
+		ELSE IF (TRACK.STATE == TRACK.STATE.RECALL.GROUP.TRACKS)	/* RECALL GROUP			*/
+		{
+			DO I = 0 TO NUM.TRACK.BUTTONS-1;			/* LIGHT ANY BUTTONS THAT ARE				*/
+				WRITE(MAM) = TBUT.PTR;					/* TRACK GROUPS								*/
+				WRITE(MAL) = I;
+
+				J = READ(MD) & 0xFF;
+
+				if (TRK.HEAD.LOOKUP(J, THD.GROUPLIST) != 0)
+					BLINK(TRAK.L + I);
+			END;
+		}
+
+		ELSE									/* TRACK.STATE.PERFORM.TPAN.ASSIGN						*/
+			CALL ASSIGN.MULTIPLE(TRAK.L,
+			TRAK.L + ((LAST.LOD.TRACK - NUM.KBD.TRACKS) / 8),
+			2);								/* BLINK ALL 27 BANKS DURING SECOND PHASE OF TRACK PAN */
+
+		RETURN;
+	}
+
+	IF (CHAIN\BOUNCE\SMT\SKT)<>0
+	THEN DO;
+		CALL ASSIGN.MULTIPLE(TRAK.L,TRAK.L+NUM.TRACK.BUTTONS,2);	/* BLINK ALL OF THEM DURING SMT, SKT, CHAIN, OR BOUNCE */
+		RETURN;
+	END;
+
+	/* Else show normal track buttons: light soloed tracks, blink    */
+	/* the ready tracks when recording:                              */
+
+	DO I=0 TO NUM.TRACK.BUTTONS-1;	/* CHECK EACH TRACK BUTTON      */
+
+		WRITE(MAM)=TBUT.PTR;				/* LOOK UP ABS. TRACK NUMBER    */
+		WRITE(MAL)=I;						/* FOR THIS TRACK BUTTON        */
+		WRITE(MAL)=READ(MD);				/* LOOK AT THIS TRACK           */
+
+		IF (READ(MAL)=RECD.TRK)			/* BLINK THE SYNCLAVIER         */
+		THEN CALL BLINK(TRAK.L+I);		/* RECORDING TRACK              */
+
+		ELSE IF (RECD<>0)					/* BLINK ALL TRACKS ARMED FOR   */
+		AND     (RECD.TRK<>0)			/* MULTI RECORD                 */
+		AND     (READ(MAL)<FIRST.LOD.TRACK)
+		AND     ((READ(MD)&B.READY.TRK)<>0)
+		THEN CALL BLINK(TRAK.L+I);
+
+		ELSE IF (READ(MD)&B.SOLOED.TRK)<>0	/* SOLOED TRACK (LOD OR   */
+		THEN CALL ON(TRAK.L+I);					/* SYNCL) - ON STEADY     */
+
+		ELSE IF (READ(MAL) >= FIRST.LOD.TRACK)	/* LOD TRACK FOR       */
+		AND     (READ(MAL) <  LAST.LOD.TRACK )	/* RECORDING           */
+		AND     ((LOD.RECD.TRACKS & BITS(READ(MAL)-FIRST.LOD.TRACK))<>0)	/* SELECTED FOR RECORDING  */
+		THEN CALL BLINK(TRAK.L+I);		/* THEN BLINK IT                */
+
+	END;
+
+END DISPLAY.TRACK.BUTTONS;
+
+/* $PAGE - MORE HIGHER LEVEL BUTTON ROUTINES */
+
+DCL KEYBOARD.TIMBRE.CONTROL FIXED PUBLIC;	/* NON-ZERO VALUE INDICATES ABS TRK THAT IS " TEMPORARILY SHARING" THE KBD TIMBRE */
+
+DISPLAY.SMT.SKT.BUTTONS:PROC PUBLIC SWAPABLE;/* DISPLAY CORRECT SMT, SKT BUTTONS */
+	CALL OFF (SKT.L);						/* BEGIN BY CLEARING ALL THE LIGHTS */
+	CALL OFF (SMT.L);
+	CALL OFF (SPLIT.L);
+	CALL OFF (TRACKPAN.L);
+
+	IF (HELD.RTE.BUTTONS\HELD.MIDI.BUTTON)<>0 THEN RETURN;	/* LEAVE OFF */
+
+	IF (SMT<>0) THEN DO;					/* SMT IN PROGRESS */
+		CALL ON(SMT.L);					/* TURN ON SMT */
+	END;
+
+	IF (SKT<>0) THEN DO;					/* ON OR BLINK FOR SKT */
+		IF (SPLT<>0) THEN DO;			/* SPLIT */
+			IF TIMB.DEST<0 THEN CALL ON(SPLIT.L);		/* SET SPLIT MODE  */
+			ELSE                CALL BLINK(SPLIT.L);	/* SECOND PRESS */
+		END;
+		ELSE IF (SMT\TIMB.DEST)<>0
+		THEN CALL BLINK(SKT.L);			/* BLINK SKT DURING SECOND HALF OF SMT, OR IF SECOND SKT PRESS */
+		ELSE CALL    ON(SKT.L);			/* JUST LIGHT IT FOR FIRST PRESS OF SKT */
+	END;
+
+	ELSE IF KEYBOARD.TIMBRE.CONTROL<>0	/* KBD IS CONTROLING A TRACK TIMBRE TOO */
+	THEN CALL BLINK(SKT.L);
+
+	IF (TPAN == 1)
+		ON(TRACKPAN.L);
+
+	IF (TPAN == 3)
+		BLINK(TRACKPAN.L);
+
+END DISPLAY.SMT.SKT.BUTTONS;
+
+DCL (HGS)                     FIXED PUBLIC;	/* 0 = 1-12,  1 = 13-24,  2=25-36 (NEW PANEL ONLY) */
+DCL (SCALE.ADJUST.IS.ACTIVE)  FIXED PUBLIC;
+
+DISPLAY.HGS:PROC PUBLIC SWAPABLE;	/* DISPLAY APPROPRIATE HARMONIC GROUP SELECT */
+	CALL OFF(HGS1.L); CALL OFF(HGS2.L); CALL OFF(SCALE.A.L);	/* INIT TO OFF */
+	IF (HELD.RTE.BUTTONS\HELD.MIDI.BUTTON)<>0 THEN RETURN;	/* LEAVE OFF */
+	IF SCALE.ADJUST.IS.ACTIVE<>0 THEN DO;	/* SCALE ADJUST */
+		CALL ON(SCALE.A.L); IF NEW.PAN<>0 THEN CALL OFF(HGS.L);
+		RETURN;	/* LEAVE HGS BUTTONS OFF IF SCALE ADJUST MODE */
+	END;
+   DO CASE(HGS);			/* BRANCH */
+      DO; CALL  ASSIGN(HGS1.L,1+IN.BLINK.MODE); END;
+      DO; CALL  ASSIGN(HGS2.L,1+IN.BLINK.MODE); END;
+   END;
+	CALL  ASSIGN(HGS.L,HGS);	/* OFF, ON, BLINK */
+END DISPLAY.HGS;
+
+/* $PAGE - HIGHER LEVEL BUTTON ROUTINES */
+
+/* FIRST, SOME VERY HIGH LEVEL BUTTON DISPLAY ROUTINES - THESE ROUTINES
+.  LOOK AT SYNCLAVIER II VARIABLES AND COMPUTE BUTTON DISPLAYS.  ROUTINES
+.  IN THIS SECTION ARE HARDWARE INDEPENDENT */
+
+DCL PRESENT.RTE.DISPLAY FIXED PUBLIC;
+DCL RTE.DISPLAY.STATE   FIXED PUBLIC;
+
+COMPUTE.RTE.BUTTONS:PROC PUBLIC SWAPABLE;	/* COMPUTE PROPER RTE DISPLAY FROM INTERNAL VARIABLES */
+	PRESENT.RTE.DISPLAY = 1;			/* SET FLAG - DONE IN ITERATIONS TO AVOID COMPUTER OVERLOAD */
+	ANY.MISC.FUNCTIONS  = TRUE;
+	RTE.DISPLAY.STATE   = 0;			/* INITIALIZE TO STATE 0 */
+END COMPUTE.RTE.BUTTONS;
+
+/* $PAGE - COMPUTE TRACK STARTING TIME IN BEATS */
+
+/* GLOBAL OUTPUTS OF FIND.FIRST.NOTE, FIND.FIRST.NONREST AND FIND.ANY.NOTE. */
+/* (ONLY VALID IF THESE PROCEDURES RETURN A TRUE.)									 */
+DCL TRACK.FIRST.TIME.MSB FIXED PUBLIC;
+DCL TRACK.FIRST.TIME.LSB FIXED PUBLIC;
+DCL TRACK.FIRST.SEC      FIXED PUBLIC;	/* SECTOR & WORD POINTERS TO THE FIRST	*/
+DCL TRACK.FIRST.WRD      FIXED PUBLIC;	/* SPECIFIED EVENT FOUND ON THE TRACK	*/
+
+/* KEY NUMBER OF FIRST SOUNDING NOTE (SET BY FIND.FIRST.NOTE ONLY) */
+DCL TRACK.FIRST.KEYN		 FIXED PUBLIC;
+
+#if (false)			/* Note: FIND.ANY.NOTE is currently not called anywhere! - TY 1998/05/15	*/
+
+/* FIND.ANY.NOTE: FINDS SEQ TIME & POINTERS FOR FIRST ACTUAL NOTE RECORD ON SPECIFIED TRACK	*/
+FIND.ANY.NOTE: PROC (T) PUBLIC SWAPABLE;
+	DCL T FIXED;	/*	ABSOLUTE TRACK NUMBER 0-255	*/
+
+	TRACK.FIRST.TIME.MSB=0; TRACK.FIRST.TIME.LSB=0;	/* INIT TO ZERO */
+
+	WRITE(MAM)=TRK.HEAD;						/* GET ABS PTR TO TRACK HEADER */
+	WRITE(MAL)=T;								/* FOR DESIRED TRACK           */
+	IF READ(MD)=0 THEN RETURN 0;			/* NO TRACK HEADER FOR TRACK   */
+	WRITE(MAM)=READ(MD);						/* THD.FOR HERE                */
+
+	IF READ(MD)=0 THEN RETURN 0;			/* NO NOTELIST SEGMENTS ON TRK */
+	TRACK.FIRST.SEC=READ(MD);				/* SAVE RELATIVE PTR TO FIRST NLS */
+
+	NEXT.SECTOR:								/* JUMP HERE FOR NEW NLS  */
+
+	WRITE(MAM)=NAH.PTR+TRACK.FIRST.SEC;	/* SET UP ABS PTRS TO NLS */
+	WRITE(MAL)=NLS.FP;						/* LOOK UP STARTING WORD  */
+	TRACK.FIRST.WRD=READ(MD);				/* SAVE IT AND THEN       */
+	WRITE(MAL)=TRACK.FIRST.WRD;			/* POINT TO IT            */
+
+	IF READ(MD)=NLS.EOS THEN DO;			/* END OF THIS NLS        */
+
+		WRITE(MAL)=NLS.FOR;					/* LOOK UP FORWARD PTR    */
+
+		IF READ(MD)=0 THEN RETURN 0;		/* END OF TRACK -- BOMB OUT */
+
+		TRACK.FIRST.SEC=READ(MD);			/* UPDATE CURRENT SECTOR PTR */
+
+		GOTO NEXT.SECTOR;						/* CONTINUE FROM NEXT NLS */
+	END;
+
+	TRACK.FIRST.TIME.LSB=SHR(READ(MD),1)&1023;	/* SAVE DELTA IN GLOBAL */
+
+	RETURN 1;									/* FOUND A NOTE RECORD    */
+
+END FIND.ANY.NOTE;
+
+#endif
+
+/* FIND.FIRST.NONREST: FINDS SEQ TIME & POINTERS FOR FIRST NON-REST EVENT ON SPECIFIED TRACK */
+FIND.FIRST.NONREST:PROC (T) PUBLIC SWAPABLE;
+	DCL (T,W1,W2,W3,W4) FIXED;
+
+	TRACK.FIRST.TIME.LSB=0;					/* INIT TIME */
+	TRACK.FIRST.TIME.MSB=0;
+
+	WRITE(MAM)=TRK.HEAD;						/* GET ABS PTR TO TRACK HEADER */
+	WRITE(MAL)=T;								/* FOR DESIRED TRACK           */
+	IF READ(MD)=0 THEN RETURN 0;			/* NO TRACK HEADER FOR TRACK   */
+	WRITE(MAM)=READ(MD);						/* THD.FOR HERE                */
+
+	IF READ(MD)=0 THEN RETURN 0;			/* NO NOTELIST SEGMENTS ON TRK */
+	TRACK.FIRST.SEC=READ(MD);				/* SAVE RELATIVE PTR TO FIRST NLS */
+
+	NEXT.SECTOR:								/* GOTO HERE FOR NEW NLS  */
+
+	WRITE(MAM)=NAH.PTR+TRACK.FIRST.SEC;	/* SET UP ABS PTRS TO NLS */
+	WRITE(MAL)=NLS.FP;						/* LOOK UP STARTING WORD   */
+	TRACK.FIRST.WRD=READ(MD);
+
+	NEXT.NOTE:									/* GOTO HERE FOR NEXT WORD IN SAME NLS */
+	
+	WRITE(MAL)=TRACK.FIRST.WRD;
+
+	IF READ(MD)=NLS.EOS THEN DO;			/* END OF THIS NLS          */
+		WRITE(MAL)=NLS.FOR;					/* LOOK UP FORWARD PTR      */
+		IF READ(MD)=0 THEN DO;				/* END OF TRACK -- BOMB OUT */
+			TRACK.FIRST.TIME.MSB=0;			/* RESET TIME BACK TO ZERO  */
+			TRACK.FIRST.TIME.LSB=0;
+			RETURN 0;
+		END;
+		TRACK.FIRST.SEC=READ(MD);			/* UPDATE CURRENT SECTOR PTR */
+		GOTO NEXT.SECTOR;						/* CONTINUE FROM NEXT NLS    */
+	END;
+
+	W1=READ(MDI);								/* READ IN RECORD */
+	W2=READ(MDI);
+	W3=READ(MDI);
+	W4=READ(MDI);
+
+	T=SHR(W1,1)&1023;							/* EXTRACT START TIME DELTA FOR NOTE RECORD */
+	TRACK.FIRST.TIME.LSB=TRACK.FIRST.TIME.LSB+T;	/* ADD IT INTO 32-BIT CURRENT TIME */
+	TRACK.FIRST.TIME.MSB=TRACK.FIRST.TIME.MSB+(TRACK.FIRST.TIME.LSB ILT T);/* CARRY */
+
+	IF (W1&"174001") ieq "100001"			/* IF THIS IS AN ALTERNATE FORMAT REST NOTE */
+	THEN DO;
+		/* ADD IN 32-BIT EXTENDED REST TO CURRENT TIME */
+		TRACK.FIRST.TIME.MSB=TRACK.FIRST.TIME.MSB+W2;
+		TRACK.FIRST.TIME.LSB=TRACK.FIRST.TIME.LSB+W3;
+		TRACK.FIRST.TIME.MSB=TRACK.FIRST.TIME.MSB+(TRACK.FIRST.TIME.LSB ILT W3); /* CARRY */
+
+		/* SKIP THIS REST AND GET THE NEXT NOTE */
+		TRACK.FIRST.WRD=TRACK.FIRST.WRD+4;
+		GOTO NEXT.NOTE;
+	END;
+
+	ELSE IF ((W2 & "77")=REST.NOTE)		/* ELSE IF THIS IS A NORMAL FORMAT REST NOTE */
+	THEN DO;
+		/* SKIP NOTE AND GET NEXT NOTE */
+		IF W1
+		THEN TRACK.FIRST.WRD=TRACK.FIRST.WRD+4;
+		ELSE TRACK.FIRST.WRD=TRACK.FIRST.WRD+2;
+		GOTO NEXT.NOTE;
+	END;
+	RETURN 1;
+END FIND.FIRST.NONREST;
+
+/* FIND.FIRST.NOTE: FINDS SEQ TIME, POINTERS & KEY# FOR FIRST SOUNDING NOTE ON TRACK */
+FIND.FIRST.NOTE:PROC (T) PUBLIC SWAPABLE;
+	DCL (T,W1,W2,W3,W4) FIXED;
+
+	/* NOTE: PASSED TRACK NUMBER IS AN ABSOLUTE TRACK NUMBER 0-255 */
+
+	TRACK.FIRST.TIME.LSB=0;					/* INIT TIME TO BEFORE EVERYTHING */
+	TRACK.FIRST.TIME.MSB=0;
+	TRACK.FIRST.KEYN    =0;
+
+	WRITE(MAM)=TRK.HEAD;						/* GET ABS PTR TO TRACK HEADER */
+	WRITE(MAL)=T;								/* FOR DESIRED TRACK           */
+	IF READ(MD)=0 THEN RETURN 0;			/* NO TRACK HEADER FOR TRACK   */
+	WRITE(MAM)=READ(MD);						/* THD.FOR HERE                */
+
+	IF READ(MD)=0 THEN RETURN 0;			/* NO NOTELIST SEGMENTS ON TRK */
+	TRACK.FIRST.SEC=READ(MD);				/* SAVE RELATIVE PTR TO FIRST NLS */
+
+	NEXT.SECTOR:								/* JUMP HERE FOR NEW NLS  */
+
+	WRITE(MAM)=NAH.PTR+TRACK.FIRST.SEC;	/* SET UP ABS PTRS TO NLS */
+	WRITE(MAL)=NLS.FP;						/* LOOK UP STARTING WORD  */
+	TRACK.FIRST.WRD=READ(MD);
+
+	NEXT.NOTE:									/* JUMP HERE FOR NEXT WORD IN SAME NLS */
+	WRITE(MAL)=TRACK.FIRST.WRD;
+
+	IF READ(MD)=NLS.EOS THEN DO;			/* END OF THIS NLS          */
+
+		WRITE(MAL)=NLS.FOR;					/* LOOK UP FORWARD PTR      */
+
+		IF READ(MD)=0 THEN DO;				/* END OF TRACK -- BOMB OUT */
+			TRACK.FIRST.TIME.MSB=0;			/* RESET TIME BACK TO ZERO  */
+			TRACK.FIRST.TIME.LSB=0;
+			RETURN 0;
+		END;
+
+		TRACK.FIRST.SEC=READ(MD);			/* UPDATE CURRENT SECTOR PTR */
+
+		GOTO NEXT.SECTOR;						/* CONTINUE FROM NEXT NLS    */
+	END;
+
+	W1=READ(MDI);								/* READ FIRST WORD OF RECORD */
+	W2=READ(MDI);
+	W3=READ(MDI);
+	W4=READ(MDI);
+
+	T=SHR(W1,1)&1023;							/* EXTRACT START TIME DELTA FOR NOTE RECORD */
+
+	TRACK.FIRST.TIME.LSB=TRACK.FIRST.TIME.LSB+T;	/* ADD INTO 32-BIT CURRENT TIME */
+	IF TRACK.FIRST.TIME.LSB ILT T
+	THEN TRACK.FIRST.TIME.MSB=TRACK.FIRST.TIME.MSB+1;
+
+	IF W1<0 THEN DO;							/* IF THIS IS AN ALTERNATE FORMAT NOTE */
+		IF ((W1&"74000") ieq 0)				/* IF THIS IS A REST NOTE */
+		THEN DO;
+			/* NEED TO ADD IN SPECIAL 32-BIT EXTENDED REST TO CURRENT TIME */
+			TRACK.FIRST.TIME.MSB=TRACK.FIRST.TIME.MSB+W2;
+			TRACK.FIRST.TIME.LSB=TRACK.FIRST.TIME.LSB+W3;
+			IF TRACK.FIRST.TIME.LSB ILT W3
+			THEN TRACK.FIRST.TIME.MSB=TRACK.FIRST.TIME.MSB+1;
+		END;
+
+		/* SKIP NOTE AND GET NEXT NOTE */
+
+		TRACK.FIRST.WRD=TRACK.FIRST.WRD+4;
+
+		GOTO NEXT.NOTE;
+
+	END;
+
+	ELSE IF ((W2 & "77")=REST.NOTE)				/* SKIP NORMAL FORMAT REST NOTES */
+	OR      (W1 AND ((W3&SHL(B.UPD,8))<>0))	/* AND UPDATE RECORDS */
+	THEN DO;
+
+		/* SKIP NOTE AND GET NEXT NOTE */
+
+		IF W1
+		THEN TRACK.FIRST.WRD=TRACK.FIRST.WRD+4;
+		ELSE TRACK.FIRST.WRD=TRACK.FIRST.WRD+2;
+
+		GOTO NEXT.NOTE;
+
+	END;
+
+	/* look up key # of first note in case anyone is interested */
+
+	TRACK.FIRST.KEYN = (W2 & "77") + 12;
+
+	IF ((W1 & 1) != 0)								/* IF 4 WORD RECORD */
+	{
+		IF ((W4&(LOWER.KEY\RAISE.KEY)) != 0)
+		{
+			IF (W4&LOWER.KEY)<>0 THEN TRACK.FIRST.KEYN = TRACK.FIRST.KEYN - 12;
+			IF (W4&RAISE.KEY)<>0 THEN TRACK.FIRST.KEYN = TRACK.FIRST.KEYN + 12;
+		}
+	}
+
+	RETURN 1;
+
+END FIND.FIRST.NOTE;
+
+COMPUTE.START.TIME.DISPLAY:PROC(TRK) PUBLIC SWAPABLE;	/* COMPUTE DISPLAY OF STARTING TIME OF TRACK - GIVEN ABS. TRACK# (0-255) */
+	DCL (TRK,OK) FIXED;
+
+	IF  (TRK >= FIRST.LOD.TRACK)						/* IF TRK IS A LOD TRACK */
+	AND (TRK <  LAST.LOD.TRACK)
+	AND (NEW.PAN<>0)
+	THEN DO;
+		TRK = TRK - FIRST.LOD.TRACK;					/* BRING INTO CORRECT RANGE */
+		CALL CLEAR.DISPLAY;
+		CALL EMIT.STRING(0,'Live Track');			/* DISPLAY LIVE TRACK MESSAGE */
+		CALL EMIT.NUMBER(11,TRK+1,0,LEFT.JUST);
+		IF (DTD.AVAIL.TRKS&BITS(TRK))<>0
+		THEN CALL EMIT.STRING(16,'Direct-To-Disk');
+		ELSE CALL EMIT.STRING(16,'(Unavailable)');
+		BOTH.DISPLAY=1;
+		UPPER.DISP=START.DISP;							/* INDICATE TRACK START DISPLAYED IN UPPER HALF */
+		SUPRESS.BEAT.DISPLAY=1;							/* STOP BEAT DISPLAYS MOMENTARILY */
+		BEAT.DISPLAY.TIME=REAL.MILLISECONDS;		/* HOLD DISPLAY FOR 5 SECONDS */
+	END;
+	ELSE DO;
+
+		OK=FIND.FIRST.NOTE(TRK);						/* GET TIME OF FIRST NOTE ON THIS ABSOLUTE TRACK */
+
+		IF OK=0												/* NO NOTE ON TRACK - EMPTY TRACK */
+		THEN CALL DISPLAY.TRACK.START(TRK,0,0,0);	/* SPECIAL FORMAT FOR EMPTY TRK MESSAGE */
+		ELSE DO;
+			IF  (TRACK.FIRST.TIME.MSB=0)
+			AND (TRACK.FIRST.TIME.LSB ILT ZERO.TIME)
+			THEN TRACK.FIRST.TIME.LSB=ZERO.TIME;	/* LIMIT SMALLEST TIME TO MATCH SCRIPT */
+
+			CALL DISPLAY.TRACK.START(TRK,1,TRACK.FIRST.TIME.MSB,TRACK.FIRST.TIME.LSB);
+		END;
+	END;
+END COMPUTE.START.TIME.DISPLAY;
+
+/* $SUBTITLE  COMPUTE DISPLAY BUTTONS FOR SOFTWARE TOGGLES (REPEAT, ARPEGGIATE, FILTER TRACKING) */
+
+DCL (ANY.TRACKING)   FIXED PUBLIC;				/* TRACKING BITS FOR FILTERS */
+
+DCL MISC.TOGGLE.BITS DATA PUBLIC (BIT.LPT,BIT.HPT,BIT.BPT,BIT.REPEAT,BIT.ARPEG);	/* MAPPING FROM LPN'S TO BIT IN MISC AREA BITS WORD */
+
+COMPUTE.TOGGLE.DISPLAY:PROC PUBLIC SWAPABLE;	/* CALL TO SET UP TOGGLE BUTTONS ON PANEL (PORT,VIBRATO,FILTERS,REPEAT/ARPEG) */
+	DCL (I,J,PTPTR)                  FIXED;
+	DCL (GLIDEBITS,VIBWAVE,MISCBITS) FIXED;
+	DCL LIST DATA										/* LIST OF TOGGLE LPN'S FOR CLEARING PURPOSES */
+		(PONOFF.L,PLOGL.L,INVERT.L,QUANT.L,RAISE.L,
+		 LPT.L,HPT.L,BPT.L,REPEAT.L,ARPEG.L);
+
+	DO I=0 TO 9;	/* BEGIN BY CLEARING THEM */
+		CALL OFF(LIST(I));	/* TURN THEM OFF */
+	END;
+
+	IF (HELD.RTE.BUTTONS\HELD.MIDI.BUTTON)<>0 THEN RETURN;	/* LEAVE OFF IF RTE MODE */
+
+	I=0;
+	DO WHILE (SELECTED.PARTIALS&BITS(I))=0; I=I+1; END;	/* FIND DISPLAYED PARTIAL */
+
+	PTPTR=TIM.HEAD.LOOKUP(0,TIM.PARTIAL.POINTERS+I);	/* GET PTR TO SELECTED KBD PARTIAL */
+
+	WRITE(MAL)=TIM.MISC.POINTER;				/* GET PTR TO MISC INFO AREA   */
+	I=READ(MD);										/* GET MISC BITS FOR TIMBRE 0  */
+
+	GLIDEBITS=P.LOOKUP(PTPTR+P.GLIDEBITS);	/* READ PORTAMENTO        INFO */
+	VIBWAVE  =P.LOOKUP(PTPTR+P.VIBWAVE  );	/* READ VIBRATO WAVE TYPE INFO */
+
+	J=TRK.HEAD.LOOKUP(0,THD.CTBITS);	/* GET TBITS FROM TRACK HEADER */
+
+	MISCBITS=P.LOOKUP(I) XOR J;				/* FOR TOGGLED BITS */
+	ANY.TRACKING=MISCBITS&(BIT.LPT\BIT.HPT\BIT.BPT);
+
+	IF (GLIDEBITS&1)<>0 THEN CALL ON(PONOFF.L);	/* GLIDE ON */
+	IF (GLIDEBITS&2)<>0 THEN CALL ON(PLOGL.L);	/* LOG/LIN GLIDE */
+	IF NEW.PAN<>0 THEN DO;								/* FOR NEW PANEL, SHOW VIB MODIFIERS */
+		IF (VIBWAVE&"020")<>0 THEN CALL ON(INVERT.L);
+		IF (VIBWAVE&"040")<>0 THEN CALL ON(QUANT.L);
+		IF (VIBWAVE&"100")<>0 THEN CALL ON(RAISE.L);
+	END;
+
+	DO J=0 TO 4;									/* TEST EACH BIT */
+		IF (MISCBITS&MISC.TOGGLE.BITS(J))<>0
+		THEN CALL ON(LPT.L+J);					/* LIGHT THAT BUTTON */
+	END;
+	WRITE(MAM)=MIDI.SWITCHDATA;
+	WRITE(MAL)=R.GLIDE.SW;
+	IF (GLIDESWITCH\READ(MD))<>0
+	THEN CALL ON(PONOFF.L);								/* LIGHT PORTA  BUTTON */
+	IF NEW.PAN=0 THEN DO;								/* OLD PANEL - LIGHT FOOT SWITCHES IF ON */
+		IF (REPSWITCH<>0) THEN CALL ON(REPEAT.L);	/* LIGHT REPEAT BUTTON */
+		IF (ARPSWITCH<>0) THEN CALL ON(ARPEG.L);	/* LIGHT ARPEG  BUTTON */
+	END;
+
+END COMPUTE.TOGGLE.DISPLAY;
+
+/* $SUBTITLE  COMPUTE DRIVE SELECT BUTTON */
+
+COMPUTE.DSEL.BUTTON:PROC PUBLIC SWAPABLE;
+
+	IF  ((SYSTYP=1)							/* WINCH DISK */
+	AND  (MAP.LEVEL(ACTIVE.LEVEL)=2))	/* F0         */
+	OR  ((SYSTYP=0)							/* FLOPPY     */
+	AND  (MAP.LEVEL(ACTIVE.LEVEL)=3))	/* F1         */
+	THEN DO;
+		CALL ON(DSEL.L);
+		CALL ON(SLIB.L);
+	END;
+	ELSE DO;
+		CALL OFF(DSEL.L);
+		CALL OFF(SLIB.L);
+	END;
+END COMPUTE.DSEL.BUTTON;
+
+/* $SUBTITLE   Routines to PUSH and POP Current Track Solo States */
+
+PUSH.TBUT.SOLOS: PROC PUBLIC SWAPABLE;	/* SAVES CURRENT TRK SOLO STATE IN LITTLE PDL */
+	DCL (I) FIXED;
+
+	WRITE(MAM)=TBUT.PTR;
+
+	DO I=NUM.KBD.TRACKS TO LAST.LOD.TRACK-1;
+		WRITE(MAL) = I;
+
+		IF ((READ(MD) & B.SOLOED.TRK) != 0)
+			WRITE(MD) = READ(MD) | B.PUSHD.TRK;
+	END;
+
+END PUSH.TBUT.SOLOS;
+
+POP.TBUT.SOLOS: PROC PUBLIC SWAPABLE;	/* RESTORES CURRENT TRK SOLO STATE FROM PDL */
+	DCL ABS.TRK#			FIXED;
+	DCL RECOMPUTE.FLAG	BOOLEAN;
+	DCL (SOLOED,PUSHED)	BOOLEAN;
+	DCL CLEAR.ERAS.BUTTON PROC EXTERNAL;
+
+	CLEAR.ERAS.BUTTON();
+
+	RECOMPUTE.FLAG = FALSE;
+
+	WRITE(MAM)=TBUT.PTR;
+
+	DO ABS.TRK#=NUM.KBD.TRACKS TO LAST.LOD.TRACK-1;
+
+		WRITE(MAL)=ABS.TRK#;
+		SOLOED = ((READ(MD)&B.SOLOED.TRK)<>0);
+		PUSHED = ((READ(MD)&B.PUSHD.TRK )<>0);
+
+		IF  NOT ((RECD<>0) AND (ABS.TRK#=RECD.TRK))			/* IF NOT RECORDING ON THIS TRACK */
+		THEN DO;
+
+			/* SEE IF CURRENT SOLO STATE DIFFERS FROM SAVED SOLO STATE */
+			IF  (SOLOED != PUSHED) THEN DO;	/* SAVED STATE DIFFERS FROM CURRENT STATE */
+
+				IF SOLOED							/* CURRENTLY SOLOED */
+				THEN DO;								/* RESTORE TRK TO UNSOLOED STATE */
+					WRITE(MD) = (READ(MD) xor B.SOLOED.TRK);	/* CLEAR SOLOED BIT */
+					NUM.OF.SOLOED.TRACKS=NUM.OF.SOLOED.TRACKS-1;
+
+					IF ABS.TRK#=RECD.TRK								/* IF TRACK WAS BLINKING */
+					THEN RECD.TRK=0;									/* THEN TURN IT OFF		 */
+				END;
+				ELSE DO;								/* RESTORE TRK TO SOLOED STATE */
+					WRITE(MD)=READ(MD)\B.SOLOED.TRK;				/* SET SOLOED BIT */
+					NUM.OF.SOLOED.TRACKS=NUM.OF.SOLOED.TRACKS+1;
+
+					IF  (RECD=0)										/* IF NOT RECORDING					*/
+					AND (LOD.RECD.TRACKS=0)							/* AND NO LOD TRACKS ARE ARMED	*/
+					AND (ABS.TRK# ilt FIRST.LOD.TRACK)			/* AND THIS IS A SEQUENCER TRACK	*/
+					THEN RECD.TRK=ABS.TRK#;							/* THEN ARM IT FOR RECORD			*/
+				END;
+
+				RECOMPUTE.FLAG=TRUE;
+
+			END;	/* of SAVED STATE DIFFERS FROM CURRENT STATE */
+
+		END;	/* of IF NOT RECORDING ON THIS TRACK */
+
+		IF PUSHED THEN WRITE(MD) = (READ(MD) xor B.PUSHD.TRK);	/* CLEAR PUSHED BIT */	
+
+	END;	/* of DO ABS.TRK#=NUM.KBD.TRACKS TO LAST.LOD.TRACK-1 */
+
+	IF RECOMPUTE.FLAG THEN CALL COMPUTE.ACTIVE.TRKS;	/* RECOMPUTE ACTIVE.TRACKS */
+
+	CALL DISPLAY.TRACK.BUTTONS;	/* DISPLAY POSSIBLY NEW TRACK BUTTONS */
+
+END POP.TBUT.SOLOS;
+
+/* $SUBTITLE  PANEL INITIALIZATION ROUTINE: */
+
+/* Panel.init performs two main functions:                       */
+/*   1.  It sets up the inverse lookup table PBN.LOOKUP          */
+/*   2.  It initializes the panel buttons that should be on when */
+/*       the Synclavier Program is booted.                       */
+
+// It's complicated.
+// All communication to the outside world is done using the VKP button configuration.
+// That's the same as saying Termulator and Synclavier³ always show the VK on-screen.
+// We have hooks created to show lights and the numeric display on the ORK if that is what is attached.
+
+panel.init:  proc PUBLIC SWAPABLE;	/* initialize panel and set up PBN.LOOKUP table */
+	dcl (lpn,pbn) fixed;
+	do pbn=0 to num.vkp.buttons-1;   /* look at each button */
+		lpn=lpn.lookup(pbn);				/* look up software function */
+		write(mam)=pbn.ptr+shr(lpn,8);
+		write(mal)=lpn;
+		write(md)=pbn\"020000";			/* construct inverse table - make valid entries nonzero */
+	end;
+	do pbn=0 to num.ork.buttons-1;   /* look at each button */
+		lpn=ork.lookup(pbn);				/* look up software function */
+		write(mam)=ork.ptr+shr(lpn,8);
+		write(mal)=lpn;
+		write(md)=pbn\"020000";			/* construct inverse table - make valid entries nonzero */
+	end;
+	selected.partials=1;					/* select partial #1 */
+	call display.partial.buttons;
+	call display.timbre.recall.buttons;
+	call display.bank.buttons;
+end panel.init;

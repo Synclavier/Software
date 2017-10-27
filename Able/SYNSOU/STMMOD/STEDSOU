@@ -1,0 +1,1395 @@
+/* $Title STEDSOU  Sample-To-Memory Sound Editor Command Routines */
+
+/* 
+   11/18/91 - PF  - More quick update support
+   11/15/89 - tss - Fixed bug saving files when file base addr > 32 MB
+   07/31/89 - tss - Fixed signed comparison bug in CREATE.NAMED.SOUND.FILE
+   10/31/88 - cj  - allow write of sound file from > 32 megs of poly
+   07/07/88 - LSS - fix in SAVE.SOUND.FILE for replacing files
+   06/27/88 - MWH - Remove unused inserts
+   04/27/88 - MWH - Move some procedures (STEDSOUE) since STEDLIB is too big
+   04/13/88 - MWH - Preserve mark start, mark end where possible
+   03/22/88 - MWH - Add LOD wave display data compression and transfer
+   02/08/88 - MWH - Don't swap L & R when reversing a stereo sound file
+   02/02/88 - MWH - Expand crossfade times to 65.535 seconds
+   12/21/87 - MWH - Merge poly updates with N-Final plus AEE sources
+   08/26/87 - MWH - Merge with other release-N edits
+   08/13/87 - MWH - Update all to support max 4 poly bins, 512mb/bin
+   07/14/87 - MWH - new interface for PS.ALLOCATE and PS.SETUP
+   07/02/87 - MWH - new interface for PS.DEALLOCATE
+   02/06/87 - BSW - Created this module
+*/
+
+Module STEDMOD;
+   insert ':-xpl:catrout';      /* for f#name_len, save, unsave, etc */
+   insert ':-xpl:devutil';      /* for disk_check */
+   insert ':-xpl:intrprtr';
+   insert ':synlits:comlits';   /* compilation literals */
+   insert ':synlits:asciilit';  /* ASCII literals */
+   insert ':synlits:globlits';  /* good globals */
+   insert ':synlits:samplits';  /* sound file and sampling literals */
+   insert ':synlits:fcodlits';  /* function code literals for FM and POLY synths */
+   insert ':synlits:prmlits';   /* literals for timbre data structure(i.e., mor ) */
+   insert ':synlits:timlits';   /* timbre head literal definitions (i.e., tim.synth.type) */
+   insert ':synauxs:stmlits';   /* specific stm literals */
+   insert ':synauxs:lodlits';   /* for history files */
+
+   insert ':synmods:globdcl';
+   insert ':synmods:xmemdcl';   /* external memory routines and declarations */
+   insert ':synmods:polydcl';   /* for accessing poly memory */
+   insert ':synmods:mathdcl';   /* for computations */
+   insert ':synmods:errdcl';    /* for error handling */
+   insert ':synmods:moussdcl';  /* mouse routines such as mouse.switch */
+   insert ':synmods:getvdcl';   /* for new.poly.contents               */
+   insert ':synmods:tformdcl';  /* terminal formatting routines */
+   insert ':synmods:tprimdcl';  /* general routines used by screens */
+
+   insert ':synmods:stutldcl';  /* STM utility routines */
+   insert ':synmods:stdrdcl';   /* STM drawing routines (i.e., DRAW.GRAPHICS.CURSORS) */
+   insert ':synmods:stindcl';   /* STM input routines */
+
+   insert ':synrdcls:03-pdcls';
+   insert ':synrdcls:05-bdcls';
+   insert ':synrdcls:11-tdcls';
+
+
+   dcl endname  data ('END'); /* END    symbol     */
+   dcl mstart   data public ('#')  ; /* mark start symbol */
+   dcl mend     data public ('$')  ; /* mark end symbol   */
+
+   /* Create New Sound File Routine */
+
+   COMPUTE.NEXT.FILENAME: proc swapable; /* compute next filename for new sound file */
+      dcl sum   fixed;
+      dcl ch    fixed;
+      dcl (i,j) fixed;
+
+      i=4; sum=0;                /* convert string into number to find largest */
+      do while i<8;
+         ch=byte(NEWFNAME,i);
+         load sum; mul 10; sum=res+(ch-asc.0);    /* no overflow check */
+         i=i+1;
+      end;
+      sum=sum+1;                 /* add one to file id since it is currently the largest */
+      if sum=10000 then sum=0;   /* file id modulo 10000 */
+      load sum; div 1000; i=res; j=read(4); /* set new sound file name */
+      call pbyte(NEWFNAME,4,asc.0+i);
+      load j; div 100; i=res; j=read(4);
+      call pbyte(NEWFNAME,5,asc.0+i);
+      load j; div 10;  i=res; j=read(4);
+      call pbyte(NEWFNAME,6,asc.0+i);
+      call pbyte(NEWFNAME,7,asc.0+j);
+   end COMPUTE.NEXT.FILENAME;
+
+
+   /* $Subtitle Create Sound File */
+
+   CREATE.NAMED.SOUND.FILE: proc(name,#secs,srate,record,stereo) fixed public swapable;  /* creates a new (empty) sound file with a new name */
+      /* returns 1 if okay or 0 if not enough memory to create the sound file */
+      dcl name         array;       /* file name to use                */
+      dcl #secs        fixed;       /* length of sound file in sectors */
+      dcl srate        fixed;       /* must pass correct SRATE         */
+      dcl record       fixed;       /* 1 -> sound file for recording, 0 -> not for recording */
+      dcl stereo       fixed;       /* 1 -> stereo sound file 0 -> mono sound file */
+      dcl bin          fixed;       /* which poly bin                  */
+      dcl maxbin       fixed;       /* which bin has max amount free   */
+      dcl maxfree (1)  fixed;       /* max amount free found           */
+      dcl (i)          fixed;
+      dcl (j)          fixed;
+
+      if #secs ilt 5 then #secs=5;           /* need at least 5 sectors for a valid sound file */
+
+      if record = 0 then do;
+         do bin=0 to polynums - 1;           /* look in all poly bins */
+            call set.cur.bin(bin);           /* point variables at this bin */
+            if com32(maxfree,psfree) = lw#ilt then do;  /* more room here? */
+               maxbin = bin;                 /* remember this bin */
+               call copy32(psfree,maxfree);  /* and how much is free here */
+            end;
+         end;
+      end;
+      else maxbin = 0;                       /* if recording, always use bin 0 */
+     
+	  if ps.allocate(#secs,maxbin,0)<>0 then do;  /* if enough room in poly memory */
+         call ps.lock;
+         call psmwrite(SFILE.BASE,0,BL.LEN);    /* set up sound file length */
+         do i=0 to 255;
+            misc.buf(i)=0;
+         end;
+         if record=0 then do;                /* if creating an empty sound file and not recording */
+            i=0;
+            do while i ilt #secs;
+               call poly.out(addr(misc.buf(0)),256);
+               i=i+1;
+            end;
+         end;
+         else do;
+            do i=0 to 4;            /* init hdr + sf info + 1 data sector */
+               call poly.out(addr(misc.buf(0)),256);
+            end;
+         end;
+         call psmwrite(SFILE.BASE,0,BL.LEN); /* set up sound file length */
+         write(psd)=#secs;
+         write(psd)=0;                       /* initialize number of users to zero */
+         do i=1 to f#name_len;               /* store sound file name so others can reference it */
+            write(psd)=name(i);
+         end;
+         j=0;
+         while (j<8 && byte(name,j) != 0)
+            j = j + 1;
+         call psmwrite(SFILE.BASE,0,BL.LNAME);
+         write(psd)=j;
+         do i=1 to f#name_len;               /* store sound file name so others can reference it */
+            write(psd)=name(i);
+         end;
+
+         call psmwrite(SFILE.BASE,SF.HDR,0);
+         write(psd)=4;                       /* compat is 4      */
+         write(psd)=1;                       /* raw sampled data */
+
+         write(psd)=0;                       /* valid data       */
+         write(psd)=#secs-4;
+         write(psd)=0;
+
+         write(psd)=0;                       /* unused           */
+
+         write(psd)=0;                       /* total data       */
+         write(psd)=#secs-4;
+         write(psd)=0;
+
+         call INDEX_TO_TIME(0,#secs-5,255,srate,stereo); /* compute the total time of the entire sound file */
+         write(psd)=TIME.SECONDS;            /* NOTE: save info for use below! */
+         write(psd)=TIME.MILLISECONDS;
+         write(psd)=TIME.MICROSECONDS;
+
+         write(psd)=0;                      /* keyboard decay # */
+         write(psd)=0;                      /* pitch bend       */
+         write(psd)=0;                      /* vibrato info     */
+         write(psd)=0;
+         write(psd)=0;
+         write(psd)=0;
+
+         /* $page */
+
+         write(psd)=4400;                   /* hertz (middle a) */
+
+         write(psd)="061341";               /* FLOATING POINT 3.09 */
+         write(psd)="043702";
+
+         load 300; mul 1000;                /* convert sample rate to period index */
+         i=res;    div srate;
+         write(psd)=res;                    /* period.index        */
+
+         load srate; mul (100/2);
+         write(psd)=res;                    /* nyquist (hz)        */
+
+         write(psd)=0;                      /* mark start          */
+         write(psd)=0;
+         write(psd)=0;
+
+         write(psd)=TIME.SECONDS;           /* mark end           */
+         write(psd)=TIME.MILLISECONDS;
+         write(psd)=TIME.MICROSECONDS;
+
+         write(psd)=0;                      /* cursor time        */
+         write(psd)=0;
+         write(psd)=0;
+
+         write(psd)=0;                      /* gain exponent      */
+         write(psd)=4;                      /* # of symbols       */
+
+         call psmwrite(SFILE.BASE,SF.HDR,sf.stereo); /* type of sound file */
+         write(psd)=stereo;
+         write(psd)=srate;                  /* sample rate (kHz*10) */
+
+         call psmwrite(SFILE.BASE,SF.HDR,sf.file.handle);
+         do i=1 to f#name_len;
+            write(psd)=name(i);
+         end;
+
+         call psmwrite(SFILE.BASE,SF.SYM,0);
+         write(psd)=0;                      /* ORIGIN */
+         write(psd)=0;
+         write(psd)=0;
+
+         call COPY_OUT_STRING(origname);
+         write(psd)=0;
+
+         write(psd)=0;                      /* # */
+         write(psd)=0;
+         write(psd)=0;
+         write(psd)=1;
+         write(psd)=asc.sharp;
+         write(psd)=0;
+         write(psd)=0;
+         write(psd)=0;
+
+         write(psd)=TIME.SECONDS;           /* $ */
+         write(psd)=TIME.MILLISECONDS;
+         write(psd)=TIME.MICROSECONDS;
+         write(psd)=1;
+         write(psd)=asc.dollr;
+         write(psd)=0;
+         write(psd)=0;
+         write(psd)=0;
+
+         write(psd)=TIME.SECONDS;           /* END                */
+         write(psd)=TIME.MILLISECONDS;
+         write(psd)=TIME.MICROSECONDS;
+         call COPY_OUT_STRING(endname);
+         write(psd)=0;
+         write(psd)=0;
+
+         call ps.unlock;
+         return 1;                      /* everything is okay */
+      end;
+      else do;
+         call noroom.error;             /* otherwise not enough memory */
+         return 0;
+      end;
+   end CREATE.NAMED.SOUND.FILE;
+
+   CREATE.SOUND.FILE: proc(#secs,srate,record,stereo) fixed public swapable;  /* creates a new (empty) sound file with a new name */
+      /* returns 1 if okay or 0 if not enough memory to create the sound file */
+      dcl #secs             fixed;		/*	length of sound file in sectors */
+      dcl srate             fixed;		/*	must pass correct SRATE         */
+      dcl record            fixed;		/*	1 -> sound file for recording, 0 -> not for recording */
+      dcl stereo            fixed;		/*	1 -> stereo sound file 0 -> mono sound file */
+      dcl name(f#name_len)  fixed;
+      dcl (i)               fixed;
+
+      call COMPUTE.NEXT.FILENAME;		/*	find the next new sound file name */
+      do i=0 to f#name_len;				/*	see if file already exists on disk or in poly */
+         FNBUF(i)=NEWFNAME(i);
+      end;
+      FNBUF(0)=8;
+      LNBUF(0)=0;
+      do while (ps.search<>0) or (FIND.SOUND(FNBUF)<>0);	/* if file already exists in poly memory or on disk*/
+         call COMPUTE.NEXT.FILENAME;	/*	get the next available one */
+         do i=1 to f#name_len;			/*	see if file already exists on disk or in poly */
+            FNBUF(i)=NEWFNAME(i);
+         end;
+      end;
+      fnbuf(0)=shl(f#name_len,1);
+      call copy.string(fnbuf,name);
+      return CREATE.NAMED.SOUND.FILE(name,#secs,srate,record,stereo);
+   end CREATE.SOUND.FILE;
+
+   /* $Subtitle Copy Current Sound File Routine */
+
+   TWEAK.SOUND.FILE.HEADER: proc(newBase, newName) swapable;
+      dcl newBase array;
+      dcl newName array;
+      dcl i       fixed;
+      dcl j       fixed;
+
+      call psmwrite(newBase,0,BL.USERS);
+      write(psd)=0;                   /* initialize number of users to zero */
+
+      do i=1 to f#name_len;           /* store sound file name so others can reference it */
+         write(psd)=newName(i);
+      end;
+
+      // Get real length for handle and long name
+      j = 0;
+
+      while (j < 8 && byte(newName, j) != 0)
+         j = j + 1;
+
+      call psmwrite(newBase,0,BL.LNAME);
+      write(psd)=j;
+      do i=1 to f#name_len;               /* store sound file name so others can reference it */
+         write(psd)=newName(i);
+      end;
+      do i=f#name_len to sf.file.handle.wl-1;
+         write(psd)=0;
+      end;
+
+      call psmwrite(newBase,SF.HDR,sf.file.handle);
+      do i=1 to f#name_len;
+         write(psd)=newName(i);
+      end;
+      do i=f#name_len to sf.file.handle.wl-1;
+         write(psd)=0;
+      end;
+   end TWEAK.SOUND.FILE.HEADER;
+
+   COPY.CURRENT.SOUND.FILE: proc(base) fixed swapable;  /* copies current sound file to another area in memory and gives it a new name */
+      /* returns 1 if successful or 0 if unsuccessful */
+      dcl base            fixed array;   /* current sound file base */
+      dcl new.base (1)    fixed;         /* base of new sound file area */
+      dcl #secs           fixed;         /* length of current sound file */
+      dcl (i,j)           fixed;
+
+      call psmread(base,0,BL.LEN);          /* find the length of the current sound file */
+      #secs=read(psd);                      /* get file length */
+
+      if CREATE.SOUND.FILE(#secs,stm.sample.rate,0,stereo)<>0 then do;  /* if it was possible to create a new sound file */
+         call copy32(SFILE.BASE,new.base);  /* things may have changed */
+         call LOOK.UP.SF.INFO;              /* so find current file name again */
+
+         if sf.type=1 then do;              /* if a sound file */
+            call COPY.POLY.MEM.SEC(SFILE.BASE,0,new.base,0,#secs); /* copy current sound file to new sound file */
+            TWEAK.SOUND.FILE.HEADER(new.base, NEWFNAME);
+            call dealloc(0);               /* free up wave memories, buffers, etc. for keyboard timbre */
+            i=find.partial;                /* get partial in question */
+            j=find.frame(i,1);             /* point to first timbre frame */
+            do i=1 to f#name_len;          /* change name in partial to new name*/
+               call p.store(j+pt.name+(i-1),NEWFNAME(i));
+            end;
+            // eliminate long name; frame will be shortened on next garbage collect
+            if (p.lookup(j+clen) > pt.len) {
+               do i = pt.len to p.lookup(j+clen) - 1;
+                  p.store(j+i, 0);
+               end;
+            }
+            call alloc.timbre(0);          /* allocate partial */
+            return 1;                      /* we were successful in copying sound file */
+
+         end;
+      end;
+      return 0;                            /* we were unsucessful in copying the current sound file */
+   end COPY.CURRENT.SOUND.FILE;
+
+   /* $Subtitle Show Routines */
+
+   CENTER.SAMPLE: proc(sample.time) public swapable;   /* Given the sample time,centers the sample in the display window*/
+      dcl sample.time  fixed array;
+      dcl half.time(2) fixed;   /* time of half of the display window */
+      dcl i            fixed;
+
+      call COMPUTE_PIXEL_TIME(shr(display.width,1),half.time);     /* find the time of half of the display width */
+      do i=0 to 2;             
+         half.time(i)=half.time(i)-start.time(i);
+      end;
+      call TIME_NORMALIZE(half.time);
+
+      do i=0 to 2;                               /* new cursor time should be in center of display */
+         some.time(i)=sample.time(i)-half.time(i); /* so must find new display start time */
+      end;
+      call TIME_NORMALIZE(some.time);
+      do i=0 to 2;
+         some.other.time(i)=0;
+      end;
+      if (compare_times(some.time,some.other.time,3)>=0)   /* if new starting time and within range of the sound file */
+      and (compare_times(some.time,tot.time,3)<=0) then do;
+         call ERASE.GRAPHICS.CURSORS(stm.graphx,2);
+         call COPY_TIME(some.time,start.time);       /* put cursor at half way point over sample*/
+         stm.graphx=shr(display.width,1);
+         call DRAW.GRAPHICS.CURSORS(stm.graphx,2);
+         call CHANGE.CURSOR.TIME;
+         call CHANGE.SIGNAL.LEVEL;
+         new.poly.contents = new.poly.contents \ 1;
+      end;
+      else if (compare_times(some.time,some.other.time,3)<0)   /* if we cannot quite center it */
+      and (compare_times(some.other.time,start.time,3)<>0) then do; /* and not already at beginning of the sound file */
+         call ERASE.GRAPHICS.CURSORS(stm.graphx,2);
+         call COPY_TIME(some.other.time,start.time);           /* stick us back at the beginning of the sound file */
+         stm.graphx=COMPUTE_PIXEL_NUMBER(sample.time);
+         call DRAW.GRAPHICS.CURSORS(stm.graphx,2);
+         call CHANGE.CURSOR.TIME;
+         call CHANGE.SIGNAL.LEVEL;
+         new.poly.contents = new.poly.contents \ 1;
+      end;
+   end CENTER.SAMPLE;
+
+   LEFT.SAMPLE: proc public swapable;   /* puts sample on which cursor lies at left edge of display window */
+      if compare_times(cursor.time,tot.time,3)<=0 then do; /* if cursor is within sound file limits */
+         call ERASE.GRAPHICS.CURSORS(stm.graphx,2);
+         if compare_times(cursor.time,tot.time,3)<0   /* if cursor time within sound file limits */
+         then call COPY_TIME(cursor.time,start.time); /* start time of display becomes the current cursor time */
+         else call COPY_TIME(tot.time,start.time);    /* put the end of the sound file at the left edge of the display */
+         stm.graphx=0;
+         call DRAW.GRAPHICS.CURSORS(stm.graphx,2);
+         call CHANGE.CURSOR.TIME;
+         call CHANGE.SIGNAL.LEVEL;
+         new.poly.contents = new.poly.contents \ 1;
+      end;
+   end LEFT.SAMPLE;
+
+   /* $page */
+
+   PAGE.RIGHT: proc swapable;     /* pages forward by display width */
+      call compute_pixel_time(display.width,some.time);   /* get end time of window */
+      if compare_times(some.time,tot.time,3)<=0 then do; /* if new time within sound file limits */
+         call COPY_TIME(some.time,start.time);
+         new.poly.contents = new.poly.contents \ 1;
+      end;
+   end PAGE.RIGHT;
+
+   PAGE.LEFT: proc swapable; /* pages backward through sound file by the display width */
+      dcl i fixed;
+
+      call compute_pixel_time(display.width,some.time);   /* get end time of window */
+
+      do i=0 to 2;
+         some.time(i)=(some.time(i)-start.time(i));           /* find display width time */
+      end;
+      call TIME_NORMALIZE(some.time);
+      do i=0 to 2;
+         some.time(i)=start.time(i)-some.time(i);            /* subtract display width time from starting time */
+      end;
+      call TIME_NORMALIZE(some.time);
+      do i=0 to 2;                                           /* cannot go beyond the limits of the sound file */
+         some.other.time(i)=0;
+      end;
+      if (compare_times(some.time,some.other.time,3)>=0)      /* if within limits of the sound file */
+      and (compare_times(some.time,tot.time,3)<=0) then do;
+         call COPY_TIME(some.time,start.time);
+         new.poly.contents = new.poly.contents \ 1;
+      end;
+      else if (compare_times(some.time,some.other.time,3)<0)
+      and (compare_times(some.other.time,start.time,3)<>0) then do;  /* and can move back some */
+         call COPY_TIME(some.other.time,start.time);          /* go back to origin */
+         new.poly.contents = new.poly.contents \ 1;
+      end;
+   end PAGE.LEFT;
+
+   /* $page */
+
+   MOVE.THROUGH.SOUND.FILE: proc (ch) public swapable;
+      dcl ch                        fixed;
+   /* move cursor across 1/4 of display width from current position, unless at right edge */
+
+      call erase.graphics.cursors(stm.graphx,2); /* erase previous cursor */
+      if ch=u.arr then do;                     /* if up arrow */
+         if      stm.graphx<display.width/4   then stm.graphx=display.width/4;   /* move display by 1/4 from current cursor position */
+         else if stm.graphx<display.width/2   then stm.graphx=display.width/2;   
+         else if stm.graphx<display.width*3/4 then stm.graphx=display.width*3/4; 
+         else if stm.graphx<display.width     then stm.graphx=display.width;
+         else call PAGE.RIGHT;
+      end;
+      else do;                                /* if down arrow */
+         if stm.graphx=0 then call PAGE.LEFT;
+         else if stm.graphx<=display.width/4   then stm.graphx=0;
+         else if stm.graphx<=display.width/2   then stm.graphx=display.width/4;   
+         else if stm.graphx<=display.width*3/4 then stm.graphx=display.width/2; 
+         else if stm.graphx<=display.width     then stm.graphx=display.width*3/4;
+      end;
+      call COMPUTE_PIXEL_TIME(stm.graphx,some.time);   /* compute the pixel time of the new cursor location */
+      if compare_times(some.time,tot.time,3)>0         /* restrain the cursor location to the end of sound file if greater than */
+      then stm.graphx=COMPUTE_PIXEL_NUMBER(tot.time);
+
+      call draw.graphics.cursors(stm.graphx,2);
+      call CHANGE.CURSOR.TIME;
+      call CHANGE.SIGNAL.LEVEL;
+   end MOVE.THROUGH.SOUND.FILE;
+
+   /* $page */
+
+   SHOW.SOUND.FILE: proc (base) public swapable; /* shows the sound file from the specified location */
+      dcl base     fixed array;           /* starting address of sound file */
+      dcl symbol_index   fixed;
+      dcl symbol.time(2) fixed;
+      dcl i              fixed;
+
+      if PARSE.TOKEN(token)<>0 then do;                      /* if a symbol */
+         symbol_index=FIND_NAME(base,token);
+         if symbol_index<0 then do; 
+            call no.symbol;                           /* symbol does not exist */
+            return;
+         end;
+         else do;                                     /* if symbol exists */
+            call psmread(base,SF.SYM,symbol_index * symbol_length);
+            do i=0 to 2;                              
+               symbol.time(i)=read(psd);
+            end;
+         end;                     /* of if a symbol exists */
+      end;                        /* of if token is a symbol */
+      else do;
+         call CONV.STR.TO.SFTIME(token,symbol.time);      /* read the time value */
+         if ertyp<>0 then return; /* error encountered   */
+      end;
+      do i=0 to 2;
+         some.time(i)=0;
+      end;
+      if (compare_times(symbol.time,some.time,3)>=0)
+      and (compare_times(symbol.time,tot.time,3)<=0) then do;
+         if ((compare_times(symbol.time,start.time,3)<0) /* if time not within the window */
+         or (compare_times(symbol.time,end.time,3)>0)) then do; 
+            call CENTER.SAMPLE(symbol.time);
+            new.poly.contents = new.poly.contents \ 1;
+         end;
+         else do;                                        /* if time is within window, just move cursor to that location */
+            call ERASE.GRAPHICS.CURSORS(stm.graphx,2);
+            stm.graphx=COMPUTE_PIXEL_NUMBER(symbol.time);      /* move cursor there */
+            call DRAW.GRAPHICS.CURSORS(stm.graphx,2);
+            call CHANGE.CURSOR.TIME;
+            call CHANGE.SIGNAL.LEVEL;
+         end;
+      end;
+   end SHOW.SOUND.FILE;
+
+   /* $Subtitle Search for Amplitude Routine */
+
+   SEARCH.FOR.AMPLITUDE: proc (base) public swapable;  /* searches for first occurrence of specified amplitude */
+      dcl base        fixed array;        /* sector address from which to start search */
+      dcl stm.search.value  fixed;        /* specified voltage in terms of a 16-bit sample value */
+      dcl xsec              fixed;        /* sector number */
+      dcl xwrd              fixed;        /* word offset */
+      dcl #secs             fixed;        /* number of sectors of valid data */
+      dcl last.sound.offset fixed;
+      dcl stm.value.found   fixed;        /* indicates if voltage found */
+      dcl sample.time(2)    fixed;
+      dcl stm.max.volts     lit '5000';   /* maximum voltage significant to 3 places */
+
+      stm.search.value=ABS(CONV.STR.TO.FIXED(token,3,1));  /* get specified amplitude level from token*/
+      if ertyp<>0 then return;                    /* error encountered           */
+      else if stm.search.value>stm.max.volts then do;           /* if greater than maximum voltages */
+         call overflow.error;
+         return;
+      end;
+      else do;
+         stm.search.value=stm.search.value*32767/stm.max.volts;    /* convert volts into a sample for comparison */
+         if read(4)>=shr(stm.max.volts+1,1)        /* if remainder greater than half round up */
+         then stm.search.value=stm.search.value+1;
+
+         stm.value.found=0;                     /* assume value not found yet */
+         call TIME_TO_INDEX(cursor.time(0),cursor.time(1),cursor.time(2),stm.sample.rate,stereo);  /* get sectors & word to start display */
+         xsec=sector.numb; xwrd=sector.offset;  /* relative address of start time */
+
+         call psmread(base,0,BL.LEN);           /* find the length of the sound file */
+         #secs=read(psd);
+         last.sound.offset = #secs - shr(bl.poly,8);
+
+         call psmread(base,xsec+shr(bl.poly,8),xwrd);  /* point to a sample */
+         do while ((xsec ILT last.sound.offset) and (stm.value.found=0)); /* search for first occurrence of that voltage */
+            if abs(read(psd)) IGE stm.search.value then stm.value.found=1;  /* if sample is equal to search value */
+            else do;      
+               xwrd=xwrd+1;                     /* point to next word */
+               if xwrd=256 then do;
+                  xwrd=0;
+                  xsec=xsec+1;
+               end;
+            end;
+         end;
+
+         if stm.value.found<>0 then do;   /* if voltage found put cursor on that location */
+            call INDEX_TO_TIME(0,xsec,xwrd,stm.sample.rate,stereo);
+            sample.time(0)=time.seconds;
+            sample.time(1)=time.milliseconds;
+            sample.time(2)=time.microseconds;
+            if (compare_times(sample.time,start.time,3)>0)  /* see if already within the display */
+            and (compare_times(sample.time,end.time,3)<0) then do;
+               call ERASE.GRAPHICS.CURSORS(stm.graphx,2);
+               stm.graphx=COMPUTE_PIXEL_NUMBER(sample.time);
+               call DRAW.GRAPHICS.CURSORS(stm.graphx,2);
+               call CHANGE.CURSOR.TIME;   /* reset the cursor time to reflect the change */
+               call CHANGE.SIGNAL.LEVEL;
+            end;
+            else do;                      /* go to the screen which contains the amplitude level */
+               call COPY_TIME(sample.time,start.time); /* set start time to sample time of amplitude level */
+               call ERASE.GRAPHICS.CURSORS(stm.graphx,2);
+               stm.graphx=0;              /* set graphics cursor at the amplitude level */
+               call DRAW.GRAPHICS.CURSORS(stm.graphx,2);
+               call CHANGE.CURSOR.TIME;   /* reset the cursor time to reflect the change */
+               call CHANGE.SIGNAL.LEVEL;
+               new.poly.contents = new.poly.contents \ 1;
+            end;
+         end;
+         else call no.amplitude;                   /* amplitude level not found */
+      end;
+   end SEARCH.FOR.AMPLITUDE;
+
+   /* $Subtitle Add and Remove Symbol Routines */
+
+   ADD_SYMBOL: proc(base,time,name) public swapable;  /* Adds a symbol to the sound file symbol table 1-> successful*/
+      dcl base           fixed array;
+      dcl time           fixed array;  /* symbol time */
+      dcl name           fixed array;  /* symbol name */
+      dcl symbol_index   fixed;        /* points beyond where symbol belongs */
+      dcl (j,k)          fixed;
+
+      if number_of_symbols>=max.symbols     /* table is full */
+      then call no.more.labels;
+
+      else if compare_times(time,tot.time,3)>0   /* out of range */
+      then call out.of.limits;
+
+      else if FIND_NAME(base,name)>0             /* name already in table */
+      then call duplicate.label;
+
+      else do;
+         symbol_index=FIND_TIME(base,time);       /* symbol index points to one beyond where symbol belongs */
+
+         j=number_of_symbols;
+         do while j>symbol_index; /* move the symbols to make room for new symbol */
+            call psmread(base,SF.SYM+shr(j-1,5),shl(j-1,3)&255);
+            call poly.in(addr(copy.buf(0)),symbol_length);
+            call psmwrite(base,SF.SYM+shr(j,5),shl(j,3)&255);
+            call poly.out(addr(copy.buf(0)),symbol_length);
+            j=j-1;  
+         end;  
+         /* add new symbol */
+         k=symbol_index*symbol_length;  /* point to entry */
+         call psmwrite(base,SF.SYM+shr(k,8),k&255);
+         call poly.out(addr(time(0)),3); /* copy time into symbol area */
+         call poly.out(addr(name(0)),5); /* copy name into symbol area */
+         number_of_symbols=number_of_symbols+1; 
+         call psmwrite(base,SF.HDR,sf.number.of.symbols);  /* update the number of symbols */
+         write(psd)=number_of_symbols;
+         new.poly.contents = new.poly.contents \ 1;
+      end;
+   end ADD_SYMBOL;
+
+   /* $page */
+
+   REMOVE_SYMBOL: proc(base,name) public swapable; /* remove given symbol from symbol table 1-> successful*/
+      dcl base               fixed array;
+      dcl name               fixed array;  /* symbol name */
+      dcl symbol_index       fixed;
+      dcl number_of_symbols  fixed;
+      dcl i                  fixed;
+
+      call psmread(base,SF.HDR,sf.number.of.symbols);
+      number_of_symbols=read(psd);
+
+      symbol_index=FIND_NAME(base,name);           /* find pointer to symbol in table */
+
+      if (symbol_index=0) or (symbol_index=number_of_symbols-1) then do;   /* may not delete ORIGIN or END */
+         if (eqstr(ORIGNAME,name)=0) or (eqstr(ENDNAME,name)=0)   /* if ORIGIN or END user may not delete */
+         then do;          
+            call no.delete;
+            return;
+         end;                                    /* could have duplicate time values at origin or end */
+      end;
+      else if symbol_index<0 then do;
+         call no.symbol;                         /* symbol does not exist */
+         return;
+      end;
+
+      do i=symbol_index to number_of_symbols-1; /* loop over remaining symbols */
+         call psmread(base,SF.SYM+shr(i+1,5),shl(i+1,3)&255);
+         call poly.in(addr(copy.buf(0)),symbol_length);
+         call psmwrite(base,SF.SYM+shr(i,5),shl(i,3)&255);
+         call poly.out(addr(copy.buf(0)),symbol_length);
+      end;
+
+      number_of_symbols=number_of_symbols-1;  /* decrement symbol count */
+      call psmwrite(base,SF.HDR,sf.number.of.symbols);        /* update the number of symbols */
+      write(psd)=number_of_symbols;
+
+      if (eqstr(name,mstart )=0) 
+      or (eqstr(name,mend   )=0)    /* if this string is a mark */
+      or (eqstr(name,markoff)=0) then do;
+         call dealloc(0);
+         if eqstr(name,mstart)=0    
+         then call psmwrite(base,SF.HDR,sf.mark.start);
+         else if (eqstr(name,mend)=0)
+         then call psmwrite(base,SF.HDR,sf.mark.end);
+         else call psmwrite(base,SF.HDR,sf.mark.offset);
+
+         if (eqstr(name,mend)=0)  /* if mark end set to the very end */
+         then do i=0 to 2;
+            write(psd)=tot.time(i);
+         end;
+         else do i=0 to 2;                  /* set to zero for mark start and offset */
+            write(psd)=0;
+         end;
+
+         call ps.setup(base);     /* update Synclavier info for modified sound file */
+         call alloc.timbre(0);
+      end;
+      new.poly.contents = new.poly.contents \ 1;
+   end REMOVE_SYMBOL;
+
+   /* $page */
+
+   ADD_MARK: proc(base,name,mtime) public swapable;  /* adds mark start or mark end labels */
+      dcl base               fixed array;  /* sound file starting sector */
+      dcl name               fixed array;
+      dcl mtime              fixed array;  /* new mark time */
+      dcl new.base (1)       fixed;        /* 32 bit poly base */
+      dcl symbol_index       fixed;        /* points beyond where symbol belongs */
+      dcl number_of_symbols  fixed;        /* number of symbols in sound file */
+      dcl (j,k)              fixed;
+
+      call copy32(base,new.base);      /* initialize our local copy */
+
+      if FIND_NAME(base,name)>=0                /* name already in table */
+      then call REMOVE_SYMBOL(base,name);       /* remove it */
+
+      symbol_index=FIND_TIME(base,mtime);       /* symbol index points to one beyond where symbol belongs */
+
+      call psmread(new.base,SF.HDR,sf.number.of.symbols);
+      number_of_symbols=read(psd);              /* get number of symbols */
+      j=number_of_symbols;
+      do while j>symbol_index; /* move the symbols to make room for new symbol */
+         call psmread(new.base,SF.SYM+shr(j-1,5),shl(j-1,3)&255);
+         call poly.in(addr(copy.buf(0)),symbol_length);
+         call psmwrite(new.base,SF.SYM+shr(j,5),shl(j,3)&255);
+         call poly.out(addr(copy.buf(0)),symbol_length);
+         j=j-1;  
+      end;  
+
+      /* add new symbol */
+      k=symbol_index*symbol_length;          /* point to entry */
+      call psmwrite(new.base,SF.SYM+shr(k,8),k&255);
+      call poly.out(addr(mtime(0)),3);       /* copy time into symbol area */
+      call poly.out(addr(name(0)),5);        /* copy name into symbol area */
+      number_of_symbols=number_of_symbols+1; 
+
+      call dealloc(0);
+      call psmwrite(new.base,SF.HDR,sf.number.of.symbols);  /* update the number of symbols */
+      write(psd)=number_of_symbols;
+      if eqstr(name,mstart)=0                /* if adding the mark start */
+      then call psmwrite(new.base,SF.HDR,sf.mark.start);
+      else if eqstr(name,mend)=0             /* if adding the mark end */
+      then call psmwrite(new.base,SF.HDR,sf.mark.end);
+      else call psmwrite(new.base,SF.HDR,sf.mark.offset);
+      do j=0 to 2;
+         write(psd)=mtime(j);
+      end;
+      call ps.setup(new.base);      /* update Synclavier info for modified sound file */
+      call alloc.timbre(0);
+      new.poly.contents = new.poly.contents \ 1;
+
+   end ADD_MARK;
+
+   /* $Subtitle Set Resolution and Set Crossfade*/
+
+   SET.RESOLUTION:  proc public swapable; /* set drawing resolution */
+      dcl i fixed;
+
+      ertyp=0;
+      i=CONV.STR.TO.FIXED(token,0,0);
+      if ertyp=0 then do;
+         if (i>=1) and (i<=50) then do;         /* if within boundaries */
+            prev.stm.resolution=stm.resolution;
+            stm.resolution=i;
+            call DRAW.RESOLUTION;               /* update the graphic display in case sound file not available */
+            new.poly.contents = new.poly.contents \ 1;
+         end;
+         else call overflow.error;
+      end;
+   end SET.RESOLUTION;
+
+   SET.CROSSFADE:  proc public swapable; /* set crossfade and draw it */
+      dcl i fixed;
+
+      if inc.stmm=0 then return;       /* Crossfade is a STM release M feature */
+
+      ertyp=0;
+      i=CONV.STR.TO.FIXED(token,0,0);  /* Any 16 bit quantity is legal */
+      if ertyp=0 then do;
+         prev.stm.crossfade=stm.crossfade;
+         stm.crossfade=i;
+         call DRAW.CROSSFADE;
+      end;
+   end SET.CROSSFADE;
+
+   /* $Subtitle Add Caption to Sound File Header */
+
+   ADD_CAPTION:  proc (base,parm) public swapable;        /* Add the caption to the sound file header */
+      dcl base            fixed array;
+      dcl parm            fixed array;
+      dcl i               fixed;
+      dcl caption.wrd.len fixed;
+
+      if inc.stmm=0 then return;                /* if we are not to include STM release M features */
+
+      call psmread(base,SF.HDR,sf.index.base);
+      i=read(psd);                              /* get index base           */
+
+      if i=0 then i=256;
+
+      if parm(0) > shl(i-sf.id.field,1)
+      then parm(0) = shl(i-sf.id.field,1);
+
+      caption.wrd.len=shr(parm(0)+1,1);         /* find caption word length */
+
+      call psmwrite(base,SF.HDR,sf.id.field.bytes);
+      do i=0 to caption.wrd.len;
+         write(psd)=parm(i);
+      end;
+      new.poly.contents = new.poly.contents \ 1;
+
+   end ADD_CAPTION;
+
+   /* $Subtitle Lock the Current Sound File in the Right Channel Display */
+
+   LOCK.SOUND.FILE:  proc public swapable;  /* locks the current sound file in the right channel display */
+      /* Note: assumes FNBUF contains current sound file name */
+      dcl i     fixed;
+
+      lock.name(0)=shl(f#name_len,1);   /* filename is 8 characters long */
+      do i=0 to f#name_len;
+         lock.name(i)=FNBUF(i);         /* name is FNBUF. Hopefully also in LNBUF. */
+      end;
+      FNBUF(0)=8;
+      if ps.search<>0 then do;
+         call ps.users(SFILE.BASE,1);   /* indicate that the sound file has an additional user */
+         locked=1;
+         lock.stereo=stereo;               /* keep track of whether the locked sound file is stereo or mono */
+         lock.sample.rate=stm.sample.rate; /* save the sample rate */
+         lock.tot.time(0)=tot.time(0);     /* and total length of file */
+         lock.tot.time(1)=tot.time(1);
+         lock.tot.time(2)=tot.time(2);
+         new.poly.contents = new.poly.contents \ 1;
+      end;
+      
+   end LOCK.SOUND.FILE;
+
+   /* $Subtitle Unlock the Current Sound File from the Right Channel Display */
+
+   UNLOCK.SOUND.FILE:  proc public swapable; /* unlocks the sound file from the right channel display */
+      dcl name(4) fixed;
+      dcl i       fixed;
+
+      do i=0 to f#name_len;
+         name(i)=FNBUF(i);               /* temporarily save the current sound file */
+         FNBUF(i)=lock.name(i);          /* go get the sound file locked in the right channel window */
+      end;
+      FNBUF(0)=8;
+      LNBUF(0)=0;
+      if ps.search<>0 then do;           /* see if it exists */
+         call ps.users(SFILE.BASE,(-1)); /* subtract one from the number of sound file users */
+         new.poly.contents = new.poly.contents \ 1;
+      end;
+      do i=0 to f#name_len;           
+         FNBUF(i)=name(i);               /* restore the current sound file name */
+      end;
+      locked=0;                          /* indicate that it is unlocked */
+   end UNLOCK.SOUND.FILE;
+
+   /* $Subtitle  Save Sound File Routine */
+
+   SAVE.SOUND.FILE: proc(basearg,name) public swapable; /* saves current sound file on disk*/
+      dcl basearg      fixed array;     /* base address of current sound file */
+      dcl name         fixed array;     /* sound file name */
+      dcl #secs        fixed;           /* file sector length */
+      dcl #wrds        fixed;           /* file word length mod 64K*/
+      dcl dev          fixed;           /* device file will be saved on */
+      dcl base(1)      fixed;           /* local array for base of current file */
+      dcl (i,j)        fixed;
+      dcl level        lit '1';         /* current catalog */
+      dcl rec(POLY.HIST.REC.LEN-1) fixed;
+
+      call copy32(basearg, base); /* make local copy of current sound file address */
+
+      if name(0)<>0 then do;            /* if user designated a sound file name or treename */
+         if INC.MONO<>0 then call STOP.DISK; /* make sure we are not playing */
+         call psmread(base,0,BL.LEN); /* find file sector length */
+         #secs=read(psd)-1;           /* exclude the polymem sound file header */
+         load #secs; mul 256;
+         #wrds=res;                   /* find file word length modulo 64K */
+
+         /* see if there is enoungh room on the disk for the sound file */
+
+         if replace(name,t#sound,0,#secs,#wrds,level) then do;
+
+            dev=shr(F#MS_Sector,8);       /* extract device file is to be saved on */
+
+            if ((f#ms_sector and "HFF") = 0) and (f#ls_sector ilt shr(C#Dir_Size,8)) /* catalog sectors? */
+            then call big.trouble;        /* a message saying that user was about to overwrite catalog */
+            else do;
+               call DRAW.MESSAGE('Saving Sound File...');
+
+               // Write the file to disk without a sound file handle.
+               // That way the file can be renamed on the able disk without issue.
+               // Handle would be assigned when file was imported to the mac
+               // Or handle would be set when file was read into memory at a later time
+
+               call psmwrite(base,SF.HDR,sf.file.handle);
+
+               do i=1 to sf.file.handle.wl;
+                  write(psd)=0;
+               end;
+
+               // Write the data to disk
+               call poly.writedata (f#ms_sector,f#ls_sector,base,SF.HDR,0,#secs);
+
+               // File is saved on disk
+               CALL PSMWRITE(base,0,BL.SAVED);
+               WRITE(PSD)=1;
+
+               // Zero file file name
+               do j=F#NAME(0) to 7;             /* zero fill the name */
+                  call pbyte(F#NAME,j,0);
+               end;
+
+               // Set the file handle to the correct new name (which may be the same as the old name)
+               // in the in-memory version
+               call psmwrite(base,SF.HDR,sf.file.handle);
+
+               do i=1 to 4;                     /* store new name          */
+                  write(psd)=F#NAME(i);
+               end;
+
+               do i=4 to sf.file.handle.wl-1;
+                  write(psd)=0;
+               end;
+
+               call PSMREAD(base,0,BL.FNAME);   /* look at name */
+               j=1;                             /* assume equal */
+               do i=1 to 4;
+                  if read(psd)<>F#NAME(i) then j=0;
+               end;
+
+               // Also see if we started with a long name. Since we are saving to an able disk
+               // we have to remove the long name
+               call PSMREAD(base, 0, BL.LNAME);
+               if (read(psd) > 8) j = 0;
+
+               if j=0 then do;                  /* different name - rename sound file */
+
+                  call BUILD.POLY.HIST.REC(base,1,rec);  /* first indicate file deleted in hist buf */
+                  call ADD.POLY.TO.HIST(rec);
+
+                  do i=0 to 4;                  /* copy to fnbuf */
+                     fnbuf(i)=F#NAME(i);
+                  end;
+                  FNBUF(0)=8;
+                  LNBUF(0)=0;
+                  if (PS.SEARCH <> 0) then do; /* if the file was already in poly */
+                     if (com32(SFILE.BASE,base) <> lw#ieq) then do; /* if it's not the current file */
+                        call PS.DEALLOCATE(SFILE.BASE); /* get rid of old version */
+                        call PSMWRITE(SFILE.BASE,0,BL.FNAME);
+                        do i=1 to 4;                    /* mark empty block */
+                           write(psd)=0;
+                        end;
+                     end;
+                  end;
+                  call PSMWRITE(base,0,BL.FNAME);  /* now rename current file */
+                  do i=1 to 4;                     /* store new name          */
+                     write(psd)=F#NAME(i);
+                  end;
+
+                  j=0;
+
+                  while (j<8 && byte(F#NAME,j) != 0)
+                     j = j + 1;
+
+                  call psmwrite(base,0,BL.LNAME);
+                  write(psd)=j;
+                  do i=1 to f#name_len;               /* store sound file name so others can reference it */
+                     write(psd)=F#NAME(i);
+                  end;
+                  do i=f#name_len to sf.file.handle.wl-1;
+                     write(psd)=0;
+                  end;
+
+                  i=find.partial;               /* find first selected partial */
+                  if TIM.HEAD.LOOKUP(0,tim.synth.typ+i)=2
+                  then do;                      /* is a sound file             */
+                     j=find.frame(i,1);         /* point to first timbre frame */
+                     if p.lookup(j)=mor         /* consistency check for       */
+                     then do;                   /* frame exists                */
+                        do i=1 to 4;            /* set up the filename too     */
+                           call p.store(j+pt.name+(i-1),F#NAME(i));
+                        end;
+                        // eliminate long name; frame will be shortened on next garbage collect
+                        if (p.lookup(j+clen) > pt.len) {
+                           do i = pt.len to p.lookup(j+clen) - 1;
+                              p.store(j+i, 0);
+                           end;
+                        }
+                     end;
+                  end;
+                  new.poly.contents = new.poly.contents \ 1;
+
+                  call BUILD.POLY.HIST.REC(base,0,rec);   /* now show a new file created */
+                  call ADD.POLY.TO.HIST(rec);
+
+               end;
+               if (dev = 6) or (dev = 7) then do; /* file saved on winchester */
+                  if not ADD.FILE.TO.CACHE(name)   /* try to add file to cache */
+                  then call SETUP.CACHE(false);    /* reset sound file cache in poly memory */
+               end;
+               call ERASE.MESSAGE;
+            end;
+         end;
+         else do;
+            if      c#status=e#protect
+            then call write.protect.error;
+            else if c#status=e#name
+            then call invalid.filename;
+            else if c#status=e#no_floppy
+            then call no.floppy;
+            else if c#status=e#storage
+            then call no.space;              /* otherwise indicate that there is not enough room */
+            else if c#status=e#cstorage
+            then call no.contig.space;
+            else if c#status=e#invalid
+            then call invalid.directory;
+            else if c#status=e#treename
+            then call incorrect.treename;
+            else if c#status=e#no_path
+            then call inter.cat.not.found;
+            else if c#status=e#dir_full
+            then call directory.full;
+         end;
+      end;
+   end SAVE.SOUND.FILE;
+
+   /* $Subtitle Unsave Sound File Routine */
+
+   UNSAVE.SOUND.FILE: proc(name) public swapable; /* unsave a file, only if type is SOUND.F or SPECTRAL.F */
+      dcl name  fixed array;   /* name of sound file to unsave */
+      dcl dev   fixed;         /* device file is stored on */
+      dcl level lit '1';       /* current catalog */
+      dcl i     fixed;
+
+      if INC.MONO<>0 then call STOP.DISK; /* make sure we are not playing */
+      if locate(name,level) then do; /* file exists */
+
+         dev = shr(f#ms_sector,8); /* get device */
+
+         do i=0 to f#name_len;  fnbuf(i)=f#name(i); end;   /* in case error message */
+         if (disk_check(shr(f#ms_sector,8))&2)<>0
+         then call write.protect.error;
+         else if (f#type = t#sound) or (f#type = t#spect) then do; /* correct type */
+            call DRAW.MESSAGE('Unsaving Sound File...');
+            if (dev = 6) or (dev = 7) then do; /* file is on winchester */
+               if REMOVE.FILE.FROM.CACHE(name) then do; /* try to remove file from cache */
+                  call delete(name,level); /* delete file from catalog */
+               end;
+               else do; /* couldn't remove file, so need to init cache again */
+                  call delete(name,level); /* delete file from catalog */
+                  call SETUP.CACHE(false); /* reset sound file cache in poly memory */
+               end;
+            end;
+            else call delete(name,level); /* delete file from catalog */
+
+            do i=fnbuf(0) to (shl(f#name_len,1) - 1);
+               call pbyte(fnbuf,i,0);
+               call pbyte(lnbuf,i,0);
+            end;
+            fnbuf(0)=shl(f#name_len,1);
+            LNBUF(0)=0;
+            if PS.SEARCH<>0 then do;
+               CALL PSMWRITE(SFILE.BASE,0,BL.SAVED);
+               WRITE(PSD)=0;
+            end;
+            call ERASE.MESSAGE;
+         end;
+         else call type.error;       /* incorrect type */
+      end;
+      else do;
+         do i=0 to f#name_len;  fnbuf(i)=f#name(i); end;   /* in case error message */
+         call file.not.on.disk;    /* file not found */
+      end;
+   end UNSAVE.SOUND.FILE;
+
+   /* $Subtitle Rename Sound File Edit Routine */
+
+   RENAME.SOUND.FILE: proc(base,name) public swapable;   /* renames current sound file */
+      dcl base         fixed array;    /* sound file base address */
+      dcl new.base (1) fixed;          /* new sound file base */
+      dcl #secs        fixed;          /* file length in sectors */
+      dcl name         fixed array;    /* sound file name */
+      dcl (i,j)        fixed;
+      dcl rec(POLY.HIST.REC.LEN-1) fixed;
+
+      if name(0)<>0 then do;             /* if user typed in a name */
+         if not valid_filename(name)
+         then call invalid.filename; /* invalid characters in filename */
+         else do;                        /* if filename okay */
+            do i=name(0) to shl(f#name_len,1)-1;    /* pad the rest of filename with zeroes */
+               call pbyte(name,i,0);
+            end;
+            name(0)=shl(f#name_len,1);   /* filename can be up to 8 characters long */
+            do i=0 to f#name_len;
+               FNBUF(i)=name(i);         /* rename file to what user typed */
+            end;
+            FNBUF(0)=8;
+            LNBUF(0)=0;
+            if (ps.search<>0) or (FIND.SOUND(FNBUF)<>0)     /* if file already exists */
+            then call duplicate.filename;            /* indicate that there is a duplicate filename */
+            else do;                                 /* if filename doesn't already exist */
+               call psmread(base,0,bl.len);          /* find the length of the current sound file */
+               #secs=read(psd);
+               if CREATE.SOUND.FILE(#secs,stm.sample.rate,0,stereo)<>0 then do;  /* if it was possible to create a new sound file */
+                  call copy32(SFILE.BASE,new.base);  /* things may have changed */
+                  call LOOK.UP.SF.INFO;              /* so find current file name again */
+                  if sf.type=1 then do;              /* if a sound file */
+                     call COPY.POLY.MEM.SEC(SFILE.BASE,0,new.base,0,#secs); /* copy current sound file to new sound file */
+                     TWEAK.SOUND.FILE.HEADER(new.base, name);
+                     call dealloc(0);               /* free up wave memories, buffers, etc. for keyboard timbre */
+                     i=find.partial;                /* get partial in question */
+                     j=find.frame(i,1);             /* point to first timbre frame */
+                     do i=1 to f#name_len;                   /* change name in partial to new name*/
+                        call p.store(j+pt.name+(i-1),name(i));
+                     end;
+                     // eliminate long name; frame will be shortened on next garbage collect
+                     if (p.lookup(j+clen) > pt.len) {
+                        do i = pt.len to p.lookup(j+clen) - 1;
+                           p.store(j+i, 0);
+                        end;
+                     }
+                     call alloc.timbre(0);          /* allocate partial */
+                     new.poly.contents = new.poly.contents \ 1;
+
+                     call BUILD.POLY.HIST.REC(new.base,0,rec);   /* now show a new file created */
+                     call ADD.POLY.TO.HIST(rec);
+
+                  end;                              /* of if a sound file */
+               end;                                 /* of if it was possible to create a new sound file */
+               call clear.display;
+            end;                                    /* of if filename doesn't already exist */
+         end;                                       /* of if filename okay */
+      end;                                          /* of if user typed in a filename */
+   end RENAME.SOUND.FILE;
+
+   /* $Subtitle Reverse Sound File Edit Routine */
+
+   REVERSE.SYMBOLS: proc(base) swapable;  /* reverses the order of the symbols and changes the times accordingly */
+      dcl base             fixed array;
+      dcl first.time(2)    fixed; /* top symbol time */
+      dcl first.name(4)    fixed; /* top symbol name */
+      dcl last.time(2)     fixed; /* bottom symbol time */
+      dcl last.name(4)     fixed; /* bottom symbol name */
+      dcl (i,j,k)          fixed;
+
+      if number_of_symbols>0 then do;   /* if there are symbols in the sound file*/
+         i=0;
+         if number_of_symbols>1 then do;            /* if more than one symbol */
+            do while i<=((number_of_symbols/2)-1);  /* swap the symbols */
+               j=number_of_symbols-1-i;
+               call psmread(base,SF.SYM+shr(i,5),(shl(i,3)+3)&255);
+               call poly.in(addr(first.name(0)),5);
+               call psmread(base,SF.SYM+shr(j,5),(shl(j,3)+3)&255);
+               call poly.in(addr(last.name(0)),5);
+                  
+               if (eqstr('ORIGIN',first.name)<>0 
+               and eqstr('END',last.name)    <>0) then do;  /* do not interchange ORIGIN and END symbol names */
+                  if (eqstr(mstart,first.name)<>0          /* do not interchange mark start or mark end symbol names*/
+                  and eqstr(mend,last.name) <>0) then do; 
+
+                     call psmwrite(base,SF.SYM+shr(i,5),(shl(i,3)+3)&255);
+                     call poly.out(addr(last.name(0)),5);
+                     call psmwrite(base,SF.SYM+shr(j,5),(shl(j,3)+3)&255);
+                     call poly.out(addr(first.name(0)),5);
+
+                  end;
+
+                  call psmread(base,SF.SYM+shr(i,5),shl(i,3)&255);
+                  call poly.in(addr(first.time(0)),3);
+                  call psmread(base,SF.SYM+shr(j,5),shl(j,3)&255);
+                  call poly.in(addr(last.time(0)),3);
+                  
+                  do k=0 to 2;                       /* extract their times for time conversion */
+                     first.time(k)=tot.time(k)-first.time(k);
+                     last.time(k) =tot.time(k)- last.time(k);
+                  end;
+                  call TIME_NORMALIZE(first.time);
+                  call TIME_NORMALIZE(last.time);
+
+                  call psmwrite(base,SF.SYM+shr(i,5),shl(i,3)&255);
+                  call poly.out(addr(last.time(0)),3);
+                  call psmwrite(base,SF.SYM+shr(j,5),shl(j,3)&255);
+                  call poly.out(addr(first.time(0)),3);
+                     
+               end;
+
+               i=i+1;
+            end;                                /* of swapping the symbols */
+         end;                                  /* if more than one symbol */
+
+         if number_of_symbols then do;         /* if odd number of symbols change time for middle symbol*/
+            call psmread(base,SF.SYM+shr(i,5),shl(i,3)&255);
+            call poly.in(addr(first.time(0)),3);
+            do k=0 to 2;                       /* extract time for time conversion */
+               first.time(k)=tot.time(k)-first.time(k);
+            end;
+            call TIME_NORMALIZE(first.time);   /* normalize time */
+
+            call psmwrite(base,SF.SYM+shr(i,5),shl(i,3)&255);
+            call poly.out(addr(first.time(0)),3);
+         end;
+
+         /* $page */
+
+         /* change the mark start and mark end times */
+
+         call psmread(base,SF.HDR,sf.mark.end);    /* determine mark start time */
+         do k=0 to 2;
+            first.time(k)=tot.time(k)-read(psd);
+         end;
+         call TIME_NORMALIZE(first.time);
+         call psmread(base,SF.HDR,sf.mark.start);  /* determine mark end time */
+         do k=0 to 2;                  
+            last.time(k)=tot.time(k)-read(psd);
+         end;
+         call TIME_NORMALIZE(last.time);
+
+         call psmwrite(base,SF.HDR,sf.mark.start);  /* set new mark start time */
+         do k=0 to 2;                  
+            write(psd)=first.time(k);
+         end;
+         call psmwrite(base,SF.HDR,sf.mark.end);  /* set new mark end time */
+         do k=0 to 2;                  
+            write(psd)=last.time(k);
+         end;
+      end;     /* of if there are symbols in the sound file */
+         
+   end REVERSE.SYMBOLS;
+
+   /* $Subtitle Reverse Words in Poly Memory */
+
+   REVERSE.WORDS:  proc (base,ssec,swrd,slen,wlen) swapable;   /* reverse the words in poly memory starting with given address for the specified length */
+      dcl base           fixed array;  /* poly file base */
+      dcl ssec           fixed;        /* starting sector */
+      dcl swrd           fixed;        /* starting word */
+      dcl slen           fixed;        /* sector length */
+      dcl wlen           fixed;        /* word length */
+      dcl xbase (1)      fixed;        /* local normalized 32 bit poly pointer */
+      dcl difference (1) fixed;      
+      dcl last.base (1)  fixed;        /* last sector where reverse loop occurs */
+      dcl last.wrd       fixed;        /* last word offset */
+      dcl (i,j)          fixed;
+
+      SWAP.DATA: proc (first.base,first.wrd,second.base,second.wrd,wrds); /* swaps specified sectors in poly memory */
+         dcl first.base     fixed array;  /* 32 bit pointer to first sector to be swapped with second */
+         dcl first.wrd      fixed;
+         dcl second.base    fixed array;  /* 32 bit pointer to second sector to be swapped with first */
+         dcl second.wrd     fixed;
+         dcl wrds           fixed;
+         dcl i              fixed;
+         dcl j              fixed;
+
+         call psmread(second.base,0,second.wrd);  /* point to the second sector */
+         call poly.in(addr(misc.buf(0)),wrds);    /* move it temporarily to main memory */
+         i=0;
+         do while i<>wrds;
+            j=wrds-i;
+            if j igt copy.blen then j=copy.blen;
+            call psmread(first.base,0,first.wrd+i);
+            call poly.in(addr(copy.buf(0)),j);
+            call psmwrite(second.base,0,second.wrd+i);
+            call poly.out(addr(copy.buf(0)),j);
+            i=i+j;
+         end;
+         call psmwrite(first.base,0,first.wrd);   /* point to the first sector */
+         call poly.out(addr(misc.buf(0)),wrds);    /* copy contents of second sector to second sector */
+
+      end SWAP.DATA;
+
+      REVERSE.DATA: proc (base,wrd,wrds);  /* reverses the words in a given sector of poly memory */
+         dcl base  fixed array;   /* pointer to sector in which words will be reversed */
+         dcl wrd   fixed;         /* pointer to word offset */
+         dcl wrds  fixed;
+         dcl (i,j) fixed;         /* pointers to words within specified sector */
+         dcl x     fixed;         /* words to be swapped */
+
+         call psmread(base,0,wrd);             /* point to the sector in poly memory */
+         call poly.in(addr(misc.buf(0)),wrds); /* copy the sector of poly memory into main memory */
+         do i=0 to shr(wrds,1)-1;              /* reverse the sector contents */
+            j=wrds-i-1;
+            x=misc.buf(j);                     /* save word towards the end */
+            misc.buf(j)=misc.buf(i);           /* set last to first */
+            misc.buf(i)=x;                     /* set first to last */
+         end;
+         if stereo then do i=0 to wrds-1 by 2; /* put L & R back in order */
+            x=misc.buf(i);                     /* save next word */
+            misc.buf(i)=misc.buf(i+1);         /* swap pair */
+            misc.buf(i+1)=x;
+         end;
+         call psmwrite(base,0,wrd);            /* point to the sector in poly memory */
+         call poly.out(addr(misc.buf(0)),wrds); /* write out the reversed contents */
+      end REVERSE.DATA;
+
+      call copy32(base,xbase);                 /* normalize in local copy */
+      call add16(ssec,xbase);
+      call add16(shr(swrd,8),xbase);
+      swrd=swrd&255;
+      slen=slen+shr(wlen,8);
+      wlen=wlen&255;
+
+      last.wrd=swrd+wlen;
+      call copy32(xbase,last.base);
+      call add16(slen + shr(last.wrd,8),last.base);     /* point to last sector of valid data */
+      last.wrd=last.wrd&255;
+      call sub32(last.base,xbase,difference);            /* difference must be 16 bits */
+
+      do while (difference(lw#lsb) igt 4)
+      or       ((shl(difference(lw#lsb),8)+last.wrd-swrd)>=512);
+         call REVERSE.DATA(xbase,swrd,256);              /* reverse contents of first sector */
+         call sub16(1,last.base);                        /* point at last sector of real data */
+         call REVERSE.DATA(last.base,last.wrd,256);      /* reverse contents of last sector */
+         call SWAP.DATA(xbase,swrd,last.base,last.wrd,256); /* swap the two sectors */
+         call add16(1,xbase);
+         call sub32(last.base,xbase,difference);
+			timeshare_with_host();									// keep mac alive
+      end;
+
+      i=shl(difference(lw#lsb),8)+last.wrd-swrd; /* compute # of words left to reverse */
+
+      if i>=2 then do;                         /* must swap words */
+         j=shr(i,1);                           /* get half */
+         call REVERSE.DATA(xbase,swrd,j);
+         last.wrd=last.wrd-j;
+         if last.wrd<0 then do;
+            last.wrd=last.wrd+256;
+            call sub16(1,last.base);
+         end;
+         call REVERSE.DATA(last.base,last.wrd,j);
+         call SWAP.DATA(xbase,swrd,last.base,last.wrd,j); /* swap the two sectors */
+      end;
+   end REVERSE.WORDS;
+
+   /* $page */
+
+   REVERSE.SOUND.FILE: proc(base) public swapable;
+      dcl base          fixed array; /* sound file base address */
+      dcl flag          fixed; /* 1 => it is possible to reverse the current sound file */
+      dcl #secs         fixed; /* number of sectors of valid data */
+      dcl new.base (1)  fixed; /* 32 bit poly sound file base pointer */
+      dcl rec(POLY.HIST.REC.LEN-1) fixed;
+
+      call DRAW.MESSAGE('Reversing Sound File...');
+
+	  	flag=1;                               /* assume it's okay to reverse the sound file */
+      
+		call copy32(base,new.base);           /* initialize our local copy */
+      call psmread(base,0,bl.saved);        /* if the file is saved or locked */
+     
+	  if (read(psd)<>0) or (locked<>0) then do;        /* copy it over to another area in memory */
+         if COPY.CURRENT.SOUND.FILE(base)<>0 then do;  /* if successful in copying it over */
+            call LOOK.UP.SF.INFO;
+            call copy32(SFILE.BASE,new.base);
+         end;
+         else flag=0;
+      end;
+
+      if flag<>0 then do;                   /* it is okay to reverse the current sound file */
+         call PS.LOCK;                         /* lock out a reboot */
+         call REVERSE.SYMBOLS(new.base);       /* reverse the symbols of samples in the symbol table */
+         call psmread(new.base,0,bl.len);      /* read the file length in sectors */
+         #secs=read(psd)-shr(bl.poly,8);       /* determine number of sectors of valid data */
+
+         call REVERSE.WORDS(new.base,shr(BL.POLY,8),0,#secs,0); /* reverse the entire sound file */
+
+         /* Set data type */
+         call psmwrite(new.base,SF.HDR,sf.file.data.type);
+         write(psd)=256;   /* time reversed */
+
+         /* Set caption */
+         call psmwrite(new.base,SF.HDR,sf.id.field.bytes);
+         call copy_out_string(revcap);
+
+         call PS.UNLOCK;
+
+         call dealloc(0);
+         call ps.setup(new.base);
+         call alloc.timbre(0);
+
+         call CHANGE.CURSOR.TIME;
+         call CHANGE.SIGNAL.LEVEL;
+         new.poly.contents = new.poly.contents \ 1;
+
+         if (com32(new.base,base) <> lw#ieq)        /* created new file above */
+         then do;
+            call BUILD.POLY.HIST.REC(base,0,rec);   /* keep quick updates going  */
+            call ADD.POLY.TO.HIST(rec);
+         end;
+			
+			call ERASE.MESSAGE;
+      end;                   /* of it's okay to reverse the sound file */
+     
+   end REVERSE.SOUND.FILE;
+   insert ':synsou:stmmod:stedsoua';        /* combine, exchange, ext mono, delete, extract */
+   insert ':synsou:stmmod:stedsoub';        /* cut, paste, and copy */
+   insert ':synsou:stmmod:stedsouc';        /* fill, loop, volume, normalize */
+   insert ':synsou:stmmod:stedsoud';        /* reverse loop, mix, invert, modulate */
+end STEDMOD;

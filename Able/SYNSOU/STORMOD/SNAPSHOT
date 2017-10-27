@@ -1,0 +1,159 @@
+/* SNAPSHOT  $TITLE  Routine to Take Snap Shot of Sound Files on DIR.DEVICE */
+
+/* 11/17/87 - snafed sort.names into filemod */
+
+dcl SORT.NAMES lit 'Sort.Cat.Buffer.By.Filename';
+
+SOUND.FILE.SNAPSHOT:  proc (Device) fixed swapable; /* takes snap shot of sound files on specified device */
+   dcl Device   fixed; /* which device to take snap shot of */
+   dcl (Bin,I)  fixed;
+   dcl Ptr  (1) fixed;
+   dcl Base (1) fixed;
+   dcl SnapPtr  fixed;
+   dcl temp(1)  fixed;
+
+	dcl S$SenseKey 			fixed external;
+	dcl W1.State   			fixed external;
+	dcl force_empty_display fixed external;
+	
+   SnapFCBs=0; /* reset count of files in snap shot */
+   SnapPtr =0; /* and reset the ptr                 */
+
+	S$SenseKey = 0;
+	
+   if inc.poly and (Device=PolyMemDev) then do; /* get files in poly mem -- only get here if poly system exists */
+
+      Bin=0;
+
+      do while (Bin ILT PolyNumS);    /* more bins to look at */
+
+         call Set.Cur.Bin(Bin);
+         call Copy32(PsFirst,Ptr);    /* start from here */
+
+         do while (Com32(Ptr,PsLast)<>LW#IEQ) /* not at end of memory */
+         and      ((SnapPtr+SnapFCBLen) ILE SnapLen); /* more room in snap shot area */
+
+            call Copy32(Ptr,Base);
+            Base(LW#MSB)=Base(LW#MSB)|shl(Bin,Base#Bin_P);
+
+            call PsmRead(Base,0,0);         /* set up to read 1st sector of next block */
+
+            write("313")=addr(Copy.Buf(0)); /* set up for quick reads */
+            write("373")=read(psd);         /* read block length */
+            write(ATNV) =read(psd);         /* skip past # of users field */
+            write("373")=read(psd); write("373")=read(psd); /* read in filename */
+            write("373")=read(psd); write("373")=read(psd);
+
+            if  ((Copy.Buf(1)&255)>32)      /* first char in valid range */
+            then do;                        /* save file in snap shot area */
+               write("313")=addr(Copy.Buf(1)); /* set up for quick write */
+
+               write(mam)=SnapBase+shr(SnapPtr,8); /* init ptr to snap shot area */
+               write(mal)=SnapPtr;
+
+               write(mdi)=read("373"); write(mdi)=read("373"); /* write filename to snap shot */
+               write(mdi)=read("373"); write(mdi)=read("373");
+               call COPY32(Base,Temp);       /* move base address to file to temp */
+               call ADD16 (1,Temp);          /* plus 1 to point to start of sound file */
+               write(mdi)=Temp(LW#MSB);      /* save full 22-bit ptr to file */
+               write(mdi)=Temp(LW#LSB);
+               write(mdi)=Copy.Buf(0)-1;     /* and sector length       */
+               write(mdi)=SnapPtr;           /* save pointer to long name in memory so we can find it after the sort */
+
+               // Grab long file name as well. We don't have room for the length word, so we just grab
+               // the bytes
+               if (interp_is_running != 0) {
+                  dcl m fixed;
+                  
+                  // Clean out string area
+                  write(mam)=NameBase+shr(SnapPtr,5);    /* init ptr to snap shot area */
+                  write(mal)=shl(SnapPtr,3);
+                  rpc sf.file.handle.wl;
+                  write(mdi)=0;
+
+                  call PsmRead(Base,0,BL.LNAME);         /* set up to read 1st sector of next block */
+                  m = read(psd);                         // Get number of bytes in long name
+
+                  // Now name, just store file name
+                  write(mam)=NameBase+shr(SnapPtr,5);    /* init ptr to snap shot area */
+                  write(mal)=shl(SnapPtr,3);
+
+                  if (m == 0) {
+                     write("313")=addr(Copy.Buf(1)); /* set up for quick write */
+                     write(mdi)=read("373"); write(mdi)=read("373"); /* write filename to long name area */
+                     write(mdi)=read("373"); write(mdi)=read("373");
+                  }
+                  
+                  else {                                 // Else fill long name area of snapshot with long name
+                     rpc sf.file.handle.wl;
+                     write(mdi) = read(psd);
+                  }
+               }
+
+               SnapFCBs=SnapFCBs+1;         /* one more file */
+               SnapPtr =SnapPtr+SnapFCBLen; /* bump ptr to next free spot */
+            end;
+
+            call Add16(Copy.Buf(0),Ptr);    /* add file len to cur ptr (step to next poly file) */
+         end;
+
+         Bin=Bin+1;                         /* step to next poly bin */
+      end;
+   end;
+
+   /* $PAGE */
+
+   else if Device ILT 8 then do; /* accessing a real disk drive -- compute size and loc of catalog */
+
+      if inc.mono<>0 then call Stop.Disk; /* stop mono output so we can read disk */
+
+		if (force_empty_display != 0) /* silently force empty display if asked to do so.  Done			*/
+			;									/* when we know we just ejected the media...							*/
+			
+		else if (Device == 7 && W1.State == 1)			/* attempting to view an ejected w1 */
+			SET.ERROR(err.opt, 'Mount W1: before use.');
+			
+      else if Read_Catalog('',Device) then do;    	/* catalog read successfully 			*/
+
+         I=0;
+         do while (I ILT (C#Dir_Size/C#Len)) /* not at end of catalog */
+         and      ((SnapPtr+SnapFCBLen) ILE SnapLen); /* more room in snap shot area */
+
+            call Get_FCB(I,Copy.Buf); /* get next fcb from catalog buffer */
+
+            // Ignore sound files beginning with period (.macfile)
+            if ((Copy.Buf(F#NM)<>0) and (Copy.Buf(F#TY)=T#Sound) and ((Copy.Buf(F#NM)&0xFF)!=a.period))
+            then do;               /* this is a sound file */
+               Copy.Buf(F#MS)=Copy.Buf(F#MS)+C#MS_Sector; /* add in catalog base */
+               Copy.Buf(F#LS)=Copy.Buf(F#LS)+C#LS_Sector; /* to get absolute addr */
+               if Copy.Buf(F#LS) ILT C#LS_Sector
+               then Copy.Buf(F#MS)=Copy.Buf(F#MS)+1;
+
+               write(mam)=SnapBase+shr(SnapPtr,8);
+               write(mal)=SnapPtr;
+               write("313")=addr(Copy.Buf(F#NM)); /* set up for quick write */
+
+               write(mdi) =read("373"); write(mdi)=read("373"); /* write filename to snap shot */
+               write(mdi) =read("373"); write(mdi)=read("373");
+               write(mdi) =Copy.Buf(F#MS); /* write origin MSB */
+               write(mdi) =Copy.Buf(F#LS); /* write origin LSB */
+               write(mdi) =Copy.Buf(F#LL); /* write sector LS length */
+               write(mdi) =Copy.Buf(F#TY); /* save type code in last word */
+
+               SnapFCBs=SnapFCBs+1;         /* one more file */
+               SnapPtr =SnapPtr+SnapFCBLen; /* bump ptr to next free spot */
+            end;
+
+            I=I+1;
+         end; /* looping over file entries */
+
+      end; /* catalog read successfully */
+		
+		else
+			handle.scsi.cat.error();
+   end;
+
+   // Note - sort order is wrong for long file names; the characters beyond 8th are not examined
+   if SnapFCBs<>0 then call SORT.NAMES(SnapBase,SnapFCBLen,SnapFCBs); /* sort filenames into alphabetical order */
+
+end SOUND.FILE.SNAPSHOT;

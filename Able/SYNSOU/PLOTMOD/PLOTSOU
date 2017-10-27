@@ -1,0 +1,809 @@
+/*	:SYNSOU:PLOTMOD:PLOTSOU  $TITLE  Plot Routines Library
+
+Modified:
+1999/10/15 - TY  - Modified TPOS.X() and TPOS.Y() not to load negative numbers into the D4567
+						 when passed mouse clicks from the left and bottom pixel margins.
+1989/05/12-TSS,DY- Fixed bug in ENTER.ALPHA.MODE
+1988/04/22 - MWH - Fix pop graphics attributes, REALLY enter modes specified!
+1987/03/30-MPB,BSW-changed push and pop graphics attributes to handle 3 level stacks
+1987/02/09-MPB,EG- added gbox, draw.icon here
+1987/01/29 - BSW - put plotting routines into a module
+*/
+
+Module PLOTMOD;
+
+	insert ':synlits:comlits';		/*	compilation literals	*/
+	insert ':synlits:asciilit';	/*	ASCII literals	*/
+	insert ':synlits:globlits';	/*	general global literals	*/
+	insert ':synauxs:plotlits';	/*	literals used by the plotting package	*/
+
+	insert ':synmods:globdcl';		/*	needed for run.syn.loop	*/
+	insert ':synmods:ttydcl';		/*	terminal i/o				*/
+
+	/*	Plot Libray Global Variable Declarations	*/
+
+	dcl #mode				fixed	public;	/*	0=transparent, 1=alpha, 2=vector, 3=point	*/
+	dcl (#lastx,#lasty)	fixed	public;	/*	coordinates of last point	*/
+	dcl #data.level		fixed	public;	/*	0 for white, 1 for black, 2 for complemented	*/
+	dcl #blockmode			fixed	public;	/*	1: vector mode with block mode	*/
+	dcl #line.type			fixed			;	/*	0-5 types of lines	*/
+   dcl #alias_lines     fixed       ;
+
+	dcl crosshair.on		fixed	public;	/*	if mouse cursor crosshair on	*/
+	dcl mouse.replot		fixed	public;	/*	if mouse cursor needs to be refreshed	*/
+
+	dcl #wind(3)			fixed	public;	/*	problem coordinates	*/
+	dcl #view(3)			fixed	public;	/*	display area			*/
+
+	dcl enter.vector		fixed;	/*	flag to indicate entry into vector mode	*/
+
+	dcl phys.limits		data (0,1023,0,779);
+	dcl (#px,#py)			fixed;	/*	number of pixels on terminal screen	*/
+	dcl (#nx,#ny)			fixed;	/*	numerators to scale point		*/
+	dcl (#dx,#dy)			fixed;	/*	denominators to scale point	*/
+
+	dcl (last.highy,last.lowy,last.highx)	fixed;	/*	last coordinates transmitted	*/
+
+	dcl GRAPHICS.STACK.SIZE						lit '3';
+	dcl GSP											fixed;	/*	Graphics Stack Ptr	*/
+
+	dcl SV.XMIN	(GRAPHICS.STACK.SIZE)		fixed;	/*	Viewport limits	*/
+	dcl SV.XMAX	(GRAPHICS.STACK.SIZE)		fixed;
+	dcl SV.YMIN	(GRAPHICS.STACK.SIZE)		fixed;
+	dcl SV.YMAX	(GRAPHICS.STACK.SIZE)		fixed;
+
+	dcl SW.XMIN	(GRAPHICS.STACK.SIZE)		fixed;	/*	Window limits	*/
+	dcl SW.XMAX	(GRAPHICS.STACK.SIZE)		fixed;
+	dcl SW.YMIN	(GRAPHICS.STACK.SIZE)		fixed;
+	dcl SW.YMAX	(GRAPHICS.STACK.SIZE)		fixed;
+
+	dcl SLX		(GRAPHICS.STACK.SIZE)		fixed;	/*	Last X	*/
+	dcl SLY		(GRAPHICS.STACK.SIZE)		fixed;	/*	Last Y	*/
+	dcl SMODE	(GRAPHICS.STACK.SIZE)		fixed;	/*	Mode i.e. transparent	*/
+	dcl SDL		(GRAPHICS.STACK.SIZE)		fixed;	/*	Data level	*/
+	dcl SLT		(GRAPHICS.STACK.SIZE)		fixed;	/*	line type	*/
+
+	/*	Note that you may have to change modes twice in certain circumstances	*/
+	/*	on the Pericom terminal:																*/
+	/*																									*/
+	/*							 TO: TRANS	 VECTR	ALPHA   POINT							*/
+	/*				FROM:	 TRANS	 -			Y		  Y		 N								*/
+	/*						 VECTR	 Y			-		  Y		 Y								*/
+	/*						 ALPHA	 Y			Y		  -		 Y								*/
+	/*						 POINT	 N			N		  Y		 -								*/
+	/*																									*/
+	/*	For example, you can't go directly from POINT mode to VECTOR mode.		*/
+	/*	You must go from POINT to ALPHA modes first, then to VECTOR.				*/
+
+	enter.alpha.mode: proc public;
+		screen.dump=0;
+		if #mode<>#point
+		then call pc(gs);
+		call pc(us);
+		#mode=#alpha;
+	end enter.alpha.mode;
+
+   enter.nonalias.text: proc public swapable;
+		screen.dump=0;
+		if #mode<>#point
+		then call pc(gs);
+		call pc(etb);
+		#mode=#alpha;
+	end enter.nonalias.text;
+
+   alias.lines.off: proc public swapable;
+      if (#alias_lines == 0)
+         pc(stx);
+      #alias_lines = #alias_lines + 1;
+   end alias.lines.off;
+
+   alias.lines.on: proc public swapable;
+      #alias_lines = #alias_lines - 1;
+      if (#alias_lines == 0)
+         pc(etx);
+   end alias.lines.on;
+
+	enter.vector.mode: proc public;
+		screen.dump=0;
+		if mg600 <> 0 then do;
+			if #mode=#point
+			then alpha_mode;
+		end;
+		call pc(gs);
+		#mode=#vector;
+		enter.vector=1;
+	end enter.vector.mode;
+
+	enter.point.mode: proc public;
+		screen.dump=0;
+		if mg600 <> 0 then do;
+			if #mode=#transparent
+			then vector_mode;
+		end;
+		call pc(fs);
+		#mode=#point;
+		enter.vector=1;
+	end enter.point.mode;
+
+	enter.transparent.mode: proc public;
+		if #mode<>#transparent then do;
+			screen.dump=1;
+			if mg600 <> 0 then do;
+				if #mode=#point
+				then alpha_mode;
+			end;
+			call pc(can);
+			#mode=#transparent;
+		end;
+	end enter.transparent.mode;
+
+	clear.term: proc public SWAPABLE;	/*	clear screen, leave in adm mode	*/
+		dcl saved.scr	fixed;
+
+		saved.scr	= screen.dump;
+		screen.dump	= 0;
+
+		if gtype<>0 then do;					/*	clear graphics plane	*/
+			vector_mode;
+			call pc(esc);	/*	esc - "	*/
+			call pc(ff);	/*	ff  - "	*/
+			transparent_mode;
+		end;
+
+		call clear_screen;					/*	clear alpha plane		*/
+
+		screen.dump  = saved.scr;
+		crosshair.on = 0;						/*	mouse cursor was erased with screen erase	*/
+		mouse.replot = 1;
+
+	end clear.term;
+
+	data_level:proc(i) public swapable;	/*	sets line to on, off, or complement	*/
+		dcl i	fixed;
+
+		if (i<0) or (i>2) then return;	/*	error return	*/
+		call pc(esc);
+		call pc(slash);
+		do case i;
+			call pc(asc.0);	/*	dots on	*/
+			call pc(asc.1);	/*	dots off	*/
+			call pc(asc.2);	/*	dots complemented	*/
+		end;
+		call pc(lower.d);
+		#data.level=i;	/*	save value	*/
+	end data_level;
+
+	line_type:proc(i) public swapable;	/*	sets line type	*/
+		dcl i	fixed;
+		if (i<0) or (i>5) then return;	/*	user defined types not implemented	*/
+		call pc(esc);
+		do case i;
+			call pc(asc.grave);	/*	normal line	*/
+			call pc(lower.a);		/*	dotted line	*/
+			call pc(lower.b);		/*	dot-dashed line	*/
+			call pc(lower.c);		/*	short-dashed line	*/
+			call pc(lower.d);		/*	long-dashed line	*/
+			do;						/*	dot-dot no-dot (duck,duck,gray duck)	*/
+				call ps('/1;1a');
+				call pc(esc);
+				call ps('x');
+			end;
+		end;
+		#line.type=i;	/*	save value	*/
+	end line_type;
+
+	Set.Fill.Pattern: proc(pattern) public swapable;
+		dcl pattern	fixed;
+
+		call pc(a.esc);
+		call ps('|P');
+		call pc(pattern);
+	end Set.Fill.Pattern;
+
+	char_size:proc(i) public swapable;	/*	char size 0 -80 per line; 1-40 per line	*/
+		dcl i		fixed;
+
+		if (i<0) or (i>3) then return;
+		call pc(esc);
+		call pc(asc.0+i);
+
+	end char_size;
+
+	pstring:proc(string) public;	/*	prints 'string' on plot in 4010 #alphacharacters	*/
+		dcl string	array;	/*	DO NOT SWAP SO STRING CONSTANT IS IN EXT MEMORY	*/
+		dcl i			fixed;
+
+		if #mode<>#alpha then alpha_mode;
+		call ps(string);
+	end pstring;
+
+	/*	$SUBTITLE  Device Dependent Routines for Draw, Move, and Plot	*/
+
+	convertx: proc(x)	fixed swapable;	/*	convert the x coordinate	*/
+		dcl x	fixed;
+		return (x-#wind(0))*#nx/#dx+#view(0);
+	end convertx;
+
+	converty: proc(y)	fixed swapable;	/*	convert the y coordinate	*/
+		dcl y	fixed;
+		return (y-#wind(2))*#ny/#dy+#view(2);
+	end converty;
+
+	dcl convert_x			lit 'x=convertx(x)';
+	dcl convert_y			lit 'y=converty(y)';
+	dcl convert_coords	lit 'convert_x; convert_y';
+
+	transmit_coords: proc(x,y) swapable;	/*	emit vector coordinates according to protocol	*/
+		dcl (x,y)							fixed;
+		dcl (highy,lowy,highx,lowx)	fixed;
+		dcl (loopctr)						fixed STATIC;
+
+		/*	scale user's terminal screen coordinates to physical plotter units	*/
+		write(5)=x;
+		write(6)=phys.limits(1);
+		mwait;	/*	this is needed because of a 4567 bug	*/
+		write(7)=#px;
+		x=read(5);
+		if (dq640 and (read(4) >= shr(#px + 1, 1))) then x = x + 1;	/*	round up	*/
+
+		write(5)=y;
+		write(6)=phys.limits(3);
+		mwait;	/*	this is needed because of a 4567 bug	*/
+		write(7)=#py;
+		y=read(5);
+		if (dq640 and (read(4) >= shr(#py + 1, 1))) then y = y + 1;	/*	round up	*/
+
+		highy=(shr(y,5)+32);
+		lowy= ((y&"37")+96);
+		highx=(shr(x,5)+32);
+		lowx= ((x&"37")+64);
+
+		if enter.vector then do;	/*	must write all bytes			*/
+			enter.vector=0;
+			call pc(highy); call pc(lowy); call pc(highx);
+		end;
+		else do;							/*	conditionally write bytes	*/
+			if last.highy<>highy then call pc(highy);
+			if last.highx<>highx then do;
+				call pc(lowy); call pc(highx);
+			end;
+			else if last.lowy<>lowy then call pc(lowy);
+		end;
+		call pc(lowx);
+		last.highy=highy; last.lowy=lowy; last.highx=highx;	/*	keep track of last values	*/
+
+		if run.syn<>0 then do;		/*	run.syn.loop if enabled			*/
+			loopctr=loopctr+1;		/*	balance Synclavier work load	*/
+			if loopctr=3 then do;	/*	with call to run.syn.loop		*/
+				call run.syn.loop;	/*	about every 10 characters		*/
+				loopctr=0;
+			end;
+		end;
+
+	end transmit_coords;
+
+	/*	$SUBTITLE  Routines to Draw, Move, and Plot	*/
+
+	imove: proc(x,y)	fixed public swapable;	/*	begin new vector drawing sequence at (x,y), return 1 if out of bounds	*/
+		dcl (x,y)	fixed;
+
+		#lastx=x;
+		#lasty=y;
+		if (x<#view(0) or x>#view(1)) or (y<#view(2) or y>#view(3)) then return 1;
+		if #mode<>#point then vector_mode;
+		call transmit_coords(x,y);
+		return 0;
+	end imove;
+
+	/*	$page	*/
+
+	draw: proc(x,y) public swapable;	/*	called to draw vector to or put point at (x,y)	*/
+		dcl (x,y)	fixed;
+		dcl flag	fixed static;	/*	to indicate that (x,y) has been clipped	*/
+
+		code:proc(x,y)	fixed;	/*	end#pointcodes for 9 regions of screen	*/
+			dcl (x,y)	fixed;
+			dcl c			fixed;
+			c=0;					/*	initialize	*/
+			if			#view(0)>x then c=1;
+			else if	x>#view(1) then c=2;
+			if			#view(2)>y then c=c+4;
+			else if	y>#view(3) then c=c+8;
+			return c;
+		end code;
+
+		clip:proc(x1,y1,x2,y2);	/*	clips vector from (x1,y1) to (x2,y2) at viewport	*/
+			/*	Note: clip is derived from the procedure on page 66 of Newman and Sproull	*/
+			dcl (x1,y1,x2,y2)	fixed;
+			dcl (c,c1,c2)		fixed;
+			dcl (x,y)			fixed;
+
+			c1=code(x1,y1);  c2=code(x2,y2);  flag=0;
+
+			do while (c1+c2)<>0;
+				if (c1&c2)<>0 then return;	/*	line is off screen	*/
+
+				c=c1; if c=0 then c=c2;
+				if (c&1)>0 then do;			/*	crosses left edge		*/
+					y=(y2-y1)*(#view(0)-x1)/(x2-x1);
+					y=y+y1;
+					x=#view(0);
+				end;
+				else if (c&2)>0 then do;	/*	crosses right edge	*/
+					y=(y2-y1)*(#view(1)-x1)/(x2-x1);
+					y=y+y1;
+					x=#view(1);
+				end;
+				else if (c&4)>0 then do;	/*	crosses bottom edge	*/
+					x=(x2-x1)*(#view(2)-y1)/(y2-y1);
+					x=x+x1;
+					y=#view(2);
+				end;
+				else if (c&8)>0 then do;	/*	crosses top edge		*/
+					x=(x2-x1)*(#view(3)-y1)/(y2-y1);
+					x=x+x1;
+					y=#view(3);
+				end;
+				if c=c1 then do;
+					x1=x;
+					y1=y;
+					c1=code(x,y);
+				end;
+				else do;
+					x2=x;
+					y2=y;
+					c2=code(x,y);
+					flag=1;	/*	end of vector is out	*/
+				end;
+			end;	/*	of do while	*/
+
+			if (x1<>#lastx) or (y1<>#lasty) then call imove(x1,y1);	/*	begin new vector if start of vector has been clipped	*/
+			call transmit_coords(x2,y2);
+		end clip;
+
+		if #mode=#point then do;
+			if code(x,y)=0 then call transmit_coords(x,y);
+			#lastx=x;
+			#lasty=y;
+		end;
+		else if #mode<>#vector then call imove(x,y);
+		else do;
+			call clip(#lastx,#lasty,x,y);
+			#lastx=x;
+			#lasty=y;
+		end;
+	end draw;
+
+	/*	$SUBTITLE  Additional Plotting Primitives	*/
+
+	plot: proc(x,y) public swapable;	/*	continues #vectorsequence to user's (x,y)	*/
+		dcl (x,y)	fixed;
+
+		convert_coords;
+
+		if (#mode=#vector) or (#mode=#point) then	call draw (x,y);
+		else													call imove(x,y);
+	end plot;
+
+	move_to: proc(x,y) public swapable;	/*	begin vector sequence at user's (x,y)	*/
+		dcl (x,y)	fixed;
+
+		convert_coords;
+
+		call imove(x,y);
+	end move_to;
+
+	connect: proc (a,b,c,d) public swapable;	/*	connects users (a,b) to (c,d)	*/
+		/*
+		moves to (a,b) with pen in present state and then connects (a,b)
+		with (c,d) and leaves pen up at the end.
+		*/
+		dcl (a,b,c,d)	fixed;
+
+		call move_to(a,b);	/*	begin vector sequence at user's (x,y)	*/
+		call plot(c,d);
+	end connect;
+
+	axes: proc (x,y,x.incr,y.incr) public swapable;	/*	axes through (x,y)	*/
+		/*	draws axes thru (x,y) with tick marks at intervals of x.incr
+		.  on x-axis and y.incr on y-axis	*/
+		dcl (x,y,x.incr,y.incr)	fixed;
+		dcl (i,j)					fixed;
+
+		call connect(x,#wind(3),x,#wind(2));
+		call connect(#wind(0),y,#wind(1),y);
+
+		point_mode;	/*	enter point mode	*/
+		do i=((x-#wind(0)) mod x.incr) to #wind(1) by x.incr;
+			do j=((y-#wind(2)) mod y.incr) to #wind(3) by y.incr;
+				call plot(i,j);
+			end;
+		end;
+	end axes;
+
+	border: proc public swapable;	/*	border around viewport	*/
+
+		call imove(#view(0),#view(2));
+		call draw (#view(0),#view(3));
+		call draw (#view(1),#view(3));
+		call draw (#view(1),#view(2));
+		call draw (#view(0),#view(2));
+	end border;
+
+	/*	$page	*/
+
+	punits: proc(x,y) public swapable;	/*	defines number of pixels on terminal screen	*/
+		dcl (x,y)	fixed;
+
+		#px=x;
+		#py=y;
+	end punits;
+
+	map: proc swapable;	/*	computes numerator and denominator for scaling	*/
+		#nx=#view(1) - #view(0);
+		#ny=#view(3) - #view(2);
+		#dx=#wind(1) - #wind(0);
+		#dy=#wind(3) - #wind(2);
+	end map;
+
+	window: proc(x1,x2,y1,y2) public swapable;	/*	store window (plot limits in user units) in #vector*/
+		dcl (x1,x2,y1,y2)	fixed;
+
+		#wind(0)=x1;
+		#wind(1)=x2;
+		#wind(2)=y1;
+		#wind(3)=y2;
+		call map;
+	end window;
+
+	viewport: proc(x1,x2,y1,y2) public swapable;	/*	store viewport in #vector*/
+		dcl (x1,x2,y1,y2)	fixed;
+
+		#view(0)=x1;
+		#view(1)=x2;
+		#view(2)=y1;
+		#view(3)=y2;
+		call map;
+	end viewport;
+
+	BLOCKMODE_OFF: proc public swapable;	/*	turns block mode off for a mg600	*/
+		IF #BLOCKMODE <> 0
+		THEN DO;
+			CALL PC(ESC); CALL PC(etx); #BLOCKMODE=0;
+		END;
+	end BLOCKMODE_OFF;
+
+	BLOCKMODE_ON: proc public swapable;		/*	turns block mode on for a mg600	*/
+		IF #BLOCKMODE = 0
+		THEN DO;
+			CALL PC(ESC); CALL PC(stx); #BLOCKMODE=1;
+		END;
+	end BLOCKMODE_ON;
+
+	/*	$page	*/
+
+	PUSH.GRAPHICS.ATTRIBUTES: PROC PUBLIC SWAPABLE;	/*	saves the current graphic attributes	*/
+		GSP = GSP + 1;
+		if GSP > GRAPHICS.STACK.SIZE then do;
+			call cpos(23,0);
+			call ps('GRAPHICS STACK OVERFLOW');
+			return;
+		end;
+		SV.XMIN(GSP) = #VIEW(0);
+		SV.XMAX(GSP) = #VIEW(1);
+		SV.YMIN(GSP) = #VIEW(2);
+		SV.YMAX(GSP) = #VIEW(3);
+
+		SW.XMIN(GSP) = #WIND(0);
+		SW.XMAX(GSP) = #WIND(1);
+		SW.YMIN(GSP) = #WIND(2);
+		SW.YMAX(GSP) = #WIND(3);
+
+		SLX(GSP)   = #LASTX;
+		SLY(GSP)   = #LASTY;			/*	SAVE LASTX AND LASTY DRAWN	*/
+		SMODE(GSP) = #MODE \ SHL(#BLOCKMODE,8);
+		SDL(GSP)   = #DATA.LEVEL;
+		SLT(GSP)   = #LINE.TYPE;
+	END PUSH.GRAPHICS.ATTRIBUTES;
+
+	POP.GRAPHICS.ATTRIBUTES: PROC PUBLIC SWAPABLE;	/*	restores the current graphic attributes	*/
+
+		CALL VIEWPORT(SV.XMIN(GSP),SV.XMAX(GSP),SV.YMIN(GSP),SV.YMAX(GSP));	/*	RESTORE ALL GRAPHIC	*/
+		CALL WINDOW	 (SW.XMIN(GSP),SW.XMAX(GSP),SW.YMIN(GSP),SW.YMAX(GSP));	/*	ATTRIBUTES				*/
+		CALL IMOVE	 (SLX(GSP),SLY(GSP));				/*	GRAPHIC CURSOR POSITION	*/
+
+		IF (#MODE <> #POINT)					/*	IF WE AREN'T IN A MODE THAT		*/
+		&  (#MODE <> #VECTOR)				/*	WILL TAKE A DATA LEVEL PUT THE	*/
+		THEN VECTOR_MODE;						/*	TERMINAL IN VECTOR_MODE				*/
+		IF SDL(GSP)<>#DATA.LEVEL
+		THEN CALL DATA_LEVEL(SDL(GSP));	/*	DATA LEVEL	*/
+		IF SLT(GSP)<>#LINE.TYPE
+		THEN CALL LINE_TYPE(SLT(GSP));	/*	LINE TYPE	*/
+
+		IF (SHR(SMODE(GSP),8)<>0) AND (#BLOCKMODE=0)
+		THEN CALL BLOCKMODE_ON;				/*	SET UP BLOCK MODE	*/
+		ELSE IF (SHR(SMODE(GSP),8)=0) AND (#BLOCKMODE<>0)
+		THEN CALL BLOCKMODE_OFF;
+
+		IF (SMODE(GSP)&255)<>#MODE THEN DO;		/*	GRAPHIC MODE	*/
+			DO CASE (SMODE(GSP)&255);
+				TRANSPARENT_MODE;
+				ALPHA_MODE;
+				VECTOR_MODE;
+				POINT_MODE;
+			END;
+		END;
+		GSP = GSP - 1;
+		if GSP < 0 then do;
+			call cpos(23,0);
+			call ps('GRAPHICS STACK UNDERFLOW');
+		end;
+	END POP.GRAPHICS.ATTRIBUTES;
+
+	/*	$Subtitle Draw Graphical Primitive Routines	*/
+
+	draw_rect: procedure (left, bottom, right, top) public swapable;	/*	Draw a hollow rectangle	*/
+
+		dcl (left, bottom, right, top)	fixed;	/*	lower-Left corner and upper-Right corners of the rectangle	*/
+
+		call move_to (left, bottom);	/*	Draw a rectangle	*/
+		call plot (left, top);
+		call plot (right, top);
+		call plot (right, bottom);
+		call plot (left, bottom);
+
+	end draw_rect;
+
+	draw_text:proc(text,x,y,size) public;	/*	draw text in large alpha characters	*/
+											/*	DO NOT SWAP SO STRING CONSTANT IS IN EXT MEMORY	*/
+		dcl text		fixed array;	/*	text	*/
+		dcl (x,y)	fixed;			/*	starting location	*/
+		dcl size		fixed;			/*	size of text: 0=normal, 1=medium, 2=large, 3=xlarge	*/
+
+		call move_to(x,y);
+		call char_size(size);
+		call pstring(text);	/*	draw text in designated size	*/
+		vector_mode;
+		call char_size(0);	/*	return to normal size characters	*/
+	end draw_text;
+
+	draw_vertical_label: proc(string) public;
+											/*	DO NOT SWAP SO STRING CONSTANT IS IN EXT MEMORY	*/
+		dcl string	array;
+		dcl i			fixed;
+
+		do i=1 to string(0);
+			call move_to(0,i);
+			alpha_mode;
+			call pc(byte(string,string(0)-i));
+		end;
+		vector_mode;
+	end draw_vertical_label;
+
+	area.fill: proc (x1,y1,x2,y2,d,fill) public swapable;	/*	fills a specified area using the given data level and fill pattern	*/
+		dcl (x1,y1,x2,y2)	fixed;	/*	area	*/
+		dcl d					fixed;	/*	data level	*/
+		dcl fill				fixed;	/*	fill pattern	*/
+		dcl (i,j)			fixed;
+		dcl syn.counter	fixed;
+
+		call PUSH.GRAPHICS.ATTRIBUTES;	/*	save the current graphic attributes	*/
+
+		vector_mode;
+		call data_level(d);
+		if (x2<=x1) and (y2<=y1) then do;	/*	swap the corners	*/
+			i=x2;   j=y2;
+			x2=x1; y2=y1;
+			x1=i;  y1=j;
+		end;
+
+		if (mg600) then do;		/*	if pericom		*/
+			call pc(esc); call ps('|P');
+			do case fill;
+				call pc(asc.unl);	/*	solid				*/
+				call pc(asc.j);	/*	left diagonal	*/
+			end;
+			call BLOCKMODE_ON;
+			call connect(x1,y1,x2,y2);
+			call BLOCKMODE_OFF;
+		end;
+		else do;
+			syn.counter = 0;
+			do i = y1 to y2;
+				call connect(x1,i,x2,i);
+				syn.counter=syn.counter+1;
+				if (syn.counter=10)
+				then do;
+					syn.counter=0;
+					call run.syn.loop;
+				end;
+			end;
+		end;
+		call POP.GRAPHICS.ATTRIBUTES;	/*	restore the current graphic attributes	*/
+	end area.fill;
+
+	gpos.x: proc (x) returns (fixed) public swapable;	/*	maps transparent x-coord to graphics pixel pos	*/
+		dcl x	fixed;	/*	horizontal char pos * 100 (can be + or - )	*/
+
+		if MG600 then do;
+			x = (x * 12 / 100) + 23;
+			if rem ige 50 then x = x + 1;
+		end;
+		else do;	/*	vt640	*/
+			x = (x * 75 / 1000) + 8;
+			if rem ige 500 then x=x+1;
+		end;
+
+		if			x < 0					then x = 0;
+		else if	x > screen.width	then x = screen.width;
+
+		return x;
+	end gpos.x;
+
+	gpos.y: proc (y) returns (fixed) public swapable;	/*	maps transparent y-coord to graphics pixel pos	*/
+		dcl y	fixed;	/*	vertical char pos * 100 (can be + or - )	*/
+
+		if MG600 then do;
+			y = ((2300-y) * 30 / 100) + 42;
+			if rem ige 50 then y = y + 1;
+		end;
+		else do;	/*	vt640	*/
+			y = ((2300-y) * 20 / 100);
+			if rem ige 50 then y = y + 1;
+		end;
+
+		if			y < 0					then y = 0;	/*	limit coord to screen bounds	*/
+		else if	y > screen.height	then y = screen.height;
+
+		return y;
+	end gpos.y;
+
+	TPOS.X: PROC(X) RETURNS(FIXED) PUBLIC SWAPABLE;	/*	MAPS X PIXEL COORDINATE TO SCREEN COORDINATE	*/
+		DCL X	FIXED;
+
+		IF MG600 THEN DO;
+			LOAD X - 23+24;
+			DIV 12;
+		END;
+		ELSE DO;	/*	VT640	*/
+			LOAD X - 8+15;		/*	SUBTRACT THE LEFT PIXEL MARGIN				*/
+			MUL 10;				/*	MUST DIVIDE BY 7.5 (PIXEL WIDTH OF FONT)	*/
+			MWAIT;
+			DIV 75;				/*	DIVIDE BY WIDTH OF FONT							*/
+		END;
+		RETURN RES-2;
+	END TPOS.X;
+
+	TPOS.Y: PROC(Y) RETURNS(FIXED) PUBLIC SWAPABLE;
+		DCL Y	FIXED;
+
+		IF MG600 THEN DO;
+			LOAD Y - 42+60;
+			DIV 30;
+			RETURN (23+2 - RES);
+		END;
+		ELSE DO;	/*	VT640	*/
+			LOAD Y;			/*	NO BOTTOM PIXEL MARGIN ON VT640	*/
+			DIV 20;			/*	DIVIDE BY PIXEL OF TRANSPARENT MODE CHARACTER	*/
+			RETURN (23 - RES);
+		END;
+	END TPOS.Y;
+
+	Limit.X: proc(x) returns (fixed) public swapable;
+		dcl x	fixed;
+
+		if			x < 0					then x = 0;
+		else if	x > screen.width	then x = screen.width;
+		return x;
+	end Limit.X;
+
+	Limit.Y: proc(y) returns (fixed) public swapable;
+		dcl y	fixed;
+
+		if			y < 0					then y = 0;
+		else if	y > screen.height	then y = screen.height;
+		return y;
+	end Limit.Y;
+
+	gpix.x: proc (chars) returns (fixed) public swapable;
+		dcl chars	fixed;	/*	hundredths of chars to compute graphic pixels for	*/
+
+		load abs(chars);
+		mul  tchar.width;
+		mwait;
+		div  1000;
+		if chars < 0
+		then return -(res + (rem >= 500));
+		else return   res + (rem >= 500);
+	end gpix.x;
+
+	gpix.y: proc (chars) returns (fixed) public swapable;
+		dcl chars	fixed;	/*	hundredths of chars to compute graphic pixels for	*/
+
+		load abs(chars);
+		mul  tchar.height;
+		mwait;
+		div  1000;
+		if chars < 0
+		then return -(res + (rem >= 500));
+		else return   res + (rem >= 500);
+	end gpix.y;
+
+	gbox: proc (x1,y1,x2,y2,raised) public swapable;
+		dcl (x1,y1,x2,y2)	fixed;
+		dcl raised			fixed;
+
+      call alias.lines.off();
+		call connect(x1,y1,x2,y1);
+		call plot	(x2,y2);
+		call plot	(x1,y2);
+		call plot	(x1,y1);
+		if raised then do;
+			call Line_Type(1);
+			call move_to (x2+1,y1-2);
+			call plot	 (x2+1,y2-1);
+			call plot	 (x1+2,y2-1);
+			call Line_Type(0);
+			call move_to (x2+2,y1-4);
+			call plot	 (x2+2,y2-2);
+			call plot	 (x1+4,y2-2);
+		end;
+      call alias.lines.on();
+	end gbox;
+
+	/*	draws a bow-tie shape	*/
+	gbow: proc (x1,y1,x2,y2) public swapable;
+		dcl (x1,y1,x2,y2)	fixed;
+
+      call alias.lines.off();
+		call connect(x1,y1,x2,y2);
+		call plot	(x2,y1);
+		call plot	(x1,y2);
+		call plot	(x1,y1);
+      call alias.lines.on();
+
+	end gbow;
+
+	/*	draws a diamond shape, passed co-ordinate is center	*/
+	gdiam: proc (x,y) public swapable;
+		dcl (x,y)	fixed;
+
+      call alias.lines.off();
+		call connect(x-gpix.x(75), y, x, y+gpix.y(60));
+		call plot	(x+gpix.x(75), y);
+		call plot	(x, y-gpix.y(60));
+		call plot	(x-gpix.x(75), y);
+      call alias.lines.on();
+
+	end gdiam;
+
+	DRAW.ICON: proc(icon,x,y) public swapable;
+		dcl icon		fixed array;
+		dcl (x,y)	fixed;
+		dcl I			fixed;
+
+		call move_to(x,y);
+		call plot(x,y);
+		do i = 1 to icon(0);
+			call plot(x+icon(i*2-1),y+icon(i*2));
+		end;
+		call plot(x,y);
+	end DRAW.ICON;
+
+	initialize.graphics.terminal:proc public swapable;
+		if gtype<>0 then do;
+			call punits(screen.width,screen.height);
+			call viewport(0,screen.width,0,screen.height);
+			call window  (0,screen.width,0,screen.height);
+			vector_mode;
+			call data_level(0);	/*	white	*/
+			call char_size (0);	/*	set character size to normal	*/
+			transparent_mode;
+			call tty_wait;
+		end;
+	end initialize.graphics.terminal;
+
+	call initialize.graphics.terminal;
+
+end PLOTMOD;
+

@@ -1,0 +1,509 @@
+/*	:SYNSOU:STMMOD:STRECSOA  $Title  SAMPLE TO MEMORY CODE CONTINUED	*/
+
+/*
+Modified:
+1989/10/14 - cj  - corrected start time & duration of button
+						 panel STM recording for tempo map
+1989/02/24 - TSS - Fixed poly ram >> 32mb bugs (sign extend into page bits)
+1988/12/09 - SGS - Replaced check for SAFE II with call to READ.STM.CONFIG
+1988/09/07 - SGS - Add check for new SAFE II adc - allow stereo 100 kHz sampling
+1988/04/22 - JSS - Changed compute_gain to deal w/new SAFE (ADC); gain in db.
+1987/12/17 - MWH - Merge poly updates with N-Final plus AEE sources
+1987/11/12 - MWH - Make timer comparisons unsigned to fix "30 sec hang"
+1987/08/11 - MWH - Update all to support max 4 poly bins, 512mb/bin
+1987/06/26 - MWH - Split FRP.PTR into FP0-FP3.PTR for expanded poly
+1987/02/10 - BSW - This is part of the module Sample-To-Memory Module, STRECMOD
+*/
+
+	start.mono.adc:proc swapable;		/*	init and start mono adc	*/
+		write(d66)="11";					/*	select control register	*/
+		write(d67)="370";					/*	inititialize unit	*/
+		write(d67)=0;						/*	but only temporarily	*/
+		write(d66)="12";					/*	select divisor register	*/
+		write(d67)=pindex-2;				/*	set up appropriate rate	*/
+		write(d66)="15";					/*	select clear input buffer register	*/
+		write(d67)=0;
+		write(d66)="17";					/*	select input limit register	*/
+		write(d67)=256;					/*	generate interrupt when 256 words in buffer	*/
+		write(d66)="11";					/*	select control register again	*/
+
+		disable;
+
+		//	cj - 3/15/99 - I'm not sure why we wait for the d16 here.  I believe it's so we can synchronize starting
+		//	the sampling precisely in sync with the next millisecond boundary.  This (theoretically) will give us
+		//	sub-millisecond synchronization during playback.  E.G. the playback starts during the interrupt routine, so
+		//	it will be precisely in sync with what we originally recorded.
+
+		if d16there<>0 then do;          /*	wait here for d16	*/
+			do while (read(1)&128)=0;
+            interp_check_interrupts();
+			end;
+		end;
+
+		write(d67)=1;							/*	start adc running	*/
+		adc.start.msb = play.time.msb;	/*	sample start time	*/
+		adc.start.lsb = play.time.lsb;	/*	for use later		*/
+		enable;
+
+		adc.start.lsb=adc.start.lsb+1;	/*	increment to reflect		*/
+		if adc.start.lsb=0					/*	correct playback time	*/
+		then adc.start.msb=adc.start.msb+1;
+
+		tossed.d66.sectors = 0;
+
+		write(d66)="10";					/*	select data register	*/
+		write("300")=read(d67);			/*	read and toss first  sample (eroneous)	*/
+		write("300")=read(d67);			/*	read and toss second sample (eroneous)	*/
+	end start.mono.adc;
+
+	start.digital.adc:proc swapable;	//	Initialize and start digital STM inputs
+		if (interp_latch_dig_stm(0, stm.record.stereo, stm.record.rate) != 0)
+			DRAW.MESSAGE('Digital STM is not installed or is in use by another application');
+
+		disable;
+
+		if d16there<>0 then do;			/*	wait here for d16	*/
+			do while (read(1)&128)=0;
+            interp_check_interrupts();
+			end;
+		end;
+
+		interp_start_dig_stm();
+
+		adc.start.msb = play.time.msb;	/*	sample start time	*/
+		adc.start.lsb = play.time.lsb;	/*	for use later		*/
+		enable;
+
+		adc.start.lsb=adc.start.lsb+1;	/*	increment to reflect		*/
+		if adc.start.lsb=0					/*	correct playback time	*/
+		then adc.start.msb=adc.start.msb+1;
+
+		tossed.d66.sectors = 0;
+	end start.digital.adc;
+
+	/*	$page	*/
+
+	allocate_channels: proc returns (fixed) swapable;	/*	allocate poly channels for A/D	*/
+		dcl zero_busy	fixed;			/*	TRUE if channel zero is busy	*/
+		dcl one_busy	fixed;			/*	TRUE if channel one is busy	*/
+		dcl message		fixed;				/*	TRUE if message printed			*/
+		dcl (i,j)		fixed;
+
+		zero_busy = 1; one_busy = 1;	/*	assume the channels are busy	*/
+		message = 0;						/*	no message yet	*/
+
+		do while ((zero_busy <> 0) and ((stm.record.stereo <> 1) or (one_busy <> 0)));	/*	wait for the channels to come free	*/
+			do i = 1 to core(fp0.ptr);	/*	search for channels	*/
+				j = (core(fp0.ptr + i) and "377");	/*	pick up number of next free channel	*/
+
+				if ((j = 0) or ((stm.record.stereo = 1) and (j = 1))) then do;	/*	if it's channel zero or one	*/
+					core(fp0.ptr + i) = core(fp0.ptr + core(fp0.ptr));	/*	remove channel from free list	*/
+					core(fp0.ptr) = core(fp0.ptr) - 1;
+					if j = 0 then zero_busy = 0; else one_busy = 0;	/*	no longer busy	*/
+				end;
+			end;								/*	of searching for channels	*/
+
+			if ((zero_busy <> 0) and ((stm.record.stereo <> 1) or (one_busy <> 0))) then do;	/*	if they aren't free yet	*/
+				if message = 0 then call draw.message ('Waiting for free channel');
+				message = 1;
+
+				if ((num.of.d50.in.chars<>0) or (new.poly.contents)) then do;	/*	if user did something to stop us	*/
+					if ((zero_busy = 0) or (one_busy = 0)) then do;	/*	if we stole channel zero or one	*/
+						core(fp0.ptr) = core(fp0.ptr) + 1;	/*	return it to the end	*/
+						if zero_busy = 0 then j = 0; else j = 1;	/*	get channel number to return	*/
+						core(fp0.ptr + core(fp0.ptr)) = (b.poly or j);
+					end;
+					if message <> 0 then call erase.message;
+
+					return (0);				/*	channel allocation aborted by user	*/
+				end;
+			end;								/*	of they aren't free yet	*/
+
+			chill.out.and.run.syn();
+
+		end;									/*	of waiting for channels to come free	*/
+
+		if message <> 0 then call erase.message;
+
+		return (1);							/*	channels successfully allocated	*/
+	end allocate_channels;
+
+	free_channels: proc swapable;		/*	free poly channels used for A/D	*/
+		dcl i	fixed;
+
+		if stm.record.stereo = 1 then i = 2; else i = 1;	/*	determine number of channels to free	*/
+		call blockmove (loc(fp0.ptr + 1), loc(fp0.ptr + 1 + i), core(fp0.ptr));	/*	make room at top of free channel list	*/
+		core(fp0.ptr) = core(fp0.ptr) + i;	/*	and add them to the free channel list	*/
+		do i = 1 to i;								/*	like so	*/
+			core(fp0.ptr + i) = (b.poly or (i - 1));
+		end;
+	end free_channels;
+
+	/*	$page	*/
+
+	//	Note: routine must keep interrupts off
+	compute_gain: proc(gain) returns (fixed) swapable;	/*	compute A/D format gain	*/
+		dcl gain	fixed;	/*	gain (times ten) to set it to. dB or linear scale	*/
+		dcl mult	fixed;	/*	multiplier to write to A/D	*/
+
+		dcl multiplier data (4, 10,   30,    90,   270);	/*	table of multipliers		*/
+		dcl mult_value data (4,  0, "40", "140", "340");	/*	values to write to A/D	*/
+
+		if (READ.STM.CONFIG(0) & "H8000") <> 0		/*	If new SAFE (Analogic ADC)	*/
+		then do;							/*	compute gain & limit for new SAFE		*/
+			gain = 3 + gain;			/*	Compute dB gain value to write to SAFE	*/
+
+			if gain <  0 then gain = 0;		/*	Limit value to valid range	*/
+			if gain > 31 then gain = 31;
+
+			return (gain);							/*	Return A/D gain for new SAFE	*/
+		end;			/*	of new SAFE	*/
+		else do;		/*	Old SAFE (Analog Solutions ADC); compute gain for it	*/
+			if gain <  10 then gain =  10;	/*	cannot have gains less than one	*/
+			if gain > 793 then gain = 793;	/*	or greater than this	*/
+
+			mult = 1;
+			do while ((mult <= multiplier (0)) and (gain >= multiplier (mult)));	/*	find multiplier	*/
+				mult = mult + 1;
+			end;
+
+			mult = mult - 1;	/*	point to correct multiplier	*/
+
+			return (mult_value (mult) + 16*gain/multiplier (mult) - 16);	/*	return A/D gain	*/
+		end;			/*	of old SAFE	*/
+	end compute_gain;
+
+	start.poly.adc: proc(base, max#) swapable;	/*	initialize and start poly adc	*/
+		dcl base			fixed array;	/*	sound file sector base	*/
+		dcl max#			fixed;			/*	sound file sector length	*/
+		dcl right		fixed;			/*	A/D channel corresponding to right stereo channel	*/
+      dcl i          fixed;
+		dcl new_gain	fixed;			/*	gain	*/
+
+		dcl left	lit '0';	/*	left A/D channel	*/
+
+		call compute.psyn.freq (3840 + log1000 (shl(stm.record.rate, 1)));	/*	determine increment, modulus, and phase increment	*/
+
+		disable;
+
+		write(psc) = master;	/*	select master poly channel		*/
+		write(psf) = pswl;	/*	start with wave table length	*/
+		if sample.to.memory <> 0 then do;					/*	if sampling			*/
+			write(psd) = -(max# - shr(bl.poly, 8));		/*	wave table length	*/
+			write(psd) = "177400";								/*	sign extend into page bits	*/
+			write(psd) = base(lw#lsb) + shr(bl.poly,8);	/*	poly base sectors	*/
+			write(psd) = shl(base(lw#msb),8) \ 0;			/*	base page, word	*/
+			write(psd) =-1;										/*	loop length			*/
+			write(psd) =-1;
+		end;
+		else do;														/*	if not sampling	*/
+			write(psd) = -1;										/*	wave table length	*/
+			write(psd) = -max#;
+			write(psd) = base(lw#lsb);							/*	poly base sectors	*/
+			write(psd) = shl(base(lw#msb),8) \ 20;			/*	base page, word	*/
+			write(psd) = 0;										/*	loop length			*/
+			write(psd) = 0;
+		end;
+
+		if (READ.STM.CONFIG(0)&"H4000")=0 then do;	/*	PRM is not present	*/
+         write(psc) = 0;            // Explicitly set channel number to pin 0. This assumes master is in bin 0
+			write(psf) = psadmode;		/*	set A/D mode	*/
+			if stm.record.rate <= 505	/*	less than 50.5 kHz?	*/
+			then write(psd) = 0;			/*	set mode to 2 channel, no autogain	*/
+			else write(psd) = 1;			/*	set mode to 1 channel, no autogain	*/
+		end;
+		else do;
+         write(psc) = 0;            // Explicitly set channel number to pin 0. This assumes master is in bin 0
+			write(psf) = psadmode;		/*	set A/D mode	*/
+			write(psd) = 0;				/*	PRM is present - set to 2 channel, no autogain	*/
+		end;
+
+		new_gain = compute_gain (stm.record.scale);
+		write(psc) = left;				/*	select left A/D channel	*/
+		write(psf) = psadvol;			/*	set gain	*/
+		write(psd) = new_gain;
+
+		if stm.record.stereo = 0 then do;		/*	mono sampling	*/
+			write(psc) = (left and "14");			/*	activate the A/D channel - set first channel in box	*/
+			write(psf) = psadact;
+			write(psd) = bits (left and "3");	/*	set channel number(s) in that box	*/
+
+			write(psc) = master;	/*	select master channel - set to required rate	*/
+			write(psf) = pspi;	/*	write phase increment first	*/
+			write(psd) = 0;		/*	MS phase increment	*/
+			if sample.to.memory <> 0	/*	if sampling	*/
+			then write(psd) = noteadd;	/*	phase increment of NOTEADD		*/
+			else write(psd) = 0;			/*	otherwise, no phase increment	*/
+			write(psd) = noteinc; write(psd) = notenum;	/*	increment of NOTEINC; modulus of NOTENUM	*/
+
+			write(psf) = psadmc;			/*	turn on the A/D channel	*/
+			write(psd) = 1;
+		end;	/*	of mono sampling	*/
+
+		/*	$page	*/
+
+		else do;	/*	stereo sampling	*/
+			if stm.record.rate <= 505	/*	less than 50.5 kHz?	*/
+			then right = left + 1;		/*	the right channel is the next channel	*/
+			else do;	/*	sampling in stereo, between 50.6 kHz and 100 kHz, inclusive	*/
+				if ( READ.STM.CONFIG(left)&"H4000" )<>0	/*	see if PRM is there	*/
+				then right = left + 1;	/*	using new SAFE II box, the right chan is next chan	*/
+				else right = left + 2;	/*	using old SAFE box, the right channel is two over (takes two channels to do 100kHz)	*/
+			end;
+
+			write(psc) = (left and "14");	/*	activate the A/D channel - set first channel in box	*/
+			write(psf) = psadact;
+			write(psd) = (bits (left and "3") or bits (right and "3"));	/*	set channel number(s) in that box	*/
+
+			write(psc) = slave;					/*	select slave poly channel	*/
+			write(psf) = pswl;					/*	start with wave table length	*/
+			if sample.to.memory <> 0 then do;					/*	if sampling	*/
+				write(psd) = -(max# - shr(bl.poly, 8));		/*	wave table length	*/
+				write(psd) = "177400";								/*	sign extend into page bits	*/
+				write(psd) = base(lw#lsb) + shr(bl.poly, 8);
+				write(psd) = shl(base(lw#msb),8) \ 0;			/*	base address	*/
+				write(psd) = -1;
+				write(psd) = -1;										/*	loop length	*/
+			end;
+			else do;	/*	if not	*/
+				write(psd) = -1;
+				write(psd) = -max#;									/*	wave table length	*/
+				write(psd) = base(lw#lsb);
+				write(psd) = shl(base(lw#msb),8) \ 20;			/*	base address	*/
+				write(psd) = 0;
+				write(psd) = 0;										/*	loop length	*/
+			end;
+
+			write(psc) = master;		/*	select master channel - set to required rate	*/
+			write(psf) = pspi;		/*	write phase increment first	*/
+			write(psd) = 0;			/*	MS phase increment	*/
+			if sample.to.memory <> 0				/*	if sampling	*/
+			then write(psd) = shl(noteadd, 1);	/*	phase increment of NOTEADD*2	*/
+			else write(psd) = 0;						/*	otherwise, no phase increment	*/
+			write(psd) = noteinc; write(psd) = notenum;	/*	increment of NOTEINC; modulus of NOTENUM	*/
+
+			write(psc) = slave;		/*	select slave channel - set to full rate	*/
+			write(psf) = pspi;		/*	write phase increment first	*/
+			write(psd) = 0;		 write(psd) = 0;				/*	phase increment of 0	*/
+			write(psd) = (1 - 1); write(psd) = (256 - 1);	/*	increment of 1; modulus of 1 (101.01 kHz)	*/
+
+			new_gain   = compute_gain (stm.record.scale);
+			write(psc) = right;		/*	select right A/D channel	*/
+			write(psf) = psadvol;	/*	set gain	*/
+			write(psd) = new_gain;
+
+			write(psf) = psadmc;		/*	turn on the A/D channels	*/
+			write(psd) = 2;
+
+			write(psc) = slave;		/*	select slave poly channel	*/
+			write(psf) = pson;		/*	turn the channel on	*/
+			write(psd) = 1;			/*	without looping	*/
+		end;	/*	of stereo sampling	*/
+
+		write(psc) = master;			/*	select master poly channel	*/
+		write(psf) = pson;			/*	turn the channel on	*/
+
+		//	Wait for the next millisecond boundary so playback will precisely synchronize with recording.  This
+		//	is useful if we are sampling the output of the sequencer.
+		if d16there<>0 then do;		/*	wait here for d16	*/
+			do while (read(1)&128)=0;
+            interp_check_interrupts();
+			end;
+		end;
+		write(psd) = 1;	/*	without looping	*/
+		adc.start.msb = play.time.msb;	/*	sample start time	*/
+		adc.start.lsb = play.time.lsb;	/*	for use later		*/
+
+		enable;
+
+		adc.start.lsb=adc.start.lsb+1;	/*	increment to reflect	*/
+		if adc.start.lsb=0					/*	correct playback time	*/
+		then adc.start.msb=adc.start.msb+1;
+
+		//	Wait here for ADC to actually start sampling
+		right = 0;
+		do while (right = 0);
+			right = interp_usleep(10);    //	Delay for PPC
+			disable;
+			write(psc) = 0;
+			write(psf) = psadsc0;			/*	get sample count	*/
+			right = read(psd);
+			enable;
+
+         // Handle numerous cases of stereo STM recording not working
+         // by not crashing Sync3
+         if (right == 0) {
+            i = i + 1;
+            if ((i mod 100) == 99)
+               interp_run_host_non_timer();
+            if (i == 1000)
+               right = 1;
+         }
+		end;
+	end start.poly.adc;
+
+	meter.display: proc swapable;
+		dcl meter				fixed static;		/*	current meter value	*/
+		dcl prev.meter			fixed static;		/*	previous meter value	*/
+		dcl clip.hold			fixed static;		/*	time at which to turn off clip indicator	*/
+		dcl meter.disabled	fixed static;
+		dcl last.wimage(16)	fixed static;		/*	copy of top line of window	*/
+		dcl i						fixed;
+		dcl meter.space		data ('.');			/*	element not lit character		*/
+		dcl clip.char			data (1,127);		/*	clipping indicator character	*/
+		dcl clip.detected		fixed static;		/*	clip flag 1-clipped 0-no clip	*/
+
+		meter.time = real.milliseconds - 1975;	/*	next refresh time: 25 msec	*/
+		if force.meter <> 0 then do;				/*	forced restore of meter	*/
+			meter.disabled = 1;						/*	kludge to handle forced case	*/
+		end;												/*	so .....'s appear	*/
+		else do;											/*	else not forced restore	*/
+			i = 0;										/*	reset character index	*/
+			do while (i<16)							/*	compare last meter output	*/
+			& (last.wimage(i)=wimage(i));			/*	to window as it is now	*/
+				i = i + 1;								/*	if it has changed let what is	*/
+			end;											/*	there stay for two seconds	*/
+			if (i < 16)
+			then do;										/*	image changed by someone else	*/
+				meter.time = real.milliseconds;	/*	delay for full 2 secs	*/
+				meter.disabled = 1;					/*	flag disable for next time	*/
+				do i = 0 to 15;						/*	make a copy of wimage	*/
+					last.wimage(i)=wimage(i);
+				end;
+				return;									/*	leave now--we are disabled	*/
+			end;
+		end;
+
+		if meter.disabled <> 0						/*	coming back from 2sec disable	*/
+		then do;											/*	or first iteration	*/
+			call clear.upper;							/*	first clear the upper line	*/
+			call emit.string(0,'................');	/*	fill with ....'s	*/
+			meter.disabled = 0;						/*	clear disable flag	*/
+			meter = (shr(smax,11)&"77777");		/*	smax will be more accurate than mmax here	*/
+			prev.meter = 0;							/*	clear old prev value	*/
+			clip.detected = 0;						/*	clear old clip detect	*/
+		end;												/*	old values out of date	*/
+
+		else do;											/*	normal refresh cycle	*/
+			if meter > 0 then							/*	if we need to decay	*/
+				meter = meter - 1;					/*	compute meter decay	*/
+			if shr(mmax,11) igt meter				/*	cur value > decay value	*/
+			then do;										/*	display new peak	*/
+				meter = shr(mmax,11);				/*	sample peak value	*/
+				if meter > 15							/*	limit in case of overflow	*/
+				then meter = 15;						/*	d66 will do this when clipping	*/
+			end;
+		end;
+															/*	see if we are clipping	*/
+		if (mmax ige 32767)																	/*	dig & d66 clip level		*/
+		or ((stm.record.device = stm.record.device.stm) & (mmax ige 32512))	/*	poly clip level			*/
+		then do;
+			clip.hold = real.milliseconds;			/*	flag clip element on for 2sec	*/
+			clip.detected = 1;							/*	set clip flag	*/
+		end;
+
+		if meter <> prev.meter							/*	plot new meter if current	*/
+		then do;												/*	level is different from last	*/
+			if meter > prev.meter						/*	must display new peak	*/
+			then do;											/*	first compute number of	*/
+				meter.blocks(0) = meter-prev.meter;	/*	new elements to light	*/
+				call emit.string(prev.meter,meter.blocks);	/*	light them	*/
+			end;
+			else do;
+				call emit.string(prev.meter-1,meter.space);	/*	clear one element	*/
+			end;
+		end;
+
+		if (clip.detected <> 0)										/*	deal with clipping	*/
+		then do;															/*	if clip has	*/
+			if ((real.milliseconds - clip.hold) IGT 2000)	/*	been displayed for	*/
+			then do;		/*	clip hold time over	*/				/*	2secs after last	*/
+				call emit.string(15,meter.space);				/*	clip then erase	*/
+				clip.detected = 0;									/*	clip character	*/
+			end;
+			else do;														/*	else	*/
+				if (wimage(15) <> 127)								/*	we haven't display it	*/
+				then call emit.string(15,clip.char);			/*	display clip element	*/
+			end;
+		end;
+
+		do i = 0 to 15;									/*	copy wimage for	*/
+			last.wimage(i) = wimage(i);				/*	next time	*/
+		end;
+		prev.meter = meter;								/*	sample for next time	*/
+		mmax = 0;											/*	reset max counter	*/
+	end meter.display;
+
+	button.record.note: proc swapable;
+		dcl (dur,dur.msb,dur.lsb)	fixed;
+		dcl borrow	fixed;
+		dcl time(1)	fixed;
+
+		call erase.track(stm.track);					/*	clear any existing notes	*/
+		if allocate.trk.header(stm.track)=0			/*	TRY TO ALLOCATE TRK HEAD	*/
+		then do;
+			/*	error	*/
+			return;											/*	NOT ENOUGH ROOM - BOMB OUT	*/
+		end;
+
+		if tossed.d66.sectors<>0 then do;
+
+			/*	compute how much sequencer time went by	*/
+			/*	in the 256 samples we just tossed			*/
+
+			bitmsb=shr(tossed.d66.sectors,8);			/*	get # of samples tossed	*/
+			bitlsb=shl(tossed.d66.sectors,8);
+
+			call ratio_multiply(samp.speed,1000);		/*	scale by speed				*/
+
+			if smpte.onoff<>0 then do;						/*	scale by smpte speed		*/
+				call ratio_multiply(smpte.track.rate,smpte.mode.rate);
+			end;
+
+			call ratio_multiply(pindex,30000);			/*	convert to # mseconds	*/
+
+			adc.start.msb = adc.start.msb + bitmsb;
+			adc.start.lsb = adc.start.lsb + bitlsb;
+			if adc.start.lsb ilt bitlsb
+			then adc.start.msb = adc.start.msb + 1;
+
+		end;
+
+		borrow = 0;												/*	clear borrow flag	*/
+		dur.lsb = adc.stop.lsb - adc.start.lsb;		/*	subtract start from stop lsb	*/
+		if dur.lsb igt adc.stop.lsb						/*	check for borrow	*/
+		then borrow = 1;
+
+		dur.msb = adc.stop.msb - adc.start.msb;		/*	subtract start from stop msb	*/
+		if dur.msb igt adc.stop.msb						/*	check for underflow	*/
+		then do;
+			if new.pan <> 0 then								/*	emit error if	*/
+			call emit.string(0,'ADC DURATION ERR');	/*	underflow; set note	*/
+			dur.msb = 0; dur.lsb = 0;						/*	length to zero	*/
+		end;
+		else do;
+			if borrow <> 0 then do;							/*	subtract borrow if	*/
+				dur.msb = dur.msb - 1;						/*	set	*/
+			end;
+		end;
+
+		/*	set up note for insertion	*/
+
+		call Map.Real.Time.To.Sequence.Time(loc(addr(adc.start.msb)), time);
+		call Map.Real.Duration.To.Sequence.Duration(time, loc(addr(dur.msb)), loc(addr(dur.msb)));
+
+		dur = msec.to.duration(loc(addr(dur.msb)));	/*	xlate msec to recorder format duration	*/
+		#w1 = shl((dur&"036000"),1)\1;					/*	set duration of note	*/
+		#w2 = shl(dur,6);										/*	to computed sf duration	*/
+		#w2 = (#w2 \ 33);										/*	set note to a440	*/
+		#w3 = rte.max;											/*	full volume	*/
+		#w4 = vel.note;										/*	protocol	*/
+
+		call load.seq.globals(stm.track);				/*	keep globals current	*/
+		call insert.note.record(time(0),time(1));		/*	put note in notelist	*/
+		call copy.timbre(0,stm.track);					/*	copy keyboard timbre onto track	*/
+	end button.record.note;
+
+	button.record.abort: proc swapable;
+		if (recd <> 0) then call STOP.RECORD;
+	end button.record.abort;

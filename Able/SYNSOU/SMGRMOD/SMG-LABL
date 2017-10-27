@@ -1,0 +1,214 @@
+/* SMG-LABL   $TITLE  Transparent mode label bits
+
+   Modified:
+   12/03/87 - MWH - Return delete attempt event when appropriate
+   11/17/87 - MWH - Split into 2 libraries; SMGR is too big
+   10/20/87 - MWH - Screen.Changed, Update, Exhibit, Enable USED CONSISTENTLY
+   10/20/87 - MWH - Keep screen updated while waiting for events
+   09/25/87 - MWH - Use literals for suffix lengths
+   
+*/
+
+DEFINE.LABEL.SUBROUTINE: proc(id,row,col,width,label0) swapable;
+   dcl id     fixed;   /* Id to attach to label */
+   dcl row    fixed;  
+   dcl col    fixed;
+   dcl width  fixed;   /* Maximum width of label; 0 means use length of label */
+   dcl label0 fixed;   /* length of label in characters */
+   dcl i     fixed;
+
+   if width = 0 then width = LABEL0;  /* Set width if default width is passed */
+
+   if Allocate.New.Object(O#Hlen+O#LABL.Size+shr(width+1,1)+1) then do;
+      call Write.Object(Object.Ptr+  O#Type,  O$Label);
+      call Write.Object(Object.Ptr + O#Status,O#STAT.Update);
+      call Write.Object(Object.Ptr + O#Id,    id);
+
+      call Write.Object(Object.Ptr + O#ULX,   gpos.x(col*100));
+      call Write.Object(Object.Ptr + O#ULY,   gpos.y(row*100)+gpix.y(100));
+      call Write.Object(Object.Ptr + O#LRX,   gpos.x(col*100)+gpix.x(width*100));
+      call Write.Object(Object.Ptr + O#LRY,   gpos.y(row*100));
+      call Write.Object(Object.Ptr + O#Action,Default.Action
+                                            \ O#ACT.Deposit.Rept.Disabled);
+      if (Default.Action&O#ACT.RealTime.Object)<>0
+      then Any.RealTime.Objects=Any.RealTime.Objects+1;
+      call Write.Object(Object.Ptr + O#Attr,  Default.Attr);
+      call Write.Object(Object.Ptr + O#ObjectGets,Get#In.Char);
+      call Write.Object(Object.Ptr + O#Trans.Row,Row);  /* Trans Row */
+      call Write.Object(Object.Ptr + O#Trans.Col,Col);
+      call Write.Object(Object.Ptr + O#Trans.Width,width);
+      Screen.Changed = true;
+      return 1;
+   end;
+
+   return 0;
+end DEFINE.LABEL.SUBROUTINE;
+
+DEFINE.LABEL: proc(id,row,col,width,label) public recursive;  /* NON-SWAP for string memory management */
+   dcl id    fixed;   /* Id to attach to label */
+   dcl row   fixed;  
+   dcl col   fixed;
+   dcl width fixed;   /* Maximum width of label; 0 means use length of label */
+   dcl label array;   /* Label, if any, to deposit initially */
+
+   Id = Allocate.Id(Id);   /* keep system info up to date, possibly auto allocate id */
+
+   if DEFINE.LABEL.SUBROUTINE(id,row,col,width,label(0)) then do;
+      call Copy.String.To.Exmem(Label,Object.Ptr+O#LABL.Label);
+      return Id;
+   end;
+   else return 0;
+end DEFINE.LABEL;
+
+UPDATE.LABEL: proc (ptr) public swapable; /* redraws value in field of object if different from displayed value */
+   dcl ptr           fixed; /* ptr to object to update */
+   dcl status        fixed;
+   dcl (i)           fixed;
+   dcl (x,y)         fixed;
+   dcl RT            boolean;   /* true if object is more real-time */
+
+   RT     = (Read.Object(Ptr+O#Action)&O#ACT.RealTime.Object);
+   status = Read.Object(ptr+O#Status);   /* read object status bits */
+
+   if (status & O#STAT.Enable) = 0       /* Object may not be drawn on screen */
+   then do;                              /* Just turn off update bit */
+      call Write.Object(ptr+O#Status,(Status & NOT(O#STAT.Update)));
+      return;
+   end;
+
+   if (status and O#STAT.Update) <> 0 then do;
+      if (RT<>0) then call Run.Syn.Loop;   /* keep real time code going */
+      call cpos(Read.Object(ptr+O#Trans.Row),Read.Object(ptr+O#Trans.Col)); /* Position at string field */
+      if (RT<>0) then call Run.Syn.Loop;   /* keep real time code going */
+      call Set.Term.Obj.Attr(ptr);
+      if (RT<>0) then call Run.Syn.Loop;   /* keep real time code going */
+      call Print.EMString(ptr+O#LABL.Label); /* print new string (drawing it) */
+      do i = Read.Object(ptr+O#LABL.Label) to Read.Object(ptr+O#Trans.Width)-1;
+         call pc(a.sp);
+      end;
+      if Disable.Attr.Reset=0 then call Set.Term.Attr(ATTR#Normal);
+      call Write.Object(ptr+O#Status,(Status&not(O#STAT.Update\O#STAT.Disp.Attr.Set))
+                        \(O#STAT.Exhibit\shl(Status&O#STAT.Attr.Set,1))); /* object now displayed and refreshed */
+      if (RT<>0) then call Run.Syn.Loop;   /* keep real time code going */
+   end;
+end UPDATE.LABEL;
+      
+PUBLISH.LABEL: proc (ptr,col) public swapable; /* redraws value in field of object if different from displayed value */
+   dcl ptr           fixed; /* ptr to object to update */
+   dcl col           fixed;
+   dcl status        fixed;
+   dcl (i)           fixed;
+   dcl (x,y)         fixed;
+   dcl RT            boolean;   /* true if object is more real-time */
+
+   status = Read.Object(ptr+O#Status);   /* read object status bits */
+
+   if (status & O#STAT.Enable) = 0       /* Object may not be drawn on screen */
+   then do;                              /* Just turn off update bit */
+      call Write.Object(ptr+O#Status,(Status & NOT(O#STAT.Update)));
+      return;
+   end;
+
+   if (col == 0) {
+      call cpos(Read.Object(ptr+O#Trans.Row),Read.Object(ptr+O#Trans.Col)); /* Position at string field */
+      call erase.to.end.of.line;
+      call Set.Term.Obj.Attr(ptr);
+   }
+
+   call Print.EMString(ptr+O#LABL.Label); /* print new string (drawing it) */
+   do i = Read.Object(ptr+O#LABL.Label) to Read.Object(ptr+O#Trans.Width)-1;
+      call pc(a.sp);
+   end;
+   call Write.Object(ptr+O#Status,(Status&not(O#STAT.Update\O#STAT.Disp.Attr.Set))
+                     \(O#STAT.Exhibit\shl(Status&O#STAT.Attr.Set,1))); /* object now displayed and refreshed */
+end PUBLISH.LABEL;
+      
+DEPOSIT.LABEL: proc (id,label) public RECURSIVE; /* NON-SWAP FOR STRING MANAGEMENT store new value into string type object */
+   dcl id      fixed;
+   dcl label   array; /* String to deposit */
+   dcl label0  fixed;
+   dcl RT      fixed;
+   dcl update  fixed;
+   dcl (ptr,i) fixed;
+
+   if Locate.Object(id)<>0 then do;
+      ptr=Object.Ptr;
+
+      RT  = (Read.Object(Ptr+O#Action)&O#ACT.RealTime.Object);
+      if (RT<>0) then call Run.Syn.Loop;    /* keep real time code going */
+
+      label0=label(0);                      /* save original length of string */
+
+      i = Read.Object(Ptr+O#Trans.Width);   /* Get max byte count from object */
+      if label0 igt i then label(0)=i;      /* Make sure label to deposit is not longer than allocated length */
+
+      if (XMem.Str.Equals.IMem.Str(Ptr+O#LABL.Label,label)=0) /* strings are different */
+      or ((Read.Object(ptr + O#Status) & O#STAT.Exhibit)  =0) /* object is not displayed yet */
+      then do;
+         call Write.Event.Queue(Get.Screen.Event,S#Deposit,id);
+         call Copy.String.To.Exmem(Label,ptr+O#LABL.label);
+
+         if Check.Update.On.Deposit(ptr) <> 0
+         then call Update.Label(ptr);       /* Do update right now */
+
+         if (RT<>0) then call Run.Syn.Loop; /* keep real time code going */
+      end;
+
+      label(0)=label0;                    /* restore label to original len */
+   end;                                   /* of object exists */
+
+end DEPOSIT.LABEL;
+
+GET.LABEL: proc(ptr) returns (fixed) public swapable;
+   dcl ptr   fixed;
+   dcl event fixed;
+
+   call cpos(Read.Object(ptr+O#Trans.Row),Read.Object(ptr+O#Trans.Col));
+
+   if (Read.Object(ptr+O#Action)&O#ACT.Prev.Obj) <> 0  /* Return to previous object bit set */
+   then do;
+      Last.Event.Code = Get.Screen.Event;
+      Last.Event.Info = S#ObjectTerminate;      /* Nothing happened */
+      return Last.Event.Code;
+   end;
+
+   do while 1;
+      call Enable.Object.and.User.Gets(ptr);
+      if Screen.Changed <> false            /* See if some objects need updating */
+      then call Update.Screen;              /* Will return right away if events pending */
+      event = Get.Next.Event;
+      call Disable.Object.and.User.Gets(ptr);
+
+      if event = Get.In.Char then do;         /* User typed a character */
+
+         if Last.Event.Info = A.CR then do;   /* Is it a CR ? */
+            call Write.Event.Queue(Get.Screen.Event,S#KeyActivate,Read.Object(ptr+O#Id));
+            New.Screen.Event = S#ObjectTerminate;
+         end;
+
+         else if Last.Event.Info = A.DEL then do;   /* Is it a DELETE ? */
+            call Write.Event.Queue(Get.Screen.Event,S#DelAttempt,Read.Object(ptr+O#ID));
+            New.Screen.Event = S#ObjectTerminate;
+         end;
+
+         if get.item.enabled(Get.In.Char) <> 0
+         then return event;                   /* Someone else has chars enabled */
+
+      end;
+      else return event;                      /* Return all other events */
+   end;
+end GET.LABEL;
+
+FETCH.LABEL: proc(id,out.string) public swapable; /* returns current value in specified string object */
+   dcl id         fixed; /* object to fetch string from */
+   dcl out.string array; /* output array */
+   dcl i          fixed;
+
+   if Locate.Object(id) then do; /* object exists */
+      do i = 0 to shr(Read.Object(Object.Ptr+O#LABL.Label)+1,1); /* copy words */
+         out.string(i) = Read.Object(Object.Ptr+O#LABL.Label+i);
+      end;
+   end;
+   else out.string(0) = 0; /* error - return null string */
+end FETCH.LABEL;
+

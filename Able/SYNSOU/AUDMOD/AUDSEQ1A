@@ -1,0 +1,552 @@
+/* AUDSEQ1A - update panl                                  */
+
+/*
+   11/06/90 - PF  - Split this file off from AUD-SEQ1
+*/
+
+
+/* $page - Update all sequencer note information on screen */
+
+
+Update.Sequencer.Note.Information: proc (force) swapable;
+   dcl force   fixed;   /* pass 1 to force update without interrupting */
+                        /* pass 2 to force erase  of all  fields       */
+   dcl row     fixed;
+   dcl trk     fixed;
+   dcl i       fixed;
+   dcl j       fixed;
+   dcl k       fixed;
+   dcl c(16)   fixed;
+   dcl time    fixed static;
+
+   Check.Cursor.Movement: proc;
+      dcl seqtime(1) fixed;
+
+      /* if the real time has advanced beyond Cursor.Scroll.End,  then */
+      /* check here for a Big.Time display update or a Cursor          */
+      /* movement:                                                     */
+
+      if COM32(loc(addr(Sampled.Actual.Play.Time.Msb)), Cursor.Scroll.End) = lw#igt
+      then do;
+
+         call Map.Real.Time.To.Sequence.Time(loc(addr(Sampled.Actual.Play.Time.Msb)), seqtime);
+
+         if  (COM32(seqtime, Seq.Cursor.End) = lw#igt)			/* if play time as gone beyond and of cursor */
+         and (COM32(Seq.Cursor.End, Seq.Screen.End) <> lw#IEQ)	/* and there are more notes on screen...     */
+         then call Update.Seq.Time.Cursor;
+      end;
+
+      /* check big time display every 500 msecs */
+
+      if (Real.Milliseconds - time) IGT 500
+      then do;
+         if Big.Time.Display.Mode=BT#SEQ then do;
+            if (COM32(loc(addr(Sampled.Actual.Play.Time.Msb)), Big.Time.Begin) = lw#ilt)
+            or (COM32(loc(addr(Sampled.Actual.Play.Time.Msb)), Big.Time.End  ) = lw#igt)
+            then do;
+               call Refresh.Big.Time.Display;
+            end;
+         end;
+         else if Big.Time.Display.Mode=BT#SMPTE then do;
+            if New.Smpte.Info <> 0 then do;
+               call Refresh.Big.Time.Display;
+               New.Smpte.Info = 0;
+            end;
+         end;
+         time = Real.Milliseconds;
+      end;
+   end Check.Cursor.Movement;
+
+   if  (new.in.char        <> 0)  /* if no input char received   */
+   or  (new.mouse.button   <> 0)  /* or new mouse activity       */
+   or  (m$Presses          <> 0)  /* or stacked press            */
+   or  (Check.Next.Event   <> 0)  /* or other system event       */
+   then if force = 0 then return 0;  /* return not completed     */
+
+   do row = 0 to Seq.Event.Display.Size-1;    /* Go over rows */
+
+      /* Look up the starting time for this line of notes: */
+
+      i = 0;
+      j = false;
+      do while (i < Seq.Tracks) & (j = false);  /* Loop over all tracks until one with a time in it occurs */
+         write(mam) = AEE.Cur.Seq.Snap+i;       /* track sector */
+         write(mal) = INDEX.START+row;          /* row index */
+         if read(md) <> 0 then j = true;        /* index <> 0 means a note is there */
+         else i = i + 1;                        /* index = 0 means must continue to search */
+      end;
+
+      /* if line should be blank, erase entire line,  disable */
+      /* the table cells,   and update the current info       */
+
+      if (j = false) or (force = 2) then do;
+         
+         /* if row becomes empty waiting for a ripple verify */
+         /* by a scroll, for example, then must cancel       */
+         /* the ripple verify request                        */
+
+         if Ripple.Verify.Rows <> 0 then do;
+            Ripple.Verify.Rows = Ripple.Verify.Rows & (not(bits(row)));
+            Note.Area.Force(row) = (-1);     /* force all areas since user may be jogging end times */
+            if Ripple.Verify.Rows = 0 then do;
+               call Highlight.Graphics.Button.Table.Entry(Seq.Verify.Undo.Search, 0, 0, 0, 2, 0);
+               if (Seq.Dialog.Mode = SEQ#RippleVerifyDialog)
+               then call CLOSE.SEQ.DIALOG;
+               Ripple.Edit.Type = 0;
+            end;
+         end;
+
+         /* erase and disable start time if nothing to display. */
+         /* only erase if we had actually displayed something   */
+         /* on this line before:                                */
+
+         if  ((Note.Area.Contents(row)) <> 0)
+         or  ((Note.Area.Force   (row)) <> 0)
+         then do;
+
+            call cpos(Seq.Event.Display.Row+row, 0);
+            call erase.to.end.of.line;
+            call Disable.And.Disexhibit.Table.Cell(Seq.Event.Time.Table, 0, row);
+            Event.Time.Enabled = Event.Time.Enabled &  (not(bits(row)));
+            call Check.Next.Event;
+
+            do i = 0 to Seq.Tracks-1;
+               if  ((Note.Area.Contents(row)&bits(i)) <> 0)
+               or  ((Note.Area.Force   (row)&bits(i)) <> 0)
+               then do;
+                  call Disable.All.Table.Cells(row,i);
+                  call Check.Next.Event;
+               end;
+               write(mam) = AEE.Old.Seq.Snap+i;  /* indicate nothing is */
+               write(mal) = row*16;              /* displayed for this  */
+               write(md ) = 0;                   /* track on this row.  */
+            end;
+
+            Note.Area.Contents(row) = 0;
+            Note.Area.Force   (row) = 0;
+
+            call Check.Cursor.Movement;
+
+            if  (new.in.char        <> 0)  /* if no input char received   */
+            or  (new.mouse.button   <> 0)  /* or new mouse activity       */
+            or  (m$Presses          <> 0)  /* or stacked press            */
+            or  (Check.Next.Event   <> 0)  /* or other system event       */
+            then if force = 0 then return 0;  /* return not completed     */
+         end;
+      end;
+
+      /* Else if there is at least one note on this line,  then display */
+      /* the starting time,  and fill in the note information.          */
+
+      else do;
+
+         /* get info about this note for its starting time: */
+
+         call Get.Snapshot.Info(AEE.Cur.Seq.Snap,i,TRKINDEX,row);
+
+         /* display start time,  unless a rippple edit is pending */
+         /* for this row:                                         */
+
+         if (Ripple.Verify.Rows & bits(row)) = 0
+         then do;
+            Disable.Deposits = true;
+            call Enable.Table.Cell (Seq.Event.Time.Table,0,row);
+            call Fetch.Table       (Seq.Event.Time.Table,0,row);
+            call Deposit.32Bit.MSEC(Seq.Event.Time.Type,loc(addr(#NMSB)),Zero.Zero);
+            call Deposit.Table     (Seq.Event.Time.Table,0,row);
+            Event.Time.Enabled = Event.Time.Enabled \ bits(row);
+            call Check.Next.Event;
+            Disable.Deposits = false;
+         end;
+
+         /* now fill in the row: */
+
+         do i = 0 to Seq.Tracks-1;
+
+            write(mam) = AEE.Cur.Seq.Snap+i;       /* track sector */
+            write(mal) = INDEX.START+row;          /* row index    */
+
+            /* If this row & track should be blank,  then */
+            /* disable the appropriate table cells        */
+
+            if read(md) = 0
+            then do;
+
+               write(mam) = AEE.Old.Seq.Snap+i;       /* track sector */
+               write(mal) = row*16;
+
+               /* see if anything was displayed here.  If so, */
+               /* then erase it                               */
+
+               if  (read(md)                          <> 0)
+               or  ((Note.Area.Force   (row)&bits(i)) <> 0)
+               then do;
+
+                  write(md) = 0;  /* indicate it will be blank now */
+
+                  /* only update if no ripple verify pending: */
+
+                  if (Ripple.Verify.Rows & bits(row)) = 0
+                  then do;
+
+                     call cpos(Seq.Event.Display.Row+row,
+                               Seq.Event.Display.Left.X + i*spacing);
+
+                     if i = Seq.Tracks-1
+                     then call erase.to.end.of.line;
+                     else do;
+                        call Set.Term.Attr(ATTR#Normal);
+                        do j = 0 to Defined-1;
+                           call pc(SP);
+                        end;
+                     end;
+
+                     call Check.Next.Event;
+                     call Disable.All.Table.Cells(row,i);
+                     call Check.Next.Event;
+
+                     Note.Area.Force   (row) = Note.Area.Force   (row)
+                                             & (not(bits(i)));
+                     Note.Area.Contents(row) = Note.Area.Contents(row)
+                                             & (not(bits(i)));
+
+                  end;
+
+                  if  (new.in.char        <> 0)  /* if no input char received   */
+                  or  (new.mouse.button   <> 0)  /* or new mouse activity       */
+                  or  (m$Presses          <> 0)  /* or stacked press            */
+                  or  (Check.Next.Event   <> 0)  /* or other system event       */
+                  then if force = 0 then return 0;  /* return not completed     */
+               end;
+            end;
+
+            /* else if it should be displaying a note,  */
+            /* then draw it:                            */
+            
+            else do;
+
+               /* read in new record for comparison,  and to */
+               /* copy into 'display' area                   */
+
+               write(mal)=read(md);
+               call COPY.IN(addr(c(0)), 16);
+
+               /* compare new VS old if we don't have to     */
+               /* force the update:                          */
+
+               if ((Note.Area.Force(row)&bits(i)) = 0)
+               then do;
+
+                  write(mam) = AEE.Old.Seq.Snap+i;
+                  write(mal) = row*16;
+
+                  do j = 0 to 15;
+                     if read(mdi) <> c(j)
+                     then do;
+                        Note.Area.Force(row) = Note.Area.Force(row) \ bits(i);
+                        j = 99;
+                     end;
+                  end;
+               end;
+
+               if ((Note.Area.Force(row)&bits(i)) <> 0)
+               then do;
+
+                  write(mam) = AEE.Old.Seq.Snap+i;
+                  write(mal) = row*16;
+                  call COPY.OUT(addr(c(0)), 16);
+
+                  /* only draw if no ripple verify pending: */
+
+                  if (Ripple.Verify.Rows & bits(row)) = 0
+                  then do;
+
+                     Note.Area.Force   (row) = Note.Area.Force   (row)
+                                             & (not(bits(i)));
+                     Note.Area.Contents(row) = Note.Area.Contents(row) \ bits(i);
+
+                     call Get.Snapshot.Info(AEE.Cur.Seq.Snap,i,TRKINDEX,row);
+
+                     call Enable.And.Deposit.All.Cells(row,i);
+
+                     call Check.Cursor.Movement;
+                  end;
+
+                  if  (new.in.char        <> 0)  /* if no input char received   */
+                  or  (new.mouse.button   <> 0)  /* or new mouse activity       */
+                  or  (m$Presses          <> 0)  /* or stacked press            */
+                  or  (Check.Next.Event   <> 0)  /* or other system event       */
+                  then if force = 0 then return 0;  /* return not completed     */
+               end;
+            end;
+         end;
+      end;
+   end;
+
+   return 1;   /* display is up to date!! */
+
+end Update.Sequencer.Note.Information;
+
+/* $page - routine to take snapshot into new area: */
+
+Take.New.AEE.Snapshot: proc swapable;
+   dcl i fixed;
+
+   /*	NOTE: special logic here must be done carefully					*/
+
+   /*	We are about to take a snapshot of the sequencer for the		*/
+   /*	Audio Event Editor.  Often, we have just made an edit			*/
+   /*	in the sequence from here in the Audio Event Editor.			*/
+   /*	We need to tell other people about the edit, but we want		*/
+   /*	to remove the "note changed" event so that we can continue	*/
+   /*	our editing before the screen is up to date.						*/
+
+   /*	Here is a careful way to do this:									*/
+
+   /*	Send the new seq info event out to all other devices now.	*/
+   /*	This will clear the bit in new seq info and presumably		*/
+   /*	set it in new.ABLE.seq.info:											*/
+
+   if (new.seq.info & 4) <> 0     /* if "note changed" pending		*/
+   then call PERFORM;             /* then send it out now			*/
+
+   /*	clear the 'note area changed' bit in new.ABLE.seq.info		*/
+   /*	since we are about to take the snapshot, and we will not		*/
+   /*	need to take another snapshot later:								*/
+
+   new.ABLE.seq.info = new.ABLE.seq.info & (not(4));
+   Seq.Refresh       = Seq.Refresh       & (not(4));
+
+   /* construct format word: */
+
+   i = 0;
+   if (Display.Note.Contents &  Display.Events) <> 0
+   then i = i \ SNAP#Notes;
+   if (Display.Note.Contents &  Display.Rtes  ) <> 0
+   then i = i \ SNAP#Rtes;
+   if (Display.Note.Contents &  Display.Loops ) <> 0
+   then i = i \ SNAP#Ilps;
+
+   Seq.Note.Skip = Aee.Seq.Screen.Snapshot(AEE.Cur.Seq.Snap, Seq.Tracks, TRKINDEX,
+                                           Seq.Refresh.Time(0),Seq.Refresh.Time(1),
+                                           Seq.Event.Display.Size,
+                                           i \ SNAP#Runs \ SNAP#Begs \ SNAP#NoBackup \ shl(Seq.Note.Skip, 8));
+
+   call Check.Next.Event;
+
+   Seq.Screen.Begin(0) = Screen.Begin(0);     /* save actual screen */
+   Seq.Screen.Begin(1) = Screen.Begin(1);     /* begin and end      */
+
+   Seq.Screen.End  (0) = Screen.End  (0);     /* so we can scroll   */
+   Seq.Screen.End  (1) = Screen.End  (1);     /* or not.            */
+
+   call Update.Seq.Time.Cursor;               /* set time cursor    */
+                                              /* cursor begin & end */
+   
+   /* Would we ever want to take a snapshot and then not update     */
+   /* the display?                                                  */
+
+   Seq.Refresh = Seq.Refresh \ 8;
+
+end Take.New.AEE.Snapshot;
+
+/* $page - real time note scoll */
+
+/* this routine is called after placing a note using VITC still framing. */
+/* It will try to scroll the seq panel display to find the new note.     */
+
+dcl Find.Note proc(array, fixed, fixed, fixed, fixed, fixed, fixed, fixed, fixed) recursive;
+
+Real.Time.Note.Scroll: proc swapable;
+   dcl (i,j) fixed;
+
+  /* take a sequence snapshot to try to find note: */
+
+   call Take.New.AEE.Snapshot;
+
+   /* try to find which column has recd.trk in it: */
+
+   if Recd.Trk ILT Num.Kbd.Tracks then do;
+      call Clear.All.Highlights;
+      call Select.New.Cur.Obj(Corner.Label,-1,-1);
+      return;
+   end;
+
+   i = 0;
+   do while (i < Seq.Tracks)
+   and      (trkindex(i) <> Recd.Trk);
+      i = i + 1;
+   end;
+
+   if i = Seq.Tracks then do;     /* recd.trk not being displayed */
+      call Clear.All.Highlights;
+      call Select.New.Cur.Obj(Corner.Label,-1,-1);
+      return;
+   end;
+
+   call Find.Note(loc(addr(RTMSB)), 
+                  NEW.SEQ.MATCH.W1, NEW.SEQ.MATCH.W2, 
+                  NEW.SEQ.MATCH.W3, NEW.SEQ.MATCH.W4,
+                  i, -1, 0, bits(i));
+
+end Real.Time.Note.Scroll;
+
+/* $page - routine to update sequence editor information */
+
+UPDATE.SEQUENCE.EDITOR: proc PUBLIC swapable;
+   dcl Refresh.Bits     fixed;
+   dcl i                fixed;
+
+   /* Bits in Seq.Refresh:     */
+
+   /*   1 = Scroll Sequencer to time(xxx)           */
+   /*   2 = Scroll Sequencer to note(xxx)           */
+   /*   4 = Take snapshot of sequencer              */
+   /*   8 = Update note area information from       */
+   /*       snapshot results                        */
+   /*  16 = force updata of information into all    */
+   /*       fields regardless of comparison         */
+   /*  32 = update track numbers & titles           */
+   /*  64 = update track multichannel & volumes     */
+   /* 128 = update track solo information           */
+
+   call Check.Next.Event;      /* in case we are scrolling */
+
+   Refresh.Bits = Seq.Refresh; /* assume we will get all updates */
+   Seq.Refresh  = 0;
+
+   /* Update Track labels & titles first: */
+
+   if (Refresh.Bits&32) <> 0
+   then do;
+      call Update.Seq.Track.Labels(Seq.Tracks,Seq.Row);  /* trk number, title */
+
+      Refresh.Bits = Refresh.Bits & (not(32));
+
+      if  (new.in.char        <> 0)  /* if no input char received   */
+      or  (new.mouse.button   <> 0)  /* or new mouse activity       */
+      or  (m$Presses          <> 0)  /* or stacked press            */
+      or  (Check.Next.Event   <> 0)  /* or other system event       */
+      then do;
+         Seq.Refresh = Seq.Refresh \ Refresh.Bits;
+         return;
+      end;
+   end;
+
+   /* Now update track routings and track volumes */
+
+   if (Refresh.Bits&64) <> 0
+   then do;
+      call Update.Seq.Track.Values;
+      Refresh.Bits = Refresh.Bits & (not(64));
+
+      if  (new.in.char        <> 0)  /* if no input char received   */
+      or  (new.mouse.button   <> 0)  /* or new mouse activity       */
+      or  (m$Presses          <> 0)  /* or stacked press            */
+      or  (Check.Next.Event   <> 0)  /* or other system event       */
+      then do;
+         Seq.Refresh = Seq.Refresh \ Refresh.Bits;
+         return;
+      end;
+   end;
+
+   /* Now update solo/highlighted buttons, record track */
+
+   if (Refresh.Bits&128) <> 0
+   then do;
+      call REFRESH.SEQ.TRACK.SOLO.DISPLAY;
+      Refresh.Bits = Refresh.Bits & (not(128));
+
+      if  (new.in.char        <> 0)  /* if no input char received   */
+      or  (new.mouse.button   <> 0)  /* or new mouse activity       */
+      or  (m$Presses          <> 0)  /* or stacked press            */
+      or  (Check.Next.Event   <> 0)  /* or other system event       */
+      then do;
+         Seq.Refresh = Seq.Refresh \ Refresh.Bits;
+         return;
+      end;
+   end;
+
+   /* look at current sequencer time if desired: */
+
+   if (Refresh.Bits&1) <> 0
+   then do;
+      call COPY32(loc(addr(SAMPLED.ACTUAL.PLAY.TIME.MSB)), Seq.Refresh.Time);
+      call Map.Real.Time.To.Sequence.Time(Seq.Refresh.Time, Seq.Refresh.Time);
+      Seq.Note.Skip = 0;
+      Refresh.Bits = Refresh.Bits & (not(1));
+   end;
+
+   /* scroll to a particular note: */
+
+   if (Refresh.Bits&2) <> 0
+   then do;
+      call Real.Time.Note.Scroll;  /* do our best to find it. */
+      Refresh.Bits = Refresh.Bits & (not(2\4));  /* no other snap needed             */
+
+      /* Transfer any newly generated refresh bits to Refresh.Bits */
+      /* for our immediate use.                                    */
+
+      Refresh.Bits = Refresh.Bits \ (Seq.Refresh \ (8\16));
+      Seq.Refresh = Seq.Refresh & (not(Refresh.Bits));
+   end;
+
+   /* Take snapshot into new snapshot area if needed: */
+
+   if (Refresh.Bits&4) <> 0
+   then do;
+
+      call Take.New.AEE.Snapshot;  /* take a sequence snapshot */
+
+      Refresh.Bits = Refresh.Bits & (not(4));
+
+      if  (new.in.char        <> 0)  /* if no input char received   */
+      or  (new.mouse.button   <> 0)  /* or new mouse activity       */
+      or  (m$Presses          <> 0)  /* or stacked press            */
+      or  (Check.Next.Event   <> 0)  /* or other system event       */
+      then do;
+         Seq.Refresh = Seq.Refresh \ Refresh.Bits;
+         return;
+      end;
+   end;
+
+   /* Set bits to force update regardless of comparison if needed. */
+   /* This is done when the panel is first defined to make sure    */
+   /* all newly defined values are filled with the correct         */
+   /* value.                                                       */
+
+   if (Refresh.Bits&16) <> 0
+   then do;
+
+      do i = 0 to 15;
+         Note.Area.Force(i) = (-1);
+      end;
+      Refresh.Bits = Refresh.Bits & (not(16));
+
+      if  (new.in.char        <> 0)  /* if no input char received   */
+      or  (new.mouse.button   <> 0)  /* or new mouse activity       */
+      or  (m$Presses          <> 0)  /* or stacked press            */
+      or  (Check.Next.Event   <> 0)  /* or other system event       */
+      then do;
+         Seq.Refresh = Seq.Refresh \ Refresh.Bits;
+         return;
+      end;
+   end;
+
+   /* Now update display contents if needed: */
+
+   if (Refresh.Bits&8) <> 0
+   then do;
+
+      i = Screen.Changed;
+
+      if Update.Sequencer.Note.Information(0) <> 0
+      then Refresh.Bits = Refresh.Bits & (not(8));
+      else Seq.Refresh = Seq.Refresh \ Refresh.Bits;
+
+      Screen.Changed = i;  /* all our updating was done with update.on.deposit on,  */
+                           /* but the Deposit.Table still set Screen.Changed        */
+
+   end;
+
+end UPDATE.SEQUENCE.EDITOR;

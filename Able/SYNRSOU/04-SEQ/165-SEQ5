@@ -1,0 +1,859 @@
+/* 165-SEQ5 - APPEND NOTE DURING PLAY - SPEEDY ROUTINE FOR RECORDING NOTES
+
+   Modified:
+   01/30/91 - MWH - Report which tracks have had new notes
+   04/14/87 - ts - moved BOUNCE.DOWN and ERASE.TRACK to 12-EDIT
+*/
+
+/* APPEND NOTE DURING PLAY IS CALLED TO RECORD NOTES AND UPDATE RECORDS
+   AT THE END OF A TRACK.   THE # VARIABLES MUST BE SET UP WHEN CALLED,
+   AND #ANYF MUST = 0.    */
+
+APPEND.NOTE.DURING.PLAY:PROC (M,L) PUBLIC; /* PASS NOTE TIME MSB, LSB */
+   DCL (M,L) FIXED;
+
+   IF #SEC=0 THEN DO;                 /* GET FIRST NLS           */
+      IF ALLOCATE.FIRST.NLS=0 THEN RETURN 0; /* OUT OF MEMORY */
+   END;
+
+   #MSB = M-#NMSB;                    /* COMPUTE TIME DELTA      */
+   #LSB = L-#NLSB;                    /* TO NOTE                 */
+   IF L ILT #NLSB THEN #MSB=#MSB-1;
+
+   IF #MSB<0                          /* MEANS TRACK IS ALREADY TOO LONG */
+   THEN RETURN INSERT.NOTE.RECORD(M,L); /* USE FULL ROUTINE                 */
+
+   WRITE(MAM)=NAH.PTR+#SEC;           /* CHECK FOR ACTUAL APPEND OCCURRING */
+   WRITE(MAL)=NLS.LP;
+   IF READ(MD)<>#WRD THEN RETURN 0;   /* SYSTEM ERROR OF SORTS       */
+
+   IF #WRD>NLS.LAST THEN DO;          /* SEE IF WE NEED ANOTHER NLS   */
+      IF ALLOCATE.NEXT.NLS(1)=0       /* GET ANOTHER NLS, SET UP PTRS */
+      THEN RETURN 0;
+   END;
+
+   /* Create a system event when a note is added or removed */
+   /* from the sequencer:                                   */
+
+	interp_seq_dirtyness(1);
+
+   NEW.SEQ.INFO = NEW.SEQ.INFO \ 4;
+   WRITE(MAM) = D115D.NOTE.CHANGE.TRACKS;
+   WRITE(MAL) = #TRK;                 /* REMEMBER TRACK # ON NEW.SEQ.INFO */
+   WRITE(MD) = "177777";              /*   "NEW NOTES" OR "NEW TIMBRE"    */
+
+   IF (#MSB<>0) OR (#LSB IGT 1023)    /* CHECK FOR LONG REST NOTE NEEDED: */
+   THEN DO;                           /* REST NOTE REQUIRED          */
+
+      /* CHECK LOOP TIME BEFORE ADDING REST NOTE: */
+
+      WRITE(MAM)=#PTR;                /* LOOK UP LOOP POINTERS       */
+      WRITE(MAL)=THD.LP.WRD;
+
+      IF  (READ(MDI)=#WRD)            /* SEE IF WE ARE INSERTING     */
+      AND (READ(MDI)=#SEC)            /* REST NOTE AT LOOP START     */
+      THEN DO;                        
+
+         IF ((#NMSB ILT LOOP.SEQ.TIME.MSB))
+         OR ((#NMSB  =  LOOP.SEQ.TIME.MSB)
+         AND (#NLSB ILT LOOP.SEQ.TIME.LSB))
+         THEN DO;                     /* BUMP LOOP POINTERS          */
+
+            /* SET UP LOOP POINTERS HERE */
+            /* TO POINT AFTER THE REST   */
+            /* NOTE WE ARE ABOUT TO      */
+            /* INSERT:                   */
+
+            WRITE(MAL)=THD.LP.NMSB;
+            WRITE(MDI)=M;             /* THD.LP.NMSB */
+            WRITE(MDI)=L;             /* THD.LP.NLSB */
+            WRITE(MDI)=#NMSB;         /* THD.LP.LMSB */
+            WRITE(MDI)=#NLSB;         /* THD.LP.LLSB */
+            WRITE(MDI)=#WRD+4;        /* THD.LP.WRD  */
+            WRITE(MD )=#SEC;          /* THD.LP.SEC  */
+
+            WRITE(MAL)=THD.LP.ANY.FOR;
+            WRITE(MDI)=0;             /* THD.LP.ANY.FOR */
+            WRITE(MD )=1;             /* THD.LP.ANY.REV */
+         END;
+         ELSE DO;      /* THIS REST NOTE WE ARE ADDING WANTS TO BE INSIDE */
+            WRITE(MAL)=THD.LP.ANY.FOR;
+            WRITE(MDI)=1;
+         END;          
+      END;
+
+
+      /* $PAGE */
+
+
+      /* STORE LONG REST RECORD IN NOTE LIST: */
+
+      WRITE(MAM)=NAH.PTR+#SEC;
+      WRITE(MAL)=#WRD;
+
+      WRITE(MDI)="100001";      /* LONG REST RECORD */
+      WRITE(MDI)=#MSB;          /* LENGTH           */
+      WRITE(MDI)=#LSB;
+      WRITE(MDI)=VEL.NOTE;
+      WRITE(MD )=NLS.EOS;
+
+      #WRD=#WRD+4;              /* ADVANCE POINTER  */
+
+      WRITE(MAL)=NLS.LP;        /* SET LP           */
+      WRITE(MD )=#WRD;
+
+      #LMSB=#NMSB;              /* SKIP OVER NOTE SO WE POINT */
+      #LLSB=#NLSB;              /* TO WHERE THE DATA NOTE     */
+      #NMSB=M;                  /* WILL BE INSERTED           */
+      #NLSB=L;
+      #MSB=0;                   /* ZERO DELTA ON FOLLOWING    */
+      #LSB=0;                   /* REAL NOTE                  */
+
+      #ANYR=1;                  /* THERE IS NOW A REST NOTE   */
+
+      /* MAKE SURE ROOM IN THIS NLS */
+      /* FOR THE DATA RECORD        */
+
+      IF #WRD>NLS.LAST THEN DO; /* ANOTHER NLS IS NEEDED      */
+
+         IF ALLOCATE.NEXT.NLS(1)=0
+         THEN DO;
+
+            /* ERROR RECOVERY - WE ADDED A REST RECORD ABOVE */
+            /* IN ANTICIPATION OF STORING A NOTE RECORD      */
+            /* BELOW.   BUT WE JUST RAN OUT OF MEMORY.       */
+            /* UPDATE INFO IN THE TRACK HEAD FOR CONSISTENCY */
+
+            CALL STORE.#.INFO(THD.NMSB);   
+
+            RETURN 0;
+         END;
+      END;
+   END;
+
+
+   /* $PAGE */
+
+
+   /* NOW CHECK LOOP TIME FOR THE NOTE RECORD WE ARE ABOUT */
+   /* TO INSERT:                                           */
+
+   WRITE(MAM)=#PTR;
+   WRITE(MAL)=THD.LP.WRD;
+
+   IF  (READ(MDI)=#WRD)       /* SEE IF WE ARE INSERTING A NOTE       */
+   AND (READ(MDI)=#SEC)       /* AT LOOP POINTER                      */
+   THEN DO;                   /* CHECK FOR UPDATE OF LOOP POINTER INFO*/
+
+      IF ((M ILT LOOP.SEQ.TIME.MSB))  /* SEE IF NEW NOTE IS INSIDE   */
+      OR ((M  =  LOOP.SEQ.TIME.MSB)   /* THE LOOP                    */
+      AND (L ILT LOOP.SEQ.TIME.LSB))
+      THEN DO;                         /* IF NOT, BUMP LOOP POINTERS  */
+
+         /* SET UP LOOP POINTERS HERE */
+         /* TO POINT AFTER THE DATA   */
+         /* NOTE WE ARE ABOUT TO      */
+         /* INSERT:                   */
+
+         WRITE(MAL)=THD.LP.NMSB;
+         WRITE(MDI)=M;                  /* THD.LP.NMSB */
+         WRITE(MDI)=L;                  /* THD.LP.NLSB */
+         WRITE(MDI)=#NMSB;              /* THD.LP.LMSB */
+         WRITE(MDI)=#NLSB;              /* THD.LP.LLSB */
+         IF #W1 THEN WRITE(MDI)=#WRD+4; /* THD.LP.WRD  */
+         ELSE        WRITE(MDI)=#WRD+2;
+         WRITE(MDI)=#SEC;               /* THD.LP.SEC  */
+
+         WRITE(MAL)=THD.LP.ANY.FOR;
+         WRITE(MDI)=0;                  /* THD.LP.ANY.FOR */
+         WRITE(MD )=1;                  /* THD.LP.ANY.REV */
+      END;
+      ELSE DO;                          /* NEW NOTE IS INSIDE LOOP */
+         WRITE(MAL)=THD.LP.NMSB;
+         WRITE(MDI)=M;                  /* THD.LP.NMSB */
+         WRITE(MD )=L;                  /* THD.LP.NLSB */
+         WRITE(MAL)=THD.LP.ANY.FOR;
+         WRITE(MDI)=1;                  /* THD.LP.ANY.FOR */
+      END;
+
+   END;
+
+   /* STORE NOTE DATA IN SEQUENCE */
+
+   WRITE(MAM)=NAH.PTR+#SEC;
+   WRITE(MAL)=#WRD;
+
+   WRITE(MDI)=#W1\SHL(#LSB,1);
+   WRITE(MDI)=#W2;
+   IF #W1 THEN DO;
+      WRITE(MDI)=#W3;
+      WRITE(MDI)=#W4;
+      #WRD=#WRD+4;        /* ADVANCE WORD POINTER TEMPORARILY */
+   END;
+   ELSE #WRD=#WRD+2;      /* RESET TO NOTE RECORD BELOW       */
+
+   WRITE(MD )=NLS.EOS;
+
+   WRITE(MAL)=NLS.LP;
+   WRITE(MD )=#WRD;
+
+   
+   /* $PAGE */
+
+
+   /* SET UP PLAY POINTER TO POINT AFTER THE NOTE */
+   /* WE JUST STORED:                             */
+
+   WRITE(MAM)=#PTR;
+   WRITE(MAL)=THD.NMSB;
+   WRITE(MDI)=M;           /* THD.NMSB  */
+   WRITE(MDI)=L;           /* THD.NLSB  */
+   WRITE(MDI)=M;           /* THD.LMSB  */
+   WRITE(MDI)=L;           /* THD.LLSB  */
+   WRITE(MDI)=#WRD;        /* THD.WRD   */
+   WRITE(MD )=#SEC;
+
+   WRITE(MAL)=THD.ANY.REV;
+   WRITE(MD )=1;
+
+   /* FIX UP # VARIABLES TO POINT TO THE NOTE: */
+
+   IF #W1 THEN #WRD=#WRD-4;
+   ELSE        #WRD=#WRD-2;
+
+   #NMSB=M;
+   #NLSB=L;
+   #ANYF=1;
+
+   IF  ((#W1&"100000")=0)            /* NOT AN ALTERNATE FORMAT NOTE  */
+   AND ((#W2&"77")<>REST.NOTE)       /* OR A REST NOTE                */
+   THEN DO;                          /* INCREMENT NUMBER OF NOTES CTR */
+      CALL INCREMENT.NUM.NOTES;      /* #PTR MUST BE VALID */
+   END;
+
+   RETURN 1;                 /* OK                   */
+
+END APPEND.NOTE.DURING.PLAY;
+
+
+/* $SUBTITLE - SHORTEN NOTE LIST DURING NOTE DELETE */
+
+
+SHORTEN.NLS:PROC (RLEN) SWAPABLE;                /* SHORTEN NOTE LIST */
+   DCL RLEN FIXED;
+   DCL LEN  FIXED;
+   DCL (PSEC,PWRD) FIXED;
+   DCL (FP,RP    ) FIXED;
+   DCL (DELTA    ) FIXED;
+
+   WRITE(MAM)=NAH.PTR+#SEC;                      /* LOOK AT NOTE */
+   WRITE(MAL)=#WRD;
+
+   DELTA=SHR(READ(MD),1)&1023;                   /* GET DELTA             */
+   IF #NLSB ILT DELTA THEN #NMSB=#NMSB-1;        /* REDUCE #NMSB FOR SOON */
+   #NLSB=#NLSB-DELTA;                            /* TO BE DELETED DELTA   */
+
+   WRITE(MAL)=NLS.LP;
+   LEN=READ(MD)-#WRD-RLEN;                       /* MIGHT BE 0        */
+   WRITE(MD)=READ(MD)-RLEN;                      /* NEW LENGTH        */
+
+   CALL COPY.EXT.MEM(NAH.PTR+#SEC,#WRD+RLEN,NAH.PTR+#SEC,#WRD,LEN+1); /* COPY NLS.EOS AS WELL */
+
+   CALL ADJUST.SEQUENCER.PTRS(#SEC,-RLEN);            /* NOTE: COULD TRASH ILP INFO HERE */
+
+   PSEC=#SEC; PWRD=#WRD;             /* SAVE WHERE WE ARE */
+
+   WRITE(MAM)=NAH.PTR+#SEC;          /* SEE IF NLS.FP=NLS.LP */
+   WRITE(MAL)=NLS.LP;
+
+   IF READ(MD)=#WRD THEN DO;         /* DELETING LAST RECORD IN NLS */
+
+      WRITE(MAL)=NLS.FP;
+
+      IF READ(MDI)=READ(MDI) THEN DO; /* NLS IS NOW EMPTY. #WRD POINTS TO NLS.EOS  (WE HOPE) */
+         WRITE(MAM)=#PTR;
+         WRITE(MAL)=THD.NUM.NLS;
+         WRITE(MD )=READ(MD)-1;
+
+         WRITE(MAM)=NAH.PTR+#SEC;
+         FP=READ(MDI);
+         RP=READ(MD );
+
+         WRITE(MAM)=NAH.PTR+RP;      /* BACK UP TO NLS.REV - MAY POINT TO TRACK HEAD */
+         WRITE(MD )=FP;              /* NEW FP (MAY BE 0)   (MAY BE STORING IN THD HERE) */
+         IF FP<>0 THEN DO;           /* UPDATE BACK POINTER */
+            WRITE(MAM)=NAH.PTR+FP;
+            WRITE(MAL)=NLS.REV;
+            WRITE(MD )=RP;           /* RP MAY  POINT TO THD      */
+            CALL ADVANCE.TO.NEXT.NOTE;
+         END;
+         ELSE DO;                    /* DELETING END-MOST NOTE LIST SEG */
+            IF RP=(#PTR-NAH.PTR) THEN DO; /* NO NLS'S LEFT      */
+               #WRD =0; #SEC =0;
+               #NMSB=0; #NLSB=0;
+               #LMSB=0; #LLSB=0;
+               #ANYR=0; #ANYF=0;
+               CALL STORE.#.INFO(THD.NMSB);
+               CALL STORE.#.INFO(THD.LP.NMSB);
+            END;
+            ELSE DO;                 /* BACK UP #SEC, #WRD */
+               WRITE(MAM)=NAH.PTR+RP;
+               WRITE(MAL)=NLS.LP;
+               #SEC=RP;              /* THIS IS END OF TRACK */
+               #WRD=READ(MD);
+               #ANYF=0;
+            END;
+         END;
+
+         WRITE(MAM)=NAH.PTR+PSEC;    /* LINK PSEC ON TO FREE LIST */
+         WRITE(MDI)=NAH.FREE;        /* LINK ON TO FREE LIST      */
+         WRITE(MDI)=(-1);            /* STORE (-1) IN NLS.REV AND */
+         WRITE(MD )=(-1);            /* NLS.TRK TO CATCH PROGRAMMING BUGS */
+         NAH.FREE  =PSEC;
+         NAH.#FREE =NAH.#FREE+1;
+
+      END;
+      ELSE DO;                       /* ADVANCE #SEC, #WRD IF ANOTHER NLS */
+         CALL ADVANCE.TO.NEXT.NOTE;
+      END;
+   END;
+
+   ELSE DO;                        /* ADD IN DELTA FIELD ONLY */
+      WRITE(MAL)=#WRD;
+      DELTA=SHR(READ(MD),1)&1023;
+      #NLSB=#NLSB+DELTA;
+      IF #NLSB ILT DELTA THEN #NMSB=#NMSB+1;
+   END;
+
+   WRITE(MAM)=#PTR;
+   WRITE(MAL)=THD.WRD;             /* ADVANCE PLAY AND LOOP    */
+
+   IF  (READ(MDI)=PWRD)            /* POINTERS TO THE NEW      */
+   AND (READ(MD )=PSEC)            /* SECTOR SINCE TIMES       */
+   THEN DO;                        /* DO NOT CHANGE            */
+      WRITE(MAL)=THD.WRD;
+      WRITE(MDI)=#WRD;
+      WRITE(MD )=#SEC;
+   END;
+
+   WRITE(MAL)=THD.LP.WRD;
+   IF  (READ(MDI)=PWRD)
+   AND (READ(MD )=PSEC)
+   THEN DO;
+      WRITE(MAL)=THD.LP.WRD;
+      WRITE(MDI)=#WRD;
+      WRITE(MD )=#SEC;
+   END;
+   
+END SHORTEN.NLS;
+
+
+/* $SUBTITLE  NON-REAL-TIME ROUTINE TO DELETE A NOTE FROM A TRACK */
+
+
+/* REMOVE.NOTE.RECORD:                                               */
+
+/*   DELETES THE NOTE RECORD POINTED TO BY RELATIVE PTRS (#SEC,#WRD) */
+/*   ON THE TRACK #TRK.  THIS IS ACCOMPLISHED BY SHUFFLING THE REST  */
+/*   OF THE NOTES IN THE NOTE LIST SEGMENT DOWN BY EITHER 2 OR 4     */
+/*   WORDS.  ROUTINE UPDATES ILP/OVERALL LOOP & PLAY PTRS IF NEEDED  */
+/*   AND WILL TURN NOTE INTO REST RECORD IF NECESSARY TO MAINTAIN    */
+/*   PROPER TIME DELTAS. IF IN THE PROCESS OF DELETING THE NOTE, THE */
+/*   NOTE LIST SEGMENT BECOMES EMPTY, IT WILL BE PUT ON THE NAH.FREE */
+/*   LIST AND NLS LINKS WILL BE UPDATED.                             */
+
+
+REMOVE.NOTE.RECORD: PROC PUBLIC SWAPABLE; /* DELETES NOTE AT #SEC, #WRD */
+   DCL (FP,LP)           FIXED;
+   DCL (A,M,I,L)         FIXED;
+   DCL (AMSB,ALSB)       FIXED;
+   DCL (RLEN)            FIXED;
+
+   /* Create a system event when a note is added or removed */
+   /* from the sequencer:                                   */
+
+	interp_seq_dirtyness(1);
+   
+	NEW.SEQ.INFO = NEW.SEQ.INFO \ 4;
+   WRITE(MAM) = D115D.NOTE.CHANGE.TRACKS;
+   WRITE(MAL) = #TRK;                  /* REMEMBER TRACK # ON NEW.SEQ.INFO */
+   WRITE(MD) = "177777";               /*   "NEW NOTES" OR "NEW TIMBRE"    */
+
+   WRITE(MAM)=NAH.PTR+#SEC;            /* POINT AT NOTE RECORD */
+   WRITE(MAL)=#WRD;
+   IF READ(MD)=NLS.EOS THEN RETURN;    /* NOT POINTING AT NOTE - BOMB OUT */
+
+   /* DECREMENT NUMBER OF NOTES ON THE TRK */
+
+   IF  ((READ(MDI)&"100000")=0)        /* NOT AN ALTERNATE FORMAT NOTE  */
+   AND ((READ(MD) &"77")<>REST.NOTE)   /* OR A REST NOTE                */
+   THEN DO;                            /* DECREMENT NUMBER OF NOTES CTR */
+      CALL DECREMENT.NUM.NOTES;        /* #PTR MUST BE VALID */
+   END;
+
+   WRITE(MAM)=NAH.PTR+#SEC;            /* POINT AT NOTE RECORD */
+   WRITE(MAL)=#WRD;
+
+
+   /* 1. TURN THE NOTE INTO A REST RECORD */
+
+   AMSB=0; ALSB=SHR(READ(MD),1)&1023;  /* LOOK UP DELTA OF NOTE TO DELETE */
+
+   IF (READ(MD)&1)=0 THEN DO;          /* SEE IF DELETING A 2 WORD RECRD  */
+      WRITE(MAL)=#WRD+2;               /* COMBINE WITH ADJACENT 2 WORD REST RECORD IF POSSIBLE */
+      IF  ((READ(MDI)&1)=0)            /* TWO WORD RECORD, NOT AN NLS.EOS */
+      AND ((READ(MD )&"77")=REST.NOTE) /* TWO WORD REST NOTE              */
+      THEN DO;                         /* COMBINE THEM                    */
+         WRITE(MAL)=#WRD+2;
+         I=SHR(READ(MD),1)&1023;       /* GET IT'S DELTA                  */
+         WRITE(MAL)=#WRD;              /* CREATE 4 WORD RECORD HERE       */
+         WRITE(MDI)="100001"+SHL(ALSB,1); /* LONG REST WITH ALSB          */
+         WRITE(MDI)=0;
+         WRITE(MDI)=I;                    /* INTERNAL REST OF I           */
+         WRITE(MD )=VEL.NOTE;
+         #WRD=#WRD+2;                     /* FOR CALL TO CHANGE.THD.INFO  */
+         CALL CHANGE.THD.INFO(#SEC,#WRD-2);
+         CALL CHECK.POINTER.TIMES;        /* UPDATE TIMES IN CASE WE BROUGHT POINTERS BACK */
+         CALL ADVANCE.TO.NEXT.NOTE;       /* GO TO NEXT NOTE - MAY BE IN DIFFERENT SECTOR  */
+         CALL CHECK.POINTER.TIMES;        /* GET ITS LAST TIME CORRECT   */
+         CALL BACKUP.TO.PRIOR.NOTE;       /* POINT TO NOTE TO DELETE     */
+      END;
+
+      ELSE DO;                         /* CHECK FOR ONE BEHIND US       */
+         WRITE(MAL)=NLS.FP;            /* SEE IF WE ARE AT FRONT OF NLS */
+         IF READ(MD)<#WRD THEN DO;     /* MORE NOTES IN FRONT OF US     */
+            WRITE(MAL)=#WRD-1;
+            IF (READ(MD)&"77")=REST.NOTE
+            THEN DO;
+               CALL BACKUP.TO.PRIOR.NOTE; /* BACK UP TO 2 WORD REST RECORD */
+               I=SHR(READ(MD),1)&1023;       /* GET IT'S DELTA */
+               WRITE(MDI)="100001"+SHL(I,1);
+               WRITE(MDI)=0;
+               WRITE(MDI)=ALSB;
+               WRITE(MDI)=VEL.NOTE;
+               #WRD=#WRD+2;
+               ALSB=I;                       /* SET ALSB TO EQUAL DELTA FOR THIS REST NOTE.  INTERNAL DELTA IS ADDED IN BELOW */
+               CALL CHANGE.THD.INFO(#SEC,#WRD-2);
+               CALL CHECK.POINTER.TIMES;
+               CALL ADVANCE.TO.NEXT.NOTE;
+               CALL CHECK.POINTER.TIMES;
+               CALL BACKUP.TO.PRIOR.NOTE;
+            END;
+         END;
+      END;
+   END;
+
+
+   /* $PAGE */
+
+
+   WRITE(MAM)=NAH.PTR+#SEC;            /* POINT AT NOTE RECORD */
+   WRITE(MAL)=#WRD;
+
+   IF READ(MD) THEN DO;                /* THIS IS A 4-WORD RECORD    */
+      IF (READ(MD)&"174001")<>"100001" /* NOT ALREADY A REST */
+      THEN DO;                         /* TURN IT INTO ONE           */
+         WRITE(MDI)=(READ(MD)&SHL(1023,1))\"100001"; /* TURN INTO REST RECORD */
+         WRITE(MDI)=0;
+         WRITE(MDI)=0;
+         WRITE(MD )=VEL.NOTE;
+      END;
+      ELSE DO;
+         WRITE("324")=READ(MDI);
+         AMSB=AMSB+READ(MDI);
+         ALSB=ALSB+READ(MD );
+         IF ALSB ILT READ(MD) THEN AMSB=AMSB+1;
+      END;
+      RLEN=4;
+   END;
+   ELSE DO;                            /* THIS IS A 2-WORD RECORD */
+      WRITE(MDI)=READ(MD)&SHL(1023,1); /* TURN INTO REST RECORD - PRESERVE DELTA */
+      WRITE(MD )=REST.NOTE;
+      RLEN=2;
+   END;
+
+   IF (AMSB\ALSB)=0 THEN DO;           /* NOTE HAD ZERO DELTA - JUST DELETE IT */
+      CALL SHORTEN.NLS(RLEN);          /* #SEC, #WRD COULD DISAPPEAR    */
+      CALL CHECK.POINTER.TIMES;
+      CALL REBUILD.EVENT.QUEUE;        /* KEEP QUEUE CORRECT */
+      RETURN;
+   END;
+
+   IF #ANYR<>0 THEN DO;                /* CHECK FOR REST NOTE BEFORE US */
+      CALL BACKUP.TO.PRIOR.NOTE;
+      IF (READ(MD)&"174001")="100001"
+      THEN DO;                         /* REST NOTE THERE               */
+         WRITE("324")=READ(MDI);
+         WRITE(MDI)=READ(MD)+AMSB;
+         WRITE(MD )=READ(MD)+ALSB;
+         IF READ(MD) ILT ALSB THEN DO;
+            WRITE(MAL)=READ(MAL)-1;
+            WRITE(MD )=READ(MD )+1;
+         END;
+         CALL ADVANCE.TO.NEXT.NOTE;    /* SKIP OVER IT                  */
+         CALL SHORTEN.NLS(RLEN);       /* #SEC, #WRD COULD DISAPPEAR    */
+         CALL CHECK.POINTER.TIMES;
+         CALL REBUILD.EVENT.QUEUE;     /* KEEP QUEUE CORRECT */
+         RETURN;
+      END;
+      CALL ADVANCE.TO.NEXT.NOTE;
+   END;
+
+   CALL ADVANCE.TO.NEXT.NOTE;          /* LOOK AT NOTE AFTER US         */
+
+   IF #ANYF=0 THEN DO;                 /* NO NOTE AFTER US              */
+      CALL BACKUP.TO.PRIOR.NOTE;       /* BACK UP TO NOTE TO DELETE     */
+      CALL SHORTEN.NLS(RLEN);          /* #SEC, #WRD COULD DISAPPEAR    */
+      IF #SEC<>0 THEN DO;              /* MAY HAVE A NEW #NMSB HERE     */
+         CALL CHECK.POINTER.TIMES;
+      END;
+      CALL REBUILD.EVENT.QUEUE;        /* KEEP QUEUE CORRECT */
+      RETURN;
+   END;
+
+
+   /* $PAGE */
+
+
+   I=SHR(READ(MD),1)&1023;             /* GET DELTA FIELD OF NEXT NOTE */
+   IF (AMSB=0)&(ALSB ILE (1023-I))     /* DELTA FIELD WILL FIT         */
+   THEN DO;
+
+      CALL BACKUP.TO.PRIOR.NOTE;       /* BACK UP                      */
+      CALL SHORTEN.NLS(RLEN);          /* TOSS NOTE; ADVANCE #WRD      */
+
+      WRITE(MAM)=NAH.PTR+#SEC;
+      WRITE(MAL)=#WRD;
+      WRITE(MD)=READ(MD)+SHL(ALSB,1);  /* ADD DELTA HERE               */
+      #NLSB=#NLSB+ALSB;
+      IF #NLSB ILT ALSB THEN #NMSB=#NMSB+1;
+      CALL CHECK.POINTER.TIMES;
+      CALL REBUILD.EVENT.QUEUE;        /* KEEP QUEUE CORRECT */
+      RETURN;
+
+   END;
+
+
+   IF (READ(MD)&"174001")="100001"
+   THEN DO;                            /* LONG REST HERE - BACK IT UP */
+      CALL BACKUP.TO.PRIOR.NOTE;
+      CALL SHORTEN.NLS(RLEN);
+      WRITE(MAM)=NAH.PTR+#SEC;
+      WRITE(MAL)=#WRD;
+      WRITE("324")=READ(MDI);
+      WRITE(MDI)=READ(MD)+AMSB;
+      WRITE(MD )=READ(MD)+ALSB;
+      IF READ(MD) ILT ALSB THEN DO;
+         WRITE(MAL)=READ(MAL)-1;
+         WRITE(MD )=READ(MD )+1;
+      END;
+      CALL CHECK.POINTER.TIMES;        /* STARTING TIME OF THIS REST RECORD MAY HAVE CHANGED */
+      CALL ADVANCE.TO.NEXT.NOTE;
+      CALL CHECK.POINTER.TIMES;        /* LAST TIME HERE HAS BEEN CHANGED   */
+      CALL REBUILD.EVENT.QUEUE;        /* KEEP QUEUE CORRECT */
+      RETURN;
+   END;
+
+   ELSE DO;                            /* LEAVE POINTERS POINTING TO */
+      CALL BACKUP.TO.PRIOR.NOTE;       /* THE REST RECORD WE JUST    */
+   END;                                /* MADE                       */
+
+END REMOVE.NOTE.RECORD;
+
+
+/* $SUBTITLE  ROUTINE TO CLEAR INDEPENDENT LOOP INFO FROM A TRACK */
+
+
+REMOVE.ILP.FROM.TRACK: PROC (TRK) PUBLIC SWAPABLE; /* GET RID OF ILP ON TRK POINTED TO BY PTR */
+   DCL (TRK,I)     FIXED;  /* ABS TRACK NUMBER TO REMOVE ILP FROM */
+
+   /* Create a system event when a note is added or removed */
+   /* from the sequencer:                                   */
+
+	interp_seq_dirtyness(1);
+
+   NEW.SEQ.INFO = NEW.SEQ.INFO \ 4;
+   WRITE(MAM) = D115D.NOTE.CHANGE.TRACKS;
+   WRITE(MAL) = TRK;               /* REMEMBER TRACK # ON NEW.SEQ.INFO */
+   WRITE(MD) = "177777";           /*   "NEW NOTES" OR "NEW TIMBRE"    */
+
+   WRITE(MAM)=TRK.HEAD;
+   WRITE(MAL)=TRK;
+   IF READ(MD)=0 THEN RETURN;      /* NO TRK HEAD - NOTHING TO DO */
+
+   #TRK=TRK;
+   #PTR=READ(MD);
+
+   WRITE(MAM)=#PTR;
+   WRITE(MAL)=THD.ILP;
+   IF READ(MD)=0 THEN RETURN 0;    /* IF NO LOOP, RETURN    */
+
+   /* 1. FIRST STEP IS TO TURN THE ILS AND ILE RECORDS */
+   /*    ON THE TRACK INTO ALTERNATE FORMAT REST NOTES */
+
+   WRITE(MAL)=THD.ILS.WRD;
+   #WRD=READ(MDI); #SEC=READ(MD);      /* SAVE PTR TO ILS RECORD IN GLOBALS */
+
+   IF (#WRD\#SEC)<>0 THEN DO;          /* MEANS THERE IS AN ILS RECORD ON TRK */
+      WRITE(MAM)=NAH.PTR+#SEC;         /* MAKE SURE WE'RE POINTING AT AN ILS RECORD */
+      WRITE(MAL)=#WRD;
+      IF (READ(MD)&"174001")<>"104001" THEN RETURN 0;
+
+      WRITE(MAL)=NLS.TRK;              /* MAKE SURE WE'RE ON THE RIGHT TRACK */
+      IF READ(MD)<>TRK THEN RETURN 0;  /* WRONG TRACK                */
+
+      WRITE(MAL)=#WRD;
+      WRITE(MDI)=(READ(MD)&SHL(1023,1))\"100001";
+      WRITE(MDI)=0; WRITE(MDI)=0;
+   END;
+
+   WRITE(MAM)=#PTR;                  /* RESTORE PTR TO TRACK HEAD */
+   WRITE(MAL)=THD.ILE.WRD;
+   #WRD=READ(MDI); #SEC=READ(MD);    /* SAVE PTR TO ILE RECORD IN GLOBALS */
+
+   IF (#WRD\#SEC)<>0 THEN DO;        /* MEANS THERE IS AN ILE RECORD ON TRK */
+      WRITE(MAM)=NAH.PTR+#SEC;       /* MAKE SURE WE'RE POINTING AT AN ILE RECORD */
+      WRITE(MAL)=#WRD;
+      IF (READ(MD)&"174001")<>"110001" THEN RETURN 0;
+
+      WRITE(MAL)=NLS.TRK;              /* MAKE SURE WE'RE ON THE RIGHT TRACK */
+      IF READ(MD)<>TRK THEN RETURN 0;  /* WRONG TRACK                */
+
+      WRITE(MAL)=#WRD;
+      WRITE(MDI)=(READ(MD)&SHL(1023,1))\"100001";
+      WRITE(MDI)=0; WRITE(MDI)=0;
+   END;
+
+
+   /* 2.  NEXT STEP IS TO REZERO THE ILS AND ILE PLAY INFO */
+   /*     JUST FOR FUN.  PROBABLY NOT NECESSARY.           */
+
+   WRITE(MAM)=#PTR;           /* RESTORE PTR TO TRK HEAD   */
+   WRITE(MAL)=THD.ILS.WRD;
+
+   IF (INC.POLY<>0) OR (MODC<>0)
+   THEN DO;                   /* MODEL C VERSION             */
+      RPC 20; WRITE(MDI)=0;   /* ZERO OUT 20 WORDS OF ILP INFO */
+   END;
+   ELSE DO;                   /* MODEL B VERSION             */
+      DO I=1 TO 5;            /* ZERO OUT 20 WORDS OF ILP INFO */
+         WRITE(MDI)=0; WRITE(MDI)=0;
+         WRITE(MDI)=0; WRITE(MDI)=0;
+      END;
+   END;
+
+   WRITE(MAL)=THD.ILE.WRD;
+   IF (INC.POLY<>0) OR (MODC<>0)
+   THEN DO;                   /* MODEL C VERSION             */
+      RPC 20; WRITE(MDI)=0;   /* ZERO OUT 20 WORDS OF ILP INFO */
+   END;
+   ELSE DO;                   /* MODEL B VERSION             */
+      DO I=1 TO 5;            /* ZERO OUT 20 WORDS OF ILP INFO */
+         WRITE(MDI)=0; WRITE(MDI)=0;
+         WRITE(MDI)=0; WRITE(MDI)=0;
+      END;
+   END;
+
+
+   /* $PAGE */
+
+
+   /* 3.  FINALLY, RESET THE THD.ILP BIT, ZERO OUT THE     */
+   /*     LOOP LENGTH INFO AND RESET THE ILP COUNTER VARS. */
+
+   WRITE(MAL)=THD.ILP;        /* LOOK UP THE ILP ENABLED BIT */
+   WRITE(MD )=0;              /* TURN OFF THE THD.ILP BIT    */
+   WRITE(MAL)=THD.ILPCTR;
+   WRITE(MD )=0;              /* AND REZERO ILP COUNTER JUST TO BE SAFE */
+   WRITE(MAL)=THD.LP.ILPCTR;
+   WRITE(MD )=0;
+   WRITE(MAL)=THD.ILS.SCANNED;  /* CLEAR FLAG TO DISABLE SPURIOUS LOOP BACKS */
+   WRITE(MD )=0;
+   WRITE(MAL)=THD.LP.ILS.SCANNED; /* CLEAR LOOPED VERSION TOO */
+   WRITE(MD )=0;
+
+   
+END REMOVE.ILP.FROM.TRACK;
+
+
+/* $SUBTITLE  ROUTINE TO SET UP AN INDEPENDENT LOOP ON A TRACK */
+
+
+/* CREATE.ILP.ON.TRACK:                                               */
+
+/*    ROUTINE ASSUMES ILP END WILL OCCUR BEYOND THE CURRENT PLAY PTRS */
+/*    THIS PROC WILL NEED REWORKING TO ENABLE NON-REAL-TIME ENTRY OF  */
+/*    OF ILP INFO.  RETURNS 1 IF SUCCESSFUL, ELSE RETURNS 0.          */
+/*    ROUTINE COMPLETELY TRASHES #TRK,#SEC,#WRD,#PTR,#NMSB,#NLSB,     */
+/*    #LMSB,#LLSB,#ANYR, AND #ANYF DURING THE CALL.                   */
+
+
+CREATE.ILP.ON.TRACK: PROC (TRK,ILS.MSB,ILS.LSB,ILE.MSB,ILE.LSB) FIXED PUBLIC SWAPABLE;
+   DCL (TRK)             FIXED; /* ABS TRK NUMBER TO INSERT ILP ON     */
+   DCL (ILS.MSB,ILS.LSB) FIXED; /* TIME AT WHICH ILP STARTS            */
+   DCL (ILE.MSB,ILE.LSB) FIXED; /* TIME AT WHICH LOOP BACK IS TO OCCUR */
+   DCL I                 FIXED;
+
+   STEP.TO.TIME: PROC (MSB,LSB); /* POSITIONS PTRS AT OR BEFORE FIRST NOTE WITH GIVEN TIME */
+      DCL (MSB,LSB) FIXED;
+
+      DO WHILE ((#ANYR<>0))           /* LOOP WHILE NOTE AT STRT OF TRK */
+      AND      (((MSB ILT #LMSB))     /* AND TIME IS BEFORE CURRENT     */
+      OR        ((MSB  =  #LMSB)      /* LAST EVENT TIME                */
+      AND        (LSB ILE #LLSB)));
+         CALL BACKUP.TO.PRIOR.NOTE;   /* KEEPS OUR GLOBAL INFO CORRECT  */
+      END;
+
+      DO WHILE ((#ANYF<>0))           /* LOOP WHILE NOT AT END OF TRK  */
+      AND      (((MSB IGT #NMSB))     /* TIME IS BEYOND CURRENT        */
+      OR        ((MSB  =  #NMSB)      /* NEXT EVENT TIME               */
+      AND        (LSB IGT #NLSB)));
+         CALL ADVANCE.TO.NEXT.NOTE;   /* STEP FORWARD BY ONE NOTE      */
+      END;
+   END STEP.TO.TIME;
+
+   IF  (ILE.MSB ILT ILS.MSB)    /* LOOP IS INVERTED OR HAS */
+   OR  (ILE.MSB  =  ILS.MSB)    /* ZERO LENGTH             */
+   AND (ILE.LSB ILE ILS.LSB)
+   THEN RETURN 0;               /* DISALLOW THIS LOOP      */
+
+   WRITE(MAM)=TRK.HEAD;
+   WRITE(MAL)=TRK;
+
+   IF READ(MD)=0 THEN DO;       /* NO TRACK HEAD ON THIS TRACK YET */
+
+      IF ALLOCATE.TRK.HEADER(TRK)=0 /* TRY TO ALLOCATE TRK HEAD   */
+      THEN RETURN 0;                /* NOT ENOUGH ROOM - BOMB OUT */
+
+      WRITE(MAM)=TRK.HEAD;
+      WRITE(MAL)=TRK;
+   END;
+
+   #TRK=TRK;                    /* SAVE TRK NUMBER IN GLOBAL   */
+   #PTR=READ(MD);               /* SAVE GLOBAL PTR TO TRK HEAD */
+   WRITE(MAM)=#PTR;             /* AND POINT TO THE TRACK HEAD */
+
+   WRITE(MAL)=THD.ILP;          /* SEE IF ALREADY AN ILP ON THE TRK */
+   IF READ(MD)<>0               /* IF THERE IS ONE, THEN BE SURE TO */
+   THEN CALL REMOVE.ILP.FROM.TRACK(TRK); /* REMOVE IT */
+
+
+   /* 1.  INSERT AN ILP START RECORD AT THE THD.LP.WRD, */
+   /*     THD.LP.SEC POINT IN THE TRACK.                */
+
+   CALL LOAD.#.INFO(THD.LP.NMSB); /* READ TRK HEAD INFO INTO # VARS */
+
+   IF #SEC=0 THEN DO;             /* TRK HAS NO NOTE LIST SEGMENTS */
+      IF ALLOCATE.FIRST.NLS=0     /* SET UP FIRST NOTE SEGMENT     */
+      THEN RETURN 0;              /* NO ROOM - BOMB OUT            */
+   END;
+
+   CALL STEP.TO.TIME(ILS.MSB,ILS.LSB);
+
+   #W1="104001"; #W2=0; #W3=0; #W4=VEL.NOTE; /* ILS RECORD WITH 0 DELTA */
+
+   IF INSERT.NOTE.RECORD(ILS.MSB,ILS.LSB)=0
+   THEN RETURN 0;               /* NO GO         */
+
+   WRITE(MAM)=#PTR;             /* RESTORE PTR TO TRK HEAD */
+   WRITE(MAL)=THD.ILS.WRD;      /* SAVE PTR TO ILS RECORD  */
+   WRITE(MDI)=#WRD;             /* SET THD.ILS.WRD         */
+   WRITE(MD )=#SEC;             /* SET THD.ILS.SEC         */
+
+
+   /* 2. NOW INSERT THE ILP END RECORD INTO THE TRACK */
+
+   CALL LOAD.#.INFO(THD.NMSB);  /* COPY TRK HEAD INFO INTO # VARS */
+
+   CALL STEP.TO.TIME(ILE.MSB,ILE.LSB);
+
+   #W1="110001"; #W2=0; #W3=0; #W4=VEL.NOTE; /* ILE RECORD W/ DELTA=0 */
+
+   IF INSERT.NOTE.RECORD(ILE.MSB,ILE.LSB)=0 /* UNABLE TO CREATE ILE RECORD */
+   THEN DO;                                 /* PRESUMABLY OUT OF MEMORY    */
+      WRITE(MAM)=#PTR;                      /* SET UP PTR TO TRACK HEAD */
+      WRITE(MAL)=THD.ILS.WRD;
+      #WRD=READ(MDI); #SEC=READ(MD);        /* SAVE PTR TO ILS RECORD IN GLOBALS */
+
+      IF (#WRD\#SEC)<>0 THEN DO;            /* MEANS THERE IS AN ILS RECORD ON TRK */
+         WRITE(MAM)=NAH.PTR+#SEC;           /* TURN IT INTO A REST RECORD */
+         WRITE(MAL)=#WRD;
+         WRITE(MDI)=(READ(MD)&SHL(1023,1))\"100001";
+         WRITE(MDI)=0; WRITE(MDI)=0;
+      END;
+
+      RETURN 0;                 /* NO GO         */
+   END;
+
+   WRITE(MAM)=#PTR;             /* RESTORE PTR TO TRK HEAD */
+   WRITE(MAL)=THD.ILE.WRD;      /* SAVE PTR TO ILE RECORD  */
+   WRITE(MDI)=#WRD;             /* SET THD.ILE.WRD         */
+   WRITE(MD )=#SEC;             /* SET THD.ILE.SEC         */
+
+
+   /* $PAGE */
+
+
+   /* 3. NOW COPY THD.LP (OVERALL LOOP) INFO */
+   /*    INTO THD.ILS (ILP START) BLOCK TO   */
+   /*    SIMULATE HAVING PROCESSED AN ILS    */
+   /*    RECORD AT SOME EARLIER TIME.        */
+
+   WRITE(MAM)=#PTR;             /* RESTORE PTR TO TRK HEAD */
+   WRITE(MAL)=THD.LP.NMSB;      /* READ OVERALL LOOP INFO  */
+
+   CALL LOAD.PLAY.INFO;         /* LOAD INTO COPY.BUF      */
+
+   /* SKIP OVER THE THD.LP.NMSB, THD.LP.NLSB, THD.LP.LMSB, */
+   /* THD.LP.LLSB, THD.LP.WRD AND THD.LP.SEC SINCE THESE   */
+   /* WERE SET CORRECTLY AT TOP OF ROUTINE.                */
+
+   WRITE(MAL)=THD.ILS.CXPOS;       /* SET XMEM PTR TO ILS PLAY INFO */
+   WRITE("313")=ADDR(COPY.BUF(6)); /* SET IMEM PTR TO TEMP ARRAY */
+
+   IF (INC.POLY<>0)             /* IF WE ARE SURE IT IS       */
+   OR (MODC    <>0)             /* OKAY TO USE THE REPEAT     */
+   THEN DO;                     /* INSTRUCTION                */
+      RPC 18;                   /* 18 WRDS OF PLAY INFO       */
+      WRITE(MDI)=READ("373");   /* COPY IMEM TO XMEM          */
+   END;
+   ELSE DO;                     /* USE NORMAL MODEL B CODE    */
+      DO I=1 TO 4;              /* 18 WRDS OF PLAY INFO       */
+         WRITE(MDI)=READ("373"); /* COPY IMEM TO XMEM         */
+         WRITE(MDI)=READ("373"); /* COPY IMEM TO XMEM         */
+         WRITE(MDI)=READ("373"); /* COPY IMEM TO XMEM         */
+         WRITE(MDI)=READ("373"); /* COPY IMEM TO XMEM         */
+      END;
+      WRITE(MDI)=READ("373");   /* COPY IMEM TO XMEM          */
+      WRITE(MDI)=READ("373");   /* COPY IMEM TO XMEM          */
+   END;
+
+
+   /* 4. LAST OF ALL SET UP THE TRACK HEADER INFO */
+   /*    FOR THE NEW INDEPENDENT LOOP             */
+
+   WRITE(MAL)=THD.ILP;
+   WRITE(MDI)=1;                /* ILP IS NOW DEFINED */
+   WRITE(MDI)=ILS.MSB;          /* SET THD.COUNTIN.MSB */
+   WRITE(MDI)=ILS.LSB;          /* SET THD.COUNTIN.LSB */
+   I=ILE.MSB-ILS.MSB;
+   IF ILS.LSB IGT ILE.LSB
+   THEN I=I-1;
+   WRITE(MDI)=I;                /* SET THD.LOOPLEN.MSB */
+   WRITE(MD )=ILE.LSB-ILS.LSB;  /* SET THD.LOOPLEN.LSB */
+
+   WRITE(MAL)=THD.ILPCTR;
+   WRITE(MD )=0;
+   WRITE(MAL)=THD.LP.ILPCTR;
+   WRITE(MD )=0;
+
+   WRITE(MAL)=THD.ILS.SCANNED;  /* SET AS IF WE HAVE SCANNED */
+   WRITE(MD )=1;                /* THE ILS RECORD            */
+   WRITE(MAL)=THD.LP.ILS.SCANNED; /* AND LOOPED VERSION      */
+   WRITE(MD )=1;
+
+   CALL REBUILD.EVENT.QUEUE;    /* REBUILD THE EVENT QUEUE    */
+
+   RETURN 1;                    /* TRACK NOW HAS ILP ON IT    */
+
+END CREATE.ILP.ON.TRACK;

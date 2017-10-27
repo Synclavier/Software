@@ -1,0 +1,436 @@
+/* 151-gsub  -  variables and subroutines for guitar button panel */
+
+/*
+   11/03/88 - tss - added code to support two modes of HOLD switch
+   9/10/86 - ts - changed LOOP.L lpn to ELOOP.L
+   8/21/86 - ts,eg - fixed bug in soloed.track.bits
+   8/14/86 - eeg - added necessary external declarations
+   7/06/86 - eeg - fixed some incorrect data declarations
+   5/15/86 - "official" creation of release-M modules
+*/
+
+ /* external definitions needed by this procedure...
+    they are not in a global file because this file is used only for guitar compilations */
+
+ dcl cur.st                          fixed external; 
+ dcl cur.stbank                      fixed external; 
+ dcl (gswitchu,old.gswitchu,old.thr) fixed external; 
+ dcl (gswitchl,old.gswitchl)         fixed external; 
+ dcl tuning.info                     fixed external;
+ dcl tuning.error                    fixed external; 
+ dcl tuning.bank.in.memory           fixed external;
+ dcl axe.hold.mode                   fixed external;
+ dcl read.tuning.bank                proc  external;
+ dcl read.tuning                     proc  external;
+ dcl store.tuning                    proc  external;
+ dcl tune.guitar                     proc  external;
+ dcl restore.tuning                  proc  external;
+
+/* global variables for use by */
+/* guitar button scan code     */
+
+dcl (gb.state,gb)     fixed public; /* state control for lower 8 bits */
+dcl (gb.list)         data  public (00,12,00,13,00,06,07,14,00,13); /* panel routing */
+dcl (gb.llist)        data  public (00,01,01,02,02,04,04,08,08,00); /* lighted button list */
+dcl (gb.blist)        data  public (00,00,01,00,02,00,04,00,08,00); /* blinking button list */
+dcl (new.gb,rel.gb)   fixed public; /* bits for new presses and releases */
+dcl (cur.bbits)  (9)  fixed public; /* bits for held buttons on the current scan */
+dcl (prev.bbits) (9)  fixed public; /* bits for held buttons on last scan */
+dcl (gbu, gbl )       fixed public; /* upper & lower          lights */
+dcl (gblu,gbll)       fixed public; /* upper & lower blinking lights */
+dcl (double)          fixed public; /* set true on double button press */
+dcl (tuning)          fixed public; /* set true when ready to tune */
+dcl (r.tuning.bank)   fixed public; /* set true to read tune bank */
+dcl (tuning.entry)    fixed public; /* set true to read tuning entry */
+dcl (tuning.special)  fixed public; /* set true for other cases */
+dcl (tuning.suppress) fixed public; /* set after tune */
+dcl (special.skt)     fixed public;
+dcl (ngvol,ngrte)     fixed public;
+dcl prev.gswitchl     fixed public; /* holds last value of gswitchl */
+
+axe.to.lpn.map:  proc (item) public swapable;
+   dcl item fixed;
+
+   dcl axe.to.lpn.map.data data ( /* maps guitar button panel to lpns according to GB.STATE */
+   /* state 0 */ start.l , stop.l  , record.l , cont.l   , eloop.l  , transp.l ,         0, erase.l  ,
+   /* state 1 */ bank.l  , bank.l+1, bank.l+2 , bank.l+3 , bank.l+4 , bank.l+5 , bank.l+6 , bank.l+7 ,
+   /* state 2 */        0,        0,         0,         0,         0,         0,         0,         0,
+   /* state 3 */ timb.l  , timb.l+1, timb.l+2 , timb.l+3 , timb.l+4 , timb.l+5 , timb.l+6 , timb.l+7 ,
+   /* state 4 */        0,        0,         0,         0,         0,         0,         0,         0,
+   /* state 5 */ trak.l  , trak.l+1, trak.l+2 , trak.l+3 , trak.l+4 , trak.l+5 , trak.l+6 , trak.l+7 ,
+   /* state 6 */ trak.l+8, trak.l+9, trak.l+10, trak.l+11, trak.l+12, trak.l+13, trak.l+14, trak.l+15,
+   /* state 7 */ seqr.l  , seqr.l+1, seqr.l+2 , seqr.l+3 , seqr.l+4 , seqr.l+5 , seqr.l+6 , seqr.l+7 ,
+   /* state 8 */        0,        0,         0,         0,         0,         0,         0,         0,
+   /* state 9 */ timb.l  , timb.l+1, timb.l+2 , timb.l+3 , timb.l+4 , timb.l+5 , timb.l+6 , timb.l+7 );
+
+   return axe.to.lpn.map.data(item);
+end axe.to.lpn.map;
+
+/* $PAGE - Present Guitar Button Panel display */
+
+gdisp:proc public swapable; /* procedure to compute & display guitar buttons */
+   dcl (k,j) fixed;
+
+   SOLOED.TRACK.BITS:  proc (trk.but) fixed; /* get bits to light for soloed trk button disp */
+      dcl (trk.but,i,lbits,trk) fixed; /* start from passed trk #, up trk+7 */
+
+      if num.of.soloed.tracks=0        /* no tracks soloed        */
+      then return 0;                   /* so all bits off         */
+
+      lbits=0;                         /* assume all bits off     */
+      do i=0 to 7;                     /* turn on soloed track lights */
+         write(mam)=TBUT.PTR;          /* look up abs. track number mapping */
+         write(mal)=i+trk.but;         /* for this track button   */
+
+         trk=read(md)&255;             /* get abs track #         */
+         
+         if (trk=recd.trk)             /* trk selected for record */
+         then gbll=gbll\bits(i);       /* blink it                */
+
+         write(mal)=trk;
+         if ((read(md)&b.soloed.trk)<>0) /* find out if it is soloed */
+         then lbits=lbits\bits(i);       /* light its bit           */
+      end;
+
+      return lbits;                    /* return bits to caller   */
+   end SOLOED.TRACK.BITS;
+
+
+   gbu=shl(shl(shl(shl(dcont,1)\vtrack,1)\pfilt\quant,1)\tfilten,4); /* or in toggle buttons */
+   gbu=gbu\gb.llist(gb.state);                      /* or in bits for state */
+   gblu=gb.blist(gb.state);                         /* blink those as required */
+   if (skt<>0)&((gb.state=3)\(gb.state=9)) then do; /* if state 3 (timbre recall) or 9 (skt recall) - display SKT button for split keyboard recall */
+      gbu=gbu\3;                                    /* light both if doing skt */
+      if ((splt<>0)&(timb.dest>=0)) or ((smt\timb.dest)<>0)
+      then gblu=gblu\3; /* blink SKT during second half of SMT, or if second SKT press */
+   end;
+   if (tfilten<>0)&(tfilt=0) then gblu=gblu\"20"; /* go to blinking mode for no  trans filter */
+   if (pfilt<>0)             then gblu=gblu\"40"; /* blink mode for pitch filter */
+   if (follow.guitar<>0) then do;                 /* blink mode for strings */
+      gblu=gblu\"200"; gbu=gbu\"200";
+   end;
+   if (tuning<>0) then do;                       /* display special tuning status */
+      gbu=gbu\6; gblu=gblu\6; gbl=0; gbll=0;     /* light & blink timbre recall & track buttons */
+      if r.tuning.bank <>0 then do; gbu=gbu\1; gbl=bits(cur.stbank); end; /* getting ready for tuning bank recall */
+      if tuning.entry  <>0 then do; gblu=gblu&"17775"; gbl=bits(cur.st); end;/* back to on */
+      if tuning.special<>0 then do; gbu=gbu\1; gblu=gblu\1; gbl=bits(cur.st); end;
+      if tuning.error  <>0 then do; gbl=255; gbll=255; end; /* blink all on error */
+   end;
+   else if (tuning.suppress<>0) then do;
+      gbl=0; gbll=0; /* display nothing immediately after tuning */
+      if (tuning.error<>0) then do; gbl=255; gbll=255; end;
+   end;
+   else do case (gb.state); /* map correct status bits to lower buttons */
+      do;  /*    state 0:  display sequencer status */
+         gbl=0; gbll=0;                     /* clear all buttons to start */
+         if (gswitchl&"2")<>0 then do;      /* STOP button is held */
+            if axe.hold.mode=0              /* display HOLD switch mode */
+            then gbl = gbl | "100"; /* HOLD switch = HOLD    mode */
+            else gbl = gbl | "200"; /* HOLD switch = SUSTAIN mode */
+         end;
+         else do;
+            if  (play<>0)
+            and (move=0)       then   gbl=gbl\ "1"; /* turn on    START  button  */
+            if recd<>0         then   gbl=gbl\ "4"; /* turn on    RECORD button  */
+            if cont<>0         then   gbl=gbl\"10"; /* turn on    CONT   button  */
+            if overall.loop<>0 then   gbl=gbl\"20"; /* turn on    LOOP   button  */
+            if xpos<>0         then   gbl=gbl\"40"; /* turn on    XPOS   button  */
+            if eras<>0         then do;             /* blink both ERASE  buttons */
+               gbl=gbl\"300"; gbll=gbll\"300";
+            end;
+         end;
+      end; /* of state 0: display sequencer status */
+
+      do;  /*    state 1:  display bank store/recall status */
+         gbl=bits(our.bank); gbll=0; /* turn on light for selected bank */
+      end; /* of state 1:  display bank store/recall status */
+
+      ;    /*    state 2:  unused */
+
+      do;  /*    state 3:  display timbre store/recall status */
+         if recall.state=0 
+         then do; gbl=bits(our.timbre); gbll=0;     end; /* light active timbre */
+         else do; gbl="377";            gbll="377"; end; /* blink all timbre lights when SKT active */
+      end; /* of state 3:  display timbre store/recall status */
+
+      ;    /*    state 4:  unused */
+
+      /* $PAGE - ADDITIONAL GUITAR BUTTON PANEL DISPLAY STATES */
+
+      do;  /*    state 5:  display tracks 1-8 status */
+         if (smt\skt)<>0 then do;    /* blink all lights during SMT or SKT */
+            gbl="377"; gbll="377";
+         end;
+         else do;                    /* display selected or soloed tracks */
+            gbll=0;                  /* turn prev values off to start */
+            gbl=SOLOED.TRACK.BITS(0);/* compute solo display for tracks 1-8 */
+         end;
+      end; /* of state 5:  display tracks 1-8 status */
+
+      do;  /*    state 6:  display tracks 9-16 status */
+         if (smt\skt)<>0 then do;    /* blink all lights during SMT or SKT */
+            gbl="377"; gbll="377";
+         end;
+         else do;                    /* display selected and soloed tracks */
+            gbll=0;                  /* turn prev values off to start */
+            gbl=SOLOED.TRACK.BITS(8);/* compute solo display for tracks 9-16 */
+         end;
+      end; /* of state 6:  display tracks 9-16 status */
+
+      do;  /*    state 7:  display sequence store/recall status */
+	     if (our.seq < 0) gbl = 0;
+		 else             gbl = bits(our.seq);
+		 gbll=0; /* light button for current sequence */
+      end; /* of state 7:  display sequence store/recall status */
+
+      do;  /*    state 8: display string select status */
+         /* find first selected partial */
+         k=0;
+         do while (selected.partials&bits(k))=0; k=k+1; end;
+
+         ptptr=TIM.HEAD.LOOKUP(0,TIM.PARTIAL.POINTERS+k); /* get ptr to desired partial timbre */
+         gbl=shr(p.lookup(ptptr+p.act.strgs),10) xor "77"; gbll=0;        /* look up bits from timbre def for displaying */
+      end; /* of state 8: display string select status */
+
+      do;  /*    state 9: display SKT status */
+         if recall.state<>0 
+         then do; gbl="377"; gbll="377"; end; /* blink all timbre lights when SKT active */
+         else do; gbl=0;     gbll=0;     end; /* turn off all lights */
+      end; /* of state 9: display SKT status */
+   end;    /* of do case on GB.STATE */
+end gdisp;
+
+clear.tuning:proc public swapable; /* procedure to zero tuning variables */
+   tuning=0; r.tuning.bank=0; tuning.entry=0; tuning.special=0; tuning.error=0;
+end;
+
+/* $PAGE - Process guitar input switches */
+
+DCL ABORT.BOUNCE.SMT.SKT PROC RECURSIVE;
+
+new.upper.switch:proc public swapable;
+   dcl (i,j,k) fixed;
+   if old.gswitchu=0 then double=0; /* clear flag on any key press */
+   i=((old.gswitchu)&("17")&(not(gswitchu))); /* compute bits for TIMBRE, BANK, TRACK, or SEQUENCE button being released */
+   if (i<>0) then do; /* lifting one of the 4 buttons */
+      if (r.tuning.bank\tuning.entry)<>0 then tuning.special=0; /* zap on release of button */
+      if (double=0) then do; /* means one of the 4 buttons was released, without a double buttone press */
+         if (i&"13")<>0 then call abort.bounce.smt.skt; /* stop skt on timbre, bank, seq only - allow track button here */
+         call clear.tuning; /* exit tuning mode */
+      end;
+      if (gb.state=9)&(skt=0) then gb.state=0; /* return to state 0 on third skt button press */
+   end;
+   gb=(gswitchu)&(not(old.gswitchu)); /* get buttons just pressed */
+   old.gswitchu=gswitchu; /* and update old for next time */
+   do while gb<>0; /* process each button */
+      i=0; j=1;
+      do while (gb&j)=0; j=shl(j,1); i=i+1; end;
+      gb=gb XOR j; /* turn off bit */
+
+      if i<4 then do; /* button 0-3 - change gb.state as required */
+         do case i;   /* simulate press of equivalent button from keyboard */
+            call stack.on.panel("100000"\bankb.l);
+            call stack.on.panel("100000"\entryb.l);
+            ;
+            call stack.on.panel("100000"\seqb.l);
+         end;
+
+         if ((i=0)&((gswitchu&2)<>0)) /* pressing both timbre & bank */
+         or ((i=1)&((gswitchu&1)<>0))
+         then do;
+            gb=gb&"177774"; /* turn of other bit in case both pressed */
+            if tuning<>0 then do; /* oops - we are in tuning mode */
+               if tuning.special<>0 then do; /* in fact, time to restore */
+                  call restore.tuning; /* restore guitar tuning */
+                  call clear.tuning; /* done with tuning operation */
+               end;
+               else do; 
+                  r.tuning.bank=0; tuning.entry=0; tuning.special=1; tuning.error=0; /* set flag for later store,  or retune */
+               end;
+               gb.state=0; /* keep in state 0 generally */
+            end;
+            else do; /* prepare for split recall */
+               gb.state=9;                          /* enter special recall state - might have pressed bank button first */
+               call stack.on.panel("100000"\skt.l); /* map onto press of SKT button */
+            end;
+            double=1; /* indicate double key press occurred */
+         end;
+         else if ((i=1)&((gswitchu&4)<>0)) /* pressing both timbre & track */
+         or      ((i=2)&((gswitchu&2)<>0))
+         then do;                 /* activate special tuning feature */
+            gb=gb&"177771";       /* turn off other light if both pressed this time */
+            if tuning<>0 then do; /* oops - we have been here before */
+               call tune.guitar;  /* call procedure to measure & tune guitar */
+               call clear.tuning; /* done with tune operation */
+            end;
+            else tuning=1;        /* enter tuning state */
+            gb.state=0; double=1;
+         end;
+
+         /* $PAGE - PROCESS STATE TOGGLES */
+
+         else do;                 /* toggle state as required */
+            if tuning<>0 then do; /* oops - in middle of tuning */
+               if i=0 then do;    /* bank button */
+                  if r.tuning.bank=0 then double=1; /* clear tuning on release if this is second press */
+                  r.tuning.bank=1; tuning.entry=0; tuning.error=0;
+               end;
+               else if i=1 then do; /* timbre button */
+                  if tuning.entry=0 then double=1; /* clear tuning on release if this is second press */
+                  r.tuning.bank=0; tuning.entry=1; tuning.error=0;
+                  if tuning.bank.in.memory=0 then tuning.error=1; /* error condition if no bank */
+               end;
+            end;
+            k=shl(i,1)+1; /* compute 1,3,5,7 */
+            if      gb.state=k+1 then gb.state=0;   /* go from blinking to off */
+            else if gb.state=k   then gb.state=k+1; /* go from on to blinking */
+            else                      gb.state=k;   /* else go to on */
+            if (gb.state=2) or (gb.state=4) then gb.state=0; /* but no blinking for buttons 0 & 1 */
+         end;
+      end;
+      else do; /* means change guitar pitch filter parameters */
+         do case (i-4); /* else branch as required */
+            do; /* transient filter */
+               if      tfilten=0 then do; tfilten=1; tfilt=1; end; /* back to tfilter on */
+               else if tfilt=0   then tfilten=0;                   /* partial tfilter to none */
+               else                   tfilt=0;                     /* on to blinking */
+            end;
+            do;
+               if      quant<>0 then do; pfilt=1; quant=0; end; /* quant to pfilt */
+               else if pfilt<>0 then do; pfilt=0; quant=0; end; /* pfilt to none */
+               else                  quant=1;                   /* else go to quantize from off */
+            end;
+            vtrack=vtrack XOR 1; /* flip volume tracking */
+            do;
+               if      dcont        <>0 then do; follow.guitar=1; dcont=0; end;
+               else if follow.guitar<>0 then do; follow.guitar=0; dcont=0; end;
+               else                          dcont=1; /* flip decay control */
+            end;
+         end;
+         i=(follow.guitar\shl(tfilten\shl(dcont\shl(vtrack\shl(pfilt\shl(quant\shl(tfilt,1),1),1),1),1),1)) XOR 127; /* compute compacted form, then invert for storage */
+         j=TIM.HEAD.LOOKUP(0,TIM.MISC.POINTER); /* get ptr to desired guitar info */
+         j=p.lookup(j+GTINFO.LOC);              /* and look it up */
+         write(md)=(j&"000377")\shl(i,9); /* store in timbre (works for sfm timbre too) */
+      end;
+   end;
+   call gdisp; new.gdisplay=1; /* recompute display twice both on press and release */
+end; 
+
+/* $PAGE - process guitar lower switches */
+
+process.lower.switches:proc public swapable;
+   dcl (i,j,k) fixed;
+   if gb.state=0 then do;                    /* if displaying sequencer buttons, display ERASE properly */
+      if (gswitchl&"2") = 0 then do;         /* STOP button not held */
+         if (gswitchl&"300")="300"
+         then gswitchl=gswitchl xor "100";      /* leave 100 bit on if both pressed (erase) */
+         else gswitchl=gswitchl&"77";           /* else disalow erase */
+      end;
+   end;
+   else if (new.pan=0)&(gb.state=7) then do; /* limit sequence recall range */
+      gswitchl=gswitchl&"77";                /* allow sequences 1 - 6 */
+   end;
+
+   prev.gswitchl=gswitchl;                   /* update copy of switches */
+   do k=0 to 9; cur.bbits(k)=0; end;         /* zero out current bits */
+   if (tuning\tuning.suppress)=0 then do;    /* only if not tuning */
+      cur.bbits(gb.state)=gswitchl;          /* save new current bits */
+   end;
+
+   if (skt<>0) then do;
+      if ((prev.bbits(5)=0)&(cur.bbits(5)<>0))
+      or ((prev.bbits(6)=0)&(cur.bbits(6)<>0))
+      then special.skt=1;                    /* performing skt from track - set flag */
+   end;
+
+   do k=0 to 9; /* loop over all the states -- handle each separately */
+      new.gb=cur.bbits(k)&(not prev.bbits(k));   /* compute new presses */
+      rel.gb=prev.bbits(k)&(not cur.bbits(k));   /* compute new releases */
+
+      if (new.gb\rel.gb)<>0 then do;             /* have some changes */
+         if (k=0)&((new.gb&2)<>0) then tuning=0; /* abort tuning if STOP pressed */
+
+         if (k=8)&(new.gb<>0) then do;           /* map button presses to string select */
+            do j=0 to num.partials-1;
+               if (selected.partials&bits(j))<>0 then do;
+                  ptptr=TIM.HEAD.LOOKUP(0,TIM.PARTIAL.POINTERS+j); /* get ptr to selected partial timbre */
+                  i=p.lookup(ptptr+p.act.strgs);
+                  write(md)=i xor shl(new.gb,10); /* update timbre def */
+               end;
+            end;
+            prev.bbits(8)=cur.bbits(8);          /* update old register */
+         end;
+         else if (k = 0)                         /* SEQUENCER control state */
+         and ((new.gb & "300") <> 0)             /* ERASE buttons pressed */
+         and ((gswitchl&"2")   <> 0)             /* and STOP button held  */
+         then do;                                /* lower buttons in sequencer control mode */
+           axe.hold.mode = 0;                    /* assume left ERASE + STOP => HOLD switch = HOLD */
+           if (new.gb & "200") <> 0              /* right ERASE + STOP => HOLD switch = SUSTAIN */
+           then axe.hold.mode = 1;
+         end;
+         else do i=0 to 7;                       /* map buttons to keyboard functions */
+            if (new.gb&bits(i))<>0 then do;      /* have a new press */
+               if new.button.list(0)<BUTTON.LIST.SIZE then do;
+                  call stack.on.panel(BUTTON.LIST.HELD\axe.to.lpn.map(shl(k,3)+i));
+                  prev.bbits(k)=prev.bbits(k) xor bits(i);
+               end;
+               else prev.gswitchl=(-1);          /* force doing this code again next time */
+            end;                                 /* of new press */
+            else if (rel.gb&bits(i))<>0 then do; /* have a new release */
+               if new.button.list(0)<BUTTON.LIST.SIZE then do;
+                  call stack.on.panel(axe.to.lpn.map(shl(k,3)+i));
+                  prev.bbits(k)=prev.bbits(k) xor bits(i);
+               end;
+               else prev.gswitchl=(-1);          /* force doing this code again next time */
+            end;                                 /* of new release */
+         end;
+      end;                                       /* of have some changes */
+   end;                                          /* of loop over all states */
+   call gdisp; new.gdisplay=1;                   /* compute display continuously if guitar lower button held */
+end;
+
+/* $PAGE - process change in lower switches */
+
+change.lower.switch:proc public swapable;
+   dcl (i,j,k) fixed;
+   if gswitchl=0 then do; /* switches being released - clear certain flags */
+      if (new.pan=0)&((gb.state=7)&((old.gswitchl&"77")<>0))\(gb.state=9) then gb.state=0; /* go back to state 0 after actually recalling or storing asequence, or skt */
+      else if ((gb.state=7)&(old.gswitchl<>0))\(gb.state=9) then gb.state=0; /* go back to state 0 after actually recalling or storing asequence, or skt */
+      if tuning.suppress<>0 then tuning.error=0; /* remove error */
+      tuning.suppress=0; /* allow normal buttons now */
+      if special.skt<>0 then gb.state=0; /* return to state 0 after skt from track */
+      special.skt=0; /* clear flag if set */
+   end;
+   if tuning then do; /* check for button presses here */
+      gb=(gswitchl)&(not(old.gswitchl)); /* get buttons just pressed */
+      if gb<>0 then do;
+         tuning.info=0; j=1; /* find the button */
+         do while (gb&j)=0; j=shl(j,1); tuning.info=tuning.info+1; end;
+         k=gbu\shl(j,8); /* present new lights to user */
+         if fake.it=0 then do; /* write out lights, scan threshold, scan knobs */
+            disable;
+               write(D134)=16+7; /* select output register address */
+               write(D135)=k; /* write out to guitar panel */
+            enable;
+         end;
+         else if (new.pan=0) then do; /* present fake display for debugging - (old keyboard only) */
+            dcl cr lit '"130"';
+            dcl dr lit '"131"';
+            write(cr)="20"; /* write number to lights now. begin by disabling external write */
+            write(cr)="10"; /* select register */
+            write(dr)=k;    /* write out guitar bits */
+            write(cr)="20"; /* back to computer address */
+            write(cr)="260";/* start output display */
+         end;
+         if      r.tuning.bank <>0 then call read.tuning.bank;
+         else if tuning.entry<>0 then call read.tuning;
+         else do; /* means not bank or entry read */
+            if tuning.special<>0 then do; call store.tuning; call clear.tuning; end; /* store tuning */
+            else do; call clear.tuning; tuning.error=1; end;/* light error lights for a while */
+            gb.state=0; tuning.suppress=1; /* flip out of tuning */
+         end;
+      end;
+   end;
+   old.gswitchl=gswitchl; /* update old value for next time */
+   call gdisp; new.gdisplay=1; /* compute display correctly */
+end;

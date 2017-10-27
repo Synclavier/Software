@@ -1,0 +1,1079 @@
+/*	:SYNSOU:STORMOD:WINDOW  $TITLE  Routines to Open & Manage the Scrolling Display Window	*/
+
+/*
+Modified:
+2000/03/08 - TY  - Fixed TitleMax bug in Open.Directory.Window()
+2000/02/25 - TY  - Made changes to accommodate display of sound file loops
+1989/05/02 - TSS - Merged changes for Optical disk to DTD transfer project
+1988/12/01 - cj  - added bin button, redefine shuffle button to RAM button
+1988/09/21 - SGS - Keep Window from updating twice during startup
+1988/07/22 - SGS - Added Print button
+1988/06/09 - SGS - Center highlighted cell when restoring display, if appropriate
+1988/04/05 - SGS - Improved handling of invalid DC pointers
+1988/03/11 - MWH - Re-do part of my edit from 1/15 (someone merged HALF of it!)
+1988/01/13 - SGS - added procs to save and restore top and cursor pointers (DC pointers)
+1988/01/13 - MWH - Add column to display second poly bin if there
+1987/10/29 - EEG - added poly memory delete and shuffle
+*/
+
+dcl Debug.DC	lit '0';
+
+dcl Fetch.DC.Cursor.Pointers proc (array,fixed,fixed) recursive;
+dcl Set.Cursor.Position.At.Entry proc (fixed,fixed) returns (fixed) recursive;
+
+Get.Index.And.Offset: proc (Pointers) public swapable;
+	dcl Pointers	array;	/*	Pointers(0) = Index	*/
+									/*	Pointers(1) = Offset	*/
+
+	if SortInfo = SORT$Filename then do;
+		Pointers(0) = FListIndex;
+		Pointers(1) = -1;
+	end;
+	else do;	/*	SortInfo = SORT$Category	*/
+		Pointers(0) = CListIndex;
+		Pointers(1) = CListCurPos;
+	end;
+
+end Get.Index.And.Offset;
+
+/*	$SUBTITLE	*/
+Scroll.Table.To.Center.Cell: proc (Row, Col) returns (fixed) swapable;
+	dcl (Row,Col)				fixed;
+	dcl ItemType				fixed;
+	dcl NumLines				fixed;
+	dcl Lines					fixed;
+	dcl (IndexPtr,OffPtr)	fixed;
+
+	/*	resets F/Clist ptrs to new position such that the cell at (row,col)	*/
+	/*	will be centered in the display when the display is drawn				*/
+
+	NumLines = (GID(DirTableRows)/2)-Row-1;	/*	number of lines the cell is off-center	*/
+
+	call GetListPos(ScrollMem#);
+	Lines=0;
+	ItemType = CurItemType;
+
+	if NumLines > 0 then do;		/*	scroll backwards	*/
+		do while (Lines ilt NumLines) & (ItemType<>ITEM$BOF);	/*	loop until we scroll back half a screenful			*/
+			ItemType=Get.Prior.Line(misc.buf);						/*	back up a line - leave ptrs at start of prior line	*/
+			if ItemType<>ITEM$BOF then Lines=Lines+1;
+			else do;						/*	reset ptrs to first line	*/
+				if SortInfo = SORT$Filename then
+					call SetFListPos(0);
+				else
+					call SetCListPos(0,-1);
+			end;
+		end;
+	end;
+
+	else if NumLines < 0 then do;	/*	scroll forwards	*/
+		NumLines = -NumLines;
+		do while (Lines ilt NumLines) & (ItemType<>ITEM$EOF);	/*	loop until we scroll back half a screenful	*/
+			ItemType=Get.Next.Line(misc.buf);	/*	advance a line	*/
+			if SortInfo = SORT$Filename then do;
+				if ItemType<>ITEM$EOF then do;
+					Lines		= Lines+1;
+					IndexPtr	= FListIndex;
+				end;
+				else call SetFListPos(IndexPtr);	/*	backup to last line	*/
+			end;
+			else if SortInfo = SORT$Category then do;
+				if ItemType<>ITEM$EOF then do;
+					Lines		= Lines+1;
+					IndexPtr	= CListIndex;
+					OffPtr	= CListCurPos;
+				end;
+				else call SetCListPos(IndexPtr,OffPtr);	/*	backup to last line	*/
+			end;
+		end;
+		Lines = -Lines;	/*	since we shifted the designated cell backward in display	*/
+	end;
+
+	return (Lines);
+end Scroll.Table.To.Center.Cell;
+
+/*	$SUBTITLE	*/
+
+/*	Draws display according to the values stored in DC ptrs	*/
+RestoreDisplayPos: proc (center) public swapable;
+	dcl center				fixed;	/*	<>0 = center the highlighted cell in the display	*/
+	dcl (Index,Offset)	fixed;
+	dcl (Col,Row)			fixed;
+	dcl Ptrs(1)				fixed;
+	dcl NewTopLine			fixed;
+	dcl (i,j,k)				fixed;
+	dcl ItemType			fixed;
+	dcl (NumLines,Lines)	fixed;
+
+	/*	If the TopPtrs are not found in DirDevice's index list,	*/
+	/*	sets display to top of index list.  If CursorPtrs are		*/
+	/*	not found in display, sets TopPtrs = CursorPtrs and		*/
+	/*	tries redrawing display												*/
+
+	RESTORE:
+
+	/*	restore old display position	*/
+	NewTopLine = SetDisplayPos(DirDevice);
+
+	if NewTopLine = -1 then do;		/*	DC ptrs were invalid	*/
+
+		/*	reset DC ptrs for each display format of DirDevice	*/
+		call Reset.DC.Pointers(DirDevice);
+
+		/*	reset F/CList ptrs	*/
+		if SortInfo = SORT$Filename then
+			call SetFListPos(0);
+		else
+			call SetCListPos(0,-1);
+
+		/*	reset NewTopLine		*/
+		NewTopLine = 0;
+	end;
+
+	ScreenTopLine = NewTopLine;
+
+	call PID(Scroll.CurrentLine,ScreenTopLine);
+	call SaveListPos (ScrollMem#);	/*	initialize scroll vars	*/
+	call Set.ScrollBar.Pos;
+
+	/*	error check for devices with no sound files	*/
+	if TotalDisplayLines=0 then do;
+		Row = -1; Col = -1;
+	end;
+
+	else do;
+		/*	recall cursor entry pointers	*/
+		call Fetch.DC.Cursor.Pointers(loc(addr(Index)),DirDevice,Compute.SortFormat(SortInfo,ItemFilter));
+
+		/*	put cursor on proper entry in display	*/
+		call GetListPos(ScrollMem#);
+		if Set.Cursor.Position.At.Entry(Index,Offset)=0 then do;
+
+			/*	if we couldn't find the cursor entry in the display,	*/
+			/*	reset top ptrs to cursor entry and try redrawing		*/
+			Ptrs(0) = Index; Ptrs(1) = Offset;
+			call Store.DC.Top.Pointers(Ptrs,DirDevice,Compute.SortFormat(SortInfo,ItemFilter));
+			goto RESTORE;		/*	try it again	*/
+		end;
+
+		call Fetch.Table.Cur.Cell(GID(DirTable),loc(addr(Col)));
+
+		if center<>0 then do;
+			Lines = Scroll.Table.To.Center.Cell(Row,Col);
+			Row = Row+Lines;	/*	account for scroll	*/
+
+			call Set.Table.Cur.Cell(GID(DirTable),Col,Row);
+			call Select.New.Cur.Obj(GID(DirTable),Col,Row);
+
+			ScreenTopLine = ScreenTopLine-Lines;
+			call PID(Scroll.CurrentLine,ScreenTopLine);
+			call SaveListPos (ScrollMem#);	/*	initialize scroll vars	*/
+		end;
+
+		call Set.ScrollBar.Pos;
+	end;
+
+	/*	draw display	*/
+	call GetListPos(ScrollMem#);
+	call Fill.DirTable(true);
+
+	/*	highlight the cell at cursor position	*/
+	call Fetch.Table.Cur.Cell(GID(DirTable),loc(addr(Col)));
+	call Set.DirTable.Position(Row,Col);
+
+end RestoreDisplayPos;
+
+Compute.SortFormat: proc (Sort, Filter) returns (fixed) public swapable;
+	dcl Sort		fixed;
+	dcl Filter	fixed;
+
+	if Sort=SORT$Category then do;
+		if Filter=FILTER$Filename then
+			return (0);			/*	Cats Only	*/
+		else	/*	if Filter=FILTER$None	*/
+			return (1);			/*	Files and Cats	*/
+	end;
+	else do;
+		if Filter=FILTER$Category then
+			return (2);			/*	Files Only	*/
+		else	/*	if Filter=FILTER$None	*/
+		/*	NOTE: This should return 1 instead of 2, but an unfortunate	*/
+		/*	precedent exists of setting InfoFilter to FILTER$None when	*/
+		/*	wanting Files Only  (InfoFilter should be set to FILTER$Category!)	*/
+			return (2);			/*	Files and Cats	*/
+	end;
+
+end Compute.SortFormat;
+
+/*	Sets the table current cell to the cell containing (Index,Offset)		*/
+/*	NOTE: Proc assumes FList/CList ptrs are positioned at top of display	*/
+Set.Cursor.Position.At.Entry: proc (Index,Offset)	fixed public swapable;
+	dcl (Index,Offset)	fixed;
+	dcl ColCount			fixed;
+	dcl RowCount			fixed;
+	dcl (NextLineIndex,NextLineOffset)	fixed;
+	dcl (SearchIndex,SearchOffset)		fixed;
+
+	if TotalDisplayLines = 0 then return false;
+
+	NextLineIndex = -1; NextLineOffset = -1;
+	RowCount = 0;
+
+	/*	save first item in first line of display - this is where we'll start searching	*/
+	call PushPos;
+
+	/*	get first item on next line of display	*/
+	call Advance.To.Next.Line;
+	RowCount = RowCount + 1;
+	call Get.Index.And.Offset(loc(addr(NextLineIndex)));
+
+	/*	Find row	*/
+	do while	(RowCount ilt GID(DirTableRows))
+	and		(CurItemType <> ITEM$EOF)
+	and		((NextLineIndex < Index)
+	or			((NextLineIndex = Index) and (NextLineOffset <= Offset)));
+		call PushPos;
+		call Advance.To.Next.Line;
+		call Get.Index.And.Offset(loc(addr(NextLineIndex)));
+		RowCount = RowCount + 1;
+	end;
+
+	if (NextLineIndex < Index)
+	or ((NextLineIndex = Index) and (NextLineOffset <= Offset))
+	then do;				/*	(Index,Offset) is beyond edge of display	*/
+		return false;	/*	or beyond end of data	*/
+	end;
+
+	call PopPos;	/*	backup a line	*/
+	RowCount = RowCount - 1;
+	ColCount = 0;
+	call Get.Index.And.Offset(loc(addr(SearchIndex)));
+
+	/*	Find column	*/
+	do while	not((SearchIndex = Index) and (SearchOffset = Offset))
+	and		not((SearchIndex = NextLineIndex) and (SearchOffset = NextLineOffset))
+	and		(CurItemType <> ITEM$EOF);
+		call Advance.To.Next.Item;
+		call Get.Index.And.Offset(loc(addr(SearchIndex)));
+		ColCount = ColCount + 1;
+	end;
+
+	if ((SearchIndex = NextLineIndex) and (SearchOffset = NextLineOffset))
+	or  (CurItemType = ITEM$EOF)
+	then do;	/*	never found	*/
+		call Set.Table.Cur.Cell(GID(DirTable),0,0);
+		call Select.New.Cur.Obj(GID(DirTable),0,0);
+		return false;
+	end;
+	else do;
+		call Set.Table.Cur.Cell(GID(DirTable),ColCount,RowCount);
+		call Select.New.Cur.Obj(GID(DirTable),ColCount,RowCount);	/*	put cursor there	*/
+		return true;
+	end;
+
+end Set.Cursor.Position.At.Entry;
+
+Find.Entry.At.Cursor.Position: proc (pointers) public swapable;
+	dcl pointers	array;	/*	pointers(0) = index	*/
+									/*	pointers(1) = offset	*/
+	dcl count								fixed;
+	dcl (EndIndex,EndOffset)			fixed;
+	dcl (SearchIndex,SearchOffset)	fixed;
+	dcl finished.searching.line		boolean;
+	dcl (StartCol,StartRow)				fixed;
+	dcl (i,j,k)								fixed;
+
+/*	proc returns the pointers to the file/cat associated with	*/
+/*	the current cursor position.	*/
+
+	if ((GID(DirTableYPos) = -1) or (GID(DirTableXPos) = -1)) then do;
+		call Fetch.Table.Cur.Cell(GID(DirTable),loc(addr(StartCol)));
+	end;
+	else do;	/*	Cur.Obj.Id = GID(DirTable)	*/
+		StartCol = GID(DirTableXPos);
+		StartRow = GID(DirTableYPos);
+	end;
+
+	call GetListPos(StartRow);
+
+	if CurItemType=ITEM$Category then do;
+		/*	categories are always one per line, no matter what SortInfo or ShowInfo is	*/
+		call Get.Index.And.Offset(loc(addr(pointers(0))));
+	end;
+
+	else if CurItemType=ITEM$Filename then do;
+		if (ShowInfo&(INFO$Second|INFO$MByte|INFO$Sector|INFO$Bin|INFO$Loops|INFO$Caption|INFO$Names))=0 then do;
+			/*	display is in multiple file/cats per line format	*/
+
+			/*	get pointers to beginning of next line	*/
+			/*	(use these to know when to stop)			*/
+			call GetListPos(StartRow + 1);
+			call Get.Index.And.Offset(loc(addr(EndIndex)));
+			call GetListPos(StartRow);
+
+			do while	((count < StartCol)					/*	advance to current cell					*/
+			and		(not(finished.searching.line)));	/*	or until we've searched whole line	*/
+				call Advance.To.Next.Item;
+				count = count + 1;
+				call Get.Index.And.Offset(loc(addr(SearchIndex)));
+				if ((SearchIndex=EndIndex) and (SearchOffset=EndOffset)) then
+					finished.searching.line = true;
+			end;
+
+			/*	if cursor was in a blank cell on the searched line,	*/
+			/*	we would have gone one item too far, i.e. the item on the next line	*/
+			if (finished.searching.line) then do;
+				call Backup.To.Prior.Item;
+			end;
+
+			call Get.Index.And.Offset(loc(addr(pointers(0))));
+		end;
+		else do;	/*	display is in one file/cat per line format	*/
+			call Get.Index.And.Offset(loc(addr(pointers(0))));
+		end;
+	end;
+
+	else if CurItemType=ITEM$EOF then do;
+		call GetListPos(0);			/*	reset to file/cat at top of display	*/
+		call Get.Index.And.Offset(loc(addr(pointers(0))));
+	end;
+
+	else if CurItemType=ITEM$BOF then do;
+		pointers(0) =	0;				/*	reset to top	*/
+		pointers(1) = -1;
+	end;
+
+	else if CurItemType=ITEM$EndOfCategory then do;
+		pointers(0) = CListIndex;	/*	reset to most recent cat before row	*/
+		pointers(1) = -1;
+	end;
+
+end Find.Entry.At.Cursor.Position;
+
+/*	$SUBTITLE	*/
+
+Fetch.DC.Top.Pointers: proc (TopPointers,Device,SortFormat) public swapable;
+	dcl TopPointers	array;	/*	TopPointers(0) = Index	*/
+										/*	TopPointers(1) = Offset	*/
+	dcl Device			fixed;	/*	device						*/
+	dcl SortFormat		fixed;	/*	SortInfo and Filter		*/
+
+	if Debug.DC<>0 then do;
+		call cpos(7,0); call erase.to.end.of.line;
+		call ps('Top ptrs FETCHED: Device '); call pnum(Device,0);
+		call ps(' Sort '); call pnum(SortFormat,0);
+		call ps(' Loc ');
+		call pnum(DC#Base + ((Device-1)*DC#DevLen) + (SortFormat*DC#FormatLen),0);
+	end;
+
+	TopPointers(0) = GID(DC#Base + ((Device-1)*DC#DevLen) + (SortFormat*DC#FormatLen));
+	TopPointers(1) = GID(DC#Base + ((Device-1)*DC#DevLen) + (SortFormat*DC#FormatLen) + 1);
+
+	if Debug.DC<>0 then do;
+		call ps('; '); call pnum(TopPointers(0),0);
+		call ps(' '); call pnum(TopPointers(1),0);
+	end;
+
+end Fetch.DC.Top.Pointers;
+
+Store.DC.Top.Pointers: proc (TopPointers,Device,SortFormat) public swapable;
+	dcl TopPointers	array;	/*	TopPointers(0) = Index	*/
+										/*	TopPointers(1) = Offset	*/
+	dcl Device			fixed;	/*	device						*/
+	dcl SortFormat		fixed;	/*	SortInfo and Filter		*/
+
+	if Debug.DC<>0 then do;
+		call cpos(7,0); call erase.to.end.of.line;
+		call ps('Top ptrs STORED: Device '); call pnum(Device,0);
+		call ps(' Sort '); call pnum(SortFormat,0);
+		call ps(' Loc ');
+		call pnum(DC#Base + ((Device-1)*DC#DevLen) + (SortFormat*DC#FormatLen),0);
+	end;
+
+	call PID(DC#Base + ((Device-1)*DC#DevLen) + (SortFormat*DC#FormatLen), TopPointers(0));
+	write(md) = TopPointers(1);
+
+	if Debug.DC<>0 then do;
+		call ps('; '); call pnum(TopPointers(0),0);
+		call ps(' '); call pnum(TopPointers(1),0);
+	end;
+
+end Store.DC.Top.Pointers;
+
+Fetch.DC.Cursor.Pointers: proc (CursorPointers,Device,SortFormat) public swapable;
+	dcl CursorPointers	array;	/*	CursorPointers(0) = Index	*/
+											/*	CursorPointers(1) = Offset	*/
+	dcl Device				fixed;	/*	device							*/
+	dcl SortFormat			fixed;	/*	SortInfo and Filter			*/
+
+	if Debug.DC<>0 then do;
+		call cpos(8,0); call erase.to.end.of.line;
+		call ps('Cursor ptrs FETCHED: Device '); call pnum(Device,0);
+		call ps(' Sort '); call pnum(SortFormat,0);
+		call ps(' Loc ');
+		call pnum(DC#Base + ((Device-1)*DC#DevLen) + (SortFormat*DC#FormatLen) + 2,0);
+	end;
+
+	CursorPointers(0) = GID(DC#Base + ((Device-1)*DC#DevLen) + (SortFormat*DC#FormatLen) + 2);
+	CursorPointers(1) = GID(DC#Base + ((Device-1)*DC#DevLen) + (SortFormat*DC#FormatLen) + 3);
+
+	if Debug.DC<>0 then do;
+		call ps('; '); call pnum(CursorPointers(0),0);
+		call ps(' '); call pnum(CursorPointers(1),0);
+	end;
+
+end Fetch.DC.Cursor.Pointers;
+
+Store.DC.Cursor.Pointers: proc (CursorPointers,Device,SortFormat) public swapable;
+	dcl CursorPointers	array;	/*	CursorPointers(0) = Index	*/
+											/*	CursorPointers(1) = Offset	*/
+	dcl Device				fixed;	/*	device							*/
+	dcl SortFormat			fixed;	/*	SortInfo and Filter			*/
+
+	if Debug.DC<>0 then do;
+		call cpos(8,0); call erase.to.end.of.line;
+		call ps('Cursor ptrs STORED: Device '); call pnum(Device,0);
+		call ps(' Sort '); call pnum(SortFormat,0);
+		call ps(' Loc ');
+		call pnum(DC#Base + ((Device-1)*DC#DevLen) + (SortFormat*DC#FormatLen) + 2,0);
+	end;
+
+	call PID(DC#Base + ((Device-1)*DC#DevLen) + (SortFormat*DC#FormatLen) + 2, CursorPointers(0));
+	write(md) = CursorPointers(1);
+
+	if Debug.DC<>0 then do;
+		call ps('; '); call pnum(CursorPointers(0),0);
+		call ps(' '); call pnum(CursorPointers(1),0);
+	end;
+
+end Store.DC.Cursor.Pointers;
+
+Reset.DC.Pointers: proc (Device) public swapable;
+	dcl Device	fixed;
+	dcl Ptrs(1)	fixed;
+	dcl (i,j,k)	fixed;
+
+	/*	reset DC ptrs for each display format of Device	*/
+	Ptrs(0) = 0; Ptrs(1) = -1;
+	do i = 0 to 2;
+		call Store.DC.Top.Pointers   (Ptrs,Device,i);
+		call Store.DC.Cursor.Pointers(Ptrs,Device,i);
+	end;
+
+end Reset.DC.Pointers;
+
+/*	$SUBTITLE	*/
+
+Open.Directory.Window: proc (WindowId,Title,TitleMax,TopRow,LeftX,NumRows,CharWidth,EraseMethod,HardwareScroll,DragAble,WrapAble,ButtonBits) public swapable;
+	dcl WindowId			fixed;	/*	which window is this?					*/
+	dcl Title				array;	/*	window title								*/
+	dcl TitleMax			fixed;	/*	max length to allow title to be		*/
+	dcl TopRow				fixed;	/*	row of top of table						*/
+	dcl LeftX				fixed;	/*	left edge of table						*/
+	dcl NumRows				fixed;	/*	number of rows to use for table		*/
+	dcl CharWidth			fixed;	/*	chars per line of scrolling table	*/
+	dcl EraseMethod		fixed;	/*	how should window be erased			*/
+	dcl HardwareScroll	boolean;	/*	true to hardware scroll, false for no scroll	*/
+	dcl DragAble			boolean;	/*	true to enable dragging, false for no drag	*/
+	dcl WrapAble			boolean;	/*	true to enable wrapping within the table		*/
+	dcl ButtonBits			fixed;	/*	which buttons to put in top row		*/
+
+	dcl (FirstId,Id)		fixed;
+	dcl LastId				fixed;
+	dcl Icon	(3)			fixed;
+	dcl mr13i				lit 'write("373")';
+	dcl button_loc			fixed;	/*	where to put the window's buttons	*/
+
+	if Title(0) IGT (CharWidth+3)	then Title(0)=CharWidth+3;	/*	truncate to fit into window	*/
+	if Title(0) IGT TitleMax		then Title(0)=TitleMax;		/*	just for safety's sake			*/
+
+	call Set.Auto.Allocation.Id(OBJ$Window+WindowId*OBJ$WindowStride);	/*	reset id #	*/
+
+	FirstId=Define.Graphics.Box(s#aa,	/*	frame of scrolling window	*/
+										 gpos.x(LeftX*100-10),gpos.y(TopRow*100-100),
+										 gpos.x((LeftX+CharWidth+3)*100),gpos.y((TopRow-1+NumRows)*100),0);
+
+	/*	build a very simple single horizontal line icon	*/
+
+	write("313")=addr(icon(0));
+	mr13i=O#ICON.Plot; mr13i=(CharWidth+3)*100; mr13i=0; mr13i=O#ICON.End;
+	call Define.Graphics.Icon(s#aa,LeftX*100-10,TopRow*100,0,icon);
+
+	/*	add title to window	*/
+	Id=Define.Label(s#aa,TopRow,LeftX,TitleMax,Title);
+	call PID(DirTableTitle,Id);
+	call Set.Object.Mouse.Access(Id,0);
+	call Set.Object.Action(Id,O#ACT.Update.On.Dep,true);
+	/*	reset the region to be 1 point only for now (KLUDGE)	*/
+	call Locate.Object(Id);
+	call Write.Object(Object.Ptr+O#LRX,Read.Object(Object.Ptr+O#ULX));
+	call Write.Object(Object.Ptr+O#LRY,Read.Object(Object.Ptr+O#ULY));
+
+	/*	Draw the buttons.  Begin on right edge of window and add each	*/
+	/*	one 2 characters to the left of the last.								*/
+	button_loc = LeftX+Charwidth+1;
+
+	/*	draw Fold-Out button icon	*/
+	if (ButtonBits&B#FoldOut)<>0 then do;
+		Id=Define.Device.Icon (S#AA,TopRow,button_loc,0,asc.f);
+		call PID(DirTableFoldOut,Id);
+		button_loc = button_loc - 2;
+	end;
+	else call PID(DirTableFoldOut,0);
+
+	/*	draw search button icon	*/
+	if (ButtonBits&B#Search)<>0 then do;
+		Id=Define.Device.Icon (S#AA,TopRow,button_loc,0,asc.quest);
+		call PID(DirTableSearch,Id);
+		button_loc = button_loc - 2;
+	end;
+	else call PID(DirTableSearch,0);
+
+	/*	draw top button icon	*/
+	if (ButtonBits&B#Top)<>0 then do;
+		Id=Define.Device.Icon (S#AA,TopRow,button_loc,0,asc.t);
+		call PID(DirTableTop,Id);
+		call Set.Object.Action(id,O#ACT.Prev.Obj,False);	/*	but disable auto reselect of prior object, since top button will select directory table for us	*/
+		button_loc = button_loc - 2;
+	end;
+	else call PID(DirTableTop,0);
+
+	/*	draw RAM button icon	*/
+	if (ButtonBits&B#RAM)<>0 then do;
+		Id=Define.Device.Icon (S#AA,TopRow,button_loc,0,asc.r);
+		call PID(DirTableShuffle,Id);
+		button_loc = button_loc - 2;
+	end;
+	else call PID(DirTableShuffle,0);
+
+	/*	draw print button icon	*/
+	if (ButtonBits&B#Print)<>0 then do;
+		Id=Define.Device.Icon (S#AA,TopRow,button_loc,0,asc.p);
+		call PID(DirTablePrint,Id);
+		button_loc = button_loc - 2;
+	end;
+	else call PID(DirTablePrint,0);
+
+	/*	draw bin button icon	*/
+	if (ButtonBits&B#Bin)<>0 then do;
+		Id=Define.Device.Icon (S#AA,TopRow,button_loc,0,asc.n);
+		call PID(DirTableBin,Id);
+		button_loc = button_loc - 2;
+	end;
+	else call PID(DirTableBin,0);
+
+	/*	draw audition button icon	*/
+	if (ButtonBits&B#Audition)<>0 then do;
+		Id=Define.Device.Icon (S#AA,TopRow,button_loc,0,asc.a);
+		call PID(DirTableAudition,Id);
+		button_loc = button_loc - 2;
+	end;
+	else call PID(DirTableAudition,0);
+	/*	$PAGE	*/
+
+	TopRow=TopRow+1;		/*	scrolling table starts 1 line lower	*/
+	NumRows=NumRows-1;	/*	1 less scrolling row						*/
+
+	/*	Define Scroll Bar	*/
+	call PID(ScrollBar,Define.Scroll.Bar(s#aa,O#SBAR.Orient.Ver,O#SBAR.Just.Right,gpos.x((LeftX+CharWidth+3)*100),
+													 gpos.y((TopRow-1)*100),
+													 gpos.y((TopRow-1+NumRows)*100)));
+	call Set.Scroll.Bar.Bits(GID(ScrollBar),O#SBAR.Bits.Real.Time,1);
+
+	/*	Define Scrolling Table Type Object	*/
+	call PID(DirTable.Type.Obj,Define.Label(s#aa,TopRow,LeftX,CharsPerFile,''));	/*	type object for scrollable table	*/
+	call Set.Object.Attr(GID(DirTable.Type.Obj),0,ATTR#Normal);
+	call Set.Object.Attr(GID(DirTable.Type.Obj),1,ATTR#Normal);
+
+	/*	Define Scrolling Table	*/
+	call PID(DirTable			  ,Define.Table(s#aa,CharWidth/CharsPerFile,NumRows,GID(DirTable.Type.Obj)));	/*	the scrolling table	*/
+	call Set.Object.Action		(GID(DirTable),O#ACT.Update.On.Dep,true);
+	call Set.Object.Erase		(GID(DirTable),EraseMethod);
+	LastId = GID(DirTable);
+
+	call Set.Table.Control.Bits(GID(DirTable),O#TABL.Bits.Hardware.Scroll,HardwareScroll);
+	call Set.Table.Control.Bits(GID(DirTable),O#TABL.Bits.Wrap,WrapAble);
+
+	if DragAble then do;
+		call Set.Object.Action(GID(DirTable),O#ACT.Drag.Enabled,DragAble);
+		call Set.Object.Action(GID(DirTable),O#ACT.Drag.Type.Check,true);	/*	no type check!!	*/
+	end;
+
+	call PID(WindowGrp,Group.Objects(GRP$Window+WindowId,FirstId,LastId,Get#Screen.Event));
+
+	call PID(DirTableRows,NumRows);	/*	save char dimensions of table too	*/
+	call PID(DirTableCols,CharWidth);
+
+	Disable.Deposits = true;
+	call Activate.Scroll.Bar (GID(ScrollBar),0);		/*	reset scroll bar to top	*/
+	call Deposit.Object.Info(GID(ScrollBar),O#UserData,-1);
+	Disable.Deposits = false;
+
+	OpenWindowBits=OpenWindowBits|Bits(WindowId);	/*	set bit to denote window is open	*/
+
+	ActiveWindowId=WindowId;			/*	must set up active window before MOUNT or FILL.DIRTABLE	*/
+
+	call Activate.Group.Objects(GID(WindowGrp));		/*	activate group	*/
+
+	/*	NOTE: The following is done to prevent DirTable from getting	*/
+	/*	updated right now, since it has only blank cells.  The table	*/
+	/*	will be drawn in RestoreDisplayPos eventually.						*/
+	call Disable.Object(GID(DirTable));
+	call Update.Object.Range(FirstId,LastId);	/*	draw everything but table	*/
+	call Enable.Object(GID(DirTable));			/*	Now, re-enable the table	*/
+
+	call Mount.New.Device(DirDevice);
+	call RestoreDisplayPos(false);				/*	DirTable will get updated here	*/
+
+	call Save.Window.State(WindowId);			/*	save initial state info	*/
+	call Activate.Window  (WindowId);			/*	select window	*/
+
+end Open.Directory.Window;
+
+/*	This procedure will erase and undefine all objects in the currently	*/
+/*	active window as well as the group.												*/
+Close.Directory.Window: proc (WindowId) public swapable;
+	dcl WindowId	fixed;	/*	which window to close	*/
+
+	call Erase.Group.Objects	(GID(WindowGrp));
+	call Undefine.Group.Objects(GID(WindowGrp));
+	call Ungroup.Objects			(GID(WindowGrp));
+	call PID(WindowGrp,-1);	/*	no longer defined	*/
+	OpenWindowBits=OpenWindowBits & (not Bits(WindowId));	/*	window is now closed	*/
+end Close.Directory.Window;
+
+/*	$SUBTITLE	*/
+
+Set.Display.Format: proc (Dev,Sort,Function,Info,Filter) public swapable;
+	dcl Dev			fixed;
+	dcl Sort			fixed;
+	dcl Function	fixed;
+	dcl Info			fixed;
+	dcl Filter		fixed;
+
+	DirDevice	=Dev;					/*	reset display mode vars	*/
+	UserSort		=Sort;
+	FunctionInfo=Function;
+	ShowInfo		=Info;
+	ItemFilter	=Filter;
+
+	Sortinfo		=Usersort;			/*	assume we can use it		*/
+	if		 Dev	=PolyCacheDev then SortInfo=SORT$Category;
+	else if Dev<>LaserDev	  then SortInfo=SORT$Filename;
+
+	if (Dev <>LaserDev)
+	or (Sort =SORT$Filename)
+	then ItemFilter=FILTER$None;	/*	turn off filtering	*/
+
+end Set.Display.Format;
+
+Select.New.Window.Device: proc (WindowId,Dev) public swapable;
+	dcl WindowId	fixed;
+	dcl Dev			fixed;
+
+	if Select.Active.Window(WindowId) then do;	/*	activate directory window	*/
+		call SaveDisplayPos(DirDevice,0);			/*	save pos for the next time we're in this device+format	*/
+		call Set.Display.Format(Dev,UserSort,FunctionInfo,ShowInfo,ItemFilter);
+		call Mount.New.Device(Dev);					/*	mount the new device		*/
+		call RestoreDisplayPos(false);
+	end;
+
+end Select.New.Window.Device;
+
+dcl Search.DirTable.Forward proc (array,fixed,array) recursive;
+
+Handle.Change.To.FilesOnly.Format: proc (Sort,Filter) swapable;
+	dcl (Sort,Filter)	fixed;
+	dcl count			fixed;
+	dcl (Col,Row)		fixed;
+	dcl Filename(8)	fixed;
+	dcl Ptrs(1)			fixed;
+	dcl Enable.Search	lit '0';	/*	do we want the search to occur ??	*/
+
+	/*	proc retrieves the current filename, then searches for it	*/
+	/*	in the Files Only format.  Finally, redraws display.			*/
+
+	call Fetch.Table.Cur.Cell(GID(DirTable),loc(addr(Col)));
+	call Fetch.DirTable.Item(Row,Col,Filename);
+
+	call Set.Display.Format(DirDevice,Sort,FunctionInfo,ShowInfo,Filter);
+	call Mount.New.Device(DirDevice);		/*	remount the current device	*/
+
+	if (Enable.Search<>0) then do;
+		if (Search.DirTable.Forward(Filename,0,loc(addr(Col))))=0 then do;
+			/*	set cursor to top entry - should never happen	*/
+			Col = 0; Row = 0;
+		end;
+
+		else do;	/*	found it	*/
+			call Get.Index.And.Offset(Ptrs);
+			call Store.DC.Top.Pointers(Ptrs,DirDevice,Compute.SortFormat(Sort,Filter));
+
+			do while (count ilt Row);
+				call Advance.To.Next.Line;
+				count = count + 1;
+			end;
+
+			count = 0;
+			do while (count ilt Col);
+				call Advance.To.Next.Item;
+				count = count + 1;
+			end;
+
+			call Get.Index.And.Offset(Ptrs);
+			call Store.DC.Cursor.Pointers(Ptrs,DirDevice,Compute.SortFormat(Sort,Filter));
+		end;
+	end;
+
+	call RestoreDisplayPos(true);
+
+end Handle.Change.To.FilesOnly.Format;
+
+Change.Window.Sort.Format: proc (WindowId,Sort,Filter) public swapable;
+	dcl WindowId		fixed;
+	dcl Sort				fixed;	/*	these two combined specify the new format	*/
+	dcl Filter			fixed;	/*															*/
+	dcl center			fixed;	/*	center current cell in new display			*/
+
+	dcl Ptrs(1)			fixed;	/*	temporary pointers: 0=Index, 1=Offset		*/
+	dcl NewFormat		fixed;	/*	the new format										*/
+	dcl (Col,Row)		fixed;
+	dcl Filename(8)	fixed;
+
+	if Select.Active.Window(WindowId) then do;	/*	activate directory window	*/
+
+		NewFormat = Compute.SortFormat(Sort,Filter);
+
+		/*	look at old sort format and save pos for	*/
+		/*	the next time we're in this format, as		*/
+		/*	well as other formats that should be up-	*/
+		/*	dated.												*/
+		do case (Compute.SortFormat(SortInfo,ItemFilter));
+
+			do;	/*	old display was Cats Only	*/
+				call SaveDisplayPos(DirDevice,0);
+				if NewFormat=1 then do;			/*	new format is Files and Cats	*/
+					call Fetch.DC.Cursor.Pointers(Ptrs,DirDevice,0);
+					call Store.DC.Top.Pointers(Ptrs,DirDevice,NewFormat);
+					call Store.DC.Cursor.Pointers(Ptrs,DirDevice,NewFormat);
+				end;
+			end;
+
+			do;	/*	old display was Cats and Files	*/
+				call SaveDisplayPos(DirDevice,0);
+				call Fetch.DC.Cursor.Pointers(Ptrs,DirDevice,1);
+				if (NewFormat=0)					/*	new format is Cats Only and	*/
+				and (Ptrs(1) = -1) then do;	/*	a cat was under the cursor		*/
+					call Store.DC.Top.Pointers(Ptrs,DirDevice,NewFormat);
+					call Store.DC.Cursor.Pointers(Ptrs,DirDevice,NewFormat);
+				end;
+
+				else if (NewFormat=2)			/*	new format is Files Only and	*/
+				and (Ptrs(1) <> -1) then do;	/*	a file was under the cursor	*/
+					call Handle.Change.To.FilesOnly.Format(Sort,Filter);
+					return;
+				end;
+
+			end;
+
+			do;	/*	old display was Files Only	*/
+				call SaveDisplayPos(DirDevice,0);
+			end;
+
+		end;
+
+		call Set.Display.Format(DirDevice,Sort,FunctionInfo,ShowInfo,Filter);
+		call Mount.New.Device(DirDevice);	/*	remount the current device	*/
+		center = false;
+		call RestoreDisplayPos(center);
+	end;
+
+end Change.Window.Sort.Format;
+
+Change.Window.Function.Format: proc (WindowId,Info) public swapable;
+	dcl WindowId	fixed;
+	dcl Info			fixed;
+
+	if Select.Active.Window(WindowId) then Set.Display.Format(DirDevice,UserSort,Info,ShowInfo,ItemFilter);
+end Change.Window.Function.Format;
+
+Change.Window.Info.Format: proc (WindowId,Info) public swapable;
+	dcl WindowId	fixed;
+	dcl Info			fixed;
+	dcl (Col,Row)	fixed;
+	dcl NPerLine.Format	lit '(INFO$Second|INFO$Mbyte|INFO$Sector|INFO$Bin|INFO$Loops|INFO$Caption|INFO$Names)';
+
+	if Select.Active.Window(WindowId) then do;	/*	activate directory window	*/
+
+		if ((ShowInfo xor Info) & (not INFO$Filename))<>0
+		then do;	/*	have changes to SHOWINFO which require redisplay	*/
+
+			/*	We don't have to remount current device if we haven't	*/
+			/*	changed between NPerLine and 1PerLine formats	*/
+			if  (((Info & NPerLine.Format) = 0)
+			and  ((ShowInfo & NPerLine.Format) <>0))
+			or  (((Info & NPerLine.Format) <>0)
+			and  ((ShowInfo & NPerLine.Format) = 0)) then do;
+				/*	save the row with currently selected entry	*/
+				call Fetch.Table.Cur.Cell(GID(DirTable),loc(addr(Col)));
+
+				/*	check for invalid current cell	*/
+				if (Fetch.DirTable.Item.Type(Row,Col) = ITEM$Eof) then
+					call SaveDisplayPos(DirDevice,0);
+				else
+					call SaveDisplayPos(DirDevice,Row);
+
+				call Set.DirTable.Position(-1,-1);	/*	unhighlight current entry	*/
+				call Set.Display.Format(DirDevice,UserSort,FunctionInfo,Info,ItemFilter);
+				call Mount.New.Device(DirDevice);	/*	remount the current device	*/
+				call Fetch.Table.Cur.Cell(GID(DirTable),loc(addr(Col)));	/*	restore position and refresh	*/
+				call RestoreDisplayPos(Fetch.DirTable.Item.Type(Row,Col)<>ITEM$Category);
+			end;
+
+			else do;
+				/*	save the top row	*/
+				call SaveDisplayPos(DirDevice,0);
+				call GetListPos(0);
+				call Set.Display.Format(DirDevice,UserSort,FunctionInfo,Info,ItemFilter);
+				call Fill.DirTable(false);
+			end;
+		end;
+		else do;	/*	no need to redraw display - just change ShowInfo	*/
+			call Set.Display.Format(DirDevice,UserSort,FunctionInfo,Info,ItemFilter);
+		end;
+	end;
+
+end Change.Window.Info.Format;
+
+Change.Window.Filter.Format: proc (WindowId,Filter) public swapable;
+	dcl WindowId	fixed;
+	dcl Filter		fixed;
+
+	if Select.Active.Window(WindowId) then do;	/*	activate directory window	*/
+		call SaveDisplayPos(DirDevice,0);			/*	save pos for the next time we're in this format	*/
+		call Set.Display.Format(DirDevice,UserSort,FunctionInfo,ShowInfo,Filter);
+		call Mount.New.Device(DirDevice);			/*	remount the current device	*/
+		call RestoreDisplayPos(true);
+	end;
+
+end Change.Window.Filter.Format;
+
+/*	$SUBTITLE  Routine to Force Refresh of All Open Windows	*/
+
+Refresh.Display.Window: proc (WhichWindow) public swapable;	/*	re-opens devices and repositions to current line	*/
+	dcl WhichWindow		fixed;
+	dcl SavedScreenPos	fixed;
+
+	if (OpenWindowBits&Bits(WhichWindow))<>0 then do;	/*	window exists	*/
+		call Select.Active.Window(WhichWindow);			/*	load window's state vars	*/
+		SavedScreenPos=ScreenTopLine;							/*	save previous line position	*/
+
+		call Mount.New.Device(DirDevice);					/*	remount the device	*/
+		call PID(Scroll.CurrentLine,ScreenTopLine);		/*	init scroll vars	*/
+		call SaveListPos (ScrollMem#);						/*	initialize scroll vars	*/
+		call Seek.To.Line(SavedScreenPos);					/*	seek to original line	*/
+		ScreenTopLine=GID(Scroll.CurrentLine);				/*	this is where we seeked to	*/
+		call Fill.DirTable(true);								/*	redraw table			*/
+		call Set.ScrollBar.Pos;									/*	keep scroll box in correct position	*/
+	end;
+
+end Refresh.Display.Window;
+
+Refresh.All.Display.Windows: proc public swapable;		/*	re-opens devices and repositions to current line	*/
+	dcl OurWindow	fixed;
+	dcl OpenBits	fixed;
+
+	OpenBits=OpenWindowBits;							/*	get local copy	*/
+
+	OurWindow=0;
+	do while OpenBits<>0;
+		if (OpenBits&1)<>0								/*	refresh this window	*/
+		then call Refresh.Display.Window(OurWindow);
+
+		OpenBits=shr(OpenBits,1);						/*	done with this bit	*/
+		OurWindow=OurWindow+1;							/*	step to next window	*/
+	end;
+
+end Refresh.All.Display.Windows;
+
+Get.Next.Shuffle.Event:proc swapable;
+	dcl status	fixed;
+
+	dcl SHOW.FILE.LOADING.MESSAGE	fixed external;
+
+	call Open.Shuffle.Dialog;
+
+	do case (Get.Shuffle.Response);
+		do;								/*	cancel	*/
+		end;
+
+		do;								/*	shuffle poly memory	*/
+			transparent_mode;
+			call Set.Term.Attr(ATTR#Normal);
+			SHOW.FILE.LOADING.MESSAGE = shl(23,8);
+			status = ps.shuffle(0);	/*	collect poly memory, but don't delete unused files	*/
+			SHOW.FILE.LOADING.MESSAGE = 0;
+			if (status <> 0) then call Draw.Message('Partial Shuffle Completed');
+			else						 call Draw.Message('Shuffle Completed');
+		end;
+
+		do;								/*	collect poly memory	*/
+			transparent_mode;
+			call Set.Term.Attr(ATTR#Normal);
+			SHOW.FILE.LOADING.MESSAGE = shl(23,8);
+			status = ps.shuffle(1);	/*	collect used sound files in poly memory	*/
+			SHOW.FILE.LOADING.MESSAGE = 0;
+			if (status <> 0) then call Draw.Message('Partial Collect Completed');
+			else						 call Draw.Message('Collect Completed');
+		end;
+
+		do;								/*	Erase poly memory	*/
+			call Draw.Message('Erasing Poly Memory...');
+			call ps.deallocate.all;
+			call Draw.Message('Erase Completed');
+		end;
+	end;
+
+	/*	get next event only if user really hit CANCEL (he could've	*/
+	/*	clicked on a misc object, like the mouse hole)					*/
+	if Screen.Event.Group<>GID(SFDMiscGrp) then
+		call Get.Next.Optical.Event;
+
+end Get.Next.Shuffle.Event;
+
+/*	$SUBTITLE  Print Screen Event Handler	*/
+
+Get.Next.Print.Event:proc swapable;
+	dcl Buf(40)	fixed;	/*	user-entered title for header page	*/
+
+	call Open.Print.Dialog;
+
+	if (Get.Print.Response(Buf)<>0) then do;
+		call Draw.Message('Printing... click mouse to abort');
+		if Print.Directory(Buf)<>0
+		then call Draw.Message('Print Completed.');
+		else call Draw.Message('Print Aborted.');
+	end;
+
+	/*	get next event only if user really hit CANCEL (he could've	*/
+	/*	clicked on a misc object, like the mouse hole)					*/
+	if Screen.Event.Group<>GID(SFDMiscGrp) then
+		call Get.Next.Optical.Event;
+
+end Get.Next.Print.Event;
+
+/*	$SUBTITLE  Bin Select Event Handler	*/
+
+Get.Next.Bin.Event:proc swapable;
+
+	call Open.Bin.Dialog;
+	call Get.Bin.Response;
+
+	/*	get next event only if user really hit CANCEL (he could've	*/
+	/*	clicked on a misc object, like the mouse hole)					*/
+	if Screen.Event.Group<>GID(SFDMiscGrp) then
+		call Get.Next.Optical.Event;
+
+end Get.Next.Bin.Event;
+
+/*	$SUBTITLE  Display Window Event Handler	*/
+
+dcl Get.Next.Search.Event	proc recursive;
+
+/*	Get.Next.Window.Event returns false when an event occurred	*/
+/*	that is not in the currently active window group.  Returns	*/
+/*	true when event occurred in DirTable, DirTableAudition,		*/
+/*	or DirTableFoldOut (if defined).  Takes care of scroll bar,	*/
+/*	DirTableSearch, DirTableTop, DirTableShuffle, DirTablePrint	*/
+/*	and DirTableBin itself.													*/
+
+Get.Next.Window.Event: proc public swapable;
+
+	do while Exit.My.Screen=0;				/*	wait for exit condition	*/
+		if Screen.Event.Group<>GID(WindowGrp) then do;
+			return false;
+		end;
+
+		if Screen.Event.Code=Get.Screen.Event then do;
+
+			if Screen.Event.Id=GID(ScrollBar)	/*	Scroll Bar event	*/
+			then do;
+				call Get.Next.ScrollBar.Event;	/*	process & get next	*/
+			end;
+
+			else if Screen.Event.Id=GID(DirTableFoldOut)		/*	fold-out button	*/
+			and	  (GID(DirTableFoldOut)<>0)
+			and	  ((Screen.Event.Info=S#MouseSelect  )
+			or			(Screen.Event.Info=S#KeyActivate  ))
+			then do;
+				return true;	/*	let application take care of changing window size	*/
+			end;
+
+			else if Screen.Event.Id=GID(DirTableSearch)		/*	search button	*/
+			and	  (GID(DirTableSearch)<>0)
+			and	  ((Screen.Event.Info=S#MouseSelect  )
+			or			(Screen.Event.Info=S#KeyActivate  ))
+			then do;
+				call Get.Next.Search.Event;		/*	process & get next	*/
+			end;
+
+			else if Screen.Event.Id=GID(DirTableTop)			/*	top button	*/
+			and	  (GID(DirTableTop)<>0)
+			and	  ((Screen.Event.Info=S#MouseSelect  )
+			or			(Screen.Event.Info=S#KeyActivate  ))
+			then do;
+				call Scroll.Current.Line.To.Top;
+				call Set.ScrollBar.Pos;				/*	keep scroll box in correct position	*/
+				call Get.Next.Optical.Event;		/*	process & get next	*/
+			end;
+
+			else if Screen.Event.Id=GID(DirTableShuffle)		/*	shuffle button	*/
+			and	  (GID(DirTableShuffle)<>0)
+			and	  ((Screen.Event.Info=S#MouseSelect  )
+			or			(Screen.Event.Info=S#KeyActivate  ))
+			then do;
+				call Get.Next.Shuffle.Event;
+			end;
+
+			else if Screen.Event.Id=GID(DirTablePrint)		/*	print button	*/
+			and	  (GID(DirTablePrint)<>0)
+			and	  ((Screen.Event.Info=S#MouseSelect  )
+			or			(Screen.Event.Info=S#KeyActivate  ))
+			then do;
+				call Get.Next.Print.Event;
+			end;
+
+			else if Screen.Event.Id=GID(DirTableBin)			/*	Bin button	*/
+			and	  (GID(DirTableBin)<>0)
+			and	  ((Screen.Event.Info=S#MouseSelect  )
+			or			(Screen.Event.Info=S#KeyActivate  ))
+			then do;
+				call Get.Next.Bin.Event;
+			end;
+
+			else if Screen.Event.Id=GID(DirTableAudition)	/*	audition button	*/
+			and	  (GID(DirTableAudition)<>0)
+			and	  ((Screen.Event.Info=S#MouseSelect  )
+			or			(Screen.Event.Info=S#KeyActivate  ))
+			then do;
+				return true;	/*	let application take care of auditioning	*/
+			end;
+
+			else if Screen.Event.Id=GID(DirTable)				/*	Scrolling Table event	*/
+			then do;
+				return true;	/*	let application take care of table events	*/
+			end;
+
+			else do;
+				call Get.Next.Optical.Event;		/*	not interested, just get a new event	*/
+			end;
+
+		end;
+
+		else do;
+			call Get.Next.Optical.Event;			/*	get the next event to handle	*/
+		end;
+
+	end;
+
+end Get.Next.Window.Event;

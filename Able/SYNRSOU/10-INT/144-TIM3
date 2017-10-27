@@ -1,0 +1,1222 @@
+/* 144-TIM3 - START NEW NOTES FROM QUE
+
+   Modified:
+   04/03/91 - CJ  - Fixed Lee Kopp FM Retrigger Bugs
+   02/07/91 - MWH - Combine 3200, 6400 and 9600 RTP's
+   05/16/90 - TSS,DGM - FIXED KBD UNPLUGGED SCANNING BUG
+   04/05/90 - TSS - FIX STUCK MIDI NOTE/EXTRA NOTE OFF BUGS
+   08/24/89 - PF  - Added PATH argument to MIDI.NOTE.OFF and MIDI.NOTE.ON
+   05/11/89 - TSS - Moved save of R13,MAM & MAL back to this file
+   04/20/89 - TSS - FIXED BUG IN POLY PHASE INCR WRITE W/NEW PHASE ACC BOARDS
+   03/10/89 - TSS,PF - Moved save of R13 & MAM,MAL to 144-TIM2
+   10/15/88 - CJ - SUPPORT FOR STARTUP OF POLY NOTES IN MIDDLE
+   10/12/88 - CJ - SUPPORT FOR 96 VOICES
+   10/06/88 - TSS,SGS - Support MONO DAC voice cards during note start
+   11/16/87 - MWH - MAKE SYNCH.START.BUF BIG ENOUGH FOR 64 VOICES!!!!!!!
+   7/31/87 - MWH - Add page bits to poly file base
+   6/18/87 - MWH - Move MULTI.POLY array to external memory
+   1/8/87 - cj - cleaned up ghost block processing
+   12/30/86 - CJ - MONO SAMPLING
+   7/28/86 - CJ - FIXED STEREO HZ BUG, CONSTRUCT.SPLICE BUG
+   7/24/86 - CJ,KC - CONSTRUCT.SPLICE
+   7/11/86 - CJ - CHANGED QSTAT/SEQ.SPL.TIM
+   6/26/86 - KJC - added stereo playback code
+   6/15/86 - MOUSE ROUTINE CALL MOVED TO D3 INTERRUPT
+   5/16/86 - MPB - Calls to mouse routines
+   5/15/86 - "official" creation of release-M modules
+*/
+
+  /* CHECK EACH QUE AS REQUIRED                */
+  /* START NOTES AS CLOSE TO CLICK AS POSSIBLE */
+  /* CHECK INDEX/ENV PEAKS EVERY 5 MS SO THAT  */
+  /* SOUNDS ARE CONSISTENT                     */
+
+  /* FIRST CHECK FOR BEGINNING OF LOOP         */
+
+  DCL (I,J,K,M,N)             FIXED; /* NO PROVIDE VARIABLES USED BY NOTE START */
+                                     /* AND GUITAR SCAN (THAT CODE IS NOT RE-ENTERED, */
+                                     /* BUT MAY BE INTERRUPTED BY ABOVE CODE */
+  DCL (PPTR)                  FIXED; /* AS WELL AS LOCAL  PPTR *****         */
+  DCL (KBDTRIG)               FIXED; /* USED TO CREATE 5 MS TRIGGER PULSE    */
+
+  /*  IMPORTANT POLY NOTE: THIS NEXT BUFFER **MUST** BE DECLARED LARGE ENOUGH
+   *  FOR ALL POLY VOICES WHICH COULD START AT ONE TIME.  THIS MEANS IT MUST
+   *  BE (MAX_POSSIBLE_POLY_VOICES_IN_SYSTEM * 4), SINCE IT IS USED TO CREATE
+   *  A DATA STRUCTURE WHICH IS 4 WORDS PER VOICE.  IF THIS IS NOT DONE,
+   *  RANDOM CRASHES AND HANGS WILL BE SEEN WHEN PLAYING ENOUGH NOTES.
+   *
+   *  IT SHOULD REALLY BE DECLARED AS (32 * 4 * PSMAXBINS), BUT IS NOW
+   *  MADE 256 (ENOUGH FOR 96 VOICES; 3 FULL BINS) TO CONSERVE MEMORY....
+   *  BEWARE!
+   */
+  DCL (SYNCH.START.BUF) (256+128) FIXED; /* USED TO START POLY VOICES ALL AT ONCE */
+
+  /* THE FOLLOWING FEW LINES OF CODE AND THE LAST FEW LINES IN THIS FILE
+     ARE USED TO SAVE AND RESTORE THE EXTERNAL MEMORY PTRS AND R13.  ANY
+     ROUTINE CALLED FROM WITHIN THIS FILE CAN NOW SAFELY USE THESE VARS
+     AND IT WON'T INTERRACT WITH CODE OUTSIDE OF THIS INTERRUPT CODE. */
+
+  WRITE("303")=ADDR(SAVE.R13);   /* SET UP TO STORE THESE 3 REGS SO THEY CAN BE USED BELOW */
+  WRITE("363")=READ("313");      /* R13 TO MR3I */
+  WRITE("363")=READ(MAM);        /* MAM TO MR3I */
+  WRITE("363")=READ(MAL);        /* MAL TO MR3I */
+
+  FREE.R0;
+
+  IF (READ("51")&1024)<>0 THEN DO;   /* IF POLY HARDWARE HERE          */
+     WRITE("363")=READ(PSC);         /* SAVE CHANNEL AND FUNCTION CODE */
+     WRITE("363")=READ(PSF);         // Be sure to use 363; see kernel extension
+  END;
+
+  /* $PAGE - FINAL DECAYS */
+
+  /* FIRST CHECK FOR FINAL DECAY TIMERS */
+
+  MORE.FDLQ:;
+
+  IF FDLQF<>ADDR(FDLQF) THEN DO;            /* PROCESS FIRST BLOCK */
+     PPTR=FDLQF-FQFLOC;
+     IF PLAY.TIME.LSB>=FTIMER THEN DO;      /* TIME TO START DECAY */
+        CORE(FQB  )=FQF;                    /* OUR FP GOES TO FP BEHIND   US */ /* UNLINK */
+        CORE(FQF+1)=FQB;                    /* OUR BP GOES TO BP AHEAD OF US */ /* OURSELVES */
+        FQF        =ADDR(FINQF);            /* LINK ON TO ** END ** OF FINQ: OUR FP POINTS BACK TO FINQ */
+        FQB        =FINQB;                  /* POINT BACK TO LAST BLOCK ON QUE */
+        CORE(FQB)  =ADDR(FQF);              /* SET UP PREVIOUS BLOCK POINTING TO US */
+        FINQB      =ADDR(FQF);              /* WE ARE NOW LAST ON QUE */
+        GOTO MORE.FDLQ;
+     END;
+  END;
+
+  /* PERFORM FINAL DECAYS */
+
+  DCL (TIMER.PHASE)       FIXED;    /* PHASE - 0,2,4,6,8              */
+  DCL (PRE.MILLISECONDS)  FIXED;    /* MILLISECONDS - 0,1,2,...       */
+
+  MORE.FINQ:;
+
+  IF FINQF<>ADDR(FINQF) THEN DO;               /* SOME FINAL DECAYS  */
+     PPTR=FINQF-FQFLOC;
+
+     IF MIDIRT<>0 THEN DO;                  /* THIS IS A MIDI PARTIAL */
+        IF PSTAT<>DELAY.STATE               /* NOTE HAS BEEN STARTED */
+        THEN DO;
+           DISABLE;
+           CALL MIDI.NOTE.OFF(MIDIRT, MIDIPATH, MIDIINFO); /* TURN NOTE OFF */
+           /* MIDI.NOTE.OFF TURNS INTERRUPTS BACK ON */
+        END;
+        MIDIRT=0;                           /* REZERO INFO AFTER DOING NOTE OFF */
+     END;
+
+     PSTAT=DECAY.STATE;                     /* SET STATE TO DECAYING */
+     C.E.L=1;                               /* WAIT FOR LIMIT OF ZERO TO BE REACHED */
+     P.E.E=1;                               /* SET FLAG TO PERFORM EXPONENTIAL DECAYS */
+
+     CORE(FQB  )=FQF;                       /* OUR FP GOES TO FP BEHIND   US */ /* UNLINK */
+     CORE(FQF+1)=FQB;                       /* OUR BP GOES TO BP AHEAD OF US */ /* OURSELVES */
+     FQF=0;                                 /* NO LONGER LINKED ON FQ */
+
+     IF IQF<>0 THEN DO;                     /* BLOCK IS LINKED ON TO A TIMER QUE */
+        CORE(IQB  )=IQF;                    /* OUR FP GOES TO FP BEHIND   US     */
+        CORE(IQF+1)=IQB;                    /* OUR BP GOES TO BP AHEAD OF US     */
+        IQF=0;
+     END;
+
+     IF EQF<>0 THEN DO;                     /* SPECIAL CHECK REQUIRED IF FINAL DECAY OCCURRED BEFORE NOTE STARTED (HAPPENS IF 'STOP' PRESSED OR WITH FUNNY DELAYS) */
+        CORE(EQB  )=EQF;                    /* HAPPENS IF NOTE ENDS BEFORE DELAY */
+        CORE(EQF+1)=EQB;                    /* TIME IS UP                        */
+        EQF=0;                              /* MUST CLEAN UP GHOST BLOCKS IF ATTACK NEVER STARTED */
+        IF GFPTR<>0 THEN CALL CLEAN.GHOSTS(PPTR);
+     END;                       /* IF EQF        <>0   */
+
+     IF  ((INC.MONO=0)                         /* IF NO SAMPLING AT ALL */
+     AND  (INC.POLY=0))
+     OR (MCHN&(B.MONO\B.POLY))=0 THEN DO;      /* OR ORIGINAL SYNTHESIZER */
+        IF MCHN<>0 THEN DO;                    /* BUT SKIP OVER MIDI-ONLY BLOCKS */
+           DISABLE;
+           WRITE(CHA)=UCHN;                    /* START ENV DECAY */
+           WRITE(FUN)=EDIV; WRITE(DAT)=EFDINT; /* WRITE OUT DIVISOR NUMBER */
+           WRITE(FUN)=EADD; WRITE(DAT)=SHR(EFDINT,8);
+           WRITE(FUN)=ELIM; WRITE(DAT)=0;
+           IF (SMCHN<>0)
+           THEN DO;
+              WRITE(CHA)=SUCHN;                /* START ENV DECAY FOR SPLICE CHANNEL */
+              WRITE(FUN)=EDIV; WRITE(DAT)=SFDINT;   
+              WRITE(FUN)=EADD; WRITE(DAT)=SHR(SFDINT,8);
+              WRITE(FUN)=ELIM; WRITE(DAT)=0;
+              PPTMB=SFDINT&"177400";           /* STORE ADDER FOR SPLICE CHANNEL EXPONENTIAL DECAYS */
+           END;
+           IF (DO.FM<>0) THEN DO;              /* MUST START FM FINAL DECAY TOO */
+              WRITE(CHA)=MCHN;                 /* START INDEX DECAY */
+              WRITE(FUN)=IDIV; WRITE(DAT)=IFDINT;
+              WRITE(FUN)=IADD; WRITE(DAT)=SHR(IFDINT,8);
+              WRITE(FUN)=ILIM; WRITE(DAT)=0;
+              IF (SMCHN<>0)
+              THEN DO; 
+                 WRITE(CHA)=SMCHN;             /* START INDEX DECAY */
+                 WRITE(FUN)=IDIV; WRITE(DAT)=IFDINT;
+                 WRITE(FUN)=IADD; WRITE(DAT)=SHR(IFDINT,8);
+                 WRITE(FUN)=ILIM; WRITE(DAT)=0;
+              END;
+              IDAT=IFDINT&"177400";            /* PERFORM INDEX */
+              P.I.E=1;                         /* PERFORM EXPONENTIATION ON INDEX USING ITMC */
+           END;
+           ENABLE;
+           EDAT=EFDINT&"177400";               /* SAVE ADDER FOR ENVELOPE EXPONENTIATION */
+
+           /* Check for short final decay to 0.  If so, que up to */
+           /* check limit and quickly mute the channel to provide */
+           /* cleanly retriggered notes                           */
+
+           if (efdint&255) IGE (256-38) then do;      /* for final decays < 50 msec */
+              PSTAT = D20.STATE;               /* decay to 0                 */
+              C.E.L = 0;                       /* check here, not main loop  */
+              EQF=EPKQF;              /* SET UP OUR FORWARD PTR TO WHAT IS ON EPKQ */
+              EQB=ADDR(EPKQF);        /* SET UP OUR BACK    PTR TO QUE START */
+              EPKQF=ADDR(EQF);        /* SET UP QUE POINTING TO US      */
+              CORE(EQF+1)=ADDR(EQF);  /* SET UP BACK POINTER BACK TO US */
+           end;
+        END;    /* OF BEGIN FOR MCHN<>0              */
+     END;       /* OF BEGIN FOR ORIGINAL SYNTHESIZER */
+
+     /* $PAGE - FINAL DECAYS - MONO & POLY SYNTHS */
+
+     ELSE IF (INC.MONO<>0)&((MCHN&B.MONO)<>0) THEN DO;  /* MONO SAMPLING (W. DISK) */
+        IF (MCHN=MONO.CHAN) THEN DO;                    /* US'MS */
+           MONO.ELIM=0;                           /* SET UP NEW LIMIT OF 0 */
+           LOAD 20; MUL (256-(EFDINT&255));       /* COMPUTE 20*DIVISOR - STORE AS PSEUDO DIVISOR - USED BY EXPONENTIATION ROUTINE */
+           MONO.DIVISOR=RES;                      /* SAVE FOR OTHER USAGE */
+           LOAD 33333; MUL (SHR(EFDINT,8)+1);     /* 333333 * INCR */
+           IF (READ(4) IGE MONO.DIVISOR)          /* CHECK FOR OVERFOW */
+           THEN MONO.INC="177777";                /* GO THERE ON NEXT INTERRUPT */
+           ELSE DO;                               /* COMPUTE RATE */
+              DIV MONO.DIVISOR; MONO.INC=RES;     /* INCREMENT SOFTWARE INTERPOLATOR AT THIS RATE */
+           END;
+           MONO.ENV.TIME=OUR.MILLISECONDS;        /* RIGHT NOW            */
+        END;
+        EDAT=EFDINT&"177400";                     /* SAVE ADDER FOR ENVELOPE EXPONENTIATION */
+     END;
+     ELSE IF (INC.POLY<>0) THEN DO;               /* MEANS POLY SYNTH */
+        LOAD 256; DIV (256-(EFDINT&255));         /* GET PDELT        */
+        J=SHR((EFDINT&"177400"),4)+15;            /* PRECOMPUTE ADDER  */
+        DISABLE;
+        IF UCHN<>0 THEN DO;                       /* STEREO SOUND FILE? */
+           WRITE(PSC)=UCHN;                       /* DECAY RIGHT CHANNEL AS WELL */
+           WRITE(PSF)=PSEINC;
+           WRITE(PSD)=J;                          /* ADDER  */
+           WRITE(PSD)=RES;                        /* DELTA  */
+           WRITE(PSF)=PSELIM;
+           WRITE(PSD)=0;                          /* LIMIT OF 0 */
+        END;
+        WRITE(PSC)=MCHN;                          /* ENV CHAN         */
+        WRITE(PSF)=PSEINC;
+        WRITE(PSD)=J;                             /* ADDER  */
+        WRITE(PSD)=RES;                           /* DELTA  */
+        WRITE(PSF)=PSELIM;
+        WRITE(PSD)=0;                             /* LIMIT OF 0 */
+        ENABLE;
+        EDAT=(EFDINT&"177400")\(RES-1);           /* SAVE ADDER & PDELT FOR EXPONENTIATION */
+     END;
+
+     /* NOTE: THIS CODE IS REPEATED IN 330-FINL (ATTEMPTING TO FIX BUG WITH PLUCKED TIMBRES) */
+     IF D164_PRESENT THEN DO;     /* IF CLAVIER THERE         */
+        WRITE(D164)=5;            /* SELECT KEYBOARD GATE DAC */
+        WRITE(D165)=0;            /* REMOVE GATE              */
+     END;
+
+     GOTO MORE.FINQ;
+
+  END;
+
+
+  /* $PAGE - CHECK FOR PEAK LIMIT REACHED */
+
+  MORE.PEAK.CHECKS:;
+
+  I=EPKQF;                          /* POINT TO FIRST BLOCK ON ENV PEAK QUE */
+  DO WHILE I<>ADDR(EPKQF);          /* PROCESS EACH BLOCK  */
+
+     PPTR = I-EQFLOC;               /* GET PPTR HANDY      */
+     I    = CORE(I);                /* ADVANCE TO NEXT ONE */
+
+     IF  ((INC.MONO=0)                     /* IF NO SAMPLING AT ALL */
+     AND  (INC.POLY=0))
+     OR (MCHN&(B.MONO\B.POLY))=0 THEN DO;  /* OR ORIGINAL SYNTHESIZER - COMPUTE ITEMS */
+       WRITE(CHA)=UCHN; WRITE(FUN)=ELIM; 
+       IF PSTAT = D20.STATE THEN DO;       /* IF DECAYING TO 0, CHECK   */
+          WRITE(DAT) = 0;                  /* LIMIT TWICE               */
+          WRITE(DAT) = 0;
+       END;
+       ELSE DO;
+          WRITE(DAT)=EATLIM;               /* WRITE LIMIT DATA - DO TWICE */
+          WRITE(DAT)=EATLIM;               /* FOR HARDWARE ACCURACY  */
+       END;
+       J=READ(CHA)&1;                      /* GET 0 IF LIMIT REACHED */
+     END;                                  /* OF BEGIN FOR ORIGINAL SYNTHESIZER */
+
+     ELSE IF (INC.MONO<>0)&((MCHN&B.MONO)<>0) THEN DO;  /* MONO SAMPLING (W. DISK) */
+        IF (MONO.CHAN<>MCHN) THEN J=0;     /* END OF ATTACK IMMED IF SOMEONE ELSE HAS OUTPUT */
+        ELSE DO;                           /* WE ARE ACTIVE */
+           J=(MONO.CVAL<>MONO.ELIM);       /* PROVIDE ZERO IF AT END OF ATTACK */
+        END;
+     END;
+
+     ELSE IF (INC.POLY<>0) THEN DO;        /* MEANS POLY SYNTH */
+        WRITE(PSC)=MCHN;                   /* ENV CHAN  */
+        WRITE(PSF)=PSELIM;                 /* GET LIMIT */
+        J=READ(PSD);
+        WRITE(PSF)=PSEVAL;                 /* CURRENT V */
+        J=(J<>READ(PSD));
+     END;
+
+     /* $PAGE - START INITIAL DECAY, SPLICING, OR TEMPORARY CLEAN-UP */
+
+     IF J=0 THEN DO;                       /* IF LIMIT REACHED ...   */
+
+        IF (SMCHN<>0)                      /* IF SPLICING...         */
+        THEN DO;
+
+           IF PSTAT = D20.STATE            /* CHECK FOR END OF SHORT DECAY */
+           THEN DO;                        /* TO 0...                      */
+
+              WRITE(CHA)=SUCHN; WRITE(FUN)=ELIM; 
+              WRITE(DAT) = 0;              /* CHECK FOR LIMIT OF 0 REACHED */
+              WRITE(DAT) = 0;              /* ON BOTH CHANNELS             */
+
+              IF (READ(CHA)&1) = 0 THEN DO;
+                 WRITE(CHA)=MCHN;                 /* PERFORM CLEANUP TO    */
+                 WRITE(FUN)=ONU;  WRITE(DAT)=0;   /* REDUCE FEED-THROUGH   */
+                 WRITE(FUN)=NNU;  WRITE(DAT)=255;
+                 WRITE(FUN)=INC;  WRITE(DAT)=255;
+                 WRITE(FUN)=IDIV; WRITE(DAT)=255;
+                 WRITE(FUN)=IADD; WRITE(DAT)=255;
+                 WRITE(FUN)=ILIM; WRITE(DAT)=0;
+                 WRITE(CHA)=UCHN;
+                 WRITE(FUN)=INC;  WRITE(DAT)=255; /* HARDWARE ALSO WRITES ONU=0,NNU=255 !! */
+                 WRITE(CHA)=SMCHN;
+                 WRITE(FUN)=INC;  WRITE(DAT)=255; /* HARDWARE ALSO WRITES ONU=0,NNU=255 !! */
+                 WRITE(CHA)=SUCHN;
+                 WRITE(FUN)=INC;  WRITE(DAT)=255; /* HARDWARE ALSO WRITES ONU=0,NNU=255 !! */
+
+                 CORE(EQB  )=EQF;     /* UNLINK US FROM PK CHECK NOW THAT */
+                 CORE(EQF+1)=EQB;     /* THE SHORT DECAY TO 0 IS          */
+                 EQF=0;               /* COMPLETED                        */
+
+                 SUPR = SUPR \ 16384;      /* SET BIT TO KEEP OFF         */
+
+                 IF FQF=0 THEN DO;         /* SET STATE BITS IF FINAL     */
+                    PSTAT = DECAY.STATE;   /* DECAY HAS NOT BEEN QUED     */
+                    C.E.L = 1;
+                    P.E.E = 0;
+                 END;
+              END;
+           END;
+
+           ELSE DO;                        /* MUST BE END OF ATTACK         */
+              CORE(EQB  )=EQF;             /* UNLINK US NOW THAT ATTACK     */
+              CORE(EQF+1)=EQB;             /* IS FINISHED ON SPLICING       */
+              EQF=0;                       /* CHANNEL                       */
+
+              IF FQF=0 THEN DO;            /* IF FINAL DECAY HAS NOT BEEN QUED YET   */
+                 C.E.L=1;                  /* SET C.E.L TO ACTIVATE SPLICING CODE    */
+                 EDAT=EATLIM;              /* CHECK FOR THIS LIMIT ON UCHAN          */
+                                           /* ZERO IN UPPER HALF OF EDAT             */
+                                           /* FOR SUCHN CHECK (SEE SPLICING CODE)    */
+              END;                         /* OTHERWISE NO TIME FOR SPLICING ANYWAYS */
+           END;
+        END;                               /* CONTINUE WITH SPLICING AFTER.          */
+
+        ELSE DO;                           /* ELSE NO SPLICING...        */
+
+           IF  ((INC.MONO=0)               /* IF NO SAMPLING AT ALL      */
+           AND  (INC.POLY=0))
+           OR (MCHN&(B.MONO\B.POLY))=0 THEN DO;   /* OR FM SYNTH         */
+
+              IF PSTAT = D20.STATE            /* CLEAN UP FROM SHORT     */
+              THEN DO;                        /* DECAY TO 0              */
+                 WRITE(CHA)=MCHN;
+                 WRITE(FUN)=ONU;  WRITE(DAT)=0;
+                 WRITE(FUN)=NNU;  WRITE(DAT)=255;
+                 WRITE(FUN)=INC;  WRITE(DAT)=255;
+                 WRITE(FUN)=IDIV; WRITE(DAT)=255;
+                 WRITE(FUN)=IADD; WRITE(DAT)=255;
+                 WRITE(FUN)=ILIM; WRITE(DAT)=0;
+                 WRITE(CHA)=UCHN;
+                 WRITE(FUN)=INC;  WRITE(DAT)=255; /* HARDWARE ALSO WRITES ONU=0,NNU=255 !! */
+
+                 CORE(EQB  )=EQF;             /* UNLINK FROM PEAK QUE     */
+                 CORE(EQF+1)=EQB;             /* NOW THAT SHORT DECAY     */
+                 EQF=0;                       /* IS COMPLETED             */
+
+                 SUPR = SUPR \ 16384;         /* SET BIT TO KEEP OFF      */
+
+                 IF FQF=0 THEN DO;            /* IF FINAL DECAY HAS NOT BEEN QUED,  THEN SEQ UP FOR SUSTL=0 SUPPRESS CHECK */
+                    PSTAT = DECAY.STATE;
+                    C.E.L = 1;
+                    P.E.E = 0;
+                 END;
+              END;
+
+              ELSE DO;                        /* ELSE START INITIAL DECAY     */
+                 // CJ - 2015-20-27.
+                 // I see; the new limit is written out before the new rate.
+                 // This causes the envelope interpolator to run towards the new limit at the old rate.
+                 // This can become apparent with a very fast attack (e.g. 0) followed by a long decay (5 seconds) on a BTB-1 system.
+                 // At the end of the attack (t == 5 msec) there is a discontinuity for 5 microseconds.
+                 // See 3-6 Bass #1* A-110 Held.aif
+                 //
+                 // Note the final decay processing writes the settings in a different order:
+                 // WRITE(FUN)=EDIV; WRITE(DAT)=SFDINT;
+                 // WRITE(FUN)=EADD; WRITE(DAT)=SHR(SFDINT,8);
+                 // WRITE(FUN)=ELIM; WRITE(DAT)=0;
+                 //
+                 // So this could theoretically be changed.
+                 //
+                 // was:
+                 // WRITE(CHA)=UCHN; WRITE(FUN)=ELIM;   /* GET POSSIBLY NEW USER CHANNEL */
+                 // WRITE(DAT)=EIDLIM;                  /* WRITE OUT INITIAL DECAY LIMIT */
+                 // WRITE(FUN)=EDIV; WRITE(DAT)=   (EIDINT  );
+                 // WRITE(FUN)=EADD; WRITE(DAT)=SHR(EIDINT,8);
+                 //
+                 DISABLE;
+                 WRITE(CHA)=UCHN;                      /* GET POSSIBLY NEW USER CHANNEL */
+                 WRITE(FUN)=EDIV; WRITE(DAT)=   (EIDINT  );
+                 WRITE(FUN)=EADD; WRITE(DAT)=SHR(EIDINT,8);
+                 WRITE(FUN)=ELIM; WRITE(DAT)=EIDLIM;   /* WRITE OUT INITIAL DECAY LIMIT */
+                 ENABLE;
+                 EDAT=EIDINT&"177400";               /* SAVE ADDER FOR EXPONENTIAL COMPUTATION.  PPTMB NOT USED SINCE NO SPLICING BEING DONE IF WE GET HERE */
+
+                 IF FQF=0 THEN DO;                      /* IF FINAL DECAY HAS NOT BEEN QUED, THEN SEQ UP FOR EXPONENTIATION, OR SUSTL=0 SUPPRESS CHECK */
+                    IF ETMC<>(-1) THEN DO;              /* SET UP FOR EXPONENTIATION IF MEANINGFUL */
+                       P.E.E=1;                         /* PERFORM EXPONENTIAL INITIAL DECAY ONLY IF NOT SPLICING */
+                    END;                                /* SPLICING NOT DONE IF WE ARE HERE */
+                    IF EIDLIM=0 THEN DO;                /* INTIAL DECAY TO ZERO LIMIT */
+
+                       /* Check for short final decay to 0.  If so, que up to */
+                       /* check limit and quickly mute the channel to provide */
+                       /* cleanly retriggered notes                           */
+
+                       if (eidint&255) IGE (256-38) then do; /* for final decays < 50 msec */
+                          PSTAT = D20.STATE;                 /* decay to 0                 */
+                       end;
+                       ELSE DO;                  /* if longer init decay */
+                          PSTAT = DECAY.STATE;   /* to zero, then check  */
+                          C.E.L = 1;             /* in main loop         */
+                          CORE(EQB  )=EQF;       /* can unlink us now    */
+                          CORE(EQF+1)=EQB; 
+                          EQF=0;           
+                       END;
+                    END;
+
+                    ELSE DO;
+                       CORE(EQB  )=EQF;  /* else just unlink us from   */
+                       CORE(EQF+1)=EQB;  /* peak check que at end      */
+                       EQF=0;            /* of attack if the init      */
+                    END;                 /* decay does not go to 0     */
+                 END;
+
+                 /* Else if final decay has been qued,  leave us on the */
+                 /* pk check que (with pstat = D20.state) if we have    */
+                 /* started a short initial decay to 0.  Otherwise      */
+                 /* we are done (i.e. skip exponentiation/suppression   */
+                 /* until final decay has begun                         */
+
+                 ELSE DO;
+                    IF  (EIDLIM=0)                     /* leave on pk que if short */
+                    and ((eidint&255) IGE (256-38))    /* initial decay to 0       */
+                    then PSTAT = D20.STATE;
+                    else do;
+                       CORE(EQB  )=EQF;                /* OUR FP GOES TO FP BEHIND   US */ /* UNLINK */
+                       CORE(EQF+1)=EQB;                /* OUR BP GOES TO BP AHEAD OF US */ /* OURSELVES */
+                       EQF=0;                          /* THIS BLOCK NOT ON ANY QUE NOW */
+                    end;
+                 END;
+              END;
+           END;                                   /* OF BEGIN FOR ORIGINAL SYNTHESIZER */
+
+           ELSE DO;                               /* HANDLE MONO/POLY                  */
+
+              IF (INC.MONO<>0)&((MCHN&B.MONO)<>0) THEN DO;  /* MONO SAMPLING (W. DISK) */
+                 IF (MCHN=MONO.CHAN) THEN DO;        /* US'MS */
+                    MONO.ELIM=SHL(EIDLIM,8);         /* SET UP NEW LIMIT */
+                    LOAD 20; MUL (256-(EIDINT&255)); /* COMPUTE 20*DIVISOR - STORE AS PSEUDO DIVISOR */
+                    MONO.DIVISOR=RES;
+                    LOAD 33333; MUL (SHR(EIDINT,8)+1);   /* 333333 * INCR */
+                    IF (READ(4) IGE MONO.DIVISOR)        /* CHECK FOR OVERFOW */
+                    THEN MONO.INC="177777";              /* GO THERE ON NEXT INTERRUPT */
+                    ELSE DO;                             /* COMPUTE RATE */
+                       DIV MONO.DIVISOR; MONO.INC=RES;
+                    END;
+                    MONO.ENV.TIME=OUR.MILLISECONDS;      /* RIGHT NOW    */
+                 END;
+                 EDAT=EIDINT&"177400";               /* SAVE ADDER FOR EXPONENTIAL COMPUTATION. */
+              END;
+              ELSE IF (INC.POLY<>0) THEN DO;         /* MEANS POLY SYNTH */
+                 LOAD 256; DIV (256-(EIDINT&255));         /* GET PDELT        */
+                 J=SHR((EIDINT&"177400"),4)+15;            /* PRECOMPUTE ADDER  */
+                 K=SHL(EIDLIM,4);
+                 DISABLE;
+                 IF UCHN<>0 THEN DO;                       /* STEREO SOUND FILE? */
+                    WRITE(PSC)=UCHN;                       /* DECAY RIGHT CHANNEL AS WELL */
+                    WRITE(PSF)=PSEINC;
+                    WRITE(PSD)=J;                          /* ADDER  */
+                    WRITE(PSD)=RES;                        /* DELTA  */
+                    WRITE(PSF)=PSELIM;
+                    WRITE(PSD)=K;
+                 END;
+                 WRITE(PSC)=MCHN;                          /* ENV CHAN         */
+                 WRITE(PSF)=PSEINC;
+                 WRITE(PSD)=J;                             /* ADDER  */
+                 WRITE(PSD)=RES;                           /* DELTA  */
+                 WRITE(PSF)=PSELIM;
+                 WRITE(PSD)=K;
+                 ENABLE;
+                 EDAT=(EIDINT&"177400")\(RES-1);           /* SAVE ADDER & PDELT FOR EXPONENTIATION */
+              END;
+
+              CORE(EQB  )=EQF;                /* OUR FP GOES TO FP BEHIND   US */ /* UNLINK */
+              CORE(EQF+1)=EQB;                /* OUR BP GOES TO BP AHEAD OF US */ /* OURSELVES */
+              EQF=0;                          /* THIS BLOCK NOT ON ANY QUE NOW */
+
+              IF FQF=0 THEN DO;                      /* IF FINAL DECAY HAS NOT BEEN QUED, THEN SEQ UP FOR EXPONENTIATION, OR SUSTL=0 SUPPRESS CHECK */
+                 IF ETMC<>(-1) THEN DO;              /* SET UP FOR EXPONENTIATION IF MEANINGFUL */
+                    P.E.E=1;                         /* PERFORM EXPONENTIAL INITIAL DECAY ONLY IF NOT SPLICING */
+                 END;                                /* SPLICING NOT DONE IF WE ARE HERE */
+                 IF EIDLIM=0 THEN DO;                /* INTIAL DECAY TO ZERO LIMIT */
+                    PSTAT=DECAY.STATE; C.E.L=1;      /* SET C.E.L, BUT SET PSTAT TO DECAY.STATE */
+                 END;                                /* LEAVE C.E.L AT ZERO - DONE WITH DELAY,ATTACK PHASES. NO LIMIT CHECK NEEDED. */
+              END;
+           END;
+        END;
+     END;
+  END;
+
+  /* $PAGE - CHECK FOR INDEX PEAK REACHED, START INITIAL DECAY */
+
+  I=IPKQF;                       /* POINT TO FIRST BLOCK ON INX PEAK QUE */
+  DO WHILE I<>ADDR(IPKQF);       /* PROCESS EACH BLOCK */
+     PPTR=I-IQFLOC;
+
+     WRITE(CHA)=MCHN; WRITE(FUN)=ILIM;
+     WRITE(DAT)=IATLIM;
+     WRITE(DAT)=IATLIM;
+
+     IF (READ(CHA)&1)=0 THEN DO;             /* DONE WITH INDEX ATTACK - START INITIAL INDEX DECAY */
+        // CJ - 2015-20-27.
+        // I see; the new limit is written out before the new rate.
+        // This causes the envelope interpolator to run towards the new limit at the old rate.
+        // This can become apparent with a very fast attack (e.g. 0) followed by a long decay (5 seconds) on a BTB-1 system.
+        // At the end of the attack (t == 5 msec) there is a discontinuity for 5 microseconds.
+        // See 3-6 Bass #1* A-110 Held.aif
+        //
+        // Note the final decay processing writes the settings in a different order:
+        // WRITE(FUN)=EDIV; WRITE(DAT)=SFDINT;
+        // WRITE(FUN)=EADD; WRITE(DAT)=SHR(SFDINT,8);
+        // WRITE(FUN)=ELIM; WRITE(DAT)=0;
+        //
+        // So this could theoretically be changed.
+        //
+        // Was:
+        // WRITE(CHA)=MCHN;                     /* SELECT MODULATOR CHANNEL */
+        // WRITE(FUN)=ILIM; WRITE(DAT)=IIDLIM;  /* WRITE OUT NEW LIMIT */
+        // WRITE(FUN)=IDIV; WRITE(DAT)=IIDINT;
+        // WRITE(FUN)=IADD; WRITE(DAT)=SHR(IIDINT,8);
+        //
+        // WRITE(CHA)=SMCHN;
+        // WRITE(FUN)=ILIM; WRITE(DAT)=IIDLIM;  /* WRITE OUT NEW LIMIT */
+        // WRITE(FUN)=IDIV; WRITE(DAT)=IIDINT;
+        // WRITE(FUN)=IADD; WRITE(DAT)=SHR(IIDINT,8);
+        //
+        DISABLE;
+        WRITE(CHA)=MCHN;                        /* SELECT MODULATOR CHANNEL */
+        WRITE(FUN)=IDIV; WRITE(DAT)=IIDINT;
+        WRITE(FUN)=IADD; WRITE(DAT)=SHR(IIDINT,8);
+        WRITE(FUN)=ILIM; WRITE(DAT)=IIDLIM;     /* WRITE OUT NEW LIMIT */
+        IF (SMCHN<>0) THEN DO;                  /* SPLICE CHANNEL */
+           WRITE(CHA)=SMCHN;
+           WRITE(FUN)=IDIV; WRITE(DAT)=IIDINT;
+           WRITE(FUN)=IADD; WRITE(DAT)=SHR(IIDINT,8);
+           WRITE(FUN)=ILIM; WRITE(DAT)=IIDLIM;  /* WRITE OUT NEW LIMIT */
+        END;
+        ENABLE;
+
+        IF FQF=0 THEN DO;        /* IF FINAL DECAY HAS NOT BEEN QUED, THEN SEQ UP FOR INDEX INITIAL DECAY EXPONENTIATION */
+           IDAT=IIDINT&"177400"; /* SAVE ADDER FOR EXPONENTIATION */
+           P.I.E=1;              /* SET FLAG TO PERFORM EXPONENTIATION */
+        END;                     /* OTHERWISE NO TIME FOR EXPONTIATION ANYAYS, LET ALONE CLOBBERING IDAT, USING WRONG ITMC */
+
+        I=CORE(I);               /* ADVANCE POINTER TO NEXT BLOCK */
+        CORE(IQB  )=IQF;         /* OUR FP GOES TO FP BEHIND   US */ /* UNLINK */
+        CORE(IQF+1)=IQB;         /* OUR BP GOES TO BP AHEAD OF US */ /* OURSELVES */
+        IQF=0;                   /* THIS BLOCK NOT ON ANY INDEX QUE NOW */
+        ISTAT=2;                 /* INIDICATE INITIAL DECAY HAS STARTED */
+
+     END;
+     ELSE I=CORE(I);             /* MOVE ON TO NEXT BLOCK IF CHANNEL HAS NOT REACHED LIMIT */
+  END;
+
+  // This logic makes sure we check for starting notes and attacks
+  // once every millisecond.
+  PRE.MILLISECONDS=PRE.MILLISECONDS+1;
+  IF PRE.MILLISECONDS<>OUR.MILLISECONDS THEN DO;
+     TIMER.PHASE=TIMER.PHASE+2;
+     IF TIMER.PHASE=10 THEN TIMER.PHASE=0;
+     GOTO MORE.PEAK.CHECKS;
+  END;
+
+  /* $PAGE - CHECK KEYBOARD, SEQUENCER DELAY TIMERS */
+
+  MORE.EKBQ:;
+
+  IF EKBQF<>ADDR(EKBQF) THEN DO;            /* PROCESS FIRST BLOCK */
+     PPTR=EKBQF-EQFLOC;
+     IF OUR.MILLISECONDS>=ETIMER THEN DO;   /* TIME TO START NOTE  */
+        CORE(EQB  )=EQF;                    /* OUR FP GOES TO FP BEHIND   US */ /* UNLINK */
+        CORE(EQF+1)=EQB;                    /* OUR BP GOES TO BP AHEAD OF US */ /* OURSELVES */
+        IF QSTAT<>0 THEN DO;
+           CALL CONSTRUCT.SPLICE(PPTR,0);
+           I=ETIMER;                        /* PUT BACK ON QUE IN CORRECT TIME */
+           J=EKBQF;                         /* POINT TO FIRST BLOCK ON QUE */
+           DO WHILE (J<>ADDR(EKBQF))        /* WHILE MORE BLOCKS ON QUE    */
+           AND      (I>=CORE(J+(ETLOC-EQFLOC)));
+              J=CORE(J);
+           END;
+           EQF        =J;                   /* LINK BACK ON EKBQ */
+           EQB        =CORE(J+1);           /* IN CORRECT ORDER  */
+           CORE(EQB)  =ADDR(EQF);           
+           CORE(J+1)  =ADDR(EQF);           
+        END;
+        ELSE DO;                            /* PERFORM ATTACK NOW */
+           /* LINK OURSELVES ON TO THE ** END ** OF EATQ */                                    
+           /* THIS PRESERVES THE ORDER BETWEEN MAIN      */
+           /* AND CHORUS BLOCKS BETWEEN THE KEYBOARD     */
+           /* AND THE SEQUENCER                          */
+           EQF        =ADDR(EATQF);            /* LINK ON TO ** END ** OF EATQ: OUR FP POINTS BACK TO EATQ */
+           EQB        =EATQB;                  /* POINT BACK TO LAST BLOCK ON QUE */
+           CORE(EQB)  =ADDR(EQF);              /* SET UP PREVIOUS BLOCK POINTING TO US */
+           EATQB      =ADDR(EQF);              /* WE ARE NOW LAST ON QUE */
+        END;
+        GOTO MORE.EKBQ;
+     END;
+  END;
+
+  MORE.EDLQ:;
+
+  IF EDLQF<>ADDR(EDLQF) THEN DO;            /* PROCESS FIRST BLOCK */
+     PPTR=EDLQF-EQFLOC;
+     IF PLAY.TIME.LSB>=STIMER THEN DO;      /* TIME TO START NOTE    */
+        CORE(EQB  )=EQF;                    /* UNLINK OF FRONT OF Q  */
+        CORE(EQF+1)=EQB;                    
+        IF QSTAT<>0 THEN DO;                /* MEANS POLY SPLICE OR FM VOLUME WRITE */
+           CALL CONSTRUCT.SPLICE(PPTR,1);
+           I=STIMER;                        /* PUT BACK ON QUE IN CORRECT TIME */
+           J=EDLQF;                         /* POINT TO FIRST BLOCK ON QUE */
+           DO WHILE (J<>ADDR(EDLQF))        /* WHILE MORE BLOCKS ON QUE    */
+           AND      (I>=CORE(J+(STLOC-EQFLOC)));
+              J=CORE(J);
+           END;
+           EQF        =J;                   /* LINK BACK ON EDLQ */
+           EQB        =CORE(J+1);           /* IN CORRECT ORDER  */
+           CORE(EQB)  =ADDR(EQF);           
+           CORE(J+1)  =ADDR(EQF);           
+        END;
+        ELSE DO;                            /* SET UP QUE */
+
+           IF ETIMER=0 THEN DO;             /* NO KEYBOARD DELAY - QUE UP IMMEDIATELY */
+
+              EQF        =ADDR(EATQF);      /* LINK ON TO ** END ** OF EATQ: OUR FP POINTS BACK TO EATQ */
+              EQB        =EATQB;            /* POINT BACK TO LAST BLOCK ON QUE */
+              CORE(EQB)  =ADDR(EQF);        /* SET UP PREVIOUS BLOCK POINTING TO US */
+              EATQB      =ADDR(EQF);        /* WE ARE NOW LAST ON QUE   */
+
+              IF  (DO.FM<>0)                /* IF FM IS USED ON THIS PARTIAL */
+              AND (ITIMER<>ETIMER)          /* BUT DIFFERENT DELAY */
+              THEN DO;                      /* MUST LINK TO INDEX QUE AS WELL */
+
+                 ETIMER=OUR.MILLISECONDS+ETIMER;  /* GET ABSOLUTE TIME TO TRIGGER       */
+                 ITIMER=OUR.MILLISECONDS+ITIMER;  /* UPDATE BOTH HERE      */
+
+                 I=ITIMER;                  /* SORT INTO QUE                      */
+                 J=IKBQB;                   /* SEARCHING BACKWARDS FOR BEST SPEED */
+                 DO WHILE (J<>ADDR(IKBQF))      
+                 AND      (I<CORE(J+(ITLOC-IQFLOC)));
+                    J=CORE(J+1);            /* BACKWARDS                          */
+                 END;
+                 IQB        =J;             /* LINK US AFTER THE BLOCK ON QUE     */
+                 IQF        =CORE(J);       
+                 CORE(IQF+1)=ADDR(IQF);           
+                 CORE(J)    =ADDR(IQF);           
+                 ANY.INDEX.QUES=1;
+
+              END;
+           END;
+
+           ELSE DO;                         /* KEYBOARD DELAY - NOW USE MSEC TO TIME IT */
+
+              ETIMER=OUR.MILLISECONDS+ETIMER;  /* GET ABSOLUTE TIME TO TRIGGER       */
+              ITIMER=OUR.MILLISECONDS+ITIMER;  /* UPDATE BOTH HERE      */
+
+              I=ETIMER;                  /* SORT INTO QUE                      */
+              J=EKBQB;                   /* SEARCHING BACKWARDS FOR BEST SPEED */
+              DO WHILE (J<>ADDR(EKBQF))      
+              AND      (I<CORE(J+(ETLOC-EQFLOC)));
+                 J=CORE(J+1);            /* BACKWARDS                          */
+              END;
+              EQB        =J;             /* LINK US AFTER THE BLOCK ON QUE     */
+              EQF        =CORE(J);       
+              CORE(EQF+1)=ADDR(EQF);           
+              CORE(J)    =ADDR(EQF);           
+
+              IF  (DO.FM<>0)                /* IF FM IS USED ON THIS PARTIAL */
+              AND (ITIMER<>ETIMER)          /* BUT DIFFERENT DELAY */
+              THEN DO;                      /* MUST LINK TO INDEX QUE AS WELL */
+                 I=ITIMER;                  /* SORT INTO QUE                      */
+                 J=IKBQB;                   /* SEARCHING BACKWARDS FOR BEST SPEED */
+                 DO WHILE (J<>ADDR(IKBQF))      
+                 AND      (I<CORE(J+(ITLOC-IQFLOC)));
+                    J=CORE(J+1);            /* BACKWARDS                          */
+                 END;
+                 IQB        =J;             /* LINK US AFTER THE BLOCK ON QUE     */
+                 IQF        =CORE(J);       
+                 CORE(IQF+1)=ADDR(IQF);           
+                 CORE(J)    =ADDR(IQF);           
+                 ANY.INDEX.QUES=1;
+              END;
+           END;
+        END;
+        GOTO MORE.EDLQ;                     /* CHECK QUE FOR NEXT BLOCK */
+     END;
+  END;
+
+  /* $PAGE - START VOLUME ENVELOPE ATTACK */
+
+  IF EATQF<>ADDR(EATQF) THEN DO;               /* SEE IF ANY */
+
+     IF INC.POLY<>0 THEN DO;
+        WRITE("313")=ADDR(SYNCH.START.BUF(0)); /* R13 PTS TO START OF SPECIAL BUF */
+        WRITE("353")=0;                        /* PUT ZERO IN MR13 TO MARK END OF LIST */
+     END;
+
+     DO WHILE EATQF<>ADDR(EATQF);              /* PROCESS EACH BLOCK */
+        PPTR=EATQF-EQFLOC;
+
+        /* $PAGE - START ATTACK IF SPLICING USED */
+
+        IF MCHN<>0 THEN DO;                    /* START ATTACK IF NOT MIDI-ONLY */
+
+           IF  ((INC.MONO=0)                   /* IF NO SAMPLING AT ALL */
+           AND  (INC.POLY=0))
+           OR (MCHN&(B.MONO\B.POLY))=0 THEN DO; 
+
+              KBDTRIG=1;
+
+              IF (SMCHN<>0) THEN DO;              /* SET UP FREQUENCIES OF SPLICE CHANNEL AS WELL */
+                 // For FM voices the volume is apparently set elsewhere; I believe construct.splice accomplishes that.
+                 // That's because it was an anlog circuit and it took a while for the volume to reach the desired setting.
+                 // We wrote the volume earlier so that the front of the sound would not get chopped off.
+                 DISABLE;
+                 IF (SUPR&"177400")=0 THEN DO;    /* WRITE OUT FREQ INFO IF NOT SUPPRESSED */
+                    FREE.R0;                      /* FOR FOLLOWING ADDR */
+                    WRITE("301")=ADDR(UCHN);      /* GET POINTER TO CHANNEL LIST */
+                    FREE.R0;                      /* FOR FOLLOWING ADDR */
+                    WRITE("302")=ADDR(UONU);      /* SET UP MEM POINTERS - R2, R3 */
+                    WRITE("303")=READ("302");     /* MOVE COPY TO R1 FOR SPLICE CHANNEL WRITES */
+                    WRITE(CHA)=READ("361");       /* SEND OUT CHANNEL - UCHN  */
+                    WRITE(FUN)=ONU; WRITE(DAT)=READ("362");
+                    WRITE(FUN)=NNU; WRITE(DAT)=READ("362"); 
+                    WRITE(FUN)=INC; WRITE(DAT)=READ("362");
+                    WRITE(CHA)=READ("361");       /* SEND OUT CHANNEL - SUCHN */
+                    WRITE(FUN)=ONU; WRITE(DAT)=READ("363");
+                    WRITE(FUN)=NNU; WRITE(DAT)=READ("363"); 
+                    WRITE(FUN)=INC; WRITE(DAT)=READ("363");
+                    FREE.R0;                      /* FOR FOLLOWING TEST */
+                    IF READ("362")<>0 THEN DO;    /* CHECK DO.FM - COMPILER USES R0 HERE */
+                       WRITE("303")=READ("302");  /* INCR SPLICE CHANNEL POINTER */
+                       WRITE(CHA)=READ("361");    /* AND MODULATOR */
+                       WRITE(FUN)=ONU; WRITE(DAT)=READ("362");
+                       WRITE(FUN)=NNU; WRITE(DAT)=READ("362"); 
+                       WRITE(FUN)=INC; WRITE(DAT)=READ("362");
+                       WRITE(CHA)=READ("361");     /* AND SPLICE MODULATOR CHANNEL */
+                       WRITE(FUN)=ONU; WRITE(DAT)=READ("363");
+                       WRITE(FUN)=NNU; WRITE(DAT)=READ("363");
+                       WRITE(FUN)=INC; WRITE(DAT)=READ("363");
+                    END;
+                 END;
+                 WRITE(CHA)=UCHN;
+                 WRITE(FUN)=EDIV; WRITE(DAT)=EATINT;
+                 WRITE(FUN)=EADD; WRITE(DAT)=SHR(EATINT,8);
+                 WRITE(FUN)=ELIM; WRITE(DAT)=EATLIM;
+                 WRITE(CHA)=SUCHN;
+                 WRITE(FUN)=EDIV; WRITE(DAT)=EATINT;
+                 WRITE(FUN)=EADD; WRITE(DAT)=SHR(EATINT,8);
+                 WRITE(FUN)=ELIM; WRITE(DAT)=0; /* MAKE VOLUME HEAD TOWARDS 0 AT ATTACK TIME RATE */
+                 IF ITIMER=ETIMER THEN DO;      /* EQUAL - START BOTH INDEX AND ENV ATTACKS NOW */
+                    WRITE(CHA)=MCHN;
+                    WRITE(FUN)=IDIV; WRITE(DAT)=IATINT;
+                    WRITE(FUN)=IADD; WRITE(DAT)=SHR(IATINT,8);
+                    WRITE(FUN)=ILIM; WRITE(DAT)=IATLIM;
+                    WRITE(CHA)=SMCHN;
+                    WRITE(FUN)=IDIV; WRITE(DAT)=IATINT;
+                    WRITE(FUN)=IADD; WRITE(DAT)=SHR(IATINT,8);
+                    WRITE(FUN)=ILIM; WRITE(DAT)=IATLIM;
+                    IF ((IATLIM XOR IIDLIM)&255)<>0  /* PERFORM QUICK COMPARISON OF LOWER 8 BITS ONLY */
+                    THEN DO;                   /* LINK ON TO QUE FOR PEAK CHECK IF PEAK AND SUST LEVELS DIFFER */
+                       ISTAT=1;                /* INDICATE ATTACK STARTED */
+                       IQF=IPKQF;              /* SET UP OUR FORWARD PTR TO WHAT IS ON IPKQ */
+                       IQB=ADDR(IPKQF);        /* SET UP OUR BACK    PTR TO QUE START */
+                       IPKQF=ADDR(IQF);        /* SET UP QUE POINTING TO US      */
+                       CORE(IQF+1)=ADDR(IQF);  /* SET UP BACK POINTER BACK TO US */
+                    END;
+                    ELSE ISTAT=2;              /* TREAT AS IF INITIAL DECAY HAS STARTED */
+                 END;
+                 ENABLE;
+              END;
+
+/*    $PAGE - START ATTACK IF NO SPLICING */
+
+              ELSE DO;                   /* SET UP MODULATOR AND CARRIER ONLY */
+                 DISABLE;
+                 IF (SUPR&"177400")=0 THEN DO;    /* SEND OUT FREQ INFO IF NOT SPPRESSED */
+                    WRITE(CHA)=UCHN;              /* SEND OUT CHANNEL */
+                    WRITE("302")=ADDR(UONU);      /* SET UP MEM POINTERS - R2 */
+                    WRITE(FUN)=ONU; WRITE(DAT)=READ("362");
+                    WRITE(FUN)=NNU; WRITE(DAT)=READ("362"); 
+                    WRITE(FUN)=INC; WRITE(DAT)=READ("362");
+                    FREE.R0;                       /* FOR FOLLOWING TEST */
+                    IF READ("362")<>0 THEN DO;     /* CHECK DO.FM - COMPILER CLOBBERS R0 HERE */
+                       FREE.R0;                    /* FOR FOLLOWING MCHN LOOKUP */
+                       WRITE(CHA)=MCHN;            /* AND MODULATOR */
+                       WRITE(FUN)=ONU; WRITE(DAT)=READ("362");
+                       WRITE(FUN)=NNU; WRITE(DAT)=READ("362"); 
+                       WRITE(FUN)=INC; WRITE(DAT)=READ("362");
+                    END;
+                 END;
+                 WRITE(CHA)=UCHN;             /* SELECT USED CHANNEL */
+                 WRITE(FUN)=EDIV; WRITE(DAT)=EATINT;
+                 WRITE(FUN)=EADD; WRITE(DAT)=SHR(EATINT,8);
+                 WRITE(FUN)=ELIM; WRITE(DAT)=EATLIM;
+                 IF ITIMER=ETIMER THEN DO;           /* EQUAL - START BOTH INDEX AND ENV ATTACKS NOW */
+                    WRITE(CHA)=MCHN;
+                    WRITE(FUN)=IDIV; WRITE(DAT)=IATINT;
+                    WRITE(FUN)=IADD; WRITE(DAT)=SHR(IATINT,8);
+                    WRITE(FUN)=ILIM; WRITE(DAT)=IATLIM;
+                    IF ((IATLIM XOR IIDLIM)&255)<>0  /* PERFORM QUICK COMPARISON OF LOWER 8 BITS ONLY */
+                    THEN DO;                   /* LINK ON TO QUE FOR PEAK CHECK */
+                       ISTAT=1;                /* INDICATE ATTACK STARTED */
+                       IQF=IPKQF;              /* SET UP OUR FORWARD PTR TO WHAT IS ON IPKQ */
+                       IQB=ADDR(IPKQF);        /* SET UP OUR BACK    PTR TO QUE START */
+                       IPKQF=ADDR(IQF);        /* SET UP QUE POINTING TO US      */
+                       CORE(IQF+1)=ADDR(IQF);  /* SET UP BACK POINTER BACK TO US */
+                    END;
+                    ELSE ISTAT=2;              /* TREAT AS IF INITIAL DECAY HAS STARTED */
+                 END;
+                 ENABLE;
+              END;
+           END;          /* OF BEGIN FOR ORIGINAL SYNTHESIZER */
+
+           /* $PAGE - START ATTACK FOR MONO SYNTH */
+
+           ELSE IF (INC.MONO<>0)&((MCHN&B.MONO)<>0) THEN DO;  /* MONO SAMPLING (W. DISK) */
+              IF (MCHN=MONO.CHAN) THEN DO;                    /* US'MS */
+                 DISABLE;
+                 IF  (OUTPUT.ACTIVE=1)             /* MAKE SURE WE GOT STARTED */
+                 AND (STOP.MONO.IO=0)              /* AFTER CALL TO STOP.DISK - TREAT AS IF NOTE NEVER STARTS */
+                 THEN DO;
+                    I=READ(D66);                   /* SAVE D66 REGISTER - WE MIGHT BE INTERRUPTING THE OUTPUT ROUTINE */
+                    WRITE(D66)= 8+1;               /* SELECT CONTROL REGISTER */
+                    WRITE(D67)="1002";             /* INTERRUPTS ON, START RUNNING NOW */
+                    WRITE("300")=READ("300");      /* DELAY */
+                    WRITE(D66)=I;                  /* RESTORE D66 REGISTER */
+                    OUTPUT.ACTIVE=2;
+                 END;
+                 MONO.STATE=0;                     /* START ENVELOPE INTER */
+                 MONO.ENV.TIME=OUR.MILLISECONDS;   /* RIGHT NOW            */
+                 ENABLE;
+                 KBDTRIG=1;                        /* EMIT TRIGGER PULSE   */
+              END;
+           END;                                  /* OF MONO */
+
+           /* $PAGE - START RIGHT CHANNEL ATTACK FOR POLY SYNTH */
+
+           ELSE IF (INC.POLY<>0) THEN DO;          /* MEANS POLY SYNTH */
+
+              IF UCHN<>0 THEN DO;                  /* STEREO SOUND FILE? */
+                 WRITE(PSC)=UCHN;                  /* DECAY RIGHT CHANNEL AS WELL */
+                 WRITE(PSF)=PSON;                  /* ON/OFF BIT         */
+                 WRITE(PSD)=0;                     /* TURN CHANNEL OFF NOW TO PREPARE FOR SPLICE (IN CASE STOLEN CHANNEL) */
+
+                 IF MULTI.THERE<>0 THEN DO;           /* INITIALIZE MULTI STUFF HERE FOR POLY */
+                    J=ISTAT;                          /* GET L & R ROUTING (WITH ON BIT SET) */
+                    K=SHL(J,8);                       /* GET RIGHT ROUTING (IN LOWER HALF) */
+                    J=J&"177400";                     /* GET LEFT  ROUTING (IN UPPER HALF) */
+                    M=UCHN&255;                       /* GET CHAN ID FOR RIGHT CHANNEL */
+                    WRITE(D32)="21";                  /* SELECT MULTI I/O  */
+                    WRITE(MAM)=MPOLY.PTR;             /* POINT AT MULTICHANNEL-POLY MAP */
+                    WRITE(MAL)=M;                     /* POLY VOICE NUMBER */
+                    IF MONO_VOICES_PRESENT            /* MONO DAC VOICE CARDS */
+                    THEN WRITE(D33)=K\(READ(MD)&255); /* ROUTE RITE CHANNEL DAC TO RITE OUTPUT */
+                    ELSE DO;                          /* STEREO VOICE CARDS */
+                       WRITE(D33)=J\(SHR(READ(MD),8)); /* ROUTE LEFT INPUT TO LEFT OUTPUT */
+                       WRITE(D33)=K\(READ(MD)&255);    /* ROUTE RITE INPUT TO RITE OUTPUT */
+                    END;
+                 END;
+
+                 LOAD SSTAT;       MUL AVOL;       /* BASIC VOL; SCALE FOR RTE/AM   */
+                 LOAD READ(4);     MUL FMPTR;      /* SCALE BY FILE VOLUME FIELD    */
+                 J=READ(4);
+
+                 LOAD J; MUL  IDAT;                /* 0=ALL LEFT;  COMPUTE RIGHT VOLUME */
+                 WRITE("300")=RES; DIV 16;         /* SCALE 0-4095 */
+                 K=RES;                            /* RIGHT VOL    */
+                 LOAD J; MUL  256-IDAT;            /* 256=ALL RIGHT; COMPUTE LEFT VOLUME */
+                 WRITE("300")=RES; DIV 16;         /* SCALE 0-4095         */
+                 WRITE(PSF)=PSRCVOL;               /* LOAD CURR & DEST VOL */
+                 IF MONO_VOICES_PRESENT THEN DO;   /* FOR MONO DAC VOICE CARDS */
+                    /* DON'T INVERT PAN SINCE STEREO SEPARATION IS ACCOMPLISHED */
+                    /* THROUGH MULTI-CHANNEL ROUTING RATHER THAN PANNING */
+                    WRITE(PSD)=K; WRITE(PSD)=RES;  /* RIGHT, LEFT          */
+                    WRITE(PSD)=K; WRITE(PSD)=RES;  /* RIGHT, LEFT          */
+                 END;
+                 ELSE DO;
+                    WRITE(PSD)=RES; WRITE(PSD)=K;  /* RIGHT, LEFT          */
+                    WRITE(PSD)=RES; WRITE(PSD)=K;  /* RIGHT, LEFT          */
+                 END;
+
+                 // Populate shadow register
+                 WRITE(MAM)=POLY.PSRDVOL.SHADOW;
+                 WRITE(MAL)=UCHN;
+                 WRITE(MD )=SHL(J,8) XOR IDAT;
+                 WRITE(PSF)=PSWL;                  /* WAVE TABLE LENGTH ENTRY */
+                 RPC 8;                            /* WAVE TABLE LENGTH */
+                 WRITE(PSD)=0;                     /* BASE ADDRESS      */
+                                                   /* LOOP LENGTH       */
+                                                   /* PHASE INC          */
+                 WRITE(PSD)=255; WRITE(PSD)=0;     /* INCREMENT, MODULUS */
+
+                 LOAD 256; DIV (256-(EATINT&255)); /* GET PDELT        */
+                 WRITE(PSF)=PSEINC;
+                 WRITE(PSD)=SHR((EATINT&"177400"),4)+15; /* ADDER     */
+                 WRITE(PSD)=RES;                   /* DELTA     */
+
+                 WRITE("373")=UCHN;                /* SAVE CHAN# ON SYNCH START LIST */
+
+                 IF EATINT=(-1)                    /* DETECT 0 MILLISECOND ATTACK */
+                 THEN DO;                          /* ATTACK OF ZERO - GO DIRECTLY TO PEAK */
+                    WRITE("300")=SHL(EATLIM,4);    /* COMPUTE ENV LIMIT  */
+                    WRITE("373")=READ("300");      /* STACK IT FOR LIMIT */
+                    WRITE("373")=READ("300");      /* STACK IT FOR CVAL  */
+                 END;
+                 ELSE DO;
+                    WRITE("373")=SHL(EATLIM,4);    /* ENV LIMIT */
+                    WRITE("373")=(-1);             /* USE MINUS 1 IF NOT SET */
+                 END;
+
+                 WRITE("373")=3;                   /* TURN ON WITH LOOPING */
+              END;                                 /* OF STEREO SOUND FILE */
+              
+              /* $PAGE  START LEFT CHANNEL OR MONO ATTACK FOR POLY SYNTH, CLEAN UP */
+
+              /* TURN OFF CHANNEL AT END OF VOLUME RAMP-DOWN SPLICE IN */
+              /* CASE THIS IS A STOLEN CHANNEL:                        */
+
+              WRITE(PSC)=MCHN;                   /* SELECT OUR CHANNEL */
+              WRITE(PSF)=PSON;                   /* ON/OFF BIT         */
+              WRITE(PSD)=0;                      /* TURN CHANNEL OFF   */
+
+              /* NOW ROUTE THIS CHANNEL OUT THE CORRECT OUTPUT       */
+
+              IF MULTI.THERE<>0 THEN DO;              /* INITIALIZE MULTI STUFF HERE FOR POLY */
+                 J=ISTAT;                             /* GET L & R ROUTING (WITH ON BIT SET) */
+                 K=SHL(J,8);                          /* GET RIGHT ROUTING (IN LOWER HALF) */
+                 J=J&"177400";                        /* GET LEFT  ROUTING (IN UPPER HALF) */
+                 M=MCHN&255;                          /* GET CHAN ID FOR LEFT CHANNEL */
+                 WRITE(D32)="21";                     /* SELECT MULTI I/O  */
+                 WRITE(MAM)=MPOLY.PTR;                /* POINT AT MULTICHANNEL-POLY MAP */
+                 WRITE(MAL)=M;                        /* POLY VOICE NUMBER */
+                 IF MONO_VOICES_PRESENT               /* MONO DAC VOICE CARDS */
+                 THEN WRITE(D33)=J\(READ(MD)&255);    /* ROUTE LEFT CHANNEL DAC TO LEFT OUTPUT */
+                 ELSE DO;                             /* STEREO VOICE CARDS */
+                    WRITE(D33)=J\(SHR(READ(MD),8));   /* ROUTE LEFT INPUT TO LEFT OUTPUT */
+                    WRITE(D33)=K\(READ(MD)&255);      /* ROUTE RITE INPUT TO RITE OUTPUT */
+                 END;
+              END;
+
+              /* NOW SET CURRENT & DESTINATION VOLUMES IN POLY: */
+
+              LOAD SSTAT;       MUL AVOL;          /* BASIC VOL; SCALE FOR RTE/AM   */
+              LOAD READ(4);     MUL FMPTR;         /* SCALE BY FILE VOLUME FIELD    */
+              J=READ(4);
+
+              LOAD J; MUL  IDAT;                   /* 0=ALL LEFT;  COMPUTE RIGHT VOLUME */
+              WRITE("300")=RES; DIV 16;            /* SCALE 0-4095 */
+              K=RES;                               /* RIGHT VOL    */
+              LOAD J; MUL  256-IDAT;               /* 256=ALL RIGHT; COMPUTE LEFT VOLUME */
+              WRITE("300")=RES; DIV 16;            /* SCALE 0-4095         */
+              WRITE(PSF)=PSRCVOL;                  /* LOAD CURR & DEST VOL */
+              WRITE(PSD)=K; WRITE(PSD)=RES;        /* RIGHT, LEFT          */
+              WRITE(PSD)=K; WRITE(PSD)=RES;        /* RIGHT, LEFT          */
+
+              // Populate shadow register
+              WRITE(MAM)=POLY.PSRDVOL.SHADOW;
+              WRITE(MAL)=MCHN;
+              WRITE(MD )=SHL(J,8) XOR IDAT;
+
+              /* NOW SET UP SYNC.START.BUFFER TO PRECISELY START THE */
+              /* NOTE TOGETHER WITH ALL THE POLYS STARTING DURING    */
+              /* THIS MILLISECOND:                                   */
+
+              WRITE("373")=MCHN;                   /* SAVE CHAN# ON SYNCH START LIST */
+
+              LOAD 256; DIV (256-(EATINT&255));    /* GET PDELT        */
+              WRITE(PSF)=PSEINC;
+              WRITE(PSD)=SHR((EATINT&"177400"),4)+15;   /* ADDER     */
+              WRITE(PSD)=RES;                           /* DELTA     */
+
+              IF UCHN<>0 THEN DO;                  /* STEREO SOUND FILE? */
+                 WRITE(PSF)=PSADEVSM;              /* SET UP THIS CHANNEL AS THE EVEN STEREO MASTER */
+                 WRITE(PSD)=1;
+              END;
+
+              IF EATINT=(-1)                         /* DETECT 0 MILLISECOND ATTACK */
+              THEN DO;                               /* ATTACK OF ZERO - GO DIRECTLY TO PEAK */
+                 WRITE("300")=SHL(EATLIM,4);         /* COMPUTE ENV LIMIT  */
+                 WRITE("373")=READ("300");           /* STACK IT FOR LIMIT */
+                 WRITE("373")=READ("300");           /* STACK IT FOR CVAL  */
+              END;
+              ELSE DO;
+                 WRITE("373")=SHL(EATLIM,4);         /* ENV LIMIT */
+                 WRITE("373")=(-1);                  /* USE MINUS 1 IF NOT SET */
+              END;
+
+              /* NOW SET UP POLY SYNTH FREQUENCY, BASE ADDRESS, AND */
+              /* WAVE TABLE/LOOP LENGTH INFO:                       */
+
+              WRITE(PSF)=PSWL;                     /* WAVE TABLE LENGTH ENTRH */
+              WRITE("300")=ADDR(MONU);             /* POINT TO WHERE WE PUT PT.WTABL */
+              RPC 6;                               /* PT.WTABL(2), BASE ADDRESS,     */
+              WRITE(PSD) = READ("360");            /* PT.LOOPL(2)                    */
+
+              WRITE("373")=READ("360");            /* PT.ONLOOP - AND ON/LOOP WORD */
+              WRITE("353")=0;                      /* FOLLOWED WITH ZERO TO DENOTE END OF LIST */
+
+              WRITE(PSD)=0;    WRITE(PSD)=UONU&255; /* PHASE INC (WATCH OUT! OTHER INFO IN UPPER HALF OF UONU) */
+              WRITE(PSD)=UINC; WRITE(PSD)=UNNM;     /* INCREMENT, MODULUS */
+
+           END;
+
+           PSTAT=ACTIV.STATE;         /* INDICATE IN ACTIVE STATE NOW  */
+
+           CORE(EQB  )=EQF;           /* OUR FP GOES TO FP BEHIND   US */ /* UNLINK */
+           CORE(EQF+1)=EQB;           /* OUR BP GOES TO BP AHEAD OF US */ /* OURSELVES */
+
+           IF  (SMCHN<>0)             /* IF SPLICING                   */
+           OR  (EATLIM<>EIDLIM)       /* OR SUSTLIM DIFFERENT          */
+           THEN DO;                   /* LINK FOR PEAK CHECK QUE       */
+              EQF=EPKQF;              /* SET UP OUR FORWARD PTR TO WHAT IS ON EPKQ */
+              EQB=ADDR(EPKQF);        /* SET UP OUR BACK    PTR TO QUE START */
+              EPKQF=ADDR(EQF);        /* SET UP QUE POINTING TO US      */
+              CORE(EQF+1)=ADDR(EQF);  /* SET UP BACK POINTER BACK TO US */
+           END;
+           ELSE EQF=0;                /* ELSE CAN SKIP PEAK CHECK IF PK & SUST LEV EQUAL */
+
+        END;                          /* OF MCHN<>0              */
+
+        ELSE DO;                      /* MIDI-ONLY PARTIAL BLOCK       */
+           PSTAT=ACTIV.STATE;         /* INDICATE IN ACTIVE STATE NOW  */
+           CORE(EQB  )=EQF;           /* OUR FP GOES TO FP BEHIND   US */ /* UNLINK */
+           CORE(EQF+1)=EQB;           /* OUR BP GOES TO BP AHEAD OF US */ /* OURSELVES */
+           EQF=0;                     /* ELSE CAN SKIP PEAK CHECK IF PK & SUST LEV EQUAL */
+        END;
+
+        /* ATTACK OF A NEW NOTE HAS STARTED */
+        /* CLEAN UP GHOST QUE (IF ONE)      */
+        /* NOTE - PPTR GETS CLOBBERED HERE  */
+
+        IF GFPTR<>0 THEN CALL CLEAN.GHOSTS(PPTR);
+
+        IF MIDIRT<>0 THEN DO;      /* THIS IS A MIDI PARTIAL */
+           IF (MIDIRT & THD.MIDI.CHANP)<>0 THEN DO; /* POSSIBLE REPEATER:  SEND OFF BEFORE ON TO AVOID STUCK NOTES */
+              DISABLE;
+              CALL MIDI.NOTE.OFF(MIDIRT, MIDIPATH, MIDIINFO);
+           END;
+           DISABLE;
+           CALL MIDI.NOTE.ON(MIDIRT,MIDIPATH,MIDIINFO,SHR(MIDIINFO,8)); /* TURN NOTE ON */
+        END;
+
+     END;                                /* OF DO WHILE LOOP    */
+
+     IF INC.POLY<>0 THEN DO;             /* NOW START ANY POLY VOICES REAL QUICKLY */
+        WRITE("313")=ADDR(SYNCH.START.BUF(0)); /* RESET R13 TO START OF LIST */
+
+        IF READ("353")<>0 THEN DO;       /* IF ANY NOTE STARTS, SEND TRIGGER PULSE HERE */
+           KBDTRIG=1;
+        END;
+
+        DISABLE;
+        DO WHILE READ("353")<>0;         /* HAVE MORE POLY VOICES TO START */
+           WRITE(PSC)=READ("373");       /* CHANNEL #       */
+           WRITE(PSF)=PSELIM;            /* ENV LIM/CVAL    */
+           WRITE(PSD)=READ("373");       /* WRITE LIMIT     */
+           WRITE("200")=READ("373");     /* MR13I TO LOAD 0 */
+           WRITE("333")=1;               /* IM(1) TO RTMI   */
+           WRITE(PSD)=READ("300");       /* WRITE CVAL      */
+           WRITE(PSF)=PSON;              /* ON/OFF FUNCTION CODE */
+           WRITE(PSD)=READ("373");       /* TURN CHANNEL ON WITH/WITHOUT LOOPING */
+        END;
+        ENABLE;
+     END;
+
+  END;                                   /* OF ANY NEW PARTIALS */
+
+  IF (KBDTRIG<>0) THEN DO;                     /* REMOVE PREV TRIG  */
+     IF (KBDTRIG=1) THEN DO;
+        IF D164_PRESENT THEN DO;
+           WRITE(D164)=5;                      /* SELECT KEYBOARD GATE    DAC */
+           WRITE(D165)=1;                      /* SET GATE    OUTPUT          */
+           WRITE(D164)=6;                      /* SELECT KEYBOARD TRIGGER DAC */
+           WRITE(D165)=1;                      /* SET TRIGGER OUTPUT          */
+        END;
+        KBDTRIG=2;
+     END;
+     ELSE DO;
+        IF D164_PRESENT THEN DO;
+           WRITE(D164)=6;                      /* SELECT KEYBOARD TRIGGER DAC */
+           WRITE(D165)=0;                      /* SET TRIGGER OUTPUT          */
+        END;
+        KBDTRIG=0;
+     END;
+  END;
+
+  /* $PAGE - CHECK FOR INDEX ENVELOPE DELAYS, START DELAYED INDEX ATTACK */
+
+  IF ANY.INDEX.QUES<>0 THEN DO;            /* ANY THERE */
+
+    ANY.INDEX.QUES=0;
+
+    MORE.IKBQ:;
+    
+    IF IKBQF<>ADDR(IKBQF) THEN DO;         /* PROCESS FIRST BLOCK */
+       PPTR=IKBQF-IQFLOC;
+       IF OUR.MILLISECONDS>=ITIMER THEN DO;/* TIME TO START NOTE */
+          CORE(IQB  )=IQF;                 /* OUR FP GOES TO FP BEHIND   US */ /* UNLINK */
+          CORE(IQF+1)=IQB;                 /* OUR BP GOES TO BP AHEAD OF US */ /* OURSELVES */
+          IQF        =ADDR(IATQF);         /* LINK ON TO ** END ** OF IATQ: OUR FP POINTS BACK TO IATQ */
+          IQB        =IATQB;               /* POINT BACK TO LAST BLOCK ON QUE */
+          CORE(IQB)  =ADDR(IQF);           /* SET UP PREVIOUS BLOCK POINTING TO US */
+          IATQB      =ADDR(IQF);           /* WE ARE NOW LAST ON QUE */
+          GOTO MORE.IKBQ;
+       END;
+       ANY.INDEX.QUES=1;                   /* MUST CHECK NEXT TIME   */
+    END;
+    
+    MORE.IATQ:;
+    
+    IF IATQF<>ADDR(IATQF) THEN DO;     /* PROCESS EACH BLOCK */
+       PPTR=IATQF-IQFLOC;
+    
+       DISABLE;
+       WRITE(CHA)=MCHN;
+       WRITE(FUN)=IDIV; WRITE(DAT)=IATINT;
+       WRITE(FUN)=IADD; WRITE(DAT)=SHR(IATINT,8);
+       WRITE(FUN)=ILIM; WRITE(DAT)=IATLIM;
+       IF (SMCHN<>0) THEN DO;          /* UPDATE SPLICE CHANNEL TOO */
+          WRITE(CHA)=SMCHN;
+          WRITE(FUN)=IDIV; WRITE(DAT)=IATINT;
+          WRITE(FUN)=IADD; WRITE(DAT)=SHR(IATINT,8);
+          WRITE(FUN)=ILIM; WRITE(DAT)=IATLIM;
+       END;
+       ENABLE;
+    
+       CORE(IQB  )=IQF;                /* OUR FP GOES TO FP BEHIND   US */ /* UNLINK */
+       CORE(IQF+1)=IQB;                /* OUR BP GOES TO BP AHEAD OF US */ /* OURSELVES */
+    
+       IF ((IATLIM XOR IIDLIM)&255)=0  /* PERFORM QUICK COMPARISON OF LOWER 8 BITS ONLY */
+       THEN DO;                        /* MEANS PEAK AND SUST LEVELS ARE EQUAL */
+          IQF=0;                       /* BLOCK NOT LINKED ON ANY QUE - DONE WITH INDEX ENVELOPE IF PEAK LEVEL = SUST LEVEL */
+          ISTAT=2;                     /* TREAT AS IF INITIAL DECAY HAS STARTED */
+       END;
+       ELSE DO;                       /* PEAK/SUST LEVELS DIFFER - LINK TO PEAK CHECK QUE */
+          ISTAT=1;                    /* INDICATE ATTACK STARTED */
+          IQF=IPKQF;                  /* SET UP OUR FORWARD PTR TO WHAT IS ON IPKQ */
+          IQB=ADDR(IPKQF);            /* SET UP OUR BACK    PTR TO QUE START */
+          IPKQF=ADDR(IQF);            /* SET UP QUE POINTING TO US      */
+          CORE(IQF+1)=ADDR(IQF);      /* SET UP BACK POINTER BACK TO US */
+       END;
+    
+       GOTO MORE.IATQ;
+    
+    END;
+  END;
+    
+  /* $PAGE - SCAN KEYBOARD FOR NEW NOTES, CHECK FOR MONO SYNTH SPLICE CONSTRUCTION */
+
+  /* ADVANCE TIMER PHASE */
+
+  TIMER.PHASE=TIMER.PHASE+2;
+  IF TIMER.PHASE=10 THEN TIMER.PHASE=0;
+
+  /* VK - EVERY 1 MSEC  */
+  IF INC.CREG AND NEW.PAN AND (NEW.ORK == 0) THEN DO;
+     WRITE(DREG)=0;
+     WRITE(CREG)=0; WRITE(CREG)="40"\0;     /* EX WRITE IN MODE 0 */
+     WRITE(CREG)=0; WRITE(CREG)="100"\0;    /* EX READ  IN MODE 0 */
+     IF (READ(DREG)<>"077777")              /* KCR HAPPENING      */
+     OR (OLDKCR    <>       0)              /* OR LEFT OVER NOTE  */
+     THEN CALL SCAN.VKP.FOR.NOTES;
+     ELSE WRITE(CREG)=0;                    /* REMOVE READ        */
+  END;
+  ELSE IF INC.CREG THEN BEGIN;              /* ORIGINAL KEYB      */
+     DCL KBD.SCAN.TIME FIXED STATIC;        /* SCAN EVERY         */
+     IF OUR.MILLISECONDS>=KBD.SCAN.TIME     /* 5 MSEC             */
+     THEN DO;
+        CALL SCAN.ORK.FOR.NOTES;
+        KBD.SCAN.TIME=OUR.MILLISECONDS+5;
+     END;
+  END;
+
+  /* CHECK FOR MONO SAMPLING ENVELOPE INTERPOLATOR */
+
+  IF  (INC.MONO     <>0)                       /* CONSTRUCT VOLUME ENVELOPE */
+  AND (OUR.MILLISECONDS>=MONO.ENV.TIME)        /* CHECK EVERY 5 MSEC        */
+  THEN DO;
+
+     IF  (OUTPUT.ACTIVE<>0)                    /* OUTPUT HAPPENING */
+     AND (MONO.STATE    =0)                    /* DONE WITH SPLICE */
+     THEN DO;
+        IF MONO.CVAL ILT MONO.ELIM THEN DO;    /* MUST GO UP                */
+           I=MONO.ELIM-MONO.CVAL;              /* GET DIFFERENCE */
+           IF MONO.INC ILT I THEN I=MONO.INC;  /* BUT LIMIT INC TO THIS RATE */
+           MONO.CVAL=MONO.CVAL+I;              /* PERFORM LINEAR ATTACK */
+        END;
+        ELSE IF MONO.CVAL IGT MONO.ELIM THEN DO;  /* MUST GO DOWN */
+           I=MONO.CVAL-MONO.ELIM;                 /* GET DIFFERENCE */
+           IF MONO.INC ILT I THEN I=MONO.INC;     /* LIMIT TO THAT RATE */
+           MONO.CVAL=MONO.CVAL-I;
+        END;
+        LOAD MONO.VOL; MUL MONO.CVAL;          /* SCALE ENVELOPE BY VOLUME FACTOR */
+        I=READ(D66);                           /* SAVE D66 REGISTER */
+        WRITE (D66)=8+3;                       /* WRITE OUT VOLUME EVEN AFTER NOTE STOPS SO WE END UP AT ZERO */
+        WRITE (D67)=READ(4);                   /* WRITE OUT NEW VOLUME */
+        WRITE ("300")=READ("300");             /* MUST DELAY           */
+        WRITE (D66)=I;                         /* RESTORE D66 REGISTER */
+     END;
+
+     MONO.ENV.TIME=OUR.MILLISECONDS+5;
+
+  END;
+
+  IF INC.FM THEN DO;
+     WRITE("302")=ADDR(INTCHA);
+     WRITE( CHA )=READ("362");  /* RESTORE FM SYNTHS CHAN AND FUN CODE */
+     WRITE( FUN )=READ("362");
+  END;
+  ELSE WRITE("302") = ADDR(SAVE.R13);
+
+  WRITE("313")=READ("362");
+  WRITE(  MAM)=READ("362");
+  WRITE(  MAL)=READ("362");
+
+  FREE.R0;
+  IF (READ("51")&1024)<>0 THEN DO; /* RESTORE POLY SYNTH CHAN AND FUN CODE TOO */
+     WRITE(PSC)=READ("362");
+     WRITE(PSF)=READ("362");
+  END;

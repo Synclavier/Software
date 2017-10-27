@@ -1,0 +1,1215 @@
+/* :SYNRSOU:10-INT:144-TIM1  $TITLE  QUE DESCRIPTIONS, D3 & D16 INTERRUPTS */
+
+/*
+Modified:
+2000/10/14 - CJ  - New SMPTE filter to provide for latency errors
+2000/08/04 - CJ  - Changed smpte underrun handling to preserve sync
+2000/07/19 - CJ  - Changed behavior when smpte data is not available to provide
+						 steadier time base
+1998/06/24 - TY  - Updated an expression containing (CLICK.TRACK.MODE & 511) to
+						 account for the independence of CLICK.TRACK.MODE from CLICKON.
+1991/03/22 - cj -  Changed kbd.spl.time to fix Lee Kopp FM retrigger clicks
+1991/01/09 - PF  - various bug fixes for sequencer and MIDInet
+1990/07/10 - PF  - Use new real time Meter Map globals in LOOP.TIME.BASE
+1990/04/05 - TSS - FIX STUCK MIDI NOTE/EXTRA NOTE OFF BUGS
+1990/01/25 - MWH - Fix "300 msec delay starting cues" bug (from EditView)
+1989/08/24 - PF  - Added PATH argument to MIDI.NOTE.OFF
+1988/10/22 - cj  - fixed bug with drop frame VITC
+1988/07/22 - MWH - Add SMPTE check and coast time
+1988/07/18 - CJ  - CHECKED AND PROCESSED REPEATING SMPTE FRAMES
+						 FROM NEW FIRMWARE
+1988/02/24 -CJ,TSS-MERGED SOME SMPTE CHANGES INTO RELEASE O
+1987/01/08 - cj  - ADDED CLEAN.GHOSTS
+1986/12/30 - CJ  - MONO SAMPLING
+1986/10/24 - mpb - dynamic mouse features
+1986/10/24 - cj  - set timbre bits in construct splice
+1986/08/28 - MPB - MOUSE (X,Y) RECORDED FOR BUTTON PRESSES AND RELEASES
+1986/07/28 - CJ  - FIXED CONSCTRUCT.SPLICE BUG
+1986/07/24 -CJ,KC- ADDED CONSTRUCT.SPLICE
+1986/05/15 - "official" creation of release-M modules
+*/
+
+/* QUES -
+
+THERE ARE MORE OR LESS 13 QUES THAT ARE USED TO PROCESS NOTES IN
+THE SYNCLAVIER.  EACH QUE PERFORMS A SPECIFIC FUNCTION.
+
+THE QUES ARE DIVIDED INTO 3 CATEGORIES:
+
+	VOLUME ENVELOPE QUES
+	INDEX  ENVELOPE QUES
+	FINAL  DECAY    QUES
+
+EACH PARTIAL BOCK CAN BE LINKED TO 1 VOLUME ENVELOPE QUE, 1 INDEX ENVELOPE
+QUE,  AND/OR 1 FINAL DECAY QUE AT THE SAME TIME.
+
+THE QUES ARE GENERALLY DESCRIBED AS FOLLOWS:
+
+1. ELPQ          ENVELOPE LOOP QUE           HOLDS SEQUENCER NOTES THAT SHOULD BE
+                                             STARTED AT THE FRONT OF AN
+                                             OVERALL LOOP.   BLOCKS ON
+                                             THIS QUE ARE TRANSFERRED TO THE
+                                             EDLQ AT THE LOOP START POINT.
+
+2. EDLQ          ENVELOPE DELAY QUE          HOLDS SEQUENCER NOTES (OR DELAYED
+                                             KEYBOARD NOTES WHILE RECORDING)
+                                             THAT ARE WAITING TO START.   BLOCKS
+                                             ARE TRANSFERRED FROM THIS QUE
+                                             TO THE EATQ WHEN PLAY.TIME>=ETIMER.
+
+3. EKBQ          ENVELOPE KEYBOARD QUE       SPECIAL QUE - USED ONLY WITH
+                                             KEYBOARD NOTES THAT HAVE
+                                             ENVELOPE OR INDEX DELAYS.
+                                             BLOCKS ARE TRANSFERRED FROM THIS
+                                             QUE TO THE EATQ WHEN 
+                                             MILLISECONDS>=ETIMER (SIMILAR
+                                             TO EDLQ BUT COUNTS REAL TIME
+                                             INSTEAD OF SEQUENCER TIME)
+
+4. EATQ          ENVELOPE ATTACK QUE         BLOCKS ON THIS QUE ARE STARTED
+                                             DURING THE NEXT CLOCK INTERRUPT.
+                                             FREQUENCY INFO IS WRITTEN
+                                             TO THE SYNTHESIZER,   THE
+                                             VOLUME ENVELOPE IS STARTED,
+                                             AND THE INDEX ENVELOPE IS
+                                             STARTED (IF ITIMER=ETIMER).
+                                             AFTER THE NOTE IS STARTED,
+                                             SEVERAL IMPORTANT ACCOUNTING
+                                             ITEMS ARE PERFORMED:
+                                                 A) SETS PSTAT=ACTIV.STATE
+                                                 B) IF SPLICING (SMCHN<>0)
+                                                    THEN SETS C.E.L=1 AND EDAT=EATLIM
+                                                    REMOVES BLOCK FROM EATQ.
+                                                    BLOCK WILL NO LONGER
+                                                    BE LINKED TO ANY ENVELOPE
+                                                    QUE.  C.E.L IS NOT SET,
+                                                    HOWEVER, IF FINAL DECAY
+                                                    HAS ALREADY BEEN QUED.
+
+$PAGE 
+
+                                                 C) IF SPLICING IS NOT
+                                                    BEING DONE (SMCHN=0)
+                                                    THEN:
+                                                      C.1: IF SUSTAIN LIMIT
+                                                           DIFFERS FROM PEAK LIMIT,
+                                                           THEN BLOCK IS LINKED TO
+                                                           THE EPKQ (CHECKS FOR PEAK LIMIT
+                                                           BEING REACHED)
+                                                      C.2: IF SUSTAIN LIMIT
+                                                           EQUALS THE PEAK
+                                                           LIMIT, THEN WE ARE
+                                                           DONE WITH THE
+                                                           VOLUME ENVELOPE AND THE
+                                                           NOTE IS REMOVED FROM
+                                                           ALL ENVELOPE QUES.
+                                                           INDEX ATTACK QUE
+                                                           (CONTIUED 
+
+                                                  D) IF AN INDEX ATTACK HAD
+                                                    BEEN STARTED (ITIMER=ETIMER)
+                                                    THEN
+                                                      D.1: IF THE INDEX PEAK
+                                                           DIFFERS FROM THE INDEX
+                                                           SUSTAIN LEVEL, THEN
+                                                           THE BLOCK IS LINKED
+                                                           TO THE INDEX PEAK
+                                                           QUE (IPKQ).
+                                                      D.2: OTHERWISE WE ARE DONE
+                                                           WITH THE INDEX ENVELOPE
+                                                           AND THE BLOCK IS
+                                                           NO LONGER LINKED
+                                                           TO ANY INDEX QUE.
+
+5. EPKQ             ENVELOPE PEAK QUE        THE BLOCKS ON THIS QUE ARE
+                                             COMPARED WITH THE ENVELOPE
+                                             ATTACK LIMIT (EATLIM).  WHEN
+                                             THE LIMIT IS REACHED,  THE INITIAL
+                                             DECAY IS BEGUN.   IF AN EXPONENTIAL
+                                             INITIAL DECAY IS BEGUN, THEN
+                                             P.E.E IS SET TO ONE, AND EDAT IS
+                                             SET UP FOR PERFORMING THE EXPONENTIAL
+                                             DECAY   (ONLY DONE IF THE FINAL
+                                             DECAY HAS NOT BEEN QUED).
+                                             ONCE THE PEAK IS REACHED
+                                             THE BLOCK IS UNLINKED FROM EQPK.
+
+7.  IKBQ            INDEX KEYBOARD QUE       SIMILAR TO EKBQ - HOLDS KEYBOARD
+                                             NOTES THAT USE FM AND HAVE
+                                             A DIFFERENT DELAY THAN THE VOLUME
+                                             ENVELOPE.
+
+$PAGE 
+
+9.  IATQ            INDEX ATTACK QUE         SIMILAR TO EATQ.  PERFORMS
+                                             THE FM ATTACK DURING THE NEXT
+                                             CLOCK INTERRUPT.   NOTE - MOST
+                                             INDEX ATTACKS ARE STARTED FROM
+                                             BLOCKS LINKED TO EATQ (ENVELOPE
+                                             ATTACK QUE).   THIS QUE (IATQ) IS
+                                             ONLY USED FOR BLOCKS WHERE
+                                             THE INDEX DELAY IS DIFFERENT
+                                             FROM THE ENVELOPE DELAY.
+
+10. IPKQ            INDEX PEAK QUE           SIMILAR TO EPKQ.  CHECKS CHANNELS
+                                             FOR REACHING THE INDEX LMIT.
+                                             STARTS INITIAL DECAY WHEN PEAK
+                                             LMIT IS REACHED.   SETS UP
+                                             FOR EXPONENTIAL INITIAL DECAYS
+                                             IF THE FINAL DECAY HAS NOT
+                                             YET BEEN QUED.
+
+11. FLPQ            FINAL LOOP QUE           HOLDS SEQUENCER NOTES THAT
+                                             END AFTER LOOP POINT.
+
+12. FDLQ            FINAL DELAY QUE          USED FOR SEQUENCER NOTES ONLY.
+                                             BEGIN FINAL DECAY WHEN
+                                             PLAY.TIME >= FTIMER;
+
+13. FINQ            FINAL DECAY QUE          BEGIN FINAL DECAYS FOR
+                                             THESE BLOCKS */
+
+/* $PAGE - USE OF C.E.L, P.E.E, P.I.E, EDAT, IDAT */
+
+/* THE REAL TIME CLOCK INTERRUPT ROUTINE PERFORMS MOST OF THE
+DATA WRITES TO THE SYNTHESIZERS (STARTING NOTES, STARTING INITIAL
+DECAYS, STARTING FINAL DECAYS).  HOWEVER, SOME SYNTHESIZER WRITES
+(VIBRATO, SPLICING, DECAY EXPONENTIATION) ARE PERFORMED BY THE
+MAIN PROGRAM LOOP.  THE GENERAL REASON FOR DIVIDING THE TASKS
+THIS WAY IS:  WHEN THE COMPUTER GETS OVERLOADED SOMETHING HAS TO GO.
+SPECIFICALLY, WE WILL ALWAYS TRY TO START EACH NOTE ON TIME.  VIBRATO,
+SPLICING, AND EXPONENTIATION ARE POSTPONED WHEN THE COMPUTER GETS OVERLOADED.
+
+   THREE VARIABLES IN EACH PARTIAL BLOCK ARE USED TO SYNCHRONIZE THE
+MAIN PROGRAM LOOP WITH THE INTERRUPT CODE.  THEY ARE:
+
+THEY ARE AS FOLLOWS:
+
+1. C.E.L - CHECK.ENVELOPE.LIMIT - GENERALLY MEANS CHECK SYNTH
+   CHANNEL FOR REACHING ENVELOPE LIMIT.  C.E.L=0 MEANS DO NOTHING.
+
+      A) C.E.L=1  -  CHECK FOR LIMIT REACHED.
+
+                     IF PSTAT=DECAY.STATE,  THEN IT MEANS WE HAVE STARTED
+                     AND INITIAL DECAY TOWARDS A LIMIT OF ZERO OR ELSE
+                     WE HAVE STARTED THE FINAL DECAY.  SHUT OFF THE
+                     CHANNEL AND TERMINATE THE NOTE (IF NSTAT=1)
+                     WHEN THE LIMIT IS REACHED.
+
+                     OTHERWISE,  IT MEANS WE ARE SPLICING.  EDAT WILL HOLD
+                     THE UCHN LIMIT IN THE LOWER HALF,  AND THE SUCHN
+                     LIMIT IN THE UPPER HALF.  SPLICING CONTINUES ON
+                     TO THE NEXT TIMBRE FRAME WHEN BOTH LIMITS ARE REACHED.
+
+      B) C.E.L=2     CHECK FOR DELAY.  ONLY USED FOR DELAY SEGMENT OF
+                     A SPLICE TIMBRE (DELAYS BETWEEN FRAMES).
+                     ETIMER IS MILLISECONDS TO CONTINUE ON.
+
+2. P.E.E - PERFORM ENVELOPE EXPONENTIATION - CONSTRUCT AN EXPONENTIAL
+   VOLUME ENVELOPE DURING INITIAL AND FINAL DECAY.
+      
+      A) P.E.E=1  -  PERFORM NORMAL EXPONENTIAL ENVELOPE.  ETMC IS
+                     THE ENVELOPE TIME CONSTANT.  EDAT HOLDS THE
+                     CURRENT ADDER VALUE TO REDUCE FOR UCHN.
+                     PPTMB HOLDS THE CURRENT ADDER VALUE TO
+                     REDUCE FOR THE SPLICE SUCHN.
+
+      B) P.E.E=2  -  PERFORM S CURVE SPLICE BETWEEN TIMBRE FRAMES
+
+      B) P.E.E=3  -  PERFORM S CURVE SPLICE FROM LOOPING TIMBRE
+                     FRAME BACK TO START OF TIMBRE FRAME LOOP
+
+3. P.I.E - PERFORM INDEX EXPONENTIATION - CONSTRUCT AN EXPONENTIAL
+   INDEX ENVELOPE DURING INITIAL AND FINAL DECAY.
+
+      A) P.I.E=1  -  PERFORM EXPONENTIAL INDEX DECAY.  ITMC IS
+                     THE TIME CONSTANT.  IDAT HOLDS CURRENT ADDER VALUE.
+
+SO: */
+
+/* $PAGE - USE OF 'GHOST' BLOCKS */
+
+/* THE SYNCLAVIER SOFTWARE 'PRESCANS' THE SEQUENCER TO SEE WHAT NOTES
+   ARE ABOUT TO START.  IT ALLOCATES THE CHANNELS, COMPUTES THE
+   FREQUENCY INFO, ETC. IN ADVANCE.  THE PARTIAL BLOCKS ARE QUED
+   ON TO THE VARIOUS QUES TO THAT DELAYS, ATTACKS, INITIAL DECAYS
+   AND FINAL DECAYS OCCUR ON TIME.
+
+   ENTER THE VILLAIN: CHANNEL STEALING.  CONSIDER TWO SHORT NOTES OF
+   THE SAME PITCH.  THE FIRST NOTE IS SCANNED, AND QUED UP ON AN
+   ENVELOPE (AND POSSIBLY AN INDEX) QUE.  THE END OF THE FIRST
+   NOTE IS SCANNED, AND ITS FINAL DECAY IS QUED UP.
+
+   THE SECOND NOTE IS SCANNED,  WHICH DECIDES TO USE THE SAME CHANNEL
+   AS THE FIRST NOTE (VERY IMPORTANT FOR MANY FM EFFECTS  -  ALSO
+   APPLIES TO OTHER CHANNEL STEALING SITUATIONS: MONOPHONIC VOICES,
+   PHRASING, ETC.).  PARTIAL BLOCKS MUST BE QUED UP FOR THE
+   SECOND NOTE WITHOUT INTERFERING WITH THE QUES FOR THE EARLIER NOTE.
+
+   THIS IS ACCOMPLISHED BY THE USE OF 'GHOST' BLOCKS.  A GHOST BLOCK
+   IS A PARTIAL BLOCK THAT IS NOT LINKED TO ANY NOTE BLOCK.  IN
+   EFFECT IT IS A GHOST REMNANT FROM AN EARLIER, NOT YET COMPLETED
+   NOTE.  A GHOST BLOCK IS LINKED TO A PARTIAL BLOCK, AND SHARES
+   THE SAME CHANNEL NUMBER AS THAT PARTIAL BLOCK.
+
+   THE INTERRUPT ROUTINE PROCESSES THE MAIN QUES.  THE GHOST BLOCK
+   WILL BE PROCESSED AS IF IT WERE A REGULAR PARTIAL BLOCK.
+   WHEN THE NEWER PARTIAL IS STARTED (I.E. FREQUENCIES SET AND ATTACK STARTED)
+   THE EARLIER GHOST BLOCKS WILL BE UNLINKED AND RELEASED.  NOTE
+   THAT THIS OCCURS IN TWO SITUATIONS: 1.  IF THE FINAL DECAY FOR THE NEW
+   PARTIAL OCCURS ACTUALLY BEFORE THE PARTIAL HAS STARTED (HAPPENS WITH
+   FUNNY DELAYS AND/OR THE STOP BUTTON IS PRESSED).  OR 2.  AS THE
+   ATTACK IS BEING STARTED FOR THE NEW PARTIAL. */
+
+/* $PAGE - VARIABLES FOR REAL TIME QUES */
+
+DCL (ELPQF,ELPQB)  FIXED PUBLIC; /* QUE FOR ENV ATTACK AFTER LOOP  */
+DCL (FLPQF,FLPQB)  FIXED PUBLIC; /* QUE FOR FINAL DELAY AFTER LOOP */
+
+DCL (EDLQF,EDLQB)  FIXED PUBLIC; /* QUE FOR ENV DELAY              */
+DCL (FDLQF,FDLQB)  FIXED PUBLIC; /* QUE FOR FINAL DELAY            */
+
+DCL (EKBQF,EKBQB)  FIXED PUBLIC; /* QUE FOR KBD NOTES WITH DELAYS  */
+DCL (IKBQF,IKBQB)  FIXED PUBLIC; /* QUE FOR KBD NOTES/INX DELAYS   */
+
+DCL (EATQF,EATQB)  FIXED PUBLIC; /* QUE FOR ENV ATTACK             */
+DCL (IATQF,IATQB)  FIXED PUBLIC; /* QUE FOR INX ATTACK             */
+DCL (FINQF,FINQB)  FIXED PUBLIC; /* QUE FOR FINAL DECAY            */
+
+DCL EPQBUF(9)      FIXED PUBLIC; /* 5 PHASES                       */
+DCL IPQBUF(9)      FIXED PUBLIC; /* (TWO WORDS PER PHASE)          */
+
+
+/* $PAGE - QUE SUBROUTINES */
+
+
+DCL (PTRS.LOOPED ) FIXED PUBLIC; /* SET WHEN PLAY PTRS ARE RESET AT OVERALL LOOP */
+DCL (LOOP.RESTART) FIXED PUBLIC; /* SET WHEN TIME BASE INFO LOOPED */
+DCL (LAST.CLICK  ) FIXED PUBLIC; /* TIME OF LAST CLICK (APPROX)    */
+
+/* VARIABLES TO SET UP A PRE-ROLL TIME DURING WHICH NO AUDIO SOUNDS     */
+/* TO GET THE SEQUENCER (AND ESPECIALLY THE DTD) UP TO SPEED PROPERLY   */
+DCL (DELAY.NOTE.AND.CUE.STARTS)   FIXED PUBLIC;
+DCL (DELAY.NOTE.AND.CUE.TIME) (1) FIXED PUBLIC;
+
+
+/* CLEAN.GHOSTS:  THIS PROCEDURE IS CALLED TO CLEAN UP ANY GHOST BLOCKS */
+/* THAT ARE QUED TO THE MAIN PARTIAL BLOCK.   THIS IS DONE IN 3         */
+/* CASES:                                                               */
+
+/*    1:  WHEN A SPLICE IS STARTED                                      */
+/*    2:  WHEN AN ATTACK IS STARTED                                     */
+/*    3:  WHEN A FINAL DECAY IS STARTED                                 */
+
+/* PASS THE POINTER TO THE MAIN PARTIAL BLOCK.                          */
+
+CLEAN.GHOSTS:PROC(PPTR);               /* PROC TO CLEAN UP GHOST BLOCKS ON START OF ATTACK */
+   DCL PPTR FIXED;							// Local PPTR
+   DCL J    FIXED;
+
+   DO WHILE GFPTR<>0;                  /* GHOST BLOCK(S) ATTACHED TO THIS BLOCK */
+      J=GFPTR;                         /* MUST GET TEMP COPY OF GFPTR */
+      GFPTR=0;                         /* ZERO OUT GFPTR HERE */
+      PPTR=J;                          /* SWITCH OVER TO GHOST BLOCK */
+      IF EQF<>0 THEN DO;               /* BLOCK IS LINKED ON TO A TIMER QUE */
+         CORE(EQB  )=EQF;              /* OUR FP GOES TO FP BEHIND   US */
+         CORE(EQF+1)=EQB;              /* OUR BP GOES TO BP AHEAD OF US */
+         EQF=0;
+      END;
+      IF IQF<>0 THEN DO;               /* BLOCK IS LINKED ON TO A TIMER QUE */
+         CORE(IQB  )=IQF;              /* OUR FP GOES TO FP BEHIND   US */
+         CORE(IQF+1)=IQB;              /* OUR BP GOES TO BP AHEAD OF US */
+         IQF=0;
+      END;
+      IF FQF<>0 THEN DO;               /* BLOCK IS LINKED ON TO A TIMER QUE */
+         CORE(FQB  )=FQF;              /* OUR FP GOES TO FP BEHIND   US */
+         CORE(FQF+1)=FQB;              /* OUR BP GOES TO BP AHEAD OF US */
+         FQF=0;
+      END;
+      PFPTR=GFREE; GFREE=PPTR;         /* LINK THIS GHOST BLOCK ON TO GFREE QUE */
+
+      IF MIDIRT<>0 THEN DO;            /* THIS IS A MIDI PARTIAL */
+         IF (PSTAT<>0) THEN DO;        /* NOTE HAS BEEN STARTED */
+            DISABLE;
+            CALL MIDI.NOTE.OFF(MIDIRT, MIDIPATH, MIDIINFO); /* TURN NOTE OFF */
+         END;
+         MIDIRT=0;                     /* REZERO INFO AFTER DOING NOTE OFF */
+      END;
+   END;
+END CLEAN.GHOSTS;
+
+
+/* $PAGE - CONSTRUCT.SPLICE */
+
+/* CONSTRUCT.SPLICE - STARTS SHORT DECAYS FOR POLY VOICES TO   */
+/* CONSTRUCT SPLICE IN CASE OF STOLEN CHANNELS.   LOADS SHC    */
+/* WAVE BITS, AND VOL INFO FOR FM VOICES.  CONSTRUCTS SPLICE   */
+/* AND LOADS DAC BUFFER FOR MONO SAMPLING                      */
+
+
+CONSTRUCT.SPLICE:PROC(PPTR,MODE);   /* PASS INTERUPPT PPTR   */
+   DCL PPTR FIXED;                  /* LOCAL PPTR            */
+   DCL MODE FIXED;                  /* 0 = KBD, 1=SEQ        */
+   DCL J    FIXED;
+
+   IF  ((INC.MONO=0)                /* IF NO SAMPLING AT ALL */
+   AND  (INC.POLY=0))
+   OR (MCHN&(B.MONO\B.POLY))=0 THEN DO;  /* OR ORIGINAL SYNTHESIZER */
+
+      /* 5 MILLISECONDS BEFORE SPLICE, BEGIN DOWN RAMP:               */
+
+      // NOTE - THIS IS TO CONSTRUCT A BUT SPLICE BETWEEN TWO SOUNDS ON THE
+      // SAME POLY CHANNEL. IT IS USED WHEN RUNNING OUT OF VOICES DURING LONG
+      // DECAYS. THE FINAL DECAY IS CUT OFF AND THE NEW NOTE IS STARTED.
+
+      IF (QSTAT & "177400") <> 0    /* FIRST TIME THROUGH             */
+      THEN DO;                      /* BEGIN DOWN RAMP                */
+         WRITE(MAM)=FM.VOL.SHADOW;
+         WRITE(MAL)=UCHN; WRITE(MD) = 0;
+         WRITE(CHA)=UCHN;
+         WRITE(FUN)=ELIM; WRITE(DAT)=0;      /* SET ENV LIMIT OF 0    */
+         WRITE(FUN)=EADD; WRITE(DAT)=255;    /* WITH 2 MSEC DECAY     */
+         WRITE(FUN)=EDIV; WRITE(DAT)=253;    /* TIME                  */
+         WRITE(FUN)=VOL;  WRITE(DAT)=0;      /* ALSO SEND VOL TO 0    */
+         IF SMCHN<>0 THEN DO;
+            WRITE(MAL)=SUCHN;WRITE(MD )=0;
+            WRITE(CHA)=SUCHN;
+            WRITE(FUN)=ELIM; WRITE(DAT)=0;
+            WRITE(FUN)=EADD; WRITE(DAT)=255;
+            WRITE(FUN)=EDIV; WRITE(DAT)=253;
+            WRITE(FUN)=VOL;  WRITE(DAT)=0;
+         END;
+         IF MODE=0 THEN DO;                  /* NOW COMPUTE TIME TO   */
+            ETIMER=ETIMER+KBD.FM1;           /* BACK HERE TO FINISH   */
+            ITIMER=ITIMER+KBD.FM1;           /* THE SPLICE            */
+         END;
+         ELSE DO;
+            STIMER=STIMER+SHR(QSTAT,8);
+         END;
+         QSTAT=QSTAT & 255;
+      END;
+
+      /* 2 MILLISECONDS BEFORE NEXT NOTE, RESET THE SYNTH CHANNEL     */
+      /* AND START THE VOLUME/PAN HAPPENING                           */
+
+      ELSE DO;
+         WRITE(MAM)=FM.VOL.SHADOW;
+         WRITE(CHA)=MCHN;                 /* CLEAN UP INDEX BY SENDING */
+         WRITE(FUN)=ILIM; WRITE(DAT)=0;   /* IT TO ZERO                */
+         WRITE(FUN)=IADD; WRITE(DAT)=255;
+         WRITE(FUN)=IDIV; WRITE(DAT)=255;
+         WRITE(FUN)=ONU;  WRITE(DAT)=0;   /* RESET PHASE ACCUMULATOR   */
+         WRITE(FUN)=NNU;  WRITE(DAT)=255; /* AS WELL                   */
+         WRITE(FUN)=INC;  WRITE(DAT)=255; /* WRITE LARGE INC TO ZERO THETA */
+         WRITE(FUN)=ISHC; WRITE(DAT)=FMINFO;  /* WRITE OUT INDEX SHIFT COUNT AND STEREO INFORMATION */
+         WRITE(MAL)=UCHN; WRITE(MD )=SUPR;
+         WRITE(CHA)=UCHN;
+         WRITE(FUN)=INC;  WRITE(DAT)=255; /* HARDWARE ALSO WRITES ONU=0,NNU=255 !! */
+         IF UCHN>=0 THEN DO;           /* LOAD NEW WAVE MEMORY, UNLESS SUPRRESSED TO AVOID CLICK */
+            WRITE(FUN)=TIM;
+            WRITE(DAT)=SHR(FMINFO,8);
+         END;
+         WRITE(FUN)=VOL;  WRITE(DAT)=SUPR;
+         IF SMCHN<>0 THEN DO;
+            WRITE(CHA)=SMCHN;
+            WRITE(FUN)=ILIM; WRITE(DAT)=0;
+            WRITE(FUN)=IADD; WRITE(DAT)=255;
+            WRITE(FUN)=IDIV; WRITE(DAT)=255;
+            WRITE(FUN)=ONU;  WRITE(DAT)=0;
+            WRITE(FUN)=NNU;  WRITE(DAT)=255;
+            WRITE(FUN)=INC;  WRITE(DAT)=255; /* WRITE LARGE INC TO ZERO THETA */
+            WRITE(FUN)=ISHC; WRITE(DAT)=FMINFO;  /* WRITE OUT INDEX SHIFT COUNT AND STEREO INFORMATION */
+            WRITE(MAL)=SUCHN;WRITE(MD )=SUPR;
+            WRITE(CHA)=SUCHN;                 /* WRITE OUT VOLUME REGISTER HERE */
+            WRITE(FUN)=VOL;  WRITE(DAT)=SUPR;
+         END;
+         IF MODE=0 THEN DO;
+            ETIMER=ETIMER+KBD.FM2;     /* GET TIME TO ACTUALLY START NOTE. */
+            ITIMER=ITIMER+KBD.FM2;
+         END;
+         ELSE DO;
+            STIMER=STIMER+QSTAT;       /* GET TIME TO ACTUALLY START NOTE. */
+         END;
+         QSTAT=0;                          /* CLEAR QSTAT FOR NEXT TIME THRU */
+      END;
+   END;
+
+   ELSE IF (INC.MONO<>0)&((MCHN&B.MONO)<>0) THEN DO;  /* MONO SAMPLING (W. DISK) */
+
+      IF  (STOP.MONO.IO=0)              /* AFTER CALL TO STOP.DISK - TREAT AS IF NOTE NEVER STARTS */
+      AND (ISTAT<>2)                    /* AND NOTE WAS IN RANGE (NO OUT OF RANGE MESSAGE PRINTED) */
+      THEN DO;
+
+         IF ISTAT<2 THEN DO;            /* FIRST TIME THROUGH - START DOWN SPLICE */
+            J=READ(D66);                /* SAVE D66 IN CASE WE ARE INTERRUPTING THE WHEN D14 ROUTINE */
+            WRITE (D66)=8+3;            /* ZERO OUT VOLUME REGISTER NOW TO CREATE SPLICE */
+            WRITE (D67)=0;              /* ZERO VOLUME REGISTER ALWAYS FOR SPLICE */
+
+            DISABLE;                    /* FOR CHECK OF STATE */
+            IF (OUTPUT.ACTIVE=2)        /* IF OUTPUT IS ACTIVE,  THEN CHECK FURTHER */
+            THEN DO;                    /* WE MAY HAVE INTERRUPTED THE WHEN D66 ROUTINE */
+               STOP.OUTPUT=1;           /* SET FLAG IN CASE W. DISK IO IS HAPPENING.  TELL HIM TO STOP THERE */
+               D66.SUSPENDED=0;         /* ALSO TELL w. disk NOT TO RE-ENABLE D66 INTERRUPTS,  LET ALONE START THE D66!! */
+               WRITE (D66)=8+1;         /* SELECT CONTROL REGISTER */
+               WRITE (D67)=  2;         /* KEEP RUNNING,  BUT NO MORE INTERRUPTS */
+            END;                        /* BUT LEAVE OUTPUT ACTIVE */
+            ENABLE;
+
+            WRITE (D66)=J;              /* RESTORE D66 REGISTER */
+
+            MONO.STATE=1;               /* SUPPRESS ENVELOPE GENERATOR     */
+            MONO.CHAN =MCHN;            /* SAVE CH# FOR RELEASE, ENVELOPES */
+            MONO.SEC  =SSTAT;           /* SAVE SECTOR WITH ATTACK BUFFER  */
+            MONO.VOL  =IDAT;            /* ACTIVATE FILE VOLUME NOW        */
+            MONO.PD   =UNNM;            /* SAVE PITCH INFO                 */
+
+            MONO.ELIM=SHL(EATLIM,8);    /* INITIALIZE SOFTWARE INTERPOLATOR FOR ATTACK SEGMENT */
+            IF EATINT=(-1)              /* DETECT 0 MILLISECOND ATTACK */
+            THEN DO;                    /* ATTACK OF ZERO - GO DIRECTLY TO PEAK */
+               MONO.CVAL=MONO.ELIM;     /* SET CVAL DIRECTLY TO LIMIT */
+               MONO.INC =0;             /* NO MORE INCREMENT NEEDED */
+            END;
+            ELSE DO;                    /* SET UP INFO - BUT NOTE THAT INTERPOLATOR IS SUPPRESSED SINCE MONO.STATE<>0 */
+               LOAD 20; MUL (256-(EATINT&255));     /* COMPUTE 20*DIVISOR */
+               J=RES;                            /* SAVE FOR USE BELOW - RESULT IS ONLY 16 BITS */
+               LOAD 33333; MUL (SHR(EATINT,8)+1);   /* 333333 * INCR - MATCHES CLOCK RATE OF SYNTH WITH 5 MS. ENVELOPE INTERPOLATOR */
+               IF (READ(4) IGE J)        /* CHECK FOR OVERFOW */
+               THEN MONO.INC="177777";   /* GO THERE ON NEXT INTERRUPT */
+               ELSE DO;                  /* COMPUTE RATE */
+                  DIV J; MONO.INC=RES;
+               END;
+               MONO.CVAL=0;              /* START ATTACK FROM ZERO */
+            END;
+         END;
+
+         ELSE DO;                        /* SECOND TIME THROUGH - LOAD ATTACK BUFFER */
+            IF MCHN=MONO.CHAN THEN DO;   /* US'MS                      */
+               CALL START.W.DISK.OUTPUT; /* LOAD DAC                   */
+            END;
+         END;
+
+      END;                               /* STOP.MONO.IO=0 */
+
+      DO CASE (ISTAT);                   /* BRANCH ON TYPE */
+         DO;                             /* KEYBOARD NOTE FIRST TIME THROUGH */
+            ETIMER=ETIMER+KBD.MONO1;     /* GET TIME TO LOAD ATTACK BUFFER */
+            ITIMER=ITIMER+KBD.MONO1;    
+            QSTAT=KBD.MONO2;             /* COME BACK NEXT TIME */
+            ISTAT=3;
+         END;
+
+         DO;                             /* SEQUENCE NOTE FIRST TIME THROUGH */
+            LOAD QSTAT;                  /* GET TIME OFFSET TILL NOTE START */
+            DIV 3;                       /* MUST BE MULTIPLE OF 3           */
+            STIMER=STIMER+RES+RES;       /* GET TIME TO LOAD ATTACK BUFF    */
+            QSTAT=RES;                   /* THIS MUCH MORE TO WAIT          */
+            ISTAT=4;
+         END;
+
+         QSTAT=0;                        /* OUT OF RANGE NOTE */
+
+         DO;                             /* KEYBOARD NOTE SECOND TIME THROUGH */
+            ETIMER=ETIMER+KBD.MONO2;     /* GET TIME TO ACTUALLY START NOTE. */
+            ITIMER=ITIMER+KBD.MONO2;    
+            QSTAT=0;                     /* DONE WITH QSTAT            */
+         END;
+
+         DO;                             /* SEQUENCE NOTE SECOND TIME TRHOUGH */
+            STIMER=STIMER+QSTAT;         /* GET TIME TO ACTUALLY START NOTE. */
+            QSTAT=0;                     /* CLEAR QSTAT FOR NEXT TIME THRU */
+         END;
+
+      END;
+   END;
+
+   ELSE IF (INC.POLY<>0) THEN DO;   /* MEANS POLY SYNTH     */
+      IF UCHN<>0 THEN DO;           /* STEREO SLAVE CHANNEL */
+         WRITE(PSC)=UCHN;           /* ENV CHAN                       */
+         WRITE(PSF)=PSEINC;         /* START FAST DECAY TO ZERO LEVEL */
+         WRITE(PSD)=4095;           /* INCREMENT                      */
+         WRITE(PSD)=64;             /* DELTA - 2.5 MSEC               */
+         WRITE(PSF)=PSELIM;
+         WRITE(PSD)=0;              /* LIMIT OF 0 */
+      END;
+
+      WRITE(PSC)=MCHN;              /* ENV CHAN                       */
+      WRITE(PSF)=PSEINC;            /* START FAST DECAY TO ZERO LEVEL */
+      WRITE(PSD)=4095;              /* INCREMENT                      */
+      WRITE(PSD)=64;                /* DELTA - 2.5 MSEC               */
+      WRITE(PSF)=PSELIM;
+      WRITE(PSD)=0;                 /* LIMIT OF 0 */
+
+      IF MODE=0 THEN DO;
+         ETIMER=ETIMER+KBD.SPL.TIM;   /* GET TIME TO ACTUALLY START NOTE. */
+         ITIMER=ITIMER+KBD.SPL.TIM;    
+         QSTAT=0;                     /* DONE WITH QSTAT            */
+      END;
+      ELSE DO;
+         STIMER=STIMER+QSTAT;         /* GET TIME TO ACTUALLY START NOTE. */
+         QSTAT=0;                     /* CLEAR QSTAT FOR NEXT TIME THRU */
+      END;
+
+   END;
+
+   IF GFPTR<>0 THEN CALL CLEAN.GHOSTS(PPTR);
+
+END CONSTRUCT.SPLICE;
+
+
+/* $PAGE - MOVE.LOOP.QUES */
+
+/* MOVE.LOOP.QUES IS CALLED WHEN AN OVERALL LOOP IS PERFORMED. */
+/* IT TAKES ALL THE NOTES ON THE DELAY QUES, AND MOVES THEM    */
+/* TO THE DO-IMMEDIATELY QUES, AND THEN MOVES THE LOOP         */
+/* QUES TO THE DELAY QUES                                      */
+
+
+/* IT IS CALLED BOTH WHEN AN OVERALL LOOP IS PERFORMED, WHEN   */
+/* THE STOP BUTTON IS PRESSED, OR IF THE SEQUENCER JUMPS       */
+/* TO THE MARK START POINT                                     */
+
+
+MOVE.LOOP.QUES:PROC PUBLIC;              /* MUST BE NON SWAP (CALLED FROM INTERRUPT CODE) */
+  DCL (I,PPTR) FIXED;                    /* BETTER USE LOCAL PPTR */
+
+  DISABLE;
+  WITHIN.SCAN=WITHIN.SCAN+1;
+  ENABLE;
+
+  I=FDLQF;                               /* LINK ENTIRE FINAL DELAY QUE TO FINAL DECAY QUE SO FINAL DECAYS GET DONE EARLY */
+  IF I<>ADDR(FDLQF) THEN DO;             /* DO SO ONLY IF SOME BLOCK(S) ON QUE */
+     CORE(I+1    )=ADDR(FINQF);          /* THIS BLOCK GETS NEW BACK POINTER TO FINQF */
+     CORE(FDLQB  )=    (FINQF);          /* PROVIDE NEW FORWARD POINTER TO LAST BOCK ON FDLQ */
+     CORE(FINQF+1)=    (FDLQB);          /* STOR NEW BACK POINTER IN WHAT WAS FIRST BLOCK ON FINQ */
+     FINQF        =I;                    /* STORE US ON FRON OF FINQ */
+     FDLQF=ADDR(FDLQF); FDLQB=FDLQF;     /* PROVIDE EMPTY FDLQ */
+  END;
+
+  DO WHILE EDLQF<>ADDR(EDLQF);           /* CLEAN OUT EDLQ SINCE TIME BASE TAKES A JOLT HERE */
+     PPTR=EDLQF-EQFLOC;                  /* GET POINTER TO BLOCK */
+     CORE(EQB  )=EQF;                    /* UNLINK OF FRONT OF Q  */
+     CORE(EQF+1)=EQB;                    
+     IF QSTAT<>0 THEN DO;                /* MEANS POLY SPLICE OR FM VOLUME WRITE */
+        CALL CONSTRUCT.SPLICE(PPTR,1);   /* CONSTRUCT SPLICE & CLEAN UP GHOST BLOCKS */
+        I=EDLQF;
+        EQF        =I;                   /* LINK BACK ON EDLQ */
+        EQB        =CORE(I+1);           /* AT THE TOP        */
+        CORE(EQB)  =ADDR(EQF);           
+        CORE(I+1)  =ADDR(EQF);           
+     END;
+     ELSE DO;                            /* SET UP QUE */
+        EQF        =ADDR(EATQF);         /* LINK ON TO ** END ** OF EATQ: OUR FP POINTS BACK TO EATQ */
+        EQB        =EATQB;               /* POINT BACK TO LAST BLOCK ON QUE */
+        CORE(EQB)  =ADDR(EQF);           /* SET UP PREVIOUS BLOCK POINTING TO US */
+        EATQB      =ADDR(EQF);           /* WE ARE NOW LAST ON QUE   */
+     END;
+  END;
+
+  I=FLPQF;                               /* LINK FLPQ TO FDLQ (NOTES TO START AT BEGINNING OF LOOP) */
+  IF I<>ADDR(FLPQF) THEN DO;             /* DO SO ONLY IF SOME BLOCK(S) ON QUE */
+     CORE(I+1    )=ADDR(FDLQF);          /* THIS BLOCK GETS NEW BACK POINTER TO FDLQF */
+     CORE(FLPQB  )=    (FDLQF);          /* PROVIDE NEW FORWARD POINTER TO LAST BOCK ON FLPQ */
+     CORE(FDLQF+1)=    (FLPQB);          /* STOR NEW BACK POINTER IN WHAT WAS FIRST BLOCK ON FDLQ */
+     FDLQF        =I;                    /* STORE US ON FRON OF FDLQ */
+     FLPQF=ADDR(FLPQF); FLPQB=FLPQF;     /* PROVIDE EMPTY FLPQ */
+  END;
+
+  /* $PAGE - MOVE LOOP QUES */
+
+  I=ELPQF;                               /* LINK ELPQ TO EDLQ (NOTES TO START AT BEGINNING OF LOOP) */
+  IF I<>ADDR(ELPQF) THEN DO;             /* DO SO ONLY IF SOME BLOCK(S) ON QUE */
+     CORE(I+1    )=ADDR(EDLQF);          /* THIS BLOCK GETS NEW BACK POINTER TO EDLQF */
+     CORE(ELPQB  )=    (EDLQF);          /* PROVIDE NEW FORWARD POINTER TO LAST BOCK ON ELPQ */
+     CORE(EDLQF+1)=    (ELPQB);          /* STOR NEW BACK POINTER IN WHAT WAS FIRST BLOCK ON EDLQ */
+     EDLQF        =I;                    /* STORE US ON FRON OF EDLQ */
+     ELPQF=ADDR(ELPQF); ELPQB=ELPQF;     /* PROVIDE EMPTY ELPQ */
+  END;
+
+  DISABLE;
+  WITHIN.SCAN=WITHIN.SCAN-1;
+  ENABLE;
+END MOVE.LOOP.QUES;
+
+
+LOOP.TIME.BASE:  PROC PUBLIC;  /* RESETS TIME BASE VARS AT OVERALL LOOP JUMP BACK */
+
+   CLOCK.LIMIT.LSB             = LOOP.PLAY.TIME.LSB + (CLOCK.LIMIT.LSB             - GOBACK.PLAY.TIME.LSB);
+   MIDI.LIMIT.LSB              = LOOP.PLAY.TIME.LSB + (MIDI.LIMIT.LSB              - GOBACK.PLAY.TIME.LSB);
+	REAL.TIME.OF.MIDI.LIMIT.LSB = LOOP.PLAY.TIME.LSB + (REAL.TIME.OF.MIDI.LIMIT.LSB - GOBACK.PLAY.TIME.LSB); 
+   
+	LOAD PLAY.TIME.LSB-GOBACK.PLAY.TIME.LSB;  /* SEE HOW FAR PAST END OF LOOP WE WENT */
+   IF SAMP.SPEED<>0 THEN DO;                 /* HANDLE SPEED OF 0 WITH NO DIVIDE     */
+      MUL 1000; MWAIT; DIV SAMP.SPEED;       /* MAKE INTEGER MULTIPLE OF SAMP.SPEED  */
+      LOAD RES; MUL SAMP.SPEED;
+      MWAIT; DIV 1000;
+   END;
+
+   PLAY.TIME.ACU=LOOP.PLAY.TIME.ACU+REM;
+   PLAY.TIME.LSB=LOOP.PLAY.TIME.LSB+RES;
+   PLAY.TIME.MSB=LOOP.PLAY.TIME.MSB;
+   
+   IF PLAY.TIME.LSB ILT RES THEN PLAY.TIME.MSB=PLAY.TIME.MSB+1;
+   IF PLAY.TIME.ACU >= 1000 THEN DO;
+      PLAY.TIME.ACU=PLAY.TIME.ACU-1000;
+      PLAY.TIME.LSB=PLAY.TIME.LSB+1;
+      IF PLAY.TIME.LSB=0 THEN PLAY.TIME.MSB=PLAY.TIME.MSB+1;
+   END;
+
+   NEW.MOTION=1;
+
+   NEXT.CLICK      = LOOP.NEXT.CLICK;  /* SET TIME OF NEXT CLICK                 */
+   NEXT.SEQ.EVENT  = PLAY.TIME.LSB + 5000; // Set shortly in future until things get settled.
+   TRIGGER.CLICK   = LOOP.TRIG.CLICK;  /* SEE IF RECORDED CLICK HAS BEEN SCANNED */
+   LOOP.TRIG.CLICK = 0;                /* CLEAR IT */
+
+   LAST.CLICK = LOOP.PLAY.TIME.LSB-(GOBACK.PLAY.TIME.LSB-LAST.CLICK);   /* KEEP IN RANGE (<PLAY.TIME) */
+   IF  (PLAY.TIME.MSB=0)
+   AND (LAST.CLICK IGT PLAY.TIME.LSB)
+   THEN LAST.CLICK=0;
+
+   IF CLICK.TRACK.MODE ilt 4 THEN DO;   /* IF NOT USING A RECORDED CLICK TRACK */
+      BEAT.NUMBER=LOOP.BEAT.NUMBER;
+   END;
+
+   PRIOR.CLICK.MSB = 0;             /* FORCE THESE VALUES TO BE RECOMPUTED IN MAIN LOOP */
+   PRIOR.CLICK.LSB = 0;
+   NEXT.CLICK.MSB  = 0;
+   NEXT.CLICK.LSB  = 0;
+
+   REAL.TIME.OF.NEXT.CLICK.MSB = LOOP.REAL.TIME.OF.NEXT.CLICK.MSB;
+   REAL.TIME.OF.NEXT.CLICK.LSB = LOOP.REAL.TIME.OF.NEXT.CLICK.LSB;
+
+   ACTUALLY.EMIT.CLICK=1;           /* KEEP CLICK TRACK RUNNING */
+   NEW.BEAT.NUMBER=1;               /* DISPLAY NEW BEAT # */
+   LOOP.RESTART=1;                  /* SIGNAL MAIN LOOP   */
+
+   CALL MOVE.LOOP.QUES;             /* RESET LOOP QUES    */
+
+END LOOP.TIME.BASE;
+
+/* $PAGE - SCAN SMPTE HARDWARE */
+
+/* WE WILL INTERROGATE THE SMPTE HARDWARE EVERY 20 MSEC */
+/* ONCE A VALID SMPTE SIGNAL IS RECEIVED, WE WILL BEGIN */
+/* TO MEASURE IT'S RATE.  WE WILL COUNT SMPTE BITS      */
+/* FOR A .4 SECOND (APPROX 1000 BITS) AND THEN ESTIMATE */
+/* THE RATE.  FOR THE NEXT 4.6 SECONDS, WE WILL ADJUST  */
+/* THE SMPTE RATE OVER A .4 SECOND AVERAGING PERIOD.    */
+
+/* IF THE SMPTE RATE STAYS STEADY FOR 5 SECONDS,        */
+/* THEN WE WILL START USING A 5 SECOND AVERAGING        */
+
+/* THE SMPTE RATE IS STORED IN 'SMPTE.RATE'.  THIS      */
+/* NUMBER IS THE NUMBER OF SMPTE BITS THAT WILL GO      */
+/* BY IN A 10 SECOND PERIOD, OR 10000*BITS.PER.MSEC     */
+
+
+/* NOTE ON REPEATING SMPTE FRAMES:  OUR GOAL HERE IS TO */
+/* SET UP THE GLOBAL VARIABLES (SM.INFO1,2,3) TO        */
+/* HOLD THE CURRENT SMPTE HOURS,MINUTES,SECONDS,FRAMES, */
+/* AND BITS, AND TO SET UP THE VARIABLES SMPTE.RATE     */
+/* AND GOOD.RATE TO HOLD THE CURRENT SMPTE RATE.  ONCE  */
+/* THESE VARIABLES HAVE BEEN SET, THE HIGHER LEVEL      */
+/* SOFTWARE CAN LOCK UP TO SMPTE AND CHECK THE          */
+/* SYNCHRONIZATION.                                     */
+
+/* IN THE CASE OF REPEATED SMPTE FRAMES, AN ARTIFICIAL  */
+/* SMPTE BIT COUNTER IS GENERATED BASED ON THE ACTUAL   */
+/* SMPTE BIT COUNTER DIVIDED BY THE # OF TIMES A FRAME  */
+/* IS REPEATED.  THUS, THE FACT THAT FRAMES ARE         */
+/* REPEATED IS INVISIBLE TO THE HIGHER LEVEL SOFTWARE.  */
+/* IT MERELY SEES A DIFFERENT SMPTE POSITION AND A      */
+/* SLOWER SMPTE RATE.                                   */
+
+DCL (TIME.BASE.MODE)               FIXED PUBLIC; /* INDICATES TIME BASE MODE (INTERNAL, EXTERNAL SYNC, ETC) */
+DCL (NEW.SEQUENCER.FORWARD.MOTION) FIXED PUBLIC; /* NEW FORWARD MOTION NOW */
+
+DCL (DO.SMPTE.CHECK)   FIXED PUBLIC;             /* CHECK SYNC AFTER SMPTE DROP OUT */
+DCL (SMPTE.COAST.MSEC) FIXED PUBLIC;             /* COAST SMPTE FOR HOW LONG ON READ ERRORS */
+
+DCL (SMPTE.STARTUP.TIME) LIT '100';  /* MILLISECONDS TO WAIT BEFORE START */  // Was 400 in the analog age; switched to 100 for Sync3 CJ 2017
+DCL (SMPTE.MIN.RATE    ) LIT ' 80';  /* MINIMUM SMPTE BITS-PER-SECOND     */
+                                     /* AT WHICH WE WILL PLAY THE         */
+                                     /* SEQUENCER.  80 = 1 FRAME/SEC      */
+												 
+DCL (SMPTE.SCAN.PHASE)		FIXED;	 /* DIVIDES D03INT BY 4 TO SCAN SMPTE */
+												 /* EVERY 20 MILLISECONDS				  */
+
+SMPTE.SCAN:PROC;
+   DCL (SMPTE.PBIT  )      FIXED;     /* HOLDS ACTUAL PREVIOUS SMPTE BIT  */
+                                      /* FIELD READ FROM THE D70          */
+   DCL (SMPTE.PRIOR )      FIXED;     /* HOLDS A 'LOGICAL' PRIOR BIT      */
+                                      /* CORRECTED FOR REPEATING FRAMES   */
+   DCL (SMPTE.PTR   )      FIXED;     /* POINTER INTO SMPTE.BUF           */
+   DCL (SMPTE.COUNT )      FIXED;     /* COUNTS # OF GOOD SMPTE READINGS  */
+   DCL (SMPTE.DIV   )      FIXED;     /* MODULO 5 COUNTER TO GET 1/5 S.   */
+   DCL (SMPTE.BUF   ) (24) FIXED;     /* HOLDS BIT COUNTER FOR RATE COMP  */
+   DCL (SMPTE.HT    ) (24) FIXED;     /* HOLDS HOST TIME   FOR RATE COMP  */
+   DCL (SMPTE.NUM   )      FIXED;     /* NUMERATOR FOR REPEATED FRAMES    */
+   DCL (SMPTE.DEN   )      FIXED;     /* DENOMINATOR FOR REPEATED FRAMES  */
+   DCL (SMPTE.ERRS  )      FIXED;     /* COUNTS # OF BAD READINGS         */
+   DCL (SMPTE.REM   )      FIXED;     /* HOLDS REMAINDER DURING COASTING  */
+   DCL (SMPTE.WINDOW)      FIXED;     /* HOLDS SYNC WINDOW WIDTH          */
+   DCL (SMPTE.DBIT  )      FIXED;     /* HOLDS DROP FRAME BIT DURING SYNC */
+	DCL (SMPTE.TOSS  )		FIXED;	  /* TRUE TO TOSS INVALID INFORMATION */
+	
+	DCL (SMPTE.HTONR )		FIXED;	  /* HOST TIME OF NEXT READING		  */
+	DCL (SMPTE.HTOLR )		FIXED;	  /* HOST TIME OF LAST READING		  */
+	DCL (SMPTE.HOST  )		FIXED;	  /* HOST TIME LAST PROCESSED			  */
+	
+   DCL (I           )      FIXED;
+
+	// Could test response time
+	#if (0)
+		dcl last_msec  fixed;
+		dcl now_msec   fixed;
+		dcl last_delta fixed;
+		dcl now_delta  fixed;
+		
+		now_msec  = interp_fetch_real_msecs(0);
+		now_delta = now_msec - last_msec;
+		
+		if (now_delta != last_delta)
+			send now_delta;
+		
+		last_msec  = now_msec;
+		last_delta = now_delta;
+	#endif
+
+   /* NOTE: SMPTE.NUM COUNTS FROM 0 TO SMPTE.DEN-1 AS REPEATED FRAMES     */
+   /* ARE COUNTED & MEASURED.  AT ANY TIME,  THE LOGICAL SMPTE BIT #      */
+   /* CAN BE COMPUTED FROM THE RATIO SMPTE.NUM/SMPTE.DEN                  */
+
+   /* NOTE: INTERRUPTS ARE OFF HERE                   */
+
+   /* BIGIN BY READING SMPTE AND MEASURING            */
+   /* OUR CURRENT LOCAL TIME:                         */
+
+   /* FORMAT OF SMTPE DATA:                           */
+   /*   SM.INFO1  = STATUS  (UPPER)   BITS    (LOWER) */
+   /*   SM.INFO2  = SECONDS (UPPER)   FRAMES  (LOWER) */
+   /*   SM.INFO3  = HOURS   (UPPER)   MINUTES (LOWER) */
+
+   WRITE(D70)   = SMPTE.SUBSYS;            /* SELECT SMPTE SUBSYSTEM   */
+	
+	// If no data available, synthesize missing information
+	IF ((READ(D70) & 256) == 0)				 /* IF NO DATA AVAILABLE     */
+	{
+		WRITE("300") = ADDR(SM.INFO1);       /* READ INFO QUICKLY        */
+		WRITE("360") = SHL("200",8);
+		WRITE("360") = 0;
+		WRITE("360") = 0;
+		SMPTE.TOSS = true;
+
+		SMPTE.HTOLR  = SMPTE.HTONR;				// Latch time that went with prior reading
+		SMPTE.HTONR  = interp_fetch_real_msecs(0);
+
+		// Could display no-data errors
+		#if (0)
+			send 'NO DATA';
+		#endif
+	}
+	
+	// Else read hardware; skip reading (e.g. continue coasting) if stale data
+	else
+	{
+		WRITE("300") = ADDR(SM.INFO1);       	/* READ INFO QUICKLY        */
+		WRITE("360") = READ(D71     );       	/* TO PASS TO UPPER         */
+		WRITE("360") = READ(D72     );       	/* ROUTINE                  */
+		WRITE("360") = READ(D73     );       	/* TRIGGER RESCAN           */
+
+		SMPTE.HTOLR  = SMPTE.HTONR;				// Latch time that went with prior reading
+		SMPTE.HTONR  = interp_fetch_real_msecs(0);
+
+		// Toss outdated information that wasn't available last time
+		IF (SMPTE.TOSS != 0)
+		{
+			WRITE("300") = ADDR(SM.INFO1);
+			WRITE("360") = SHL("200",8);
+			WRITE("360") = 0;
+			WRITE("360") = 0;
+
+			SMPTE.TOSS = false;
+		}
+	}
+	
+   SMPTE.TIME = REAL.MILLISECONDS;       /* STORE TIME OF READING    */
+
+   /* NOW PROCESS THE SMPTE INFO ACCORDING TO OUR STATE: */
+
+   IF (SMPTE.STATE < (SMPTE.STARTUP.TIME/20))  /* WAIT FOR .4 SECONDS  */
+   THEN DO;                                    /* OF GOOD READINGS     */
+
+      IF (SM.INFO1 & SHL("200",8)) <> 0    /* IF NO SMPTE SYNC COMING  */
+      THEN SMPTE.STATE = 0;                /* IN,  THEN STAY HERE      */
+
+      ELSE DO;                             /* ELSE COUNT # OF GOOD     */
+                                           /* SMPTE READINGS           */
+         SMPTE.STATE = SMPTE.STATE + 1;
+
+         IF (SMPTE.STATE = (SMPTE.STARTUP.TIME/20))  /* NOW SET UP     */
+         THEN DO;                          /* FOR RATE MEASUREMENT     */
+            SMPTE.PBIT   = SM.INFO1&127;   /* SAVE PREVIOUS BIT        */
+            SMPTE.PRIOR  = SMPTE.PBIT;     /* LOGICAL STARTS HERE      */
+            SMPTE.PTR    = 1;              /* INITIALIZE POINTER       */
+            SMPTE.BUF(0) = SMPTE.ACCUM;    /* AND INITIAL READING      */
+				SMPTE.HT (0) = SMPTE.HTOLR;	 /* AND REAL TIME            */
+				SMPTE.HOST   = SMPTE.HTOLR;	 /* HOST TIME WE PROCESSED   */
+            SMPTE.COUNT  = 0;              /* AND READING COUNT        */
+            SMPTE.DIV    = 0;              /* AND MODULO 10 DIVISOR    */
+            SMPTE.NUM    = 0;              /* ASSUME FIRST FRAME       */
+            SMPTE.DEN    = 1;              /* WILL NOT BE REPEATED     */
+            SMPTE.ERRS   = 0;              /* INITIALIZE ERRORS        */
+            SMPTE.REM    = 0;              /* AND ERROR REMAINDER      */
+            SMPTE.DBIT   = SM.INFO1 & SHL(4,8); /* ISOLATE AND SAVE    */
+                                           /* DROP FRAME BIT IN        */
+                                           /* UPPER HALF               */
+         END;
+      END;
+
+      RETURN;
+
+   END;
+
+
+   /* $PAGE - PROCESS GOOD SMPTE READINGS              */
+
+   /* WE HAVE GOTTEN TWO GOOD SMPTE READINGS IN A ROW. */
+   /* MEASURE SMPTE RATE.  STORE GOOD (FILTERED) RATE  */
+   /* AND CURRENT TIME AWAY IN GLOBAL VARIABLES FOR    */
+   /* THE SYNCHRONIZATION CODE TO LOOK AT.             */
+
+   /* STATUS BITS:                                     */
+   /*   "200"  =  SET MEANS DATA INVALID (NO SYNC)     */
+   /*   "100"  =  UNUSED                               */
+   /*   "040"  =  REPEATED FRAME ("20" ALSO SET)       */
+   /*   "020"  =  DISCONTINUITY (NON-CONSECUTIVE)      */
+   /*   "010"  =  COMPUTER UNDERRUN                    */
+   /*   "004"  =  DROP FRAME BIT                       */
+
+   /* NOTE: STATUS BITS ARE IN THE ** UPPER HALF **    */
+   /* OF SM.INFO1 SO MUST CHECK THERE FOR BITS         */
+
+   IF  (SM.INFO1 & SHL("230",8)) <> 0   /* IF ANY STATUS BIT SET,  */
+   THEN DO;                             /* CHECK FURTHER           */
+		// Could display underrun errors
+		#if (0)
+			if ((SM.INFO1 & SHL("010",8)) != 0)
+			send 'UNDERRUN';
+		#endif
+
+		// Handle coasting and underrun errors when using interpreter
+		if  ((interp_is_running != 0)								// Using interpreter
+		AND  (SMPTE.ERRS < (SMPTE.COAST.MSEC/20))				// Still coasting
+		AND  (TIME.BASE.MODE == 4)									// Locked to time code now
+		AND  (SMPTE.RATE <> 0)										// Good rate coming in
+		AND  (SMPTE.DEN == 1))										// Unity speed (vs repeating frame) case
+		{
+			// Bail and wait in (rare) case when interpreter returns here too quickly
+			
+			if ((SMPTE.HTOLR - SMPTE.HOST) < 10)
+			{
+				SMPTE.TOSS = 1;										// Toss next reading since we might miss the underrun
+				return;
+			}
+			
+			LOAD  SMPTE.RATE;											// Start with bits in 10 seconds
+			MUL   (SMPTE.HTOLR - SMPTE.HOST);					// Times milliseconds transpired
+			MWAIT;
+			DIV   10000;
+			
+			SMPTE.BRATE = RES;										// Actual no. of smpte bits that have gone by
+
+			// Process fully skipped frames here
+			while (SMPTE.BRATE >= 80)
+			{
+				SMPTE.ACCUM = SMPTE.ACCUM + 80;
+				SMPTE.BRATE = SMPTE.BRATE - 80;
+			}
+			
+			// Fab SM.INFO1 to be processed below
+			SM.INFO1 = SMPTE.PBIT + SMPTE.BRATE;
+			
+			IF (SM.INFO1 >= 80)
+				SM.INFO1 = SM.INFO1 - 80;
+			
+			SMPTE.ERRS = SMPTE.ERRS + 1;    /* COUNT CORRECTIONS       */
+
+			/* SET THE 'DATA INVALID' BIT IN THE STATUS WORD WHILE     */
+			/* COASTING SO WE DO NOT UPDATE THE VK DISPLAY OR DO A     */
+			/* SYNCHRONIZATION CHECK WHILE WE ARE COASTING:            */
+			/* ALSO PRESERVE THE DROP FRAME BIT FOR ERROR CHECKING:    */
+
+			SM.INFO1 = SM.INFO1 \ SHL("200",8) \ SMPTE.DBIT;
+		}
+		
+      /* GOOD DATA, FRAME ERROR, REPEATED FRAME, NO UNDERRUN:      */
+      /* MEANS FRAME WAS REPEATED                                  */
+
+      ELSE IF  (SM.INFO1 & SHL("270",8)) = SHL("60",8)  /* REPEATED FRAME  */
+      THEN DO;
+         
+         /* SINCE WE SEE THE 'REPEATED FRAME' STATUS FOR THE	*/
+         /* ENTIRE FRAME, ONLY COUNT THE REPEATED FRAME			*/
+         /* WHEN WE FIRST COME ACROSS THIS FRAME:					*/
+
+			IF ((TIME.BASE.MODE == 4)
+			AND (SMPTE.DEN == 1))
+			{
+				SMPTE.RATE  = 0;             /* NO SMPTE COMING IN	*/
+				SMPTE.STATE = 0;             /* RESET STATE			*/
+				RETURN;
+			}
+
+         IF (SM.INFO1&127) < SMPTE.PBIT
+         THEN DO;
+            SMPTE.NUM = SMPTE.NUM + 1;   /* COUNT 1 REPEATED FRAME   */
+            IF   SMPTE.NUM > 100         /* LIMIT TO 1/100'TH NORMAL */
+            THEN SMPTE.NUM = 100;        /* PLAYBACK SPEED           */
+            IF   SMPTE.NUM >= SMPTE.DEN  /* CHECK FOR SLOWING DOWN   */
+            THEN SMPTE.DEN = SMPTE.NUM+1;
+         END;                            /* JUMPING BACKWARDS        */
+      END;
+
+      /* ELSE MUST BE UNDERRUN, OR SMPTE BREAK, OR DROP OUT.	*/
+      /* CORRECT IT IF WE CAN BY COASTING:							*/
+
+      ELSE IF ((SM.INFO1 & SHL("010",8)) == 0)		/*	NO UNDERRUN		*/
+      AND	  (SMPTE.ERRS < (SMPTE.COAST.MSEC/20))	/* if COASTING    */
+      AND	  (TIME.BASE.MODE = 4)						/* LOCKED UP NOW  */
+      AND	  (SMPTE.RATE <> 0)							/* GOOD RATE HERE */
+      THEN DO;
+         LOAD SMPTE.RATE;                /* GET CURRENT BIT RATE      */
+         ULOAD SMPTE.REM;                /* LOAD PREVIOUS REMAINDER   */
+         MUL SMPTE.DEN; MWAIT;           /* COMPUTE ACTUAL SMPTE      */
+                                         /* BIT RATE; ADD IN RMNDER   */
+
+         DIV 500;                        /* GET ACTUAL BITS IN 20 MS. */
+         SM.INFO1  = SMPTE.PBIT + RES;   /* ESTIMATE BITS             */
+         SMPTE.REM = REM;                /* SAVE REMAINDER            */
+         IF SM.INFO1 >= 80               /* SEE IF WE ARE INTO NEXT   */
+         THEN DO;                        /* FRAME.  WRAP IF SO.       */
+            SM.INFO1 =  SM.INFO1 - 80;   /* ADVANCE NUMERATOR HERE    */
+            SMPTE.NUM = SMPTE.NUM + 1;   /* IF WE HAVE COASTED INTO   */
+            IF SMPTE.NUM >= SMPTE.DEN    /* NEXT FRAME.               */
+            THEN SMPTE.NUM = 0;
+         END;
+         SMPTE.ERRS = SMPTE.ERRS + 1;    /* COUNT CORRECTIONS       */
+
+         /* SET THE 'DATA INVALID' BIT IN THE STATUS WORD WHILE     */
+         /* COASTING SO WE DO NOT UPDATE THE VK DISPLAY OR DO A     */
+         /* SYNCHRONIZATION CHECK WHILE WE ARE COASTING:            */
+         /* ALSO PRESERVE THE DROP FRAME BIT FOR ERROR CHECKING:    */
+
+         SM.INFO1 = SM.INFO1 \ SHL("200",8) \ SMPTE.DBIT;
+      END;
+
+      /* ELSE MUST BE UNDERRUN,  OR CAN NOT CORRECT:          */
+
+      ELSE DO;                        /* UNCORRECTABLE        */
+         SMPTE.RATE  = 0;             /* NO SMPTE COMING IN   */
+         SMPTE.STATE = 0;             /* RESET STATE          */
+         RETURN;
+      END;
+   END;
+
+   /* ELSE IF ALL STATUS BITS ARE GOOD, WE MUST MAKE TWO      */
+   /* SPECIAL CHECKS:                                         */
+   /*   A) IF WE HAD BEEN COASTING, SET FLAG TO CHECK SYNC    */
+   /*      NOW THAT GOOD DATA IS COMING IN,  IN CASE SMPTE    */
+   /*      IS IN A NEW LOCATION                               */
+   /*   B) IF THE PRIOR FRAME HAD BEEN REPEATING,  CHECK      */
+   /*      FOR A POSSIBLE CHANGE IN THE REPEAT RATE           */
+
+   ELSE DO;
+      IF SMPTE.ERRS <> 0 THEN DO;
+         IF DO.SMPTE.CHECK <> 0       /* IF WE'RE ALLOWED TO...    */
+         THEN CHECK.SMPTE.ERROR = 1;  /* SET FLAG TO PERFORM MAJOR */
+         SMPTE.ERRS        = 0;       /* SYNC CHECK AFTER DROP OUT */
+      END;
+
+      IF (SM.INFO1&127) < SMPTE.PBIT  /* IF NOW INTO NEXT FRAME    */
+      THEN DO;                        /* WITHOUT REPEAT, CHECK     */
+         SMPTE.DEN = SMPTE.NUM + 1;   /* REPEATED FRAME RATE       */
+         SMPTE.NUM = 0;
+      END;
+
+   END;
+
+
+   /* IF FRAMES ARE REPEATING,  CONSTRUCT A LOGICAL BIT COUNT    */
+   /* THAT MAPS A POINT IN THE REPEATED FRAME TO A LOGICAL       */
+   /* POINT WITHIN A PARTICULAR FRAME.   ACCUMULATE THE TOTAL    */
+   /* # OF SMPTE BITS GOING BY TO MEASURE THE RATE.              */
+
+   SMPTE.PBIT  = (SM.INFO1 & 127);    /* UPDATE PRIOR ACTUAL SMPTE */
+                                      /* BIT COUNT                 */
+
+   IF SMPTE.DEN <> 1 THEN DO;         /* IF FRAMES ARE REPEATING   */
+      LOAD 80;                        /* THEN COMPUTE LOGICAL      */
+      ULOAD (SM.INFO1 & 127);         /* POSITION WITHIN A FRAME   */
+      MUL SMPTE.NUM;                  /* BASED UPON WHERE WE ARE   */
+      MWAIT;                          /* IN THE REPEAT SEQUENCE    */
+      DIV SMPTE.DEN;
+      IF  (SMPTE.NUM <> 0         )   /* DO NOT JUMP BACKWARDS     */
+      AND (RES       < SMPTE.PRIOR)   /* IF DENOMINATOR INCREASES  */
+      THEN LOAD SMPTE.PRIOR;          /* ON REPEATED FRAME !!!     */
+
+      SM.INFO1 = (SM.INFO1 & SHL("204",8))  /* SAVE STATUS BIT TO  */
+               \ RES;                       /* SUPPRESS OTHER      */
+                                            /* CHECKS IF WE ARE    */
+   END;                                     /* COASTING.  ALSO     */
+                                            /* LEAVE DROP FRAME    */
+                                            /* BIT INTACT          */
+
+
+   /* NOW COMPUTE HOW MANY LOGICAL BITS HAVE GONE BY IN THE LAST   */
+   /* MILLISECONDS:                                                */
+
+   SMPTE.BRATE = (SM.INFO1 & 127)   /* COMPUTE HOW MANY LOGICAL */
+               - SMPTE.PRIOR;       /* BITS HAVE GONE BY        */
+
+   IF SMPTE.BRATE < 0                    /* CHECK FOR WRAP INTO */  
+   THEN SMPTE.BRATE = SMPTE.BRATE + 80;  /* NEXT FRAME          */
+
+   SMPTE.ACCUM = SMPTE.ACCUM + SMPTE.BRATE;  /* ACCUM TOTAL # OF BITS */
+   SMPTE.PRIOR  = (SM.INFO1 & 127);          /* UPDATE PRIOR COUNT    */
+	SMPTE.HOST  = SMPTE.HTOLR;                /* UPDATE PRIOR TIME     */
+
+   /* NOW MEASURE SMPTE RATE:  */
+
+   /* MEASURE SMPTE RATE EVERY */
+   /* 1/10 OF A SECOND.  MAKE  */
+   /* FIRST AVERAGE AFTER .5   */
+   /* SECOND:                  */
+
+   SMPTE.DIV = SMPTE.DIV + 1;     /* COUNT N TIMES            */
+
+   IF SMPTE.DIV = 10 THEN DO;     /* 1/5 OF A SECOND          */
+
+      SMPTE.DIV = 0;              /* RESET COUNTER            */
+
+      IF SMPTE.COUNT < 25                    /* FOR FIRST 25 READINGS */
+      THEN DO;                               /* USE EARLIEST POSSIBLE */
+                                             /* PRIOR READING.        */
+         SMPTE.COUNT  = SMPTE.COUNT + 1;
+
+         // Used to wait .4 seconds; with MTC use .2
+         // IF SMPTE.COUNT < 2                  /* DO NOT SET SMPTE.RATE */
+         // THEN GOTO STORE.SMPTE;              /* UNTIL .4 SECONDS      */
+
+			// Could provide longer startup delay (approx 1.0 second) for DTD
+			// to provide less pitch warble during startup
+			#if (1)
+				IF (SMPTE.COUNT < 4 && LOD.RUNNING == 1)
+				GOTO STORE.SMPTE;
+			#endif
+
+         SMPTE.WINDOW = 2 + (50 - SHL(SMPTE.COUNT,1));
+
+         I = SMPTE.PTR - SMPTE.COUNT;        /* SCALE # OF BITS TO    */
+         IF I < 0 THEN I = I + 25;           /* COMPUTE PROJECTED     */
+			
+			IF (interp_is_running != 0)			// INTERP: scale for host latency
+			{
+				LOAD (SMPTE.ACCUM - SMPTE.BUF(I));  // # of bits have gone by
+				MUL 10000; MWAIT;                   // * 10000
+				DIV  (SMPTE.HTOLR - SMPTE.HT (I));	// / MSECS
+				I = RES;
+				
+				// Publish smpte.brate derived from actual rate if using interpreter
+				LOAD  I+250;
+				DIV   500;
+				
+				SMPTE.BRATE = RES;
+
+			}
+			ELSE
+			{
+				LOAD (SMPTE.ACCUM - SMPTE.BUF(I));  /* # OF BITS IN 10       */
+				MUL 50; MWAIT;                      /* SECONDS.              */
+				DIV SMPTE.COUNT;
+				I = RES;
+			}
+
+         IF SMPTE.RATE == 0                  /* SET SMPTE.RATE AFTER  */
+         THEN SMPTE.RATE = I;                /* .4 SECOND TO START    */
+                                             /* THE LOCK-UP PROCESS.  */
+      END;
+
+		// ELSE WE HAVE 25 READINGS
+      ELSE DO;
+			IF (interp_is_running != 0)			// INTERP: scale for host latency
+			{
+				LOAD (SMPTE.ACCUM - SMPTE.BUF(SMPTE.PTR));  // # of bits have gone by
+				MUL 10000; MWAIT;                   		  // * 10000
+				DIV  (SMPTE.HTOLR - SMPTE.HT (SMPTE.PTR));  // / MSECS
+				I = RES;
+
+				// Publish smpte.brate derived from actual rate if using interpreter
+				LOAD  I+250;
+				DIV   500;
+				
+				SMPTE.BRATE = RES;
+			}
+			ELSE											// NO INTERP: BITS IN 10 SECS = (BITS IN 5 SECS) * 2
+	         I = SHL(SMPTE.ACCUM - SMPTE.BUF(SMPTE.PTR),1); 
+      END;
+
+      IF I ILT (SMPTE.MIN.RATE * 10)         /* IF SMPTE IS COMING IN */
+      THEN DO;                               /* AT VERY SLOW RATE,    */
+         SMPTE.RATE  = 0;                    /* DON'T BOTHER TO PLAY  */
+         SMPTE.COUNT = 1;                    /* THE SEQUENCE.  JUST   */
+         GOTO STORE.SMPTE;                   /* HAVE INFO AVAILABLE   */
+      END;                                   /* FOR 'TAKES'           */
+
+      /* PROVIDE HYSTERESIS - LIKE FILTER ON SMPTE RATE TO PROVIDE    */
+      /* BETTER PITCH TRACKING.                                       */
+
+      /* SEE IF NEW RATE IS SLOWER (OR MUCH SLOWER) OR FASTER (OR     */
+      /* MUCH FASTER) THAN THE OLD RATE.  ADJUST ACCORDINGLY:         */
+
+      IF (I ILT (SMPTE.RATE - SMPTE.WINDOW))				/* SLOWER           */
+      THEN DO;   
+			IF (LOD.RUNNING == 1)
+			THEN SMPTE.RATE = SMPTE.RATE - 1;
+         ELSE IF (I ILT (SMPTE.RATE-5*SMPTE.WINDOW))	/* MUCH SLOWER      */
+         THEN DO;                            
+            SMPTE.RATE  = I;									/* JUMP THERE       */
+            SMPTE.COUNT = 3;									/* WAIT FOR NEW     */
+         END;														/* RATE TO SETTLE   */
+         ELSE DO;                            
+            SMPTE.RATE = SMPTE.RATE - SHR(SMPTE.WINDOW,1);
+         END;
+      END;
+
+      ELSE IF (I IGT (SMPTE.RATE+SMPTE.WINDOW))			/* NEW RATE IS FASTER  */
+      THEN DO;
+			IF (LOD.RUNNING == 1)
+			THEN SMPTE.RATE = SMPTE.RATE + 1;
+         ELSE IF (I IGT (SMPTE.RATE+5*SMPTE.WINDOW))  /* MUCH FASTER         */
+         THEN DO;													/* GO TO NEW RATE      */
+            SMPTE.RATE  = I;
+            SMPTE.COUNT = 3;									/* AND WAIT FOR RATE   */
+         END;														/* TO SETTLE DOWN      */
+         ELSE DO;													/* ELSE ADJUST SLOWLY  */
+            SMPTE.RATE = SMPTE.RATE+SHR(SMPTE.WINDOW,1);
+         END;
+      END;
+
+
+      /* STORE SAMPLE AWAY */
+      /* FOR NEXT AVG:     */
+
+      STORE.SMPTE:;
+
+      SMPTE.BUF(SMPTE.PTR) = SMPTE.ACCUM;
+		SMPTE.HT (SMPTE.PTR) = SMPTE.HTOLR;
+ 
+      SMPTE.PTR = SMPTE.PTR+1;
+      IF   SMPTE.PTR = 25 
+      THEN SMPTE.PTR = 0;
+
+   END;
+
+END SMPTE.SCAN;

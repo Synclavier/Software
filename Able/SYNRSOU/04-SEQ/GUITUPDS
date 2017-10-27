@@ -1,0 +1,188 @@
+/* GUITUPDS  $TITLE  KLUDGE FILE TO GET GUITAR UPDATE RECORD PROCESSING UP AND RUNNING */
+
+/*
+   04/05/90 - TSS - FIX STUCK MIDI NOTE/EXTRA NOTE OFF BUGS
+   09/23/89 - CJ  - Mapped time according to tempo map for pitch updates.
+                    Also documented earlier bug fixes
+   07/19/89 - PF  - ADDED PATH ARGUMENT TO MIDI.NOTE.OFF AND MIDI.NOTE.ON
+   9/22/86 - TS,EG - CREATED THIS FILE
+*/
+
+BEGIN;
+
+   DCL (TB,TBP,PTL,TRK,THP)  FIXED EXTERNAL; /* from main loop */
+   DCL SETUP.FRQS PROC EXTERNAL;
+   DCL J FIXED;
+
+   /* 1. FIRST FIND A GUITAR NOTE WHICH GOES WITH */
+   /*    THIS UPDATE RECORD.                      */
+   /* 2. CHANGE NUPDT IN THE NOTE BLOCK FOUND     */
+   /* 3. CAUSE PITCH/VOLUME UPDATE TO OCCUR ON    */
+   /*    EACH AFFECTED PARTIAL.                   */
+
+   /* I:  STRING NUMBER       */
+
+   THP=NAH.PTR+NEXT.EVENT.QUEUE;      /* GET TRACK HEAD */
+   WRITE(MAM)=THP;
+   WRITE(MAL)=THD.TRK;
+   TRK=READ(MD);
+
+   NPTR=NOTELIST;                     /* POINT AT ACTIVE NOTE LIST */
+
+   I=SHR(W3,8)&(B.GUI+7);             /* EXTRACT STRING NUMBER 0-5, 6 FOR HOLD SWITCH */
+
+   IF I=(B.GUI+6) THEN DO;            /* MEANS HOLD SWITCH UPDATE */
+      DO WHILE (NPTR<>0);             /* SCAN NOTE LIST - TRASHING B.GUI FIELD TO PREVENT FURTHER UPDATES */
+         IF (TRACK=TRK)&((SBITS&B.GUI)<>0)
+         THEN DO;                     /* IS A GUITAR NOTE FROM THIS TRACK */
+            SBITS=(SBITS&"177770")\6; /* STRING 6 - WILL STOP FUTURE UPDATES */
+         END;
+         NPTR=NFPTR;
+      END;
+   END;
+
+   ELSE DO;                           /* STRING VOLUME\PITCH UPDATE */
+
+      /* LOOK FOR ACTIVE NOTE FROM SAME TRACK, STRING */
+
+      DO WHILE (NPTR<>0)&((TRACK<>TRK)\(NSTAT<>0)\((SBITS&(B.GUI+7))<>I));
+         NPTR=NFPTR;
+      END;
+      K=NPTR;
+
+      IF K=0 THEN DO;        /* LOOK FOR POSSIBLE DECAYING NOTE - UPDATE RECORD MAY HAVE BEEN PROCESSED A CYCLE OR TWO LATER (AFTER DECAY HAS STARTED) */
+         NPTR=NOTELIST;      /* START AT TOP AGAIN */
+         DO WHILE (NPTR<>0); /* SEARCH ENTIRE LIST TO FIND OLDEST DECAYER */
+            IF (TRACK=TRK)&(NSTAT=1)&((SBITS&(B.GUI+7))=I) THEN DO; /* FIND DECAYING NOTE WITH SAME KEY */
+               K=NPTR;       /* PERFORM PITCH UPDATE TO THIS DECAYING NOTE - MEANS WE PROCESSED THE UPDATE RECORD LATE */
+            END;
+            NPTR=NFPTR;
+         END;
+      END;
+
+      IF K<>0 THEN DO;       /* FOUND A NOTE TO DO UPDATE ON */
+         NPTR=K;
+
+         TB=TIMBRE;          /* LOOK UP TIMBRE FOR FOLLOWING ROUTINES */
+         WRITE(MAM)=TIM.HEAD;
+         WRITE(MAL)=TB;
+         TBP       =READ(MD);
+
+         /* BEYOND HERE, 'I' BECOMES A TEMP VARIABLE */
+         /* AND 'TBP' IS AN ABS PTR TO THE TIMBRE HEAD */
+         /* CORRESPONDING TO OUR NOTE. 'K' IS AMOUNT */
+         /* TO UPDATE NOTE PITCH BY.                 */
+
+         K=SHR(W2,6);
+         IF W2<0 THEN K=K\"176000"; /* PERFORM SIGN EXTEND IF PITCH DELTA<0 */
+         IF OCTRATIO<>1000 THEN K=K*OCTRATIO/1000;    /* CORRECT PITCH DELTA FOR OCTAVE RATIO */
+
+         /* We must decide whether this guitar update record goes with */
+         /* this note we have just found,  or if it goes with a prior  */
+         /* note (of the same pitch) whose channels have just been     */
+         /* stolen.   Make this guess based upon LSB of starting time. */
+         /* This should work 99+% of the time for guitar notes that    */
+         /* last less than 30 seconds long.                            */
+
+         if (tempo.map.ptr == 0)
+			{	lsb = next.event.lsb;
+			}
+         else
+			{	Map.Sequence.Time.To.Real.Time(loc(addr(next.event.msb)), loc(addr(msb)));
+			}
+
+         IF (LSB - OTIML) ILE PRESCAN /* this update is most likely for prior */
+         THEN DO;                     /* note if so                           */
+
+            PPTR=PTLST;               /* GET POINTER TO PARTIAL LIST */
+
+            IF K<>0                   /* ONLY IF NONZERO PITCH CHG   */
+            THEN DO WHILE PPTR<>0;    /* PROCESS EACH PARTIAL FOR NEW PITCH - EITHER TIED NOTE, OR PITCH UPDATE */
+              IF GFPTR <> 0 THEN DO;  /* MAKE SURE GHOST BLOCK EXISTS       */
+                 I=PFPTR;             /* GET FORWARD POINTER                */
+                 PPTR=GFPTR;          /* POINT TO GHOST BLOCK               */
+
+                 IF MCHN<>0 THEN DO;                  /* SKIP OVER MIDI-ONLY BLOCKS */
+                    PTL=PARTL;                        /* LOOK UP PARTIAL NUMBER FOR SPEEDY REFERENCE */
+                    WRITE(MAM)=TBP;                   /* RESTORE PTR TO TIMBRE HEAD */
+                    WRITE(MAL)=TIM.OPTIONS+PTL;
+                    IF (READ(MD)&(MIN.PTUNE\ANY.GLIDE))=0  /* IF NOT AN A-440 AND NO GLIDE */
+                    THEN DO;                          /* THEN UPDATE HZ       */
+                       CURRF=CURRF+K;         /* GO IMMED TO NEW PITCH */
+                       CALL SETUP.FRQS;       /* WRITE TO SYNTHS       */
+                    END;
+                 END;
+                 PPTR=I;
+              END;                            /* OF MCHN<>0               */
+              ELSE PPTR=PFPTR;                /* GET NEXT FORWARD PARTIAL */
+           END;
+
+         END;
+
+         ELSE DO;                               /* UPDATE RECORD MOST LIKELY GOES WITH THIS NOTE */
+            IF K<>0 THEN DO;                    /* WANT TO CHANGE PITCH OF THIS NOTE */
+               NUPDT=NUPDT\N.NFREQ; NEW.INFO=1; /* SET FLAG TO UPDATE FREQUENCIES FOR NOTE */
+            END;
+
+            I = (W2&"77")+12;           /* GET POSSIBLY NEW KEY # */
+            IF (W4&(RAISE.KEY\LOWER.KEY))<>0 THEN DO;
+               IF (W4&RAISE.KEY)<>0 THEN I=I+12;
+               ELSE                      I=I-12;
+            END;
+
+            KEYN =I;                         /* STORE POSSIBLY NEW KEY # */
+            VELD =W3&255;                    /* GET NEW RTE/VELOCITY VALUE */
+            SBITS=(W4&"177400")\(SBITS&255); /* GET NEW VOLUME, KEEP ORIGINAL BITS */
+
+            /* $PAGE */
+
+            PPTR=PTLST;       /* GET POINTER TO PARTIAL LIST */
+            DO WHILE PPTR<>0; /* PROCESS EACH PARTIAL FOR NEW PITCH - EITHER TIED NOTE, OR PITCH UPDATE */
+              WRITE(MAM)=TBP;                      /* RESTORE PTR TO TIMBRE HEAD */
+              IF MCHN<>0 THEN DO;                  /* SKIP OVER MIDI-ONLY BLOCKS */
+                 PTL=PARTL;                        /* LOOK UP PARTIAL NUMBER FOR SPEEDY REFERENCE */
+                 WRITE(MAL)=TIM.PARTIAL.POINTERS+PTL;
+                 PTPTR=READ(MD);                   /* LOOK UP POINTER FROM PARTIAL NUMBER */
+                 WRITE(MAL)=TIM.OPTIONS+PTL;
+                 IF (READ(MD)&MIN.PTUNE)=0         /* IF NOT AN A-440 NOTE */
+                 THEN DO;                          /* THEN UPDATE HZ       */
+                   DESTF=DESTF+K;                  /* UPDATE BY PITCH DELTA AMOUNT - OCTRATIO INCLUDED IN SCAN FROM SEQUENCER */
+                   IF (READ(MD)&ANY.GLIDE)<>0      /* IF ANY GLIDE         */
+                   THEN CALL COMPUTE.GLIDE;        /* GLIDE ACTIVATED - PERFORM IT */
+                   ELSE CURRF=DESTF;               /* GO IMMED TO NEW PITCH */
+                 END;
+                 CALL COMPUTE.VOL;                 /* COMPUTE AN UPDATED VOLUME FOR NEW SBITS */
+              END;                                 /* OF MCHN<>0            */
+
+              DISABLE;
+              IF MIDIRT<>0 THEN DO;         /* DO A SLURRED NOTE FOR MIDI TOO      */
+                 WRITE(MAM)=THP;            /* POINT AT TRACK HEAD */
+                 WRITE(MAL)=THD.CXPOS;      /* COMPUTE NEW KEY# WITH XPOS */
+                 I         =KEYN+READ(MD);
+                 WRITE(MAL)=THD.MIDX;
+                 I         =MIDI.MAP.KEY(I+READ(MD));
+
+                 J=MIDIINFO&255;
+                 MIDIINFO=I\SHL(VELD,8); /* SAVE INFO FOR NEW SLURRED NOTE */
+
+                 IF  (PSTAT<>DELAY.STATE)   /* OR ON QUE BUT IS PEAK CHECK QUE     */
+                 AND (I<>J)                 /* MIDI KEY NUMBER IS DIFFERENT */
+                 THEN DO;                   /* THEN NOTE ON WENT OUT - RETRIGGER   */
+                    CALL MIDI.NOTE.ON (MIDIRT,MIDIPATH,I,VELD&255); /* TURN NEW NOTE ON */
+                    /******/;               /* NOTE - INTERRUPTS ARE TURNED ON BY MIDI.NOTE.ON */
+                    DISABLE;
+                    CALL MIDI.NOTE.OFF(MIDIRT, MIDIPATH, J); 		/* TURN OLD NOTE OFF */
+                    /******/;               /* NOTE - INTERRUPTS ARE TURNED ON BY MIDI.NOTE.OFF */
+                 END;                       /* ELSE MEANS WE TIED TO NEW PITCH BEFORE OLD PITCH WENT OUT */
+              END;
+              ENABLE;
+
+              PPTR=PFPTR; /* GET NEXT FORWARD PARTIAL */
+
+           END;
+         END;
+      END;
+
+   END;
+
+END;

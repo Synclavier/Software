@@ -1,0 +1,931 @@
+/* 138-PRE1 -  Routines and Storage Def for Precompute Areas
+
+    THE DATA THAT MUST BE WRITTEN TO THE DIGITAL SYNTHESIZER TO PERFORMV
+    ENVELOPES IS COMPUTED IN ADVANCE TO REDUCE THE AMOUNT OF COMPUTER
+    TIME THAT IT TAKES TO START A NOTE.   THE PRECOMPUTED NUMBERS 
+    ARE STORED IN DATA ARRAYS THAT ARE INDEXED BY THE PARTIAL NUMBER.
+    ROUTINES ARE PROVIDED (BELOW) THAT COMPUTE SYNTHESIZER DATA
+    FROM THE DIALED IN ENVELOPE PARAMETERS. */
+
+/*
+   12/30/86 - CJ - DEACTIVATED SAM.DELAY CODE
+   10/9/86 - CJ,TS - INCLUDE E.SEG.DELAY IN FD SPLICING SUM
+   9/05/86 - TS,CJ - FIXED BUG IN TIMBRE FRAME LOOPING
+   8/13/86 - EEG - split compute.env.params.sub into a few procedures to save swap space
+   5/15/86 - "official" creation of release-M modules
+*/
+
+/* SYNTH.TYP:
+
+     0 = SYNCL II TIMBRE TO BE PLAYED ON ORIG SYNCL II FM SYNTH
+     1 = SYNTHESIZED/SAMPLED TIMBRE TO BE PLAYED ON POLY SYN HARDWARE
+     2 = PATCH LIST TIMBRE TO BE PLAYED ON POLY SYN HARDWARE
+     3 = PATCH LIST TIMBRE TO BE PLAYED ON MONO SYN HARDWARE
+
+   TIM.OPTIONS:
+
+     HOLDS BITS FOR FEATURES THAT ARE USED.   INDEXED BY PARTIAL #.
+
+   TIM.TOPTIONS:
+
+     HOLDS BITS FOR FEATURES THAT ARE USED.   INDEXED BY TIMBRE #. */
+
+DCL COMPUTE.ENV.PARAMS.SUB PROC(FIXED) EXTERNAL;
+
+BEGIN;
+
+  DCL (J,K,L,M,N)            FIXED;
+  DCL (PTL)                  FIXED;
+  DCL (TIM.HEADP)            FIXED;
+  DCL (EXP.FACTOR,ADD.DELTA) FIXED;
+  DCL (LOOP.F#,LOOP.PK,SUM)  FIXED;
+
+  /* THESE VARIABLES MUST BE IN ORDER: */
+  
+  DCL (EDELAY,EATTACK,EIDECAY,EFDECAY,EPEAKL,ESUSTL) FIXED;
+  DCL (IDELAY,IATTACK,IIDECAY,IFDECAY,IPEAKL,ISUSTL) FIXED;
+
+  DCL (DECADJ)               FIXED;
+  DCL (SYNTHTYP)             FIXED;
+
+  DCL (E.SEG.DEL,E.SEG.ATK,E.SEG.EXP,E.SEG.RND,E.SEG.PK,E.SEG.VOL) FIXED;
+  DCL (E.SEG.PDEL,E.SEG.LOOP)                                      FIXED;
+  DCL (E.SEG.UP,E.SEG.DN,E.SEG.UDL,E.SEG.DDL,E.SEG.LIM)            FIXED;
+  DCL (E.SEG.FDN,E.SEG.FDNT,E.SEG.FUP,E.SEG.FCOE)                  FIXED;
+
+  SCAN.E.VARS:PROC(J) SWAPABLE;   /* GET INFO FROM T.FRAME INTO GLOBAL VARIABLES FROM EXTERNAL MEMORY */
+     DCL (J) FIXED;               /* J= POINTER TO START OF T. FRAME */
+
+     CALL P.LOOKUP(J+P.E.SEG.DEL);   /* SET UP POINTERS FOR T.F. INFO */
+     E.SEG.DEL=READ(MDI); E.SEG.ATK=READ(MDI);
+     E.SEG.EXP=READ(MDI); E.SEG.RND=READ(MDI);
+     E.SEG.PK =READ(MDI); E.SEG.VOL=READ(MDI);
+
+     CALL P.LOOKUP(J+P.E.SEG.PDEL);   /* LOOK UP PITCH OFFSET INFO */
+     E.SEG.PDEL=READ(MDI); E.SEG.LOOP=READ(MDI);  /* GET INPUT VARIABLES */
+  END SCAN.E.VARS;
+
+  CORRECT:PROC(MSEC) SWAPABLE; /* PROCEDURE TO CORRECT MILLISECONDS FOR ERROR IN FOLLOWING ROUTINE */
+     DCL MSEC FIXED;
+     LOAD SHL(MSEC,1); MUL 58254; RETURN READ(4); /* USE FRACTIONAL MULTIPLY TO SCALE BY 2*1000/1152 */
+  END;
+
+  /* $PAGE - COMPUTE.INTERP.NUMBERS */
+
+  DCL (IADDER,IDIVIDER,TMC) FIXED;
+
+  COMPUTE.INTERP.NUMBERS:PROC(MSEC,RANGE,MAX) SWAPABLE; /* COMPUTE GIVEN TIME IN MILLISECONDS */
+    DCL (MSEC,RANGE,MAX,I,J) FIXED;
+
+    LOAD MSEC; MUL MAX;                   /* SCALE BY MAX/RANGE TO GET RATE FOR FULL SCALE CHANGE */
+    IF READ(4) IGE RANGE THEN MSEC=40000; /* GO AT SLOWEST POSSIBLE RATE */
+    ELSE DO; DIV RANGE; MSEC=RES; END;    /* DO DIVIDE WITHOUT OVERFLOW */
+
+    IADDER=256;                         /* ADDER=256 (4096 FOR POLY), DIVIDER=IDIVIDER (*16 FOR POLY) YIELDS CORRECT RATE */
+    IF (SYNTHTYP=0)                     /* SYNCL II        */
+    OR (SYNTHTYP=3)                     /* MONO SAMPLING   */
+    THEN DO;
+       IDIVIDER=MSEC-SHR(MSEC,2);       /* COMPUTE INITIAL DIVISOR SIMPLY */
+    END;
+    ELSE DO;                            /* COMPUTE FOR POLY SYNTH ACCURATELY */
+       LOAD MSEC; MUL 58982;            /* GET ACTUAL MILLISEC = MSEC % 36864 */
+       IDIVIDER=READ(4);                /* IDIVIDER = MILLISEC/.625 FOR POLY SYNTH 0-4000 AT 25 KHZ */
+    END;
+    IF IDIVIDER=0 THEN IDIVIDER=1;      /* NOBODY CAN DIVIDE BY ZERO RELIABLY */
+
+    DO WHILE IDIVIDER IGT 257;          /* SCALE FOR 8-BITS, 8-BITS - BUT TRY TO HANDLE 257 CASE SMARTLY */
+       IDIVIDER=SHR(IDIVIDER,1);
+       IADDER  =SHR(IADDER  ,1);
+    END;
+    IF IDIVIDER=257 THEN IDIVIDER=256;  /* LIMIT TO 8 BITS */
+
+    IF  ((SYNTHTYP=1)                   /* POLY SYNTHED    */
+    OR   (SYNTHTYP=2))                  /* POLY SAMPLING   */
+    AND (IDIVIDER >23)                  /* ONLY FOR LARGER DIVISORS */
+    THEN DO;                            /* CORRECT FOR LATER ROUND OFF ERROR */
+       LOAD 256; DIV IDIVIDER;          /* 4096/X       */
+       IF READ(4)<>0 THEN DO;           /* REMAINDER - PROVIDE CORRECTION */
+          I=RES;                        /* GET QUOTIENT */
+          IF IADDER>128
+          THEN I=I+1;                   /* ROUND UP IF NO ROOM FOR EXPANSION */
+          LOAD 256; DIV I;              /* GET ACTUAL DIVISOR USED, ROUND UP */
+          J=RES;                        /* THIS WILL BE NEW DIVSOR  */
+          LOAD J; MUL IADDER;           /* IADDER=J*IADDER/IDIVIDER */
+          WRITE("300")=0;
+          DIV IDIVIDER;
+          IADDER=RES;
+          IDIVIDER=J;
+       END;
+    END;
+
+    IF (EXP.FACTOR<>1000) THEN DO;          /* PROVIDE ROOM FOR S CURVE CHANGES */
+       LOAD IADDER; MUL 1000-EXP.FACTOR; ADD.DELTA=RES; DIV 500; /* COMPUTE RATE OF CHANGE DELTA */
+       ADD.DELTA=RES;                       /* ADD UP TO THIS MUCH DURING SPLICE */
+       IADDER=IADDER-SHR(ADD.DELTA,1);      /* START HERE */
+       DO WHILE (IADDER+ADD.DELTA) IGT 256; /* SCALE PARAMETERS TO ALLOW ROOM FOR S CURVE COMPUTATION */
+          ADD.DELTA=SHR(ADD.DELTA,1); IADDER=SHR(IADDER,1); IDIVIDER=SHR(IDIVIDER,1);
+       END;
+    END;
+    ELSE ADD.DELTA=0;            /* NO DELTA IF LINEAR SPECIFIED    */
+
+    IDIVIDER=256-IDIVIDER;       /* COMPUTE THIS FOR SYNTH HARDWARE */
+    IF IADDER<>0 THEN IADDER=IADDER-1; 
+
+    IF MSEC<0 THEN MSEC=30000;     /* USE 30 SECOND TIME CONSTANT IF LONGER DECAY */
+    IF MSEC<150 THEN MSEC=150;     /* USE MIN TCONST FOR 150 MSEC DECAY */
+    WRITE(5)="100000"; 
+    WRITE(4)=12; WRITE(7)=MSEC;    /* 819200/MSEC */
+    TMC=-RES;                      /* TIME CONSTANT FOR EXP DECAYS - USE WITH FRACTIONAL MULTIPLY */
+
+  END COMPUTE.INTERP.NUMBERS;
+
+  COMPUTE.FM.ENV: PROC SWAPABLE;
+             
+     WRITE(MAM)=TIM.HEADP;         /* POINT TO TIMBRE HEAD    */
+
+     WRITE(MAL)=TIM.OPTIONS+PTL;   /* PARTIAL OPTIONS         */
+     WRITE(MD )=READ(MD) \ ANY.FM;
+
+     IF (IDELAY<>0)                /* SEE IF ANY INDEX DELAY  */
+     THEN WRITE(MD )=READ(MD) \ ANY.DELAY;
+
+     K=SHR(DECADJ,10);             /* SEE IF ANY HARM ADJ     */
+     IF K>31 THEN K=K-64;          
+
+     IF K<>0 THEN DO;                   /* HARMONIC ADJUST - ALLOW FOR LARGER INDEX VARIATIONS */
+       IF ABS(K)>18 THEN J=SHL(J,2);    /* ALLOW FACTOR OF 4 INCREASE */
+       ELSE              J=SHL(J,1);    /* ALLOW FACTOR OF 2 INCREASE */
+       IF J>1023 THEN J=1023;           /* BUT LIMIT TO SHIFT COUNT OF 3 */
+     END;
+
+     /* COMPUTE INDEX SHIFT COUNT */
+
+     K=0;                     /* ASSUME ISHC OF 0 */
+     DO WHILE J>=128;         /* BUT SCALE ACCORDING TO ENVELOPE PEAK */
+       K=K+1; J=SHR(J,1);
+     END;
+     WRITE(MAM)=TIM.HEADP;    /* POINT TO TIMBRE HEAD    */
+     WRITE(MAL)=TIM.I.ISHC+PTL;
+     WRITE(MD )=K;      
+
+     IF J<20 THEN J=20;       /* ASSUME MAX OF AT LEAST ONE EIGHTH SCALE */
+     CALL COMPUTE.INTERP.NUMBERS(IATTACK,J,128);
+     WRITE(MAM)=TIM.HEADP;    /* POINT TO TIMBRE HEAD    */
+     WRITE(MAL)=(TIM.IATLIM+IATLIM.LOC)+(PTL*TIM.IATLIM.STR);
+     IF      K=0 THEN WRITE(MDI)=SHL(IPEAKL,1);
+     ELSE IF K=1 THEN WRITE(MDI)=IPEAKL;
+     ELSE             WRITE(MDI)=SHR(IPEAKL,K-1);
+     WRITE(MDI)=IDIVIDER\SHL(IADDER,8);
+
+     CALL COMPUTE.INTERP.NUMBERS(IIDECAY,J,128);
+     WRITE(MAM)=TIM.HEADP;    /* POINT TO TIMBRE HEAD    */
+     WRITE(MAL)=(TIM.IATLIM+IIDLIM.LOC)+(PTL*TIM.IATLIM.STR);
+     IF      K=0 THEN WRITE(MDI)=SHL(ISUSTL,1);
+     ELSE IF K=1 THEN WRITE(MDI)=ISUSTL;
+     ELSE             WRITE(MDI)=SHR(ISUSTL,K-1);
+     WRITE(MDI)=IDIVIDER\SHL(IADDER,8);
+     WRITE(MDI)=TMC;
+
+     CALL COMPUTE.INTERP.NUMBERS(IFDECAY,J,128);
+
+     WRITE(MAM)=TIM.HEADP;          /* POINT TO TIMBRE HEAD    */
+     WRITE(MAL)=(TIM.EFDINT+IFDINT.LOC)+(PTL*TIM.EFDINT.STR);
+     WRITE(MD )=IDIVIDER\SHL(IADDER,8);
+     WRITE(MAL)=(TIM.EFDINT+IFDTMC.LOC)+(PTL*TIM.EFDINT.STR);
+     WRITE(MD )=TMC;
+
+  END COMPUTE.FM.ENV;
+
+  COMPUTE.SPLICE.INFO: PROC SWAPABLE;
+
+     WRITE(MAM)=TIM.HEADP;         /* POINT TO TIMBRE HEAD    */
+     WRITE(MAL)=TIM.OPTIONS+PTL;
+     WRITE(MD )=READ(MD) \ SPLICE.INFO;
+
+     CALL SCAN.E.VARS(J);           /* GET INFO INTO GLOBAL VARIABLES */
+
+     WRITE(MAM)=TIM.HEADP;          /* POINT TO TIMBRE HEAD    */
+     WRITE(MAL)=TIM.PARTIAL.VOL+PTL;
+     IF READ(MD)<>0 THEN DO;        /* IF NON ZERO PK/SUST LEVEL ABOVE */
+        WRITE(MAL)=TIM.PINFO.POINTERS+PTL;
+        IF READ(MD)=0 THEN DO;      /* IF NO PINFO BLOCK       */
+           WRITE(MAL)=TIM.PARTIAL.VOL+PTL;
+           WRITE(MD )=E.SEG.VOL;    /* OLD PARTIAL VOLUME INFO FROM FRAME 0 */
+        END;
+     END;
+
+     /* FIRST LOOK THROUGH ALL TIMBRE FRAMES */
+     /* TO SEE IF THERE IS A TIMBRE FRAME    */
+     /* LOOP                                 */
+
+     K=J;                              /* CREATE TEMPORARY POINTER */
+     LOOP.F#=0;                        /* INITIALIZE */
+     DO WHILE (P.LOOKUP(K)=MOR);       /* CHECK FOR POSSIBLE T.FRAME LOOP */
+        CALL SCAN.E.VARS(K);           /* GET INFO INTO GLOBAL VARIABLES */
+        IF (LOOP.F#=0)&(E.SEG.LOOP<>0) 
+        THEN DO;                       /* THIS FRAME WILL BE LOOPING */
+           LOOP.F#=E.SEG.LOOP;         /* LOOP WILL BE TO THIS FRAME */
+           LOOP.PK=E.SEG.PK;           /* GET PEAK OF THIS FRAME FOR CORRECT DOWN SPLICE */
+        END;
+        K=K+P.LOOKUP(K+CLEN);
+     END;
+     
+     /* $PAGE - LOOP OVER TIMBRE FRAMES TO COMPUTE SPLICE INFO */
+
+     K=EPEAKL; N=1;                /* FOR FIRST SPLICE,  DECAY DOWN FROM PEAK LEVEL */
+     SUM=EIDECAY;                  /* INITIALIZE SUM FOR INITIAL DECAY */
+
+     DO WHILE (P.LOOKUP(J)=MOR);   /* PROCESS EACH ENVELOPE SEGMENT */
+
+        CALL SCAN.E.VARS(J);       /* GET THESE VARIABLES INTO MEMORY */
+
+        IF  (E.SEG.ATK<100)        /* ONE SPLICE TIME < 100 MS */
+        AND (EFDECAY<200)          /* AND SHORT FINAL DECAY    */
+        THEN DO;
+           WRITE(MAM)=TIM.HEADP;   /* POINT TO TIMBRE HEAD    */
+           WRITE(MAL)=TIM.TOPTIONS;
+           WRITE(MD )=READ(MD) \ SLAP.BASS;
+        END;
+
+        SUM=SUM+E.SEG.ATK;         /* SUM UP SPLICE TIMES + INITIAL DECAY */
+        IF SUM IGE 30000 THEN SUM=30000;  /* AVOID OVERFLOW - LIMIT TO 30 SECONDS */
+
+        SUM=SUM+E.SEG.DEL;         /* INCLUDE DELAY TIME IF ANY           */
+        IF SUM IGE 30000 THEN SUM=30000;  /* AVOID OVERFLOW - LIMIT TO 30 SECONDS */
+
+        /* LOOK UP SPLICE SHAPE FACTOR: */
+
+        IF E.SEG.ATK IGE 100       /* IF SPLICE TIME >=100 MS,  S CURVE CAN BE PERFORMED */
+        THEN EXP.FACTOR=E.SEG.EXP; /* LOOK UP SPECIFED FACTOR */
+        ELSE EXP.FACTOR=1000;      /* MUST DO LINEAR FOR FAST SPLICES */
+
+        IF EXP.FACTOR<150 THEN EXP.FACTOR=150; /* PROVIDE MINIMUM R/C ON DOWN CHANNEL SO WE GET THERE WITHOUT WAITING FOR EVER */
+
+        /* COMPUTE S-CURVE FRACTIONAL */
+        /* MULTIPLY CONSTANT          */
+
+        WRITE(5)=0; WRITE(4)=1000-EXP.FACTOR; 
+        WRITE(7)=1000; 
+        E.SEG.FCOE=RES;
+
+        /* NOW COMPUTE & STORE SPLICE TIMES */
+
+        L=E.SEG.PK;                   /* LOOK UP PEAK FOR THIS SEGMENT */
+        CALL COMPUTE.INTERP.NUMBERS(CORRECT(E.SEG.ATK),L,1000); /* COMPUTE UP SEGMENT TIME */
+        E.SEG.UP=IADDER+SHL(IDIVIDER,8);
+        E.SEG.UDL=ADD.DELTA;          /* AND S CURVE DELTA FOR UP SEGMENT */
+        E.SEG.LIM=SHR(L,2);           /* SAVE LIMIT FOR UP SEGMENT */
+
+        CALL COMPUTE.INTERP.NUMBERS(CORRECT(E.SEG.ATK),K,1000); /* COMPUTE DOWN TIME */
+        E.SEG.DN=IADDER+SHL(IDIVIDER,8);
+        E.SEG.DDL=ADD.DELTA;          /* SAVE POSSIBLE S CURVE DELTA */
+
+        IF LOOP.F#=N THEN DO;         /* WE WILL BE LOOPING TO THIS FRAME - COMPUTE SPECIAL DOWN SPLICE FROM LAST FRAME */
+           CALL COMPUTE.INTERP.NUMBERS(CORRECT(E.SEG.ATK),LOOP.PK,1000);
+           WRITE(MAM)=TIM.HEADP;      /* POINT TO TIMBRE HEAD    */
+           WRITE(MAL)=TIM.LOOP.INTERP+PTL;
+           WRITE(MD )=IADDER+SHL(IDIVIDER,8);
+           WRITE(MAL)=TIM.LOOP.DELTAS+PTL;
+           WRITE(MD )=ADD.DELTA;      /* S CURVE INFO TOO - TIM.LOOP.DELTAS */
+           WRITE(MAL)=TIM.TOPTIONS;
+           WRITE(MD )=READ(MD) \ NOT.STEALABLE;
+           M=K;                             /* ASSUME PREVIOUS IS HIGHER */
+           IF LOOP.PK>M THEN M=LOOP.PK;     /* FIND LARGEST ONE FOR FINAL DECAY COMPUTATIN */
+           EXP.FACTOR=1000;                 /* COMPUTE FINAL DECAY INFO FOR EACH SPLICE */
+           CALL COMPUTE.INTERP.NUMBERS(EFDECAY,M,1000);
+        END;
+        ELSE DO;                   /* COMPUTE POSSIBLE FINAL DECAY NUMBERS FOR THIS SEGMENT */
+           EXP.FACTOR=1000;        /* COMPUTE FINAL DECAY INFO FOR EACH SPLICE */
+           CALL COMPUTE.INTERP.NUMBERS(EFDECAY,K,1000);
+        END;
+
+        E.SEG.FDN=IADDER+SHL(IDIVIDER,8); /* SAVE */
+
+        CALL COMPUTE.INTERP.NUMBERS(EFDECAY,L,1000); /* FINAL DECAY FOR UP SEGMENT */
+        E.SEG.FUP=IADDER+SHL(IDIVIDER,8); /* SAVE */
+
+        CALL COMPUTE.INTERP.NUMBERS(EFDECAY,1000,1000); /* COMPUTE ACTUAL TIME CONSTANT */
+        E.SEG.FDNT=TMC;
+
+        CALL P.LOOKUP(J+P.E.SEG.UP);      /* SET UP POINTERS FOR STORE */
+        WRITE(MDI)=E.SEG.UP;    WRITE(MDI)=E.SEG.DN;
+        WRITE(MDI)=E.SEG.UDL;   WRITE(MDI)=E.SEG.DDL;
+        WRITE(MDI)=E.SEG.LIM;
+
+        CALL P.LOOKUP(J+P.E.SEG.FDN);      /* SET UP POINTERS FOR STORE */
+        WRITE(MDI)=E.SEG.FDN; WRITE(MDI)=E.SEG.FDNT;
+        WRITE(MDI)=E.SEG.FUP; WRITE(MDI)=E.SEG.FCOE;
+
+        K=L; /* SAVE THIS LIMIT FOR NEXT TIME */
+        J=J+P.LOOKUP(J+CLEN);
+        N=N+1;
+
+     END;                   /* OF LOOP OVER FRAMES */
+
+     /* RECOMPUTE INITIAL DECAY INFO  */
+     /* TO GO FROM LAST FRAME TO      */
+     /* SUST LEVEL                    */
+
+     EXP.FACTOR=1000;               /* NO S/CURVE HERE - RECOMPUTE INITIAL DECAY STUFF BASED UPON LAST FRAME */
+     CALL COMPUTE.INTERP.NUMBERS(EIDECAY,ABS(K-ESUSTL),1000);
+     WRITE(MAM)=TIM.HEADP;          /* POINT TO TIMBRE HEAD    */
+     WRITE(MAL)=(TIM.EATLIM+EIDINT.LOC)+(PTL*TIM.EATLIM.STR);
+     WRITE(MD )=IDIVIDER\SHL(IADDER,8);
+
+     CALL COMPUTE.INTERP.NUMBERS(EIDECAY,1000,1000); /* RECOMPUTE TIME CONSTANT FOR CORRECT SPLICE TIME */
+     WRITE(MAM)=TIM.HEADP;          /* POINT TO TIMBRE HEAD    */
+     WRITE(MAL)=(TIM.EATLIM+EIDTMC.LOC)+(PTL*TIM.EATLIM.STR);
+     WRITE(MD )=TMC;
+
+     IF K=ESUSTL THEN DO;   /* NO EXP OF PK=SUST */
+        WRITE(MAM)=TIM.HEADP;          /* POINT TO TIMBRE HEAD    */
+        WRITE(MAL)=(TIM.EATLIM+EIDTMC.LOC)+(PTL*TIM.EATLIM.STR);
+        WRITE(MD )=(-1);
+     END;
+
+     /* COMPUTE FINAL DECAY INFO */
+     /* FROM SUSTAIN LEVEL OR    */
+     /* LAST FRAME               */
+
+     IF K<ESUSTL THEN K=ESUSTL;                   /* GET LARGER OF SUSTAIN LEVEL OR LAST PEAK */
+     CALL COMPUTE.INTERP.NUMBERS(EFDECAY,K,1000); /* COMPUTE FINAL DECAY FOR RELEASE DURING SUSTAIN PORTION */
+     WRITE(MAM)=TIM.HEADP;          /* POINT TO TIMBRE HEAD    */
+     WRITE(MAL)=(TIM.EFDINT+SFDENV.LOC)+(PTL*TIM.EFDINT.STR);
+     WRITE(MD )=IDIVIDER\SHL(IADDER,8);
+
+     CALL COMPUTE.INTERP.NUMBERS(EFDECAY,1000,1000); /* CORRECT TIME CONSTANT */
+     WRITE(MAM)=TIM.HEADP;          /* POINT TO TIMBRE HEAD    */
+     WRITE(MAL)=(TIM.EFDINT+SFDTMC.LOC)+(PTL*TIM.EFDINT.STR);
+     WRITE(MD )=TMC;
+
+     /* CHECK FOR SPLICING DURING FINAL DECAY DESIRED */
+
+     WRITE(MAM)=TIM.HEADP;          /* POINT TO TIMBRE HEAD    */
+     WRITE(MAL)=TIM.PARTIAL.VOL+PTL;
+     IF READ(MD)<>0 THEN DO;        /* CHECK FOR FD SPLICING IF PARTIAL ACTUALLY SOUNDING */
+        IF EFDECAY>=SUM THEN DO;    /* VERY LONG FDECAY - ALLOW FD SPLICING */
+           WRITE(MAL)=TIM.FD.SPLICING;
+           WRITE(MD )=READ(MD) \ 2; /* SET BIT FOR LATER CHECK */
+        END;
+     END;
+
+  END COMPUTE.SPLICE.INFO;
+
+/* $PAGE - PRECOMPUTE ENVELOPE PARAMETERS: */
+
+
+/* WHEN SETTING UP A TIMBRE
+
+      1.  ALLOCATE TIMBRE HEAD SECTOR
+      2.  CALL COMPACT.TIMBRES TO SET UP POINTERS TO PARAM AREA
+      3.  CALL ALLOC.TIMBRE TO SET UP SYNTH.TYPE
+      4.  CALL COMPUTE.ENV.PARAMS TO SET UP PARTIAL VOLUME
+      5.  CALL COMPUTE.VOLUME.LEVELS
+      6.  CALL COMPUTE.MISC.INFO        */
+
+
+   COMPUTE.ENV.PARAMS.SUB:PROC(TB) PUBLIC SWAPABLE; /* PRECOMPUTE ENVELOPE PARAMETERS */
+     DCL (TB)               FIXED;
+
+     /* $PAGE - PRE-COMPUTE ENVELOPE INFORMATION FOR 4 PARTIALS */
+
+
+     WRITE(MAM)=TIM.HEAD;                /* POINT TO LOOK UP TABLE */
+     WRITE(MAL)=TB;                      /* SEE IF ENTRY THERE     */
+
+     IF READ(MD)=0 THEN RETURN;          /* NO INFO TO PRECOMPUTE  */
+
+     TIM.HEADP=READ(MD);                 /* POINTER TO TIM HEAD    */
+
+     WRITE(MAM)=TIM.HEADP;               /* POINT TO TIMBRE HEAD   */
+     WRITE(MAL)=TIM.TOPTIONS;            /* INITIALIZE TIMBRE OPTION BITS SET BY THIS ROUTINE */
+     WRITE(MD )=(READ(MD)) & (NOT(   NOT.STEALABLE OR BIT.REPEAT
+                                  OR BIT.ARPEG     OR ANY.SAMPLED
+                                  OR SLAP.BASS     OR LONG.FDEC  
+                                  OR BIT.APHRASE                  ));
+
+     WRITE(MAL)=TIM.MISC.POINTER;
+     J=P.LOOKUP(READ(MD)) & (BIT.ARPEG\BIT.REPEAT\BIT.APHRASE);  /* GET REPEAT, ARPEG, AUTOPHRASE BITS */
+     WRITE(MAM)=TIM.HEADP;               /* POINT TO TIMBRE HEAD   */
+     WRITE(MAL)=TIM.TOPTIONS;            /* INITIALIZE TIMBRE OPTION BITS SET BY THIS ROUTINE */
+     WRITE(MD )=READ(MD) \ J;            /* STORE REPEAT & ARPEG FOR HANDY LOOKUP */
+
+     WRITE(MAL)=TIM.FD.SPLICING;         /* ASSUME WE MIGHT WANT TO DO FD SPLICING */
+     WRITE(MD )=1;                       /* SET TO 1 AT FIRST  */
+
+     DO PTL=0 TO (NUM.PARTIALS-1);       /* PROCESS EACH PARTIAL TIMBRE IN THIS TIMBRE */
+        WRITE(MAL)=TIM.SYNTH.TYP+PTL;
+        IF READ(MD)=3 THEN DO;           /* INDICATES A MONO SAMP PARTIAL */
+           WRITE(MAL)=TIM.TOPTIONS;
+           WRITE(MD )=READ(MD)\ANY.SAMPLED;
+        END;
+     END;
+    
+     DO PTL=0 TO (NUM.PARTIALS-1);       /* NOW COMPUTE ENVELOPE INFORMATION  */
+
+       WRITE(MAM)=TIM.HEADP;             /* POINT TO TIMBRE HEAD              */
+       WRITE(MAL)=TIM.PARTIAL.POINTERS+PTL;
+       PTPTR=READ(MD);                   /* LOOK UP POINTER TO PARAMETER INFO */
+
+       WRITE(MAL)=TIM.OPTIONS+PTL;       /* INIT OPTIONS BITS FOR PARTIAL     */
+       WRITE(MD )= (READ(MD)) & (NOT(   ANY.FM      OR  SPLICE.INFO  OR  KBD.ENV
+                                     OR DYN.ENV     OR  ZERO.ATTACK  OR  ANY.DELAY 
+                                     OR ENV.DADJ    OR  INX.HADJ     OR  SAM.DELAY));
+
+       WRITE(MAL)=TIM.PARTIAL.VOL+PTL;   /* INITIALIZE PARTIAL VOLUME   */
+       WRITE(MD )=0;                     /* TO ZERO (ASSUME SUPPRESSED) */
+
+       IF (P.LOOKUP(PTPTR)<>SUP) THEN DO;  /* CHECK FURTHER IF NOT SUPPRESSED */
+
+          /* LOOK UP TIMBRE INFO */
+          /* CHECK FOR KBD ENV   */
+
+          J=ADDR(EDELAY);                  /* CORE POINTER TO EDELAY VARIABLE */
+          DO K=0 TO 11;                    /* LOOK UP EDELAY, EATTACK ETC     */
+              CORE(J+K)=READ(MDI);         /* FROM EXTERNAL MEMORY            */
+          END;         
+
+          DECADJ=P.LOOKUP(PTPTR+P.DECADJ); /* LOOK UP DECAY/HARM ADUST ALSO   */
+
+          IF ((EPEAKL\ESUSTL\IPEAKL\ISUSTL)&"176000")<>0  /* CHECK FOR KBD ENVELOPE BEFORE MASKING */
+          THEN DO;
+             WRITE(MAM)=TIM.HEADP;               /* POINT TO TIMBRE HEAD    */
+             WRITE(MAL)=TIM.PINFO.POINTERS+PTL;  /* SEE IF PINFO BLOCK      */
+             K=READ(MD);
+             IF K<>0 THEN DO;                    /* MOVE INFO THERE        */
+                CALL P.LOOKUP(K+PI.KBDL);        /* SET POINTERS FOR KBD ENVELOPE */
+                WRITE(MDI)=(SHR(EPEAKL,10)+12);  /* ADD 12 TO KEY # */
+                WRITE(MDI)=(SHR(ESUSTL,10)+12);  
+                WRITE(MDI)=(SHR(IPEAKL,10)   );  /* LEAVE SLOPES ALONE */
+                WRITE(MD )=(SHR(ISUSTL,10)   );
+                IF P.LOOKUP(K+PI.KBDL)<=13 THEN WRITE(MD)= 1;    /* EXTEND TO LOWEST  KEY */
+                IF P.LOOKUP(K+PI.KBDR)>=73 THEN WRITE(MD)=85;    /* EXTEND TO HIGHEST KEY */
+                CALL P.LOOKUP(PTPTR+P.EPEAKL);
+                WRITE(MDI)=EPEAKL&1023; WRITE(MD )=ESUSTL&1023;
+                CALL P.LOOKUP(PTPTR+P.IPEAKL);
+                WRITE(MDI)=IPEAKL&1023; WRITE(MD )=ISUSTL&1023;
+             END;
+             ELSE DO;
+                WRITE(MAM)=TIM.HEADP;               /* POINT TO TIMBRE HEAD   */
+                WRITE(MAL)=TIM.OPTIONS+PTL;         /* OPTIONS ENTRY          */
+                WRITE(MD )=READ(MD)\KBD.ENV;        /* SET OPTIONS BIT HERE   */
+             END;
+          END;
+
+          EPEAKL=EPEAKL&1023; ESUSTL=ESUSTL&1023;
+          IPEAKL=IPEAKL&1023; ISUSTL=ISUSTL&1023;
+
+          J=EPEAKL; 
+          IF ESUSTL>J THEN J=ESUSTL;             /* GET HIGHEST OF PK, SUSTAIN */
+
+          IF J<>0 THEN DO;                       /* SOME LEVEL - COMPUTE STUFF */
+
+             /* SET TIMBRE OPTIONS BITS   */
+
+             WRITE(MAM)=TIM.HEADP;               /* POINT TO TIMBRE HEAD    */
+
+             WRITE(MAL)=TIM.SYNTH.TYP+PTL;       /* LOOK UP SYNTH TYP       */
+             SYNTHTYP=READ(MD);                  /* STORE IN HANDY VARIABLE */
+
+             IF ESUSTL<>0 THEN DO;               /* NONZERO SUSTAIN LEVEL   */
+                WRITE(MAL)=TIM.FD.SPLICING;
+                WRITE(MD )=0;                    /* CAN NOT SPLICE DURING FINAL DECAY IF SPLICING DOES NOT HEAD TOWARDS 0 */
+                WRITE(MAL)=TIM.TOPTIONS;
+                WRITE(MD )=READ(MD) \ NOT.STEALABLE;
+             END;
+
+             IF  (EFDECAY IGT 100)               /* IF LONG FINAL DECAY             */
+             AND ((ESUSTL<>0)\(EIDECAY IGT 100)) /* AND SUSTAINING OR LONG EDIDECAY */
+             THEN DO;
+                WRITE(MAL)=TIM.TOPTIONS;
+                WRITE(MD )=READ(MD) \ LONG.FDEC;
+             END;
+
+            /* $PAGE - COMPUTE PARTIAL VOL, ATK & DEC INFO */
+
+             WRITE(MAM)=TIM.HEADP;               /* POINT TO TIMBRE HEAD    */
+             WRITE(MAL)=TIM.PINFO.POINTERS+PTL;  /* SEE IF PINFO BLOCK      */
+             K=READ(MD);
+
+             IF K=0 THEN DO;                     /* NO PINFO - INIT PVOL TO MAX */
+                WRITE(MAL)=TIM.PARTIAL.VOL+PTL;
+                IF SYNTHTYP<>4 THEN WRITE(MD )=1000; /* KEEP VOLUME OF 0 FOR CUE TIMBRES TO KEEP KEYBOARD NOTES FROM PLAYING THEM */
+             END;
+             ELSE DO;                            /* PINFO BLOCK EXISTS     */
+
+                L=P.LOOKUP(K+PI.PVOL);           /* LOOK UP PARTIAL VOLUME */
+                WRITE(MAM)=TIM.HEADP;            /* POINT TO TIMBRE HEAD   */
+                WRITE(MAL)=TIM.PARTIAL.VOL+PTL;
+                IF SYNTHTYP<>4 THEN WRITE(MD )=L; /* KEEP VOLUME OF 0 FOR CUE TIMBRES TO KEEP KEYBOARD NOTES FROM PLAYING THEM */
+
+                /* SEE IF DYN ENV EXISTS */
+
+                IF (P.LOOKUP(K+PI.DENVL)\P.LOOKUP(K+PI.DENVH))<>0 /* IF EITHER ONE NONZERO */
+                THEN DO;
+                   WRITE(MAM)=TIM.HEADP;         /* POINT TO TIMBRE HEAD   */
+                   WRITE(MAL)=TIM.OPTIONS+PTL;
+                   WRITE(MD )=READ(MD)\DYN.ENV;
+                END;
+
+                IF (P.LOOKUP(K+PI.KBDL) \P.LOOKUP(K+PI.KBDR ))<>0   /* IF EITHER ONE NONZERO */
+                THEN DO;
+                   WRITE(MAM)=TIM.HEADP;               /* POINT TO TIMBRE HEAD   */
+                   WRITE(MAL)=TIM.OPTIONS+PTL;         /* OPTIONS ENTRY          */
+                   WRITE(MD )=READ(MD)\KBD.ENV;        /* SET OPTIONS BIT HERE   */
+                END;
+             END;
+
+             /* SET OTHER PARTIAL OPTIONS BITS */
+
+             WRITE(MAM)=TIM.HEADP;               /* POINT TO TIMBRE HEAD    */
+             WRITE(MAL)=TIM.OPTIONS+PTL;
+
+             IF (EDELAY<>0)
+             THEN WRITE(MD)=READ(MD)\ANY.DELAY;
+             IF (EATTACK=0)                      /* SET BIT FOR SPEEDIER ATTACKS IF ATTACK=0 */
+             THEN WRITE(MD)=READ(MD)\ZERO.ATTACK;
+
+             /* COMPUTE DECAY TIMES FROM PEAK IF SPLICING */
+
+             IF  (P.LOOKUP(PTPTR+NUM.PARAMS)=MOR)   /* IF ONE TIMBRE FRAME */
+             AND (P.LOOKUP(PTPTR+NUM.PARAMS+TYPE)=TF.TYPE) /* AND IS ACTUAL TIMBRE FRAME FRAME */
+             THEN J=EPEAKL;                         /* COMPUTE DECAY TIMES FROM ACTUAL PEAK.  INITIAL DECAY RECOMPUTED BELOW */
+
+             IF J<160 THEN J=160;           /* LIMIT TO MULTIPLY BY 6.25 TO AVOID NUMERIC PROBS */
+             EXP.FACTOR=1000;               /* NO S.CURVE CORRECTION REQUIRED HERE */
+
+             CALL COMPUTE.INTERP.NUMBERS(EATTACK,J,1000);
+
+             WRITE(MAM)=TIM.HEADP;          /* POINT TO TIMBRE HEAD    */
+             WRITE(MAL)=(TIM.EATLIM+EATLIM.LOC)+(PTL*TIM.EATLIM.STR);
+
+             WRITE(MDI)=SHR(EPEAKL,2);      /* SAVE ENV ATTACK LIMIT */
+             WRITE(MDI)=IDIVIDER\SHL(IADDER,8);
+
+             IF  ((SYNTHTYP=1)              /* POLY SYNTHED    */
+             OR   (SYNTHTYP=2))             /* POLY SAMPLING   */
+             THEN J=2000;                   /* THEN EXPONENTIATION CODE CORRECTS FOR PK/SUST LEVEL */
+
+             CALL COMPUTE.INTERP.NUMBERS(EIDECAY,J,1000);
+
+             WRITE(MAM)=TIM.HEADP;          /* POINT TO TIMBRE HEAD    */
+             WRITE(MAL)=(TIM.EATLIM+EIDLIM.LOC)+(PTL*TIM.EATLIM.STR);
+             WRITE(MDI)=SHR(ESUSTL,2);      /* SAVE ENV IDEC LIMIT */
+             WRITE(MDI)=IDIVIDER\SHL(IADDER,8);
+             WRITE(MDI)=TMC;
+
+             CALL COMPUTE.INTERP.NUMBERS(EFDECAY,J,1000);
+
+             WRITE(MAM)=TIM.HEADP;          /* POINT TO TIMBRE HEAD    */
+             WRITE(MAL)=(TIM.EFDINT+EFDINT.LOC)+(PTL*TIM.EFDINT.STR);
+             WRITE(MD )=IDIVIDER\SHL(IADDER,8);
+             WRITE(MAL)=(TIM.EFDINT+EFDTMC.LOC)+(PTL*TIM.EFDINT.STR);
+             WRITE(MD )=TMC;
+
+             /* $PAGE - COMPUTE INFO FOR FM ENVELOPE */
+
+             J=IPEAKL; IF ISUSTL>J THEN J=ISUSTL;  /* COMPUTE MAX */
+
+             IF  (SYNTHTYP<>0)                /* SYNCL II ONLY ONE WHO USES FM */
+             THEN J=0;                        /* DISALLOW FM WITH PATCH LIST TIMBRES */
+
+             IF J<>0 
+             THEN CALL COMPUTE.FM.ENV;        /* COMPUTE FM ENVELOPE IF FM USED AND ALLOWED */
+             ELSE DO;                         /* ZERO OUT FM INFO FOR BETTER KNOB OPERATION */
+                WRITE(MAM)=TIM.HEADP;         /* POINT TO TIMBRE HEAD    */
+                WRITE(MAL)=TIM.I.ISHC+PTL;
+                WRITE(MD )=0;                 /* ZERO SHIFT COUNT        */
+                WRITE(MAL)=(TIM.IATLIM+IATLIM.LOC)+(PTL*TIM.IATLIM.STR);
+                WRITE(MDI)=0;                 /* ZERO PEAK LIMIT         */
+                WRITE(MAL)=(TIM.IATLIM+IIDLIM.LOC)+(PTL*TIM.IATLIM.STR);
+                WRITE(MDI)=0;                 /* ZERO SUST LIMIT         */
+             END;
+
+             /* COMPUTE DECAY ADJUST & HARMONIC ADJUST TABLES */
+
+             K=1000+(DECADJ&"1777");           /* COMPUTE BASE NUMBER */
+
+             IF (K<>1000) THEN DO;             /* IF DECAY ADJUST IS ACTIVE */
+                WRITE(MAM)=TIM.HEADP;          /* POINT TO TIMBRE HEAD    */
+                WRITE(MAL)=TIM.OPTIONS+PTL;
+                WRITE(MD )=READ(MD) \ ENV.DADJ;
+             END;
+
+             DO J=0 TO 4;                      /* ONLY DO DECAY ADJUST FOR C0-B5 (5 OCTAVES) */
+                WRITE(MAM)=TIM.HEADP;          /* POINT TO TIMBRE HEAD    */
+                WRITE(MAL)=TIM.DEC.ADJ+(PTL*TIM.DEC.ADJ.STR)+4-J;
+                WRITE(MD)=K;                   /* STORE PREVIOUS COMPUTATION */
+                LOAD (DECADJ&"1777")+1000; 
+                MUL K; MWAIT; DIV 1000; 
+                K=RES;                         /* K*(DECADJ+1000)/1000    */
+                IF K IGT 30000 THEN K=30000;   /* LIMIT TO AVOID OVERFLOW */
+             END;
+
+             K=SHR(DECADJ,10);                 /* GET HARMONIC ADJUST INFO */
+
+             IF (K<>0)                         /* IF HARMONIC ADJUST IS ACTIVE */
+             THEN DO;
+                WRITE(MAM)=TIM.HEADP;          /* POINT TO TIMBRE HEAD    */
+                WRITE(MAL)=TIM.OPTIONS+PTL;
+                WRITE(MD )=READ(MD) \ INX.HADJ;
+             END;
+
+             IF K>31 THEN K=K-64;         /* CORRECT FOR SIGN */
+             IF K>0 THEN K=K+K;           /* MAP 0-30 TO 0-60 */
+             K=10*(60+K);                 /* 300 TO 1200 - CENTER POSITION IS 600  */
+             L=1000;                      /* START HERE                            */
+
+             DO J=0 TO ((SYNC.MIDDLE.C/12)-1); /* COMPUTE FOR OCTAVES BELOW MIDDLE C   */
+               LOAD L; MUL 600; MWAIT; DIV K; L=RES; /* COMPUTE DOWN 1 OCTAVE  */
+               WRITE(MAM)=TIM.HEADP;           /* POINT TO TIMBRE HEAD    */
+               WRITE(MAL)=TIM.HARM.ADJ+(PTL*TIM.HARM.ADJ.STR)+((SYNC.MIDDLE.C/12)-1)-J;
+               WRITE(MD)=L;
+             END;
+             L=1000;
+             DO J=(SYNC.MIDDLE.C/12) TO 7;     /* COMPUTE FOR INFO ABOVE MIDDLE C */
+               WRITE(MAM)=TIM.HEADP;           /* POINT TO TIMBRE HEAD    */
+               WRITE(MAL)=TIM.HARM.ADJ+(PTL*TIM.HARM.ADJ.STR)+J;
+               WRITE(MD)=L;
+               LOAD L; MUL K; L=RES; DIV 600; L=RES;
+             END;
+
+             /* $PAGE - PRECOMPUTE ENVELOPE INFO FOR TIMBRE FRAME SPLICES: */
+
+             WRITE(MAM)=TIM.HEADP;            /* POINT TO TIMBRE HEAD    */
+             WRITE(MAL)=TIM.LOOP.INTERP+PTL;
+             WRITE(MD )=0;                    /* ASSUME TO NO TIMBRE FRAME LOOPING */
+
+             J=PTPTR+NUM.PARAMS;              /* GET POINTER TO POSSIBLE TIMBRE FRAME */
+
+             IF  (P.LOOKUP(J)=MOR)            /* COMPUTE INFO FOR ENVELOPE SEGMENTS */
+             AND (P.LOOKUP(J+TYPE)=TF.TYPE)   /* MAKE SURE TIMBRE FRAME TYPE OF FRAME */
+             THEN CALL COMPUTE.SPLICE.INFO;   /* COMPUTE SPLICE INFO */
+          END;             /* OF BEGIN FOR SOME PK/SUST LEVEL     */
+       END;                /* OF BEGIN FOR NON-SUPPRESSED TIMBRES */
+
+       /* $PAGE - MOVE ON TO NEXT PARTIAL.  CLEAN UP WHEN THROUGH */
+
+     END;                  /* OF LOOP OVER PARTIAL TIMBRES */
+
+     WRITE(MAM)=TIM.HEADP; /* POINT TO TIMBRE HEAD         */
+     WRITE(MAL)=TIM.FD.SPLICING;
+     IF READ(MD)<>3 THEN WRITE(MD)=0;  /* DISSALLOW FINAL DECAY SPLICING IF ONE PARTIAL SUSTAINS, OR NO PARTIAL HAS SPLICING WITH LONG FD */
+     ELSE DO;
+        WRITE(MAL)=TIM.TOPTIONS;
+        WRITE(MD )=READ(MD) & (NOT(SLAP.BASS));  /* FD SPLICING - NOT A SLAP BASS SOUND */
+     END;
+
+     IF TB=0 THEN NEW.KBD.PRE=1;   /* PRE COMPUTE KEYBOARD TIMBRE */
+
+   END COMPUTE.ENV.PARAMS.SUB;
+
+END;
+
+/* $PAGE - PRECOMPUTE PARTIAL VOLUMES */
+
+
+/* THIS ROUTINE SETS UP THE TIM.VOLUME.LEV FIELDS IN ALL TIMBRE HEADS. */
+/* AS INPUT,  IT USES A TIMBRES PARTIAL VOLUMES,  AS WELL AS THE       */
+/* FF/REW MUTES                                                        */
+
+
+/* DESCRIPTION OF TIM.VOLUME.LEV:
+
+      THE TIMBRE HEAD CONTAINS A TIM.VOLUME.LEV ENTRY FOR EACH OF 4
+      PARTIALS.   THIS WORD CONTAINS A NUMBER,  THAT WHEN FRACTIONALLY
+      MULTIPLIED BY A TRACK'S TRACK VOLUME (0-1000),  YIELDS A NUMBER
+      BETWEEN 0 AND 255.   THIS NUMBER IS THEN USED TO CONTROL
+      THE VOLUME OF A PARTIAL.
+
+      THE TIM.VOLUME.LEV FIELD WILL ALSO CONTAIN THE RESULTS OF
+      FF/REW MUTING,  AS WELL AS PARTIAL SOLOING */
+
+
+DCL SOLOED.PARTIALS FIXED PUBLIC;               /* BITS FOR SOLOED PARTIALS */
+
+COMPUTE.VOLUME.LEVELS:PROC PUBLIC SWAPABLE; 
+   DCL (TB,PTL,I,J) FIXED;
+
+   DO TB=0 TO PAR.NUMT-1;                /* COMPUTE FOR EACH TIMBRE IN MEMORY */
+
+      WRITE(MAM)=TIM.HEAD;               /* POINT TO TIMBRE HEAD LOOK UP TABLE */
+      WRITE(MAL)=TB;                     /* SEE IF TIMBRE HEAD EXISTS */
+
+      IF READ(MD)<>0 THEN DO;            /* IF THERE - PRECOMPUTE IT  */
+
+         WRITE(MAM)=READ(MD);            /* POINT TO TIMBRE HEAD      */
+
+         DO PTL=0 TO NUM.PARTIALS-1;     /* COMPUTE FOR EADCH PARTIAL */
+
+            WRITE(MAL)=TIM.PARTIAL.VOL+PTL;    /* LOOK UP PARTIAL VOL */
+            I=READ(MD);                  /* GET PAR VOL,  0-1000      */
+
+            IF  (MOVE<>0)
+            AND (TB>=NUM.KBD.TRACKS)     /* A SEQUENCER TRACK         */
+            THEN DO;                     /* SCALE FOR FF/EW           */
+               J=ABS(MOVE.SPEED);
+               IF J< 3000 THEN J= 3000;  /* MAX VOLUME IS 1/3         */
+               IF J>16000 THEN J=16000;  /* MIN VOLUME IS 1/16        */
+               LOAD I; MUL 1000; MWAIT; DIV J;
+               I=RES;                    /* SCALE BY 1/SPEED          */
+            END;
+
+            IF  (TB=0)                   /* KEYBOARD - CHECK SOLOING  */
+            AND (SOLOED.PARTIALS<>0)
+            AND ((SOLOED.PARTIALS&BITS(PTL))=0)   /* NOT SOLOED */
+            THEN I=0;
+
+            LOAD 0; ULOAD I;             /* FRACTIONAL DIVIDE         */
+            DIV 3921;                    /* DIV BY 1000*1000/255      */
+            WRITE(MAL)=PTL;              /* TIM.VOLUME.LEV            */
+            WRITE(MD )=RES;              /* YIELDS CORRECT FMUL CONST */
+
+         END;
+      END;
+
+   END;
+
+END COMPUTE.VOLUME.LEVELS;
+
+
+/* $PAGE - COMPUTE.ARLIST */
+
+
+/* THE SOFTWARE MAINTAINS A LINKED LIST OF TRACKS THAT REQUIRE */
+/* FILTERING OF THE RIBBON CONTROLLER.   THIS LIST STARTS      */
+/* AT ARLIST0 AND IS LINKED RELATIVE TO NAH.PTR.               */
+/* THIS LIST MUST BE RECONSTRUCTED ANY TIME THE TIMBRE FOR     */
+/* A TRACK CHANGES                                             */
+
+COMPUTE.ARLIST:PROC PUBLIC SWAPABLE;
+
+   DCL (TRACK#)       FIXED;
+   DCL (TB,I,J)       FIXED;
+   DCL (TRK.HEADP)    FIXED;
+   DCL (TIM.HEADP)    FIXED;
+
+   ARLIST0=0;
+
+   DO TRACK#=0 TO MAX.TRACKS-1;        /* MUST CHECK EACH TRACK    */
+
+      WRITE(MAM)=TRK.HEAD;             /* POINT TO TRK.HEAD SECTOR */
+      WRITE(MAL)=TRACK#;               /* INDEX TO TRACK HEAD      */
+      TRK.HEADP=READ(MD);              /* POINT TO TRACK HEAD      */
+
+      IF TRK.HEADP<>0 THEN DO;         /* CHECK BLOCK IF THERE     */
+
+         WRITE(MAM)=TRK.HEADP;         /* POINT TO BLOCK           */
+
+         WRITE(MAL)=THD.CUE.TRACK;     /* RESET CUE TRACK WORD     */
+         WRITE(MD )=0;                 /* FOR NOW                  */
+
+         WRITE(MAL)=THD.CTIMB;         /* CHECK CURRENT TIMBRE #   */
+         TB=READ(MD);
+
+         WRITE(MAM)=TIM.HEAD;
+         WRITE(MAL)=TB;
+         TIM.HEADP=READ(MD);
+                                                                   
+         IF TIM.HEADP<>0 THEN DO;      /* CHECK RTE PATCHING       */
+            WRITE(MAM)=TIM.HEADP;      /* POINT TO BLOCK           */
+
+            WRITE(MAL)=TIM.SYNTH.TYP;
+            IF READ(MD)=4 THEN DO;     /* NOW A CUE TRACK          */
+               WRITE(MAM)=TRK.HEADP;         /* POINT TO BLOCK     */
+               WRITE(MAL)=THD.CUE.TRACK;     /* SET CUE TRACK WORD */
+               WRITE(MD )=1;                 
+               WRITE(MAM)=TIM.HEADP;      
+            END;
+
+            WRITE(MAL)=TIM.USED.RTES;
+            IF (READ(MD)&(16\SHL(16,8)))<>0 THEN DO;  /* RIBBON USED */
+               WRITE(MAL)=TIM.RF.TC;
+               I=READ(MD);             /* GET TIME CONSTANT         */
+               WRITE(MAL)=TIM.ACT.PARS+5;  /* GET RIBBON PARAM BITS */
+               J=READ(MD);
+               WRITE(MAM)=TRK.HEADP;   /* LINKS ARE ON TRACK HEAD   */
+               WRITE(MAL)=THD.ARLIST;
+               WRITE(MD )=ARLIST0;
+               ARLIST0=TRK.HEADP-NAH.PTR;
+               WRITE(MAL)=THD.RF.TC;   /* STORE TIME CONST HERE     */
+               WRITE(MD )=I;
+               WRITE(MAL)=THD.RF.PARS;
+               WRITE(MD )=J;
+            END;
+         END;
+      END;
+   END;
+END COMPUTE.ARLIST;
+
+/* $PAGE - ROUTINE TO COMPUTE PRESSURE & RIBBON FILTER TIME CONSTANTS, VOLUME LEVELS */
+
+/* COMPUTE PRESSURE & RIBBON FILTER TIME CONSTANTS */
+/* COMPUTE VOLUME LEVELS FOR SOLOING, MUTE, ETC    */
+
+DCL (LP.CUT,HP.CUT)  FIXED PUBLIC;
+DCL (BP.CUT,BP.WID)  FIXED PUBLIC;
+
+COMPUTE.MISC.INFO: PROC PUBLIC SWAPABLE;    /* PRECOMPUTE MISC INFO (HOPEFULLY QUICKLY!!) */
+  DCL (I,TIMBRE#) FIXED;
+  DCL (TIM.HEADP) FIXED STATIC;
+  DCL (TRACK#)     LIT 'TIMBRE#';    /* SAVE 1 WORD OF MEMORY           */
+  DCL (TRK.HEADP)  LIT 'TIM.HEADP';
+
+  COMPUTE.FTC:PROC(TI);              /* COMPUTE TIME CONSTANT FOR PRESSURE/RIBBON FILTER */
+     DCL (I,TI) FIXED;
+     
+     WRITE(MAM)=TIM.HEADP;           /* POINT TO TIMBRE HEAD     */
+     WRITE(MAL)=TIM.TINFO.POINTER;   /* SEE IF TINFO AREA        */
+     I=READ(MD);
+
+     IF I=0 THEN RETURN (-1);        /* NO TINFO AREA - USE FASTEST T.C. */
+
+     I=P.LOOKUP(I+TI);               /* GET PARAMETER */
+     LOAD I; MUL I; I=RES; DIV 1000; I=RES; /* USE SQUARE LAW FOR BETTER CONTROL */
+     LOAD 0; WRITE(4)=I; DIV 1001;   /* GET FRACTIONAL MULTIPLY CONSTANT - PERFORM UNSIGNED FRACTIONAL DIVIDE */
+
+     RETURN RES;                     /* RETURN CONSTANT FOR FRACTIONAL MULTIPLY */
+
+  END COMPUTE.FTC;
+
+  DO TIMBRE#=0 TO PAR.NUMT-1;        /* COMPUTE FOR ALL TIMBRES IN MEMORY AT LEAST */
+
+     WRITE(MAM)=TIM.HEAD;            /* POINT TO TIM.HEAD SECTOR */
+     WRITE(MAL)=TIMBRE#;             /* INDEX TO TIMBRE HEAD     */
+     TIM.HEADP=READ(MD);             /* POINT TO TIMBRE HEAD     */
+
+     IF TIM.HEADP<>0 THEN DO;        /* FILL BLOCK IF THERE      */
+
+        I=COMPUTE.FTC(TI.PREF);      /* PRE COMPUTE FILTER TIME CONSTANTS */
+        WRITE(MAM)=TIM.HEADP;
+        WRITE(MAL)=TIM.PF.TC;
+        WRITE(MD )=I;
+
+        I=COMPUTE.FTC(TI.RIBF);      /* PRE COMPUTE FILTER TIME CONSTANTS */
+        WRITE(MAM)=TIM.HEADP;
+        WRITE(MAL)=TIM.RF.TC;
+        WRITE(MD )=I;
+
+     END;
+
+  END;
+
+  /* $PAGE - MIDI CHANNEL PRESSURE QUE */
+
+
+  /* CHECK TRACKS AND CONSTRUCT */
+  /* MIDI CHANNEL PRESSURE QUE  */
+
+
+  CPLIST0=0;
+
+  DO TRACK#=0 TO MAX.TRACKS-1;
+
+     WRITE(MAM)=TRK.HEAD;             		/* POINT TO TRK.HEAD SECTOR */
+     WRITE(MAL)=TRACK#;               		/* INDEX TO TRACK HEAD      */
+     TRK.HEADP=READ(MD);              		/* POINT TO TRACK HEAD      */
+
+     IF TRK.HEADP<>0 THEN DO;         		/* FILL BLOCK IF THERE      */
+        WRITE(MAM)=TRK.HEADP;         		/* POINT TO BLOCK           */
+        WRITE(MAL)=THD.MIDI;          		/* CHECK MIDI ROUTING       */
+        IF (READ(MD) & THD.MIDI.CHANP)<>0   /* CHANNEL PRESSURE USED    */
+        THEN DO;                      		/* STORE ON LINKED LIST     */
+           WRITE(MAL)=THD.CPLIST;
+           WRITE(MD )=CPLIST0;
+           CPLIST0=TRK.HEADP-NAH.PTR; 		/* STORE REL PTR HERE       */
+           WRITE(MAL)=THD.CPSUM;      		/* INIT SUM TO ZERO         */
+           WRITE(MDI)=0;
+        END;
+     END;
+  END;
+
+  WRITE(MAM)=TIM.HEAD;            /* POINT TO TIM.HEAD SECTOR     */
+  IF READ(MD)<>0 THEN DO;         /* CHECK POINTER FOR TIMBRE # 0 */
+     WRITE(MAM)=READ(MD);
+     WRITE(MAL)=TIM.MISC.POINTER;
+     PTPTR=READ(MD);
+
+     CALL P.LOOKUP(PTPTR+LPCUTF.LOC);         /* SET UP XMEM PTRS */
+
+     LP.CUT=(READ(MDI)&"1777");               /* GET FILTER */
+     HP.CUT=(READ(MDI)&"1777");               /* INFO INTO  */
+     BP.CUT=(READ(MDI)&"1777")+LP.CUT-250;    /* MEMORY     */
+     BP.WID=(READ(MDI));
+  END;
+
+  CALL COMPUTE.ARLIST;
+
+END COMPUTE.MISC.INFO;
+
+/* $PAGE - COMPUTE.ENV.PARAMS */
+
+
+/* CONVENIENT ROUTINE TO COMPUTE ENVELOPE */
+/* PARAMETERS AND PARTIAL VOLUME LEVELS   */
+
+
+COMPUTE.ENV.PARAMS:PROC(TB) PUBLIC SWAPABLE;   /* REDUCE UNNECESSARY SWAP TIME IF POSSIBLE */
+   DCL (TB) FIXED;                      /* TIMBRE # */
+   CALL COMPUTE.ENV.PARAMS.SUB(TB);     /* SWAP PROC #1 */
+   CALL COMPUTE.VOLUME.LEVELS;          /* SWAP PROC #2 */
+END COMPUTE.ENV.PARAMS;

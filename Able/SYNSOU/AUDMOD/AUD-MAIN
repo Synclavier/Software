@@ -1,0 +1,721 @@
+/*	:SYNSOU:AUDMOD:AUD-MAIN  $TITLE   Main module code for Audio Event Editor
+
+Modified:
+2000/02/27 - TY  - Changed EXIT.AUDIO.EVENT.EDITOR() to indirectly accommodate display of sound file loops
+1991/01/13 - cj  - Fixed record panel bug by moving q screen active
+1991/06/26 - cj  - Moved GPI code to main loop
+1991/04/26 - cj  - Update sync panel on tempo/meter change
+1991/03/26 - MWH - Add arg to Read Locate Stack routine
+1990/10/30 - cj  - different processing for new.dtd.info/32768 events
+1990/01/10 - MWH - Don't stop DTD playback when leaving Q page
+1989/05/02 - TSS - Merged changes for Optical disk to DTD transfer project
+1989/04/10 - SGS - added optical transfer group
+1988/12/20 - cj  - different use of DTD.XFER.MODE for multi-track DDT
+1988/10/03 - cj  - better use of seq.refresh
+1988/09/23 - MWH - Remove the AEE screen state variable (now in GLOBMOD)
+1988/09/18 - cj  - slight modification to use of seq.refresh
+1988/08/22 - cj  - different use of cursor.begin, cursor.end
+					  - provide use of Seq.Refresh during real time.
+1988/05/24 - TSS - Activated Function Keys on Shuttle Panel
+1988/05/20 - TSS - Added call to ANIMATE.LOCKED.ITEM
+*/
+
+dcl inc.aud				lit '1';	/*	for now	*/
+
+dcl Q.Screen.Active	fixed external;
+
+dcl Initialize.Remote.Control.Items			proc	external;
+dcl Check.Q.Screen.Remote.Control.Inputs	proc	external;
+dcl Get.SFD.Reserved.Sectors              proc	external;
+
+dcl P.Time.Base.Mode	fixed;
+
+INITIALIZE.AUDIO.EVENT.EDITOR: proc swapable;
+	dcl error(40)	fixed;
+	dcl j				fixed;
+
+	j = TRD.LEN;							/*	save initial trd len		*/
+
+	bnk.len = 0;							/*	toss bank on aee entry	*/
+	call Get.TRD.Storage(AEE.Trd.Storage.Needed);	/*	Try to get sectors of memory	*/
+
+	if TRD.LEN <> AEE.Trd.Storage.Needed then do;
+		call copy.string('Not Enough External Memory Available for Audio Event Editor',error);
+		call Set.Error(err.lod,error);
+		return false;	/*	could not get enough memory	*/
+	end;
+
+	SFD.PTR = AEE.SFDir.Base;			/*	set up sound file directory area	*/
+	SFD.LEN = AEE.SFDir.Len;
+
+	call Init.PID.GID.Area;
+	call PID(Aee.Initial.TRD.LEN,j);	/*	save initial trd len size	*/
+
+	call Init.Panel.Manager(AEE.Panel.Base);
+	call Init.AEE.Globals;
+	Place.Base = TRD.PTR+5;
+
+	P.Time.Base.Mode = ((play<>0)&(move=0));
+
+	/*	initialize remote control panel:	*/
+
+	call Initialize.Remote.Control.Items;
+
+	call Set.SFD.Misc(0,24,0);
+
+	if ((Protocol.Recording.State & 2) <> 0)	/*	detect entering screen	*/
+	or (Lod.Punch.In.Tracks				  <> 0)	/*	while doing protocol		*/
+	then call PID(Any.Recording.Happened, 1);	/*	or gpi recording			*/
+	else call PID(Any.Recording.Happened, 0);
+
+	return true;
+
+end INITIALIZE.AUDIO.EVENT.EDITOR;
+
+EXIT.AUDIO.EVENT.EDITOR: proc swapable;
+
+	call Get_Disable(Get.Ertyp);
+	call Get_Disable(Get.Program.Exit);
+	call Get_Disable(Get.DTD.Info);
+	call Get_Disable(Get.DTD.Scrolling);
+	call Get_Disable(Get.New.Seq.Info);
+	call Get_Disable(Get.Prm.Info);
+
+	if Record.Group <> 0 then do;
+		if Record.Recording.State <> 0
+		then call STOP.RECORD.RECORDING;			/*	force stop recording		*/
+		if Lod.Punch.In.Tracks <> 0 then do;	/*	perform graceful punch	*/
+			Lod.Punch.In.Tracks	= 0;				/*	when leaving screen		*/
+			new.motion				= 1;
+		end;
+	end;
+
+	/*
+	if Protocol.Recording.State = 0
+	then call Stop.DTD.Playback;					\*	stop triggered output	*\
+	*/
+
+	if Seq.Info.Track <> 0
+	then do;
+		call Stop.Info.Note(Seq.Info.Track);
+		Seq.Info.Track = 0;
+	end;
+
+	Get.Item.Enabled(Get.Play.Scrolling) = 0;
+	if Big.Time.Display.Mode=BT#SMPTE
+	then call Get_Disable(Get.SMPTE.Event);
+
+	if (Optical.Group<>0) then do;	/*	save location of cursor in optical window	*/
+		/*	save display position and formats	*/
+		call SaveDisplayPos(DirDevice,0);
+		call pid(sfr.sortinfo,		usersort );
+		call pid(sfr.functioninfo,	functioninfo);
+		call pid(sfr.showinfo,		showinfo );
+		call pid(sfr.itemfilter,	itemfilter);
+	end;
+
+	PID(Saved.AEE.Time.Format, AEE.Time.Format);
+	PID(Saved.AEE.Panel.Bits, Panel.Bits);	/*	used to restore last selected user defined panel layout button	*/
+
+	vector_mode; alpha_mode;
+	call pc(27); call ps('8');	/*	Put graphics character set back to normal	*/
+	transparent_mode;
+	call Set.Term.Attr(ATTR#Normal);
+	call tty_wait;
+
+	call Get.TRD.Storage(GID(Aee.Initial.TRD.LEN));	/*	Reallocate to normal length	*/
+
+	AEE.Screen.State = -1;	/*	screen is now closed	*/
+
+	/*	turn off tally output lines when leaving screen	*/
+
+	Q.Screen.Active = 0;
+
+	call Update.AEE.Track.Status.Displays.And.Tallies (0, 0);
+
+end EXIT.AUDIO.EVENT.EDITOR;
+
+STUFF.PERICOM.FKEYS: proc swapable;	/*	loads ESC seqs into F17 - F23	*/
+	dcl i	fixed;
+
+	stuff.fkey: proc (key#,code);
+		dcl key#	fixed;	/*	index # of FKEY (1-23)	*/
+		dcl code	fixed;	/*	which logical FKEY to map to (1-8)	*/
+
+		if key#<>0 then do;
+			call pc(ESC); call pc(ASC.AT); call pc(LOWER.A + key# - 1);
+			call pc(SLASH);
+			call pc(ESC); call pc(ASC.EXCLAM); call pc(LOWER.E + code - 1);
+			call pc(SLASH);
+		end;
+	end stuff.fkey;
+
+	dcl map data (20,21,22,23,17,18,19,0);	/*	pericom fkey #s for each of 8 logical fkeys	*/
+
+	if (mg600) and (not termulator) then do;
+
+		do i = 1 to 8;
+			call stuff.fkey(map(i-1),i);
+		end;
+
+		call tty_wait;
+	end;
+
+end STUFF.PERICOM.FKEYS;
+
+RESTORE.AEE.TO.PRIOR.LAYOUT: proc swapable;	/*	Put up panels that were up when we last were here	*/
+	dcl (next,more,row)	fixed;
+	dcl status				fixed;
+	dcl (i,j)				fixed;
+
+	Panel.Bits=GID(Saved.AEE.Panel.Bits);
+	call Highlight.Graphics.Button.Table(Panel.Menu.Table,Panel.Bits,2,0);
+
+	more=1;
+	do while more<>0;		/*	loop until all prior panels are re-opened	*/
+		more=0; row=100;
+
+		call GID(AEE.Screen.Layout);	/*	set up MAM & MAL ptrs	*/
+
+		do i=0 to 7;		/*	look for next panel to reopen	*/
+			if (status&Bits(i))=0 then do;		/*	have not finished with this word yet	*/
+				if (read(md)&"37")<>0 then do;	/*	# of lines<>0, represents a real panel	*/
+					more=more+1;						/*	advance # of panels left to open	*/
+					j=shr(read(md),5)&"37";			/*	extract panel position	*/
+					if j<row then do;					/*	top most of remaining panels, so far	*/
+						next=i;							/*	save index	*/
+						row =j;							/*	and its starting row	*/
+					end;
+				end;
+				else status=status|Bits(i);		/*	done with panel word, turn on bit	*/
+			end;
+
+			write(ATNV)=read(mdi);					/*	advance to next word	*/
+		end;
+
+		if more<>0 then do;							/*	have determined next panel to open	*/
+			more=more-1;								/*	one less panel left to open	*/
+
+			status=status|Bits(next);				/*	done with panel word, turn on bit	*/
+			next=GID(AEE.Screen.Layout+next);	/*	get panel info word	*/
+
+			I=next&"37";								/*	# of lines in panel	*/
+			next=shr(next,10)&"17";					/*	extract panel id #	*/
+
+			call Open.Panel(Next,I);				/*	open the panel	*/
+		end;
+	end;
+
+end RESTORE.AEE.TO.PRIOR.LAYOUT;
+
+REBOOT.AUDIO.EVENT.EDITOR: proc	fixed public swapable;	/*	restarts screen without actually ever leaving	*/
+
+	/*	if re-booting screen while it is running, must do some	*/
+	/*	special clean up														*/
+
+	if AEE.Screen.State = 1 then do;
+
+		/*	if screen is already active, we need to save a few state	*/
+		/*	vars to simulate a call to EXIT.AUDIO.EVENT.EDITOR:		*/
+
+		PID(Saved.AEE.Time.Format, AEE.Time.Format);
+		PID(Saved.AEE.Panel.Bits, Panel.Bits);	/*	used to restore last selected user defined panel layout button	*/
+
+		if Record.Group <> 0 then do;
+			if Record.Recording.State <> 0
+			then call STOP.RECORD.RECORDING;	/*	force stop recording	*/
+			if Lod.Punch.In.Tracks <> 0 then do;	/*	perform graceful punch	*/
+				Lod.Punch.In.Tracks	= 0;				/*	when leaving screen		*/
+				new.motion				= 1;
+			end;
+		end;
+
+		if Protocol.Recording.State = 0
+		then call Stop.DTD.Playback;			/*	stop triggered output	*/
+
+		if Big.Time.Display.Mode=BT#SMPTE
+		then call Get_Disable(Get.SMPTE.Event);
+
+	end;
+
+	if Initialize.Audio.Event.Editor=0
+	then return 0;									/*	was not enough trd memory available	*/
+
+	call Initialize.Screen.Manager(AEE.Smgr.Len);	/*	Smgr data sectors	*/
+	call Set.Screen.Animate(false);
+	call Clear.Term;
+
+	/*	reset group id #'s	*/
+
+	Project.Manager.Group = 0;
+	Shuttle.Group			 = 0;
+	Cue.Group				 = 0;
+	Cue.Menu.Group			 = 0;
+	Record.Group			 = 0;
+	Seq.Group				 = 0;
+	Sync.Group				 = 0;
+	Routing.Group			 = 0;
+	Storage.Group			 = 0;
+	Motion.Group			 = 0;
+	Optical.Group			 = 0;
+
+	/*	if first time we are up and running, then	*/
+	/*	display welcome message							*/
+
+	if AEE.Screen.State = 0 then do;
+		call Display.Notice(NT#Welcome,ATTR#Normal,NulStr,0,0,0);
+	end;
+
+	AEE.Screen.State = 1;
+
+	call Open.Panel.Menu.Panel;
+
+	return 1;
+end REBOOT.AUDIO.EVENT.EDITOR;
+
+AUDIO.EVENT.EDITOR.SCREEN: proc (arg) returns (fixed) public swapable;
+	dcl arg					fixed;
+	dcl event				fixed;
+	dcl quit					fixed;
+	dcl waste(2)			fixed;
+	dcl error.time			fixed;
+	dcl error.displayed	fixed;
+	dcl first.update		fixed;
+
+	if inc.aud=0 then do;
+		call feature.not.available;
+		return (-1);
+	end;
+
+	if (mg600)=0 then do;
+		call no.graphics.terminal;	/*	graphics terminal required for this screen	*/
+		return (-1);					/*	screen not activated	*/
+	end;
+
+	/*	dtd.retries=0;	*/						/*	if we had disconnected earlier, clear counter so we can try again	*/
+
+	if Reboot.Audio.Event.Editor=0 then return (-1);	/*	not enough TRD area to get started	*/
+
+	first.update = Update.Audio.Event.Editor;				/*	Get current project, song length, etc., if available	*/
+
+	if not termulator then do;
+		call Stuff.Pericom.FKeys;
+	end;
+
+	Q.Screen.Active = 1;
+
+	call Restore.AEE.To.Prior.Layout;						/*	now Put up panels that were up when we last were here	*/
+
+	/*	turn on tally output lines when starting screen	*/
+
+	call Update.AEE.Track.Status.Displays.And.Tallies (0, 0);
+
+	call Get_Enable(Get.Ertyp);
+	call Get_Enable(Get.Program.Exit);
+	call Get_Enable(Get.DTD.Info);
+	call Get_Enable(Get.DTD.Scrolling);
+	call Get_Enable(Get.New.Seq.Info);
+	call Get_Enable(Get.Prm.Info);
+
+	do while quit = 0;
+		if event <> Get.Null.Event then do;
+
+			if first.update = 0 then do;
+				first.update = Update.Audio.Event.Editor;	/*	Get current project, song length, etc.	*/
+			end;
+
+			if Screen.Event.Group = 0 then do;
+
+				if Screen.Event.Code = Get.Screen.Event then do;
+					if  (Screen.Event.Id = Raw.Screen.Id)
+					then call Animate.Locked.Item(Locked.Item);
+
+					else if Screen.Event.Id = Panel.Menu.Mouse.Hole then do;
+						if Screen.Event.Info = S#MouseSelect then do;
+							if Locked.Item <> (-1)	/*	turn off any locked item	*/
+							then call Lock.Mouse.To.Item(-1);
+							quit = 1;
+						end;
+					end;
+				end;
+
+				else if (Screen.Event.Code = Get.Arrow.Key)
+				then do;				/*	handle raw arrow keys	*/
+					/*	U.ARR,D.ARR,L.ARR,R.ARR	*/
+					/*	Just ignore for now		*/
+					/*	call Flush.Arrow.Keys.From.D50.Buf;	*/
+				end;
+
+				else if (Screen.Event.Code = Get.Program.Exit)
+				then do;				/*	handle the special function keys here	*/
+
+					if  (Screen.Event.Info >= ASC.FKEY1)
+					and (Screen.Event.Info <= ASC.FKEY4)
+					then do;			/*	handle 1st 4 function keys	*/
+						do case (Screen.Event.Info-ASC.FKEY1);
+							call Lock.Mouse.To.Item(0);	/*	FKEY1 to CUE  IN	*/
+							call Lock.Mouse.To.Item(2);	/*	FKEY2 to EDIT IN	*/
+							call Lock.Mouse.To.Item(3);	/*	FKEY3 to EDIT OUT	*/
+							call Lock.Mouse.To.Item(1);	/*	FKEY4 to CUE  OUT	*/
+						end;
+					end;
+
+					else if (Screen.Event.Info >= ASC.FKEY5)
+					and     (Screen.Event.Info <= ASC.FKEY8)
+					then do;
+						do case (Screen.Event.Info-ASC.FKEY5);
+							call Handle.Play.From.FKey;	/*	FKEY 5	*/
+							call Handle.Pause.FKey;			/*	FKEY 6	*/
+							call Handle.Play.To.FKey;		/*	FKEY 7	*/
+							if termulator
+							then Scrub.Scan.Mode = Scrub.Scan.Mode xor 1;	/*	FKEY 8 on MAC	*/
+						end;
+					end;
+
+					else do;
+						if Locked.Item <> (-1)			/*	turn off any locked item	*/
+						then call Lock.Mouse.To.Item(-1);
+						quit = 1;							/*	ignore others for now		*/
+					end;
+
+					call Flush.FKeys.From.D50.Buf;	/*	don't let repeated FKEYs pile up	*/
+				end;
+
+				else if Screen.Event.Code = Get.Prm.Info then do;
+					if (Screen.Event.Info&64) <> 0			/*	tr vol, routing	*/
+					then Seq.Refresh = Seq.Refresh \ 64;	/*	set bit to update track vols/routs in seq panel	*/
+					if (((Screen.Event.Info&256) <> 0)		/*	new seq name set	*/
+					&&  (Motion.Group				  <> 0))
+						call Update.Motion.Panel.Seq.Name;
+				end;
+
+				else if Screen.Event.Code = Get.Ertyp then do;
+					error.time = Real.Milliseconds;
+					error.displayed = true;
+					call Handle.System.Error.Codes(Screen.Event.Info);
+				end;
+
+				else if Screen.Event.Code = Get.Smpte.Event then do;
+					call Refresh.Big.Time.Display;
+				end;
+
+				else if (Screen.Event.Code = Get.DTD.Info) then do;
+
+					call check.next.event;
+
+					if (Screen.Event.Info&1)<>0		/*	change in dig xfer mode			*/
+					then call Highlight.Graphics.Button.Table(Dig.On.Off.Table, DTD.Xfer.Mode, 2, 0);
+
+					if  ((Screen.Event.Info&8)<>0)	/*	if scrolling event occurred	*/
+					then do;
+						call Sample.DTD.Disk.Time(DTD.Play.State);
+						call check.next.event;
+					end;
+
+					/*	Set any.recording.happened if we have just done	*/
+					/*	an optical-to-dtd transfer via protocol:			*/
+
+					if (Screen.Event.Info&32768)<>0
+					then call PID(Any.Recording.Happened, 1);
+
+					if (Screen.Event.Info&16)<>0 then do;	/*	New DTD Record/Arm activity	*/
+
+						/*	See if any protocol recording happened so we can	*/
+						/*	update the project manager:								*/
+
+						if ((Protocol.Recording.State & 2) <> 0)
+						or (Lod.Punch.In.Tracks				  <> 0)
+						then call PID(Any.Recording.Happened, 1);
+
+						/*	Only process DTD punch in/out events here	*/
+						/*	if they did not originate from the			*/
+						/*	protocol:											*/
+
+						if  (Record.Group				 <> 0)	/*	if record group is open					*/
+						and (Record.Recording.State <> 0)	/*	and we started the recording			*/
+						then do;										/*	then change Record Recording State	*/
+							call Fetch.DTD.Drive.Status(waste);
+							if (waste(0) = 0)
+							then call Stop.Record.Recording;
+							else call Set.Record.Recording.State(waste(0));
+						end;
+
+						/*	Update the record panel READY and RECORD buttons	*/
+						/*	for change in status from either record panel		*/
+						/*	events or protocol events or gpi events				*/
+
+						else if Record.Group <> 0
+						then call Display.AEE.Record.Ready.Buttons;
+
+						/*	Update the project manager (for used & fat bars)	*/
+						/*	after doing protocol or AEE recording:					*/
+
+						if  (Record.Recording.State		=	0)	/*	if no AEE recording					*/
+						and (Protocol.Recording.State		=	0)	/*	and no protocol recording			*/
+						and (Lod.Punch.In.Tracks			=	0)	/*	and no gpi		 recording			*/
+						and (GID(Any.Recording.Happened)	<>	0)	/*	but some recording had occurred	*/
+						then do;
+							call CHECK.FOR.POST.RECORD.UPDATE;
+							call UPDATE.ALLOCATE.TIMES;
+						end;
+					end;
+
+					if (Screen.Event.Info&32)<>0 then do;	/*	Command finished code; update all panels/new project	*/
+						call Update.Audio.Event.Editor;
+					end;
+
+					/*	for &64 - see Get.Next.AEE.Screen.Event (AUD_GLOB)	*/
+
+					if (Screen.Event.Info&128)<>0 then do;		/*	128 - new reel	*/
+						call Display.Current.Reel;					/*	selected			*/
+					end;
+
+					if (Screen.Event.Info&256)<>0 then do;		/*	256 - new cue	*/
+						call Display.Cue.And.Shuttle.Displays;	/*	display it		*/
+					end;
+
+					if (Screen.Event.Info&512)<>0 then do;		/*	512: new anchor time	*/
+						call Update.Shuttle.For.New.Anchor;
+					end;
+
+					if (Screen.Event.Info&1024)<>0 then do;	/*	1024: new fine bar region	*/
+						call Update.Shuttle.Fine.Bar.Region;
+					end;
+
+					if (Screen.Event.Info&2048)<>0 then do;	/*	2048: new coarse bar region	*/
+						call Update.Shuttle.Coarse.Bar.Region;
+					end;
+
+					/*	4096 is used for various DTD constants:	*/
+					/*		AUDITION mode change							*/
+					/*		CUE PLACE TRACK change						*/
+
+					if (Screen.Event.Info&4096)<>0 then do;
+						/*	Update items affected by current.cue.audition:	*/
+						call DEPOSIT.AUDITION.BUTTON.DISPLAY;
+						call DEPOSIT.CUE.TIMES.DISPLAY;
+						call DEPOSIT.SHUTTLE.TIME.DISPLAY (AEE.Shuttle.Anchor.Time);
+						/*	Update place track display:							*/
+						call DISPLAY.AEE.PLACE.TRACK;
+					end;
+
+					/*	Update cue directory when cue is saved or unsaved:	*/
+
+					if (Screen.Event.Info&8192)<>0 then do;
+						call Update.Cue.Menu.Table(0,-1);
+					end;
+
+					/*	Update various items in the project manager	*/
+					/*	when PMGR values are changed from the			*/
+					/*	protocol:												*/
+
+					if (Screen.Event.Info&16384)<>0 then do;
+						/*	Display.New.Project.Info has been set for us	*/
+						/*	so there is nothing else we need to do:		*/
+					end;
+
+				end;
+
+				else if Screen.Event.Code = Get.New.Seq.Info then do;
+
+					if (Screen.Event.Info&1) <> 0 then do;	/*	New sequence	*/
+						Place.Ptr = 0;								/*	New sequence	*/
+						if Motion.Group <> 0
+						then do;
+							call Read.In.Entire.AEE.Locate.Stack(1);
+							call Update.Motion.Panel.Seq.Name;
+						end;
+					end;
+
+					if (Screen.Event.Info&2) <> 0				/*	for timbre names	*/
+					then Seq.Refresh = Seq.Refresh\(8\16\32\64);	/*	update names, update m/c info, force update since cues may differ if note records do not.	*/
+
+					if (Screen.Event.Info&4) <> 0				/*	new notes in seq	*/
+					then Seq.Refresh = Seq.Refresh\(4\8);
+
+					if (Screen.Event.Info&8) <> 0 then do;	/*	new seq constants	*/
+						call Set.AEE.Time.Format(AEE.Time.Format);	/*	sample syncl variables for smgr, & set formats	*/
+						if Sync.Group <> 0
+						then call Update.Sync.Panel(false);		/*	update sync, click fields, bpm, speed, etc.	*/
+						if (Optical.Group <> 0) and (GID(AEE.Opt.Width.Mode)=0)
+						then call Update.Optical.Panel;			/*	update Opt -> DTD panel	*/
+						if (Cue.Menu.Group <> 0)					/*	if showing cue directory	*/
+						then call Update.Cue.Menu.Table(0,-1);	/*	update cue menu in case showing time display	*/
+						Seq.Refresh = Seq.Refresh \ (8\16);		/*	re-enter all seq panel values on possible change to live click track	*/
+					end;
+
+					if (Screen.Event.Info&(16\8)) =16 then do;	/*	new tempo/meter	*/
+						if Sync.Group <> 0								/*	if not above	*/
+						then call Update.Sync.Panel(false);			/*	update sync, click fields, bpm, speed, etc.	*/
+					end;
+
+					if (Screen.Event.Info&(32\64)) <> 0 then do;	/*	check for cursor or sequence panel scrolling	*/
+						call Handle.Play.Scroll.Event;
+					end;
+
+					if ((Screen.Event.Info&128)<>0) then do;		/*	Motion change	*/
+
+						/*	set remote box tallies:	*/
+
+						call check.next.event;
+
+						/*	highlight motion panel	*/
+
+						call check.next.event;
+						if Motion.Group <> 0
+						then call Highlight.AEE.Sequencer.Motion.Panel;
+
+						/*	refresh big time display	*/
+
+						call check.next.event;
+						call Refresh.Big.Time.Display;
+
+						call check.next.event;
+						if ((Play = 0)\(Move <> 0))	/*	if sequencer is stopped	*/
+						then do;
+							if   (Cue.Menu.Group <> 0)	/*	clean up after placing	*/
+							and  (Place.Ptr       > 0)
+							then call STOP.REAL.TIME.CUE.PLACEMENT;
+
+							if P.Time.Base.Mode <> 0	/*	reset blocking flag on	*/
+							then do;							/*	sequencer stopping		*/
+								P.Time.Base.Mode = 0;
+								AEE.Cue.Blocking.Going.On = 0;
+								if Cue.Menu.Group <> 0
+								then call CHECK.CUE.PLACE.MODE.ON.SEQUENCER.START.OR.STOP;
+								if Record.Group <> 0
+								then call CHECK.FOR.POST.RECORD.UPDATE;
+							end;
+						end;
+
+						else do;								/*	sequencer is going		*/
+							if P.Time.Base.Mode = 0 then do;	/*	detect start		*/
+								P.Time.Base.Mode = 1;			/*	sequencer moving	*/
+								if Cue.Menu.Group <> 0
+								then call CHECK.CUE.PLACE.MODE.ON.SEQUENCER.START.OR.STOP;
+							end;
+						end;
+
+					end;
+
+					if ((Screen.Event.Info&(8\128))<>0)	/*	motion or constant change	*/
+					then do;										/*	for mark start info		*/
+						if Motion.Group <> 0 then do;
+							call check.next.event;
+							call Update.Motion.Panel.Mark.Start.Info;
+							call check.next.event;
+						end;
+					end;
+
+					if ((Screen.Event.Info&256)<>0) then do;	/*	track button display change	*/
+
+						call check.next.event;
+
+						if Motion.Group <> 0
+						then call Highlight.AEE.Sequencer.Track.Display;
+
+						call check.next.event;
+
+						Seq.Refresh = Seq.Refresh \ 128;	/*	set bit to update track solos in seq panel	*/
+
+					end;
+
+					if (Screen.Event.Info&512)<>0	/*	New Synclavier sync	*/
+					then do;
+						call Highlight.Graphics.Button.Table(SMPTE.On.Off.Buttons,Bits(SMPTE.OnOff=0),2,0);
+						call Update.Sync.Panel(false);	/*	update sync, click fields, bpm, speed, etc.	*/
+					end;
+
+					if (Screen.Event.Info&1024)<>0	/*	new control inputs from d34/d35 remote control interface	*/
+					then do;
+						call Check.Q.Screen.Remote.Control.Inputs;
+					end;
+
+					/*	Handle possible change of DTD safe/ready:	*/
+
+					if (Screen.Event.Info & 4096)<>0
+					then do;
+						call Update.AEE.Track.Status.Displays.And.Tallies (0,-1);
+					end;
+
+					if (Screen.Event.Info&8192)<>0	/*	scroll to note after VITC placing	*/
+					then Seq.Refresh = Seq.Refresh \ 2;
+
+					/*	Update screen on change of input/repro/auto	*/
+					/*	from protocol:											*/
+
+					if (Screen.Event.Info & 16384)<>0
+					then do;
+						call Update.AEE.Track.Status.Displays.And.Tallies (-1,0);
+					end;
+				end;
+
+				event = Get.Null.Event;
+			end;	//	end of if (Screen.Event.Group == 0)
+
+			else if Screen.Event.Group = Record.Group
+			then event = Get.Record.Event(event);
+
+			else if Screen.Event.Group = Shuttle.Group
+			then event = Get.Shuttle.Event(event);
+
+			else if Screen.Event.Group = Cue.Group
+			then event = Get.Cue.Event(event);
+
+			else if Screen.Event.Group = Cue.Menu.Group
+			then event = Get.Cue.Menu.Event(event);
+
+			else if Screen.Event.Group = Storage.Group
+			then event = Get.Storage.Event(event);
+
+			else if Screen.Event.Group = Panel.Menu.Group
+			then event = Get.Panel.Menu.Event(event);
+
+			else if Screen.Event.Group = Seq.Group
+			then event = Get.Sequencer.Event(event);
+
+			else if Screen.Event.Group = Sync.Group
+			then event = Get.Sync.Event(event);
+
+			else if Screen.Event.Group = Routing.Group
+			then event = Get.Routing.Event(event);
+
+			else if Screen.Event.Group = Project.Manager.Group
+			then event = Get.Project.Manager.Event(event);
+
+			else if Screen.Event.Group = Motion.Group
+			then event = Get.Motion.Event(event);
+
+			else if (Screen.Event.Group = Optical.Group)
+			or		  (Screen.Event.Group = Optical.Window.Grp)
+			then event = Get.Optical.Transfer.Event(event);
+
+			else event = Get.Null.Event;
+		end;
+
+		else do;
+			if (error.displayed <> 0) then do;		/*	An error displayed; time to erase it?	*/
+				if ((Real.Milliseconds-error.time) ilt 5000) then ;
+				else do;
+					call cpos(23,0); call erase.to.end.of.line;
+					error.displayed = false;
+				end;
+			end;
+
+			if (notice.displayed <> 0) then do;		/*	An error displayed; time to erase it?	*/
+				if ((Real.Milliseconds-notice.time) ilt 5000) then ;
+				else do;
+					call cpos(24,0); call erase.to.end.of.line;
+					notice.displayed = false;
+				end;
+			end;
+
+			event = Get.Next.Screen.Event; 
+		end;
+	end;
+
+	call Exit.Audio.Event.Editor;
+
+	return 0;
+
+end AUDIO.EVENT.EDITOR.SCREEN;

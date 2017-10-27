@@ -1,0 +1,86 @@
+/* 26-INIT  $TITLE  Startup/Initialization Code */
+
+/* Copyright (c) 1985 by New England Digital Corporation */
+
+/* This program represents proprietary information and may not be released
+   publically without written permission from New England Digital Corp. */
+
+dcl a floating;
+dcl i fixed;
+
+mem.siz     =memory.size; /* look up configured memory size */
+clock.inc   =10/d03_speed;                    /* compute real time clock period */
+any.kbd     =(d130_present and d160_present); /* configured for keyboard */
+dq640       =((terminal.type=t#dq640) and (terminal.graphics=g#dq640));
+restore.flag=false; /* turn off restore-display-after-clear function */
+enable;            /* start interrupts flying now */
+free.base=core(c#contab+c#vstart)+core(c#contab+c#vlngth)+core(c#contab+c#stklen);
+if free.base IGE ((60*1024)-1928) then do;
+   /* this check will catch errors where the program is too large for 60K systems */
+   clear;
+   ps('SYSTEM PROGRAMMING ERROR:  This module of SFM is too large to run.');
+   call exit(-1); /* quit with stop status */
+end;
+free.len=mem.siz-(free.base+1024+914); /* words available for timbre */
+examount=core(LOC.EMSIZE);             /* compute sectors of external memory in system */
+
+overlayed.from.sfm=true;      /* assume we came from SFM */
+have.sound        =false;     /* and there is no current sound file */
+if core(LOC.RST)<>3 then do;  /* did not overlay from SFM */
+   fcb.ptr=file.block.loc;    /* get start of SFM FCB table */
+   do i=0 to max.file.blocks*file.block.len-1;
+      core(fcb.ptr+i)=0;      /* zero FCB table */
+   end;
+   overlayed.from.sfm=false;
+   free.len=free.len+914;     /* don't need to preserve SFM high core stuff */
+   core(LOC.RST)=3;
+end;
+else if f.name.bytes<>0 then have.sound=true; /* we do have a current sound */
+
+if dq640 then punits(799,479);
+else          punits(639,479); /* initialize display units */
+
+/* locate Synclavier files (.STAB-x, .SCON-x, .SPLT-x, .SRTP-x) */
+
+if not openfile(STAB.FILE,loc.p3,0)
+then call file_missing(STAB.FILE);
+
+if not openfile(SCON.FILE,loc.rt,0)
+then call file_missing(SCON.FILE);
+
+if not openfile(SPLT.FILE,loc.mplt,0)
+then do; /* okay, but set to zero */
+   core(loc.mplt+1)=0;
+   core(loc.mplt)  =0;
+   core(loc.mplt-1)=0;
+end;
+
+if not openfile(location(LOC.SYNRTPN),loc.p2,0)
+then call file_missing(location(LOC.SYNRTPN));
+
+/* $PAGE */
+
+/* generate fixed-point sine table for CALCWAVE */
+a=2*3.14159265/256.; /* phase increment */
+do i=0 to 255; stab(i)=32768+int(32767.5*sin(i*a)); end;
+
+/* initialize system parameters to default values */
+load free.len-192; div frame.length; /* compute max frames available */
+avail.frames  =res;
+frames        =0; /* no frames analyzed to start */
+ncoefs.use    =default.ncoefs; 
+ncoefs.stored =0; /* no coefs computed yet */
+partial.tuning=default.tuning;
+noise.floor   =default.floor;
+if have.sound then do; /* init pitch window and pcn */
+   pitch.window=default.window;
+   pcn         =float(location(octave));
+   if      pcn<0       then pcn=0; /* limit to 32.7 Hz to 20 kHz */
+   else if pcn>9.03076 then pcn=9.03076;
+end;
+track.pitch   =default.pitch;
+use.phase     =default.phase;
+timbre.name(0)=0; /* null name to start */
+
+
+call main_menu(true); /* start up menu (giving protection info) */

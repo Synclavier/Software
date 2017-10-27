@@ -1,0 +1,696 @@
+/* $D $TITLE  :UTILCAT:FORMCOPY  F O R M C O P Y  Format and Copy Utility */
+
+/* Format and Copy utility: for floppies, cartridge tapes, and winchesters.
+
+   Actual format routines are based on old versions of FORMAT and
+   DUPLICATE developed by Chris Walker 1979-1981.
+
+   Modified:
+         Aug 1983  KJC   Cartridge tape routines integrated
+         Sep 1983  KJC   Altered user interface and structure to allow multidisk/tape copies
+      20 Dec 1983  KJC   Cleaned up copy routines & modularized FORMCOPY
+      23 Dec 1983  KJC   Removed special single disk copy routine & integrated the same into normal copy routine
+       3 Jan 1984  KJC   Integrated WINDUMP into FORMCOPY
+      17 Jan 1984  KJC   Totally redesigned/rewrote the user interface
+      17 Feb 1984  KJC   Fixed GET_SIZE bug and made CC work with floppies
+      12 Dec 1984  KJC   Changed to work to -6 configuration
+      22 May 1985  KJC   Added ordered SELECT
+      31 May 1985  KJC   Added Winchester format selection menu
+      27 Feb 1986  KJC   SCSI tape drive integration
+      11 Mar 1986  LSS   Changed to support -7 catalog structure
+      30 Oct 1986  LSS   Added alternate catalog code
+      22 Jan 1987  KJC   Added MOVE option
+      10 May 1988  KJC   Macintosh support
+      17 Jul 1990  LSS   Added format of 5-inch optical media
+      05 Oct 1996  CWJ   Changed date; rebuilt for Tahiti -4
+      31 Oct 1996  CWJ   Added features for delete, file type selection
+		08 Feb 1999  TY	 Fixed "Not enough memory to copy to or from tapes" bug.
+*/
+
+configuration modelD, NOmuldiv, memory 60*1024; /* $f */
+pdl 1024;
+
+insert ':-xpl:reldat';	 /* get releasae date */
+insert ':-xpl:literals'; /* general literals */
+insert ':-xpl:asciilit'; /* ASCII literals */
+insert ':-xpl:scsicmds'; /* SCSI commands (for optical library) */
+insert ':-xpl:termutil'; /* terminal management library */
+insert ':-xpl:tapebrdg'; /* tape drive device drivers */
+insert ':-xpl:catrtns'; /* catalog routines */
+insert ':-xpl:devutil'; /* device handlers */
+insert ':-xpl:catutil'; /* catalog utilities */
+insert ':-xpl:optical'; /* optical routines (for Find_Device) */
+insert ':-xpl:strings'; /* string processing */
+insert ':-xpl:plotlib'; /* for graphics */
+insert ':utilcat:literals'; /* utilcat literals */
+
+library ':utilcat:libs:format'; /* format device */
+library ':utilcat:libs:copy'; /* copy to/from device */
+
+dcl format proc(fixed, fixed array) returns(fixed) external; /* format device */
+dcl copy   proc(fixed, fixed, fixed array, fixed) external; /* copy (also performs move & delete functions) */
+
+/* Global variables */
+
+dcl win.was.formatted boolean external; /* TRUE if (0,5,0) or (0,0) W0: disk was formatted */
+dcl cpmflag           boolean external; /* TRUE => format destination in CP/M rather than XPL format */
+
+dcl formflag  boolean public; /* TRUE => destination should be formatted before copying */
+dcl eraseflag boolean public; /* TRUE => erase DEST catalog before copy */
+dcl alphaflag boolean public; /* TRUE => cat should be alphabetized before copying */
+dcl pickflag  boolean public; /* TRUE => activate selective copy mode */
+dcl moveflag  boolean public; /* TRUE => move files from source to dest (erase copied files from source) */
+dcl delflag   boolean public; /* TRUE => delete files only; do not move or copy */
+
+/* Buffer Variables and Areas */
+
+dcl buf.loc                 fixed; /* address in core of the start of the dynamic buffer */
+dcl max.buf.size            fixed; /* upper limit in words on the size of the buffer */
+dcl catalog (c#dir_max - 1) fixed; /* catalog buffer */
+
+/* Command and State Variables */
+
+dcl mode           fixed; /* operational mode: 1 = format, 2 = copy, 3 = format and copy */
+dcl mode.name (8)  fixed; /* name of the mode */
+dcl sour           fixed; /* device number of source drive */
+dcl dest           fixed; /* device number of destination drive */
+dcl bottom.limit   fixed; /* limit on how far we can travel down the menu */
+dcl valid_line (9) boolean; /* TRUE if said line on the menu can be moved to */
+dcl no_CC          boolean; /* TRUE if there is no current catalog */
+dcl no_AC          boolean; /* TRUE if there is no alternate catalog */
+dcl format_only    boolean; /* TRUE if there aren't enough devices configured to COPY */
+dcl allow_d10_form boolean; /* TRUE if okay to format the D10 optical media */
+dcl allow_d11_form boolean; /* TRUE if okay to format the D11 optical media */
+
+/* modes: */
+
+dcl input_length lit '24'; /* maximum length of input string */
+dcl m.format lit '"1"'; /* format bit */
+dcl m.copy   lit '"2"'; /* copy bit */
+
+/* $subtitle Utility routines */
+
+print.yn:  proc (flag); /* indicate Yes or No for flag */
+   dcl flag boolean;
+
+   if flag then pstring ('Yes');
+   else         pstring ('No ');
+end print.yn;
+
+configured: proc (level) returns (boolean); /* returns TRUE if the device associated with said level is configured */
+   dcl level fixed; /* level number of device in question */
+
+   if level = -1 then return (true); /* FIND_DEVICE doesn't know about -1 (AC) */
+   else return (find_device (level) <> 0); /* look it up in the configuration */
+end configured;
+
+next.level: proc (level) returns (fixed); /* get next valid catalog number */
+   dcl level fixed; /* current level */
+
+   if level = -1 then level = 0; /* move AC back in range */
+   level = ((level + 1) mod 12); /* look at next catalog */
+   if level = 0 then level = -1; /* change SC to AC (SC isn't valid) */
+
+   return (level); /* return new level */
+end next.level;
+
+print.cat: proc (level, level.name) returns (boolean); /* print the catalog of LEVEL */
+   dcl level      fixed; /* level we want the catalog of */
+   dcl level.name fixed array; /* name of that level */
+
+   if not disk_check (level) then do; /* make sure there's a floppy disk in LEVEL */
+      pcmd ('Please insert a floppy disk into '); call name (level); pstring (' and try again.');
+      return (false); /* no need to update the screen */
+   end;
+
+   if tape (level) then do; /* is this the tape drive? */
+      call load (level); /* load the tape */
+      call check_tape; /* check the status */
+   end;
+
+   clear_screen; pstring (level.name); pstringr (' Catalog:');
+   call print_catalog (level);
+   return (true); /* update the screen */
+
+end print.cat;
+
+/* $subtitle Start Format and Copy Phases */
+
+start.up: proc returns (boolean); /* FORMAT and COPY are invoked here */
+   dcl no_error boolean; /* TRUE if we had no errors in this routine */
+   dcl i        fixed;
+
+   no_error = false; /* assume we have an error */
+
+   if delflag then i = true;   /* if deleting, fake dest being ready... */
+   else i = disk_check (dest); /* see if there's a floppy disk in the destination */
+
+   if not i /* make sure there's a floppy disk in the destination */
+   then do; erase_command; crlf; erase_line; pcmd ('Please insert a floppy disk into '); call name (dest); pstring (' and try again.'); end;
+   else if (i and d#protect) <> 0 /* make sure it isn't write-protected */
+   then do; erase_command; crlf; erase_line; pcmd ('The floppy disk in '); call name (dest); pstring (' is write-protected.'); end;
+   else if mode = m.format then do; /* format only */
+		if (optical (dest) != 0)			/* double check again for optical format */
+		{
+			call init_optical_controller; /* set up the optical controller type again to confirm */
+			
+			allow_d10_form = false;
+			allow_d11_form = false;
+			
+			i = find_device (10); /* check for the D10 optical device */
+			if ((i <> null) and ((shr(core(i +s#devtyp),10) and 1) = 1)) /* if type is 5-inch magneto */
+			then allow_d10_form = true; /* then it is okay to format the optical */
+			
+			i = find_device (11); /* check for the D11 optical device */
+			if ((i <> null) and ((shr(core(i +s#devtyp),10) and 1) = 1)) /* if type is 5-inch magneto */
+			then allow_d11_form = true; /* then it is okay to format the optical */
+			
+			if ((dest == 10 && allow_d10_form == false)
+			||  (dest == 11 && allow_d11_form == false))
+			{
+				erase_command; crlf; erase_line;
+				pcmd ('This type of optical device cannot be formatted.'); flush_term;
+				return (false); /* we had an error */
+			}
+		}
+		
+      if tape (dest) then do; /* is this a tape drive? */
+         call load (dest); /* load the tape */
+         call check_tape; /* check the status */
+         if (tape_status and write_protect) <> 0 then do; /* is the tape write protected? */
+            erase_command; crlf; erase_line;
+            pcmd ('This tape is write-protected and hence cannot be formatted.'); flush_term;
+            call unload (dest, true); /* unload the tape, wait for unload */
+            return (false); /* we had an error */
+         end;
+      end;
+
+      if ((max.buf.size ILT min.buf.secs*256) and (dest < 6)) /* not enough memory to do formatting */
+      then do; erase_command; crlf; erase_line; pcmd ('Not enough memory available to perform FORMAT operation.'); end;
+      else do; /* attempt the format */
+         call format (dest, location (buf.loc));
+         erase_command; /* go to command line */
+         no_error = true; /* we made it */
+      end;
+   end;
+
+   else do; /* no, do a copy */
+      if (tape (sour) or tape (dest)) and (max.buf.size ilt block_size) /* is there enough memory to use the tape drive? */
+      then do; erase_command; crlf; erase_line; pcmd ('Not enough memory to copy to or from tapes.'); end;
+      else if not disk_check (sour) /* make sure there's a floppy disk in the source */
+      then do; erase_command; crlf; erase_line; pcmd ('Please insert a floppy disk into '); call name (sour); pstring (' and try again.'); end;
+      else do; /* attempt the copy */
+         if (mode and m.format) <> 0 /* format and copy? */
+         then formflag = true; /* yes, set formflag */
+         else formflag = false; /* no, don't allow a format */
+         call copy (sour, dest, location(buf.loc), max.buf.size); /* initiate the copy */
+         no_error = true; /* we made it with no errors */
+      end;
+   end;
+
+   if no_error then do; /* any errors? */
+      pstring ('Press RETURN to continue ->');
+      clear_typeahead; i = rchar;
+   	  if (terminal.graphics <> 0) then clear;
+   end;
+
+   return (no_error);
+
+end start.up;
+
+/* $subtitle Menu processing:  Write the Menu Options to the Screen */
+
+write.options: proc (mode.change); /* write options to menu based on MODE */
+   dcl mode.change boolean; /* TRUE if the mode was just changed or we're rewriting the screen */
+   dcl i           fixed;
+
+   if mode.change then do; /* only do this part if the mode was changed */
+
+      do i = 0 to 9; valid_line (i) = false; end; /* assume we can't move to any lines */
+
+      if mode <> m.format then do; /* if we're copying at all, output these commands */
+
+         pos (10, 0); pstring  ('S View source catalog');
+
+         pos (11, 0);
+         if delflag then do i = 0 to 34; wchar (a.sp); end;
+         else pstring  ('D View destination catalog');
+
+         pos (12, 0);
+         if  ((mode <> m.format)
+         and  (((sour <> 1) and (sour <> -1)) or (mode = m.copy))
+         and  (delflag = false))
+         then pstring  ('I Interchange source & destination');
+         else do i = 0 to 34; wchar (a.sp); end; /* and this one */
+
+         pos (13, 0); pstring  ('A Set alternate catalog');
+      end;
+      else do; /* format only - don't allow these commands */
+         pos (10, 0); do i = 0 to 34; wchar (a.sp); end; /* erase this line */
+         pos (11, 0); pstring  ('D View destination catalog');
+         pos (12, 0); do i = 0 to 34; wchar (a.sp); end; /* this one */
+         pos (13, 0); do i = 0 to 34; wchar (a.sp); end; /* and this one */
+      end;
+
+      pos (10, 54); pstring (mode.name); erase_line; /* always output mode */
+      pos (16, 16); pstring (mode.name); do i = mode.name (0) + 15 to 34; wchar (a.sp); end;
+      valid_line (0) = true; /* we can always move to the mode line */
+      bottom.limit = 0; /* it's at least this */
+   end;
+
+   if delflag then do;
+      pos (13, 54); erase_line;
+   end;
+   else do;
+   pos (13, 54); call name (dest); erase_line; /* always output destination */
+   valid_line (3) = true; /* we can always move to the destination line */
+   bottom.limit = 3; /* it's at least this */
+   end;
+
+   if (mode and m.copy) <> 0 then do; /* only show these if copying/moving/deleting */
+      pos (12, 54); call name (sour); erase_line;
+      valid_line (2) = true;
+      bottom.limit = 2;
+
+      pos (15, 54); call print.yn (pickflag or delflag); erase_line;
+      pos (16, 54); call print.yn (alphaflag or delflag); erase_line;
+
+      if (delflag = false) then do;
+         valid_line (5) = true;
+         valid_line (6) = true;
+         bottom.limit = 6;
+      end;
+
+      pos (17, 54);
+      if mode = m.copy and delflag = false then do; /* show the following if copying or moving but not formating and not just deleting */
+         call print.yn (eraseflag);
+         valid_line (7) = true;
+         bottom.limit = 7;
+      end;
+      else valid_line (7) = false; /* not just copying */
+      erase_line;
+   end;
+
+   else do; /* not copying */
+      pos (12, 54); erase_line;
+      valid_line (2) = false;
+      do i = 5 to 7; /* don't show these lines */
+         pos (i + 10, 54); erase_line; /* erase what's there */
+         valid_line (i) = false; /* and remember we can't move here */
+      end;
+   end;
+
+   pos (19, 54);
+   if ((mode = m.format) and (dest < 6) and (dest > 1)) then do; /* only output format if formatting only */
+      if cpmflag then pstring ('CP/M'); else pstring ('N.E.D.');
+      valid_line (9) = true;
+      bottom.limit = 9;
+   end;
+   else valid_line (9) = false;
+   erase_line;
+end write.options;
+
+/* $subtitle Menu processing:  Write the Menu to the Screen */
+
+write.menu: proc;
+   clear_screen; crlf;
+   pstring  ('F O R M C O P Y  Format and Copy Utility          version of '); pstringr (rel.date); crlf;
+   pstringr ('       To issue a command, press the key that represents that command.');
+   pstringr ('       To change an option, move the cursor over the option and press');
+   pstringr ('       the space bar.'); crlf;
+   pstringr ('-------------------------------------------------------------------------------'); /* line 7 */
+
+   pos (8,0); pstring  ('COMMANDS:'); pos (8,  37); pstringr ('|  OPTIONS:');
+                                      pos (9,  37); pstringr ('|'          );
+                                      pos (10, 37); pstringr ('|  Mode:'   );
+                                      pos (11, 37); pstringr ('|'          );
+                                      pos (12, 37); pstringr ('|  Source:' );
+                                      pos (13, 37); pstringr ('|  Destination:');
+   pos (14,0); pstring ('Q Quit (return to operating system)');
+                                      pos (14, 37); pstringr ('|');
+   pos (15, 37); pstringr ('|  Select:');
+   pstring  ('RETURN Initiate '); pos (16, 37); pstringr ('|  Alphabetic:');
+   pos (17, 37); pstringr ('|  Erase:');
+   pos (18, 37); pstringr ('|');
+   pos (19, 37); pstringr ('|  Disk format:');
+   pos (20, 37); pstringr ('|');
+   pstringr ('-------------------------------------------------------------------------------'); /* line 7 */
+   call write.options (true);
+end write.menu;
+
+/* $subtitle Menu processing:  Change a Menu Option */
+
+change.option: proc (option); /* change an option */
+   dcl option      fixed; /* the option to change */
+   dcl mode.change boolean; /* TRUE if a mode change occurred */
+
+   mode.change = false; /* we haven't changed modes yet */
+
+   do case (option); /* what we do depends on where we are */
+      do; /* case 0: change mode */
+         if format_only /* not enough devices configured to copy? */
+         then pcmd ('Mode cannot be changed; there is no device to copy to.');
+
+         else if (((mode = m.format)  /* if changing from format only with */
+         and       (sour = dest)      /* source = dest?                    */
+         and       ((sour < 2) or (sour >= 6)))
+         or       ((mode = m.format)  /* or if dest is optical, only       */
+         and       (dest = 10)        /* can format, can't copy            */
+         and       (allow_d10_form))  /* optical can ONLY be formatted     */
+         or       ((mode = m.format)  /* or if dest is optical, only       */
+         and       (dest = 11)        /* can format, can't copy            */
+         and       (allow_d11_form))) /* optical can ONLY be formatted     */
+         then pcmd ('Mode cannot be changed without changing the destination.');
+
+         else do;
+            /* copy to move: */
+            if (mode = m.copy and moveflag = false and delflag = false)
+               then moveflag = true;
+            
+            /* move to delete: */
+            else if (mode = m.copy and moveflag = true and delflag = false)
+               then do; moveflag = false; delflag = true; end; /* move to delete */
+
+            /* delete to format and copy: */
+            else if (mode = m.copy and moveflag = false and delflag = true)
+               then do; 
+                  if ((dest = 1) or (dest = -1))  /* if dest = AC or CC */
+                  then delflag = false;           /* then back to copy  */
+                  else do;mode = m.format + m.copy; delflag = false; end;
+               end;
+
+            /* format and copy to format and move: */
+            else if (mode = m.format + m.copy and moveflag = false)
+               then do; moveflag = true; end;
+
+            /* format and move to format: */
+            else if (mode = m.format + m.copy and moveflag = true)
+               then do; mode = m.format; moveflag = false; end;
+
+            /* format to copy: */
+            else
+               mode = m.copy;
+
+            if mode = m.format then     call strcpy (mode.name, 'Format'); /* set name */
+            else do; /* some COPY operation */
+               if delflag then do;  /* DELETE */
+                  call strcpy (mode.name, 'Delete');
+                  pcmd ('*** Warning:  You will be deleting files from ');
+                  call name (sour);
+                  pstring ('.');
+               end;
+
+               else if moveflag then do; /* MOVE   */
+                  if mode = m.copy then call strcpy (mode.name, 'Move');
+                  else                  call strcpy (mode.name, 'Format and Move');
+                  pcmd ('*** Warning:  All files copied will be erased from '); call name (sour); pstring ('.');
+               end; /* of MOVE */
+
+               else do; /* COPY */
+                  if mode = m.copy then call strcpy (mode.name, 'Copy');
+                  else                  call strcpy (mode.name, 'Format and Copy');
+               end; /* of COPY */
+               cpmflag = false; /* restrict copy operations to XPL format */
+            end;
+            mode.change = true; /* signal to rewrite the options */
+         end;
+      end; /* of case 1 */
+
+      pcmd ('### System error: OPTION = 1 in CHANGE.OPTION'); /* case 1: illegal */
+
+      do; /* case 2: change source (this case is hardcoded in set AC (PROCESS.MENU)) */
+         if (((sour = 1) or (sour = -1)) and ((mode and m.format) <> 0))
+         then mode.change = true; /* rewrite most of screen when source is CC and formatting */
+
+         sour = next.level (sour); /* look at next source */
+
+         do while ((not configured (sour)) 
+         or        ((sour = dest) and ((sour < 2) or (sour >= 6))) /* get a valid source */
+         or        ((sour = 1) and no_CC)
+         or        ((sour = -1) and no_AC) /* skip CC and AC if they aren't there */
+         or        (sour = 10)		/* skip optical as a source - can only be destination */
+         or        (sour = 11));		/* skip optical as a source - can only be destination */
+            sour = next.level (sour); /* get next possible level */
+         end; /* of getting a valid source */
+
+         if (((sour = 1) or (sour = -1)) and ((mode and m.format) <> 0))
+         then mode.change = true; /* rewrite most of screen when source is CC or AC and formatting */
+      end; /* of case 2 */
+
+      do; /* case 3: change destination (this case is hardcoded in set AC (PROCESS.MENU)) */
+         dest = next.level (dest); /* look at next destination */
+         
+		 do while ((not configured (dest))
+		 or ((sour = dest) and ((dest < 2) or (dest >= 6)) and (mode <> m.format)) /* get a valid destination */
+         or ((dest = 1)  and (((mode and m.format) <> 0) or no_CC)) /* skip CC if formatting or it isn't there */
+         or ((dest = -1) and (((mode and m.format) <> 0) or no_AC)) /* skip AC if formatting or it isn't there */
+         or ((dest = 10) and ((mode <> m.format) or not allow_d10_form))	/* skip optical if not formatting or not 5-inch type */
+         or ((dest = 11) and ((mode <> m.format) or not allow_d11_form)));	/* skip optical if not formatting or not 5-inch type */
+            dest = next.level (dest); /* look at next destination */
+         end; /* of getting a valid destination */
+      end; /* of case 3 */
+
+      pcmd ('### System error: OPTION = 4 in CHANGE.OPTION'); /* case 4: illegal */
+
+      pickflag = (pickflag xor 1); /* case 5: toggle select */
+
+      alphaflag = (alphaflag xor 1); /* case 6: toggle alphabetic sort */
+
+      do; /* case 7: toggle erase */
+         if not eraseflag then do; /* warn them before setting it */
+            pcmd ('*** Warning:  All files on '); call name (dest); pstring (' will be erased.');
+         end;
+         eraseflag = (eraseflag xor 1); /* toggle the flag */
+      end; /* of case 7 */
+
+      pcmd ('### System error: OPTION = 8 in CHANGE.OPTION'); /* case 8: illegal */
+
+      cpmflag = (cpmflag xor 1); /* case 9: change disk format */
+   end; /* of do case OPTION */
+
+   call write.options (mode.change); /* write the new options */
+
+end change.option;
+
+/* $subtitle Menu processing:  Get and Process a Menu Command */
+
+process.menu: proc;
+   dcl cur.y               fixed; /* menu position */
+   dcl full.write          boolean; /* TRUE if we should rewrite the whole menu */
+   dcl ibuf (input_length) fixed; /* user input buffer */
+   dcl (i, j)              fixed;
+
+   full.write = true; /* write the menu the first time */
+   cur.y = 0; /* start at the top */
+   i = -1; /* make sure we enter the loop */
+
+   do while ((i <> a.q) and (i <> a.nul)); /* go until the user quits */
+      if full.write then do; /* write full menu */
+         call write.menu; /* write out the menu */
+         clear_typeahead; /* get rid of any typeahead */
+         full.write = false; /* we've done it */
+      end; /* of write full menu */
+
+      pos (cur.y + 10, 54); i = rchar; /* get next command */
+      erase_command; flush_term; /* erase any errors or prompts */
+      if ((i >= l.a) and (i <= l.z)) then i = i - (l.a - a.a); /* up the case */
+
+      if ((i = a.s) and (mode <> m.format)) then do; /* source catalog */
+         full.write = print.cat (sour, 'Source'); /* print the catalog */
+      end;
+
+      else if ((i = a.d) and (delflag = false)) then do; /* destination catalog */
+         full.write = print.cat (dest, 'Destination'); /* print the catalog */
+      end;
+
+      else if ((i = a.i)
+      and      (mode <> m.format)
+      and      (((sour <> 1) and (sour <> -1)) or (mode = m.copy))
+      and      (delflag = false))
+      then do; /* interchange source and dest devices */
+         j = sour; sour = dest; dest = j;
+         call write.options (false); /* write out new options */
+      end;
+
+      else if i = a.a then do; /* set alternate catalog */
+
+         pos (cmdline, 0);
+
+         get_string ('Alternate catalog? ', false, ibuf, shl(input_length, 1)); /* get name of alternate catalog */
+
+         if ibuf (0) <> 0 then do; /* only if they typed in something */
+            if locate (ibuf, 1) then do; /* look for the catalog (this implicitly excludes devices) */
+
+               if ((f#ms_sector = core(loc.ucat + 1)) and (f#ls_sector = core(loc.ucat))) /* AC = CC */
+               then pcmd ('The alternate catalog cannot be the same as the current catalog.');
+
+               else if enter_alternate (ibuf, 1) then do; /* so far so good - try to enter it */
+                  if ((sour <> - 1) and (dest <> -1)) then do; /* if neither source nor destination is AC */
+                     if   delflag      then sour = -1; /* set source to ac if deleting */
+                     else if cur.y = 2 then sour = -1; /* set source to AC is cursor is there */
+                     else if cur.y = 3 then dest = -1; /* set destination to AC if cursor is there */
+                  end;
+                  no_AC = false; /* we now have an AC */
+                  call write.options (false); /* update sour and dest in menu */
+               end;
+
+               else do; /* couldn't enter it */
+                  pcmd('Subcatalog '''); pstring (ibuf); pstring (''' is not available.');
+               end;
+            end; /* of found the catalog */
+
+            else do; /* couldn't even find it */
+               pcmd('Subcatalog '''); pstring (ibuf); pstring (''' does not exist.');
+            end;
+         end; /* if they actually typed something */
+      end;
+
+      else if i = a.refresh then do; /* refresh display */
+         full.write = true;
+      end;
+
+      else if i = a.cr then do; /* begin processing */
+         pos (cmdline, 0); /* move to the command line */
+         if delflag then do; /* if moving deleting... */
+            pstring ('*** Warning:  You will be deleting files from ');
+            call name (sour);
+            pstringr ('.');
+            get_string ('Enter ''OK'' followed by RETURN to select files to be deleted ->', false, ibuf, 2);
+         end;
+         else do;
+         if ((eraseflag and (mode = m.copy)) or (mode = (m.format or m.copy))) then do; /* warn them if they're about to erase or (format & copy) */
+            pstring ('*** Warning:  All files on '); call name (dest); pstringr (' will be destroyed.');
+         end;
+         else if moveflag then do; /* if moving and there's room on screen (not a terribly important message) */
+            pstring ('*** Warning:  All files copied will be erased from '); call name (sour); pstringr ('.');
+         end;
+            else do;                  /* copy or format */
+               pstring('');
+            end;
+            get_string ('Please verify selected modes, then type ''OK'' followed by RETURN ->', false, ibuf, 2);
+         end;
+
+         wchar (a.cr); /* be neat - write a carriage return (CRLF will scroll the screen!) */
+         if compare (ibuf, 'OK') then full.write = start.up; /* start up */
+         else do; erase_command; crlf; erase_line; end;
+      end;
+
+      else if ((i = cur.up) or (i = a.vt)) then do; /* cursor up */
+         if cur.y > 0 then do; /* if we can, move up */
+            cur.y = cur.y - 1;
+            do while (not valid_line (cur.y)); /* skip any blank lines */
+               cur.y = cur.y - 1; /* move up another line */
+            end;
+         end;
+      end;
+
+      else if ((i = cur.down) or (i = a.lf)) then do; /* cursor down */
+         if cur.y < bottom.limit then do; /* if we can, move down */
+            cur.y = cur.y + 1;
+            do while (not valid_line (cur.y)); /* skip any blank lines */
+               cur.y = cur.y + 1; /* move down another line */
+            end;
+         end;
+      end;
+      else if i = a.sp then call change.option (cur.y); /* change option */
+   end; /* of do until the user quits */
+
+end process.menu;
+
+/* $subtitle Initialization and Termination */
+
+dcl memory.used   fixed; /* length of core taken by program and variables */
+dcl disk_inserted boolean; /* TRUE if a disk has been inserted into the drive */
+dcl i             fixed;
+
+cpmflag   = false; /* XPL format disks */
+eraseflag = false; /* don't erase the destination catalog */
+alphaflag = false; /* don't do it in alphabetical order */
+pickflag  = false; /* copy the whole catalog */
+moveflag  = false; /* copy, don't move */
+delflag   = false; /* copy, don't delete */
+
+call set_catbuf (addr(catalog (0)), 0); /* set the catalog buffer */
+
+do i = 0 to 9; valid_line (i) = false; end; /* assume we can't move to any lines */
+
+no_CC = ((core(loc.ucat) = 0) and ((core(loc.ucat + 1) and "377") = 0)); /* determine if there's a current catalog */
+no_AC = true; /* only an alternate catalog if user successfully sets it */
+
+call init_optical_controller; /* set up the optical controller type for the drivers */
+
+allow_d10_form = false;
+allow_d11_form = false;
+
+i = find_device (10); /* check for the D10 optical device */
+if ((i <> null) and ((shr(core(i +s#devtyp),10) and 1) = 1)) /* if type is 5-inch magneto */
+then allow_d10_form = true; /* then it is okay to format the optical */
+
+i = find_device (11); /* check for the D11 optical device */
+if ((i <> null) and ((shr(core(i +s#devtyp),10) and 1) = 1)) /* if type is 5-inch magneto */
+then allow_d11_form = true; /* then it is okay to format the optical */
+
+i = 0; /* initialize number of devices configured */
+do sour = 2 to 10; /* look through all physical devices */
+   if configured (sour) then i = i + 1; /* count all the ones we find */
+end;
+
+format_only = false; /* assume any mode allowed */
+
+if no_CC /* if no current catalog */
+then sour = shr(core(loc.ucat + 1), 8); /* get current device */
+else sour = 1; /* use current catalog if there */
+
+if ((i = 1) and no_CC) then do; /* only one device configured? - it's the system device */
+   dest = sour; /* and set the destination to the source */
+   if systyp = 1 then format_only = true; /* and only allow FORMAT on Winchesters (SOUR is NEVER looked at) */
+end;
+else do; /* more than one device configured */
+   dest = 2; /* dynamically determine destination (preferred is F0) */
+   do while ((dest <= 9) and ((not configured (dest)) or (sour = dest))); /* find one not already used */
+      dest = dest + 1;
+   end;
+end; /* of more than one device configured */
+
+if format_only then do; /* if all they can do is format */
+   mode = m.format; /* default to format only */
+   call strcpy (mode.name, 'Format');
+end;
+else do; /* they can copy as well */
+   mode = m.copy; /* default to copy only */
+   call strcpy (mode.name, 'Copy');
+end;
+
+/* $page */
+
+/* Set up a few variables for use with a dynamically allocated buffer area.
+.  Compute the first location not explicitly used by this program: */
+
+memory.used = core(c#contab + c#vstart); /* starting address of variable area of this program */
+memory.used = memory.used + core(c#contab + c#vlngth); /* add the length of the variable area */
+memory.used = memory.used + core(c#contab + c#stklen); /* add on push down stack length */
+buf.loc = memory.used; /* start the dynamic buffer at first unused address */
+
+/* Memory available for dynamic buffer is MEM.SIZ minus size of area reserved
+.  for system use (LOC.LOAD) minus length of program area */
+
+max.buf.size = loc.load - memory.used;
+
+if systyp = 0 then core(loc.strd) = 0; /* on floppies, ding the current file */
+
+call process.menu;
+
+if tape (sour) then call unload (sour, false); /* unload tape if it's there */
+if tape (dest) then call unload (dest, false);
+
+disk_inserted = not (systyp = 0); /* assume there's no disk inserted on floppy systems */
+
+do while (not disk_inserted); /* make sure there's a system disk */
+   pcmd ('Insert a SYSTEM disk into '); call name (2); pstring (' and press RETURN ->');
+   clear_typeahead; call rchar; erase_command;
+   disk_inserted = disk_check (2); /* see if they put the disk in */
+end;
+
+pcmd ('End of FORMCOPY utility'); flush_term;
+
+if ((systyp = 1) and (win.was.formatted)) then stop; /* no system to go to */ 

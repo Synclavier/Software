@@ -1,0 +1,330 @@
+/* 24-ANAL1 $TITLE  Analysis Routines -- Part 1 */
+
+/* Copyright (c) 1984 by New England Digital Corporation */
+
+/* This program represents proprietary information and may not be released
+   publically without written permission from New England Digital Corp. */
+
+interpolate:  proc(buf,cycle.len) fixed; /* resamples a wave to an integral number of pts */
+   dcl buf              fixed array; /* has 1 extra pt on front & 2 extra on tail */
+   dcl cycle.len        floating; /* exact length of one cycle */
+   dcl int.len          fixed; /* length of wave after interpolation */
+   dcl (y0,y1,y2,y3,y4) floating;
+   dcl (x,a,b,c,d,e)    floating;
+   dcl (i,j)            fixed;
+
+   int.len=int(cycle.len); /* length of wave after interpolation */
+   if int.len<>cycle.len then do; /* need to interpolate */
+      int.len=int.len+1;
+      /* interpolated length will always be equal to CYCLE.LEN or to the 
+         next integer greater than CYCLE.LEN */
+
+      do i=2 to int.len+2; /* loop through pts to interpolate - do extra points for error function */
+         /* buf(0) does not need to be interpolated */
+         /* buf(1) would be the same before and after interpolation, so it
+                   also can be skipped */
+
+         if (milliseconds-sampled.ms) IGT refresh.period then show.time; /* update clock display */
+         if break.rcvd then return;
+
+         x=2-(int.len-cycle.len)*(i-1)/int.len; /* x value to use in polynomial equation */
+
+         /* load temps for interpolation equation */
+
+         j=i; /* assume desired point is closest to i */    // Interpolate from 1.5 to 2.5
+         if x<1.5 then do; j=j-1; x=x+1; end; /* interpolate around closest points */
+         y0=buf(j-2);
+         y1=buf(j-1);
+         y2=buf(j  );
+         y3=buf(j+1);
+         y4=buf(j+2);
+
+         /* compute coefficients for best 4th degree polynomial
+            through y0, y1, y2, y3, and y4 */
+         a=(    y0   -4*y1   +6*y2  -4*y3    +y4)/24;
+         b=(-10*y0  +36*y1  -48*y2 +28*y3  -6*y4)/24;
+         c=( 35*y0 -104*y1 +114*y2 -56*y3 +11*y4)/24;
+         d=(-50*y0  +96*y1  -72*y2 +32*y3  -6*y4)/24;
+         e=     y0;
+
+         buf(int.len+i+4)=int((((a*x+b)*x+c)*x+d)*x+e+.5); /* compute new y value, store in upper part of buffer */
+      end; /* of loop through pts to interpolate */
+
+      /* copy interpolated values back into bottom of array */
+      buf(0)=buf(1);
+      do i=1 to int.len+1; buf(i)=buf(int.len+i+5); end;
+   end; /* of need to interpolate */
+
+   return int.len; /* return interpolated length */
+end interpolate;
+
+/* $SUBTITLE  Endpoint Smoothing Routine */
+
+jones_function:  proc(buf,len) floating; /* computes and adds a polynomial error function to wave */
+   dcl buf         fixed array; /* wave with 2 extra pts at end */
+   dcl len         fixed; /* length of one cycle of wave */
+   dcl (min,max)   floating;
+   dcl (a,b,c,d,e) floating;
+   dcl (i,j,m,f)   floating;
+   dcl k           fixed;
+
+   function:  proc(x,y) floating; /* routine for error function computation */
+      dcl (x,y) floating;
+      if x=0 then return 0; /* handle bug in floating pt. routines */
+      return -(exp(y*log(x)))/y; /* compute -(abs(x)^y)/y */
+   end function;
+
+   i=(buf(len)-buf(0))/2.0; /* average endpoint value */
+   j=(buf(len+1)-buf(len)+buf(0)-buf(1))/2.0; /* average 1st derivative at endpts */
+
+   /* find pk. to pk. of original signal */
+   min=0; max=0; /* be sure to use floating pt. MIN and MAX */
+   do k=0 to len; /* include endpoint here */
+      if buf(k)>max then max=buf(k);
+      if buf(k)<min then min=buf(k);
+   end;
+
+   if (milliseconds-sampled.ms) IGT refresh.period then show.time; /* update clock display */
+
+   /* compute coefficients for error signal */
+   m=len/2; /* length of error function */
+   b=(max-min)/10; /* limit err function peak to peak to 1/10 of ptp of signal */
+   c=abs(m*j/b); /* compute power required to achieve desired peak */
+   if c<2 then c=2; /* limit to square function at least (yields constant 2nd deriv.) */
+
+   d=function((m-1)/m,c)-function(m/m,c); /* compute actual 1st deriv. at endpts */
+   d=j/d; /* compute scale factor--yields desired slopes at endpts */
+   e=3.14159265/len; /* compute constant for cosine call */
+
+   f=1.0; /* assume scale factor of 1 */
+   if (max+i+d/c+.5)> (32767.0) then f=( 32767.0)/(max+i+d/c+.5);
+   if (min+i+d/c+.5)<(-32768.0) then f=(-32768.0)/(min+i+d/c+.5);
+   if (max-i+d/c+.5)> (32767.0) then f=( 32767.0)/(max-i+d/c+.5);
+   if (min-i+d/c+.5)<(-32768.0) then f=(-32768.0)/(min-i+d/c+.5);
+
+   do k=0 to len; /* add in err function - include endpt only */
+      buf(k)=int(f*(buf(k)+i*cos(k*e)+d*function((m-k)/m,c))+.5); /* scale by .75 to reduce overflows */
+      if (milliseconds-sampled.ms) IGT refresh.period then show.time; /* update clock display */
+      if break.rcvd then return;
+   end;
+
+   return f; /* return scale factor */
+end jones_function;
+
+/* $SUBTITLE  Discrete Fourier Series Calculation Routine */
+
+compute_fourier_series:  proc(inbuf,len,outbuf,numcoefs) floating; /* computes Fourier series coefs */
+   dcl inbuf                fixed array; /* array of samples */
+   dcl len                  fixed; /* number of samples in INBUF */
+   dcl outbuf               fixed array; /* array of output Fourier series coefs */
+   dcl numcoefs             fixed; /* number of series terms desired */
+   dcl coefbuf (ncoefs.max) floating; /* holds magnitude of harmonic */
+   dcl phasebuf(ncoefs.max) floating; /* holds phase     of harmonic */
+   dcl sinbuf (max.wave.length) fixed;
+   dcl cosbuf (max.wave.length) fixed;
+   dcl (alow,amid,ahigh)    fixed;
+   dcl (blow,bmid,bhigh)    fixed;
+   dcl (msb,lsb)            fixed;
+   dcl sign                 fixed;
+   dcl (a,b,x,y)            floating;
+   dcl (i,j,k)              fixed;
+
+   /* literal to negate a signed 48-bit number */
+   dcl t1  lit 'high=not high; mid=not mid; low=(not low)+1';
+   dcl t2  lit 'if low=0 then do';
+   dcl t3  lit '   mid=mid+1; if mid=0 then high=high+1';
+   dcl t4  lit 'end';
+   dcl negate.48.bit lit 't1;t2;t3;t4';
+
+   if numcoefs>ncoefs.max then numcoefs=ncoefs.max;
+
+   if len<=max.wave.length then do; /* do DFT computation */
+      /* compute fixed-point sine and cosine lookup tables */
+      x=2*3.14159265/len; /* phase incr */
+      do i=0 to len-1;
+         sinbuf(i)=int(32767.0*sin(x*i)+.5);
+         cosbuf(i)=int(32767.0*cos(x*i)+.5);
+      end;
+
+      pcmd(' Analysis Status: '); ps('  Computing harmonic coefficient #');
+      do i=1 to numcoefs; /* loop over harmonics */
+         call pos(cmdline,53); call erase_line; pnum(i);
+         alow=0; amid=0; ahigh=0; blow=0; bmid=0; bhigh=0; /* init 48-bit sums */
+         y=0; /* init phase index into sine & cosine tables */
+         do j=0 to len-1; /* loop over samples */
+            if break.rcvd then return; /* look for break key to be pressed */
+            if (milliseconds-sampled.ms) IGT refresh.period then show.time; /* update clock display */
+
+            do; /* COSINE term */
+               /* compute 32-bit signed cross-product */
+               write(5)=abs(inbuf(j)); write(6)=abs(cosbuf(y));
+               if (inbuf(j) xor cosbuf(y))<0 then do; /* need to negate 32-bit result */
+                  msb=not(read(4)); lsb=(not(read(5)))+1; if lsb=0 then msb=msb+1;
+               end;
+               else do; msb=read(4); lsb=read(5); end; /* positive result */
+
+               /* add 32-bit signed cross-product to 48-bit signed sum */
+               alow=alow+lsb;
+               if alow ILT lsb then do;
+                  amid=amid+1; if amid=0 then ahigh=ahigh+1;
+               end;
+               if msb<0 then do; /* subtracting */
+                  k=amid+msb; if k IGT amid then ahigh=ahigh-1; amid=k;
+               end;
+               else do; /* adding */
+                  amid=amid+msb; if amid ILT msb then ahigh=ahigh+1;
+               end;
+            end;
+
+            /* $PAGE */
+
+            do; /* SINE term */
+               /* compute 32-bit signed cross-product */
+               write(5)=abs(inbuf(j)); write(6)=abs(sinbuf(y));
+               if (inbuf(j) xor sinbuf(y))<0 then do; /* need to negate 32-bit result */
+                  msb=not(read(4)); lsb=(not(read(5)))+1; if lsb=0 then msb=msb+1;
+               end;
+               else do; msb=read(4); lsb=read(5); end; /* positive result */
+
+               /* add 32-bit signed cross-product to 48-bit signed sum */
+               blow=blow+lsb;
+               if blow ILT lsb then do;
+                  bmid=bmid+1; if bmid=0 then bhigh=bhigh+1;
+               end;
+               if msb<0 then do; /* subtracting */
+                  k=bmid+msb; if k IGT bmid then bhigh=bhigh-1; bmid=k;
+               end;
+               else do; /* adding */
+                  bmid=bmid+msb; if bmid ILT msb then bhigh=bhigh+1;
+               end;
+            end;
+
+            y=(y+i) mod len; /* update index into SINE & COSINE tables */
+         end;
+
+         sign=(+1);
+         if ahigh<0 then begin;
+            dcl low lit 'alow'; dcl mid lit 'amid'; dcl high lit 'ahigh';
+
+            sign=(-1);
+            negate.48.bit;
+         end;
+         if alow<0  then a=65535.-not(alow);
+         else            a=alow;
+         if amid<0  then a=a+(65535.-not(amid))*65536.;
+         else            a=a+amid*65536.;
+         if ahigh<0 then a=a+(65535.-not(ahigh))*65536.*65536.;
+         else            a=a+ahigh*65536.*65536.;
+         a=(sign*2.0*a)/len;
+
+         sign=(+1);
+         if bhigh<0 then begin;
+            dcl low lit 'blow'; dcl mid lit 'bmid'; dcl high lit 'bhigh';
+
+            sign=(-1);
+            negate.48.bit;
+         end;
+         if blow<0  then b=65535.-not(blow);
+         else            b=blow;
+         if bmid<0  then b=b+(65535.-not(bmid))*65536.;
+         else            b=b+bmid*65536.;
+         if bhigh<0 then b=b+(65535.-not(bhigh))*65536.*65536.;
+         else            b=b+bhigh*65536.*65536.;
+         b=(sign*2.0*b)/len;
+
+         coefbuf(i-1)=sqr(a*a+b*b); /* compute magnitude */
+
+         phasebuf(i-1)=-atn(b/a); /* compute phase angle */
+         if a<0 then phasebuf(i-1)=phasebuf(i-1)+3.14159265;
+         phasebuf(i-1)=phasebuf(i-1)+3.14159265/2; /* correct for sine vs. cosine */
+      end; /* of loop over harmonics */
+
+      /* convert floating point format to Synclavier RTP format */
+      a=0; b=64/(2*3.14159265);
+      do i=0 to numcoefs-1; if coefbuf(i)>a then a=coefbuf(i); end; /* find max magnitude */
+      do i=0 to numcoefs-1;
+         outbuf(i)=int(coefbuf(i)*1000./a+.5); /* rescale 0 to 1000 */
+         if outbuf(i)<>0 /* only set phase if coef is non-zero */
+         then outbuf(i)=outbuf(i)+shl(int(phasebuf(i)*b+.5),10); /* store phase in upper 6 bits */
+        // the WHY THIS was to set the phases for the fundamental to 0. Assuming the fundamental was the strongest
+        // you wanted to avoid the amplitude shift during the splice transition.
+        // What you want to do is equalize the phase of the strongest harmonic ( you would expect that to be 1, 2 or 3 or
+        // so for most musical sounds. The cycles for analyzis have no ineherent phase relationship. they are
+        // just chosen in the file. So the only thing that is important is the relative phase between the harmonics.
+        // The phase of the "strongest" tone should be constant accross the timbre frame.
+         /* WHY THIS ??? outbuf(i)=outbuf(i)+shl(int((phasebuf(i)-(i+1)*phasebuf(0))*b+.5),10);*/ /* store phase in upper 6 bits */
+         if (milliseconds-sampled.ms) IGT refresh.period then show.time; /* update clock display */
+      end;
+   end; /* of doing DFT */
+
+   return a; /* return a peak normalization scaling factor */
+end compute_fourier_series;
+
+/* $SUBTITLE  Pitch Extraction Routine */
+
+compute_period:  proc(buf,samples,pitch.dev) floating; /* computes best period of a wave */
+   dcl buf            fixed array; /* sampled data */
+   dcl samples        fixed; /* approx. samples in one cycle of wave */
+   dcl pitch.dev      fixed; /* percent deviation in pitch to search over */
+   dcl abs.diff.msb   fixed;
+   dcl abs.diff.lsb   fixed;
+   dcl min.abs.diff   fixed;
+   dcl best.len       fixed;
+   dcl best.index     fixed;
+   dcl index          fixed;
+   dcl diff   (512)   fixed;
+   dcl period         floating;
+   dcl (x,y)          fixed;
+   dcl (y0,y1,y2,y3)  floating;
+   dcl (i,j,k)        fixed;
+
+   pcmd(' Analysis Status: '); ps('  Computing pitch of waveform');
+
+   index=0; best.index=0; best.len=0; min.abs.diff="177777"; /* init */
+   k=pitch.dev*samples/100;
+   do i=samples-k to samples+k; /* loop through possible cycle lengths */
+      if (milliseconds-sampled.ms) IGT refresh.period then show.time; /* update clock display */
+
+      abs.diff.msb=0; abs.diff.lsb=0; /* init */
+      do j=0 to samples-1; /* loop over points in one cycle */
+         x=buf(j); y=buf(j+i); x=x+"100000"; y=y+"100000";
+         if x IGT y then k=x-y;
+         else            k=y-x;
+         abs.diff.lsb=abs.diff.lsb+k; /* accumulate abs differences */
+         if abs.diff.lsb ILT k then abs.diff.msb=abs.diff.msb+1;
+      end;
+      /* compute average absolute diff */
+      write(5)=abs.diff.lsb; write(4)=abs.diff.msb; write(7)=samples;
+      abs.diff.msb=read(5);
+      if read(4) IGE shr(samples,1) then abs.diff.msb=abs.diff.msb+1;
+
+      if abs.diff.msb ILT min.abs.diff then do; /* have a new minimum abs diff */
+         min.abs.diff=abs.diff.msb; best.len=i; best.index=index;
+      end;
+      diff(index)=abs.diff.msb;
+      index=index+1;
+   end;
+
+   /* extrapolate intersection of abs diff function from both sides to 
+      approximate minimum of function */
+   best.index=best.index-2; best.len=best.len-2;
+   if diff(best.index+1) IGT diff(best.index+3) then do;
+      best.index=best.index+1; best.len=best.len+1;
+   end;
+   y0=diff(best.index);   y1=diff(best.index+1); 
+   y2=diff(best.index+2); y3=diff(best.index+3);
+   
+   if (best.len>=(samples+pitch.dev*samples/100))
+   or (best.len<=(samples-pitch.dev*samples/100))
+   then do; /* error: period out of range of pitch extractor */
+      period=(-1); /* default to approx. pitch specified */
+      analysis.status(frames)=analysis.status(frames)\pitch.err; /* pitch period out of range */
+   end;
+   else do;
+      if (y1-y0-y3+y2)=0 
+      then period=best.len; /* degenerate case */
+      else period=best.len+(-y0+3*y2-2*y3)/(y1-y0-y3+y2); /* magic formula */
+   end;
+
+   return period;
+end compute_period;

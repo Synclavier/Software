@@ -1,0 +1,1180 @@
+/*	:SYNSOU:STMMOD:STINSOU - $Title Sample To Memory Input Handler
+
+Modified:
+2002/09/01 - TY  - Fixed bug: when exiting zoom mode with 'K', mark offset was set instead of mark end.
+2001/09/06 - TY  - Rewrote part of STM_STORE_INPUT() so that when saving soundfiles, the current filename
+						 can be appended to a partial treename entered by the user.
+2000/06/08 - TY  - Fixed bug in STM_STORE_INPUT.  It was trying extract filenames padded with zero bytes,
+						 but filenames are padded with spaces.
+1999/10/13 - TY  - Fixed bug in STM_DISPLAY_INPUT_CHAR that didn't allow commands Q through W to
+						 exit properly from the zoom mode.
+						 Removed 6 redundant calls to POS.STM.ALPHA.CURSOR from STM_DISPLAY_INPUT_CHAR,
+						 2 from STM_MODIFY_INPUT, and 1 from STM_STORE_INPUT.
+1991/08/19 - PF  - Inserted seqlits for Hzinfo definitions
+1988/12/13 - cj  - changed 'smart' to 'speech'
+1988/09/14 - LSS - Fix stacked error problem with CUT in GET.SAMPLE.TIME
+1988/08/23 - MWH - Add "real" DSP user interface
+1988/06/27 - MWH - Remove unused inserts
+1988/05/17 - JSS - allow neg nums for L-screen input gain with new STM
+1988/04/19 - MWH - Add "OK" prompt for collect, max_time, print
+1988/04/18 - MWH - Add point mode and zero line
+1988/04/14 - MWH - Add crossfades to EXTRACT; different at start and end
+1988/03/21 - LSS - added call to SOUND.FILE.SEARCH in recall
+1988/03/08 - TSS - added code to run Time Scale Modification DSP hardware
+1988/02/12 - MWH - Expand crossfade times to 65.535 seconds; improve
+1987/12/16 - MWH - Merge poly updates with N-Final plus AEE sources
+1987/08/26 - MWH - Merge with other release-N edits
+1987/08/24 - MWH - Add stm.max.time option to shuffle for max recording time
+1987/08/10 - MWH - Update all to support max 4 poly bins, 512mb/bin
+*/
+
+Module STINMOD;
+   insert ':-xpl:catrout';			/* for locate, f#name, etc. */
+   insert ':-xpl:optlits';			/* for searching optical disk for files */
+   insert ':-xpl:intrprtr';		/* for interpreter interface */
+
+   insert ':synlits:comlits';		/* compilation literals */
+   insert ':synlits:asciilit';	/* ASCII literals */
+   insert ':synlits:globlits';	/* good globals */
+   insert ':synlits:syslits';		/* system literals such as d40_present */
+   insert ':synlits:fcodlits';	/* function code literals for poly synths used in playback */
+   insert ':synlits:samplits';	/* sound file and sampling literals */
+   insert ':synlits:thdlits';		/* track head literals */
+   insert ':synauxs:stmlits';		/* STM specific literals */
+   insert ':synauxs:seqlits';		/* for Hzinfo Record */
+   insert ':synauxs:lodlits';		/* for cue history */
+	insert ':SYNLITS:TIMLITS';		//	for TIM#POLY and TIM.SYNTH.TYP
+
+   insert ':synmods:globdcl';		/* global routines */
+   insert ':synmods:ttydcl';		/* terminal i/o routines */
+   insert ':synmods:polydcl';		/* poly routines */
+   insert ':synmods:errdcl';		/* error routines */
+   insert ':synmods:plotdcl';		/* plotting routine */
+   insert ':synmods:moussdcl';	/* mouse routines */
+   insert ':synmods:mathdcl';		/* for compare_times */
+   insert ':synmods:filedcl';		/* for file.search */
+   insert ':synmods:getdcl';
+   insert ':synmods:getvdcl';		/* for new.poly.contents               */
+   insert ':synmods:d40dcl';		/* hardcopy */
+   insert ':synmods:tprimdcl';	/* draw and erase message */
+   insert ':synmods:stordcl';		/* for sound file recall screen */
+   insert ':synmods:odiskdcl';	/* for recall.sound.file        */
+   insert ':synmods:tformdcl';	/* string routines              */
+   insert ':synmods:indexdcl';	/* optical disk routines        */
+   insert ':synmods:xmemdcl';		/* for copy.buf */
+   insert ':synmods:dspdcl';		/* TSM and SRC routines */
+
+   insert ':synmods:stutldcl';	/* sample to memory utility routines */
+   insert ':synmods:stdrdcl';		/* for plotting limits */
+   insert ':synmods:steddcl';		/* editing functions including CREATE.SOUND.FILE */
+
+   insert ':synrdcls:03-pdcls';
+   insert ':synrdcls:05-bdcls';
+   insert ':synrdcls:06-mdcls';
+   insert ':synrdcls:11-tdcls';
+
+	dcl SUBCAT.DIRECTORY.SCREEN proc (fixed) external;	//	For mouse link to D-page
+	dcl PATCH.ASSIGNMENT.SCREEN proc (fixed) external;	//	For mouse link to I-page
+
+   dcl stm.anchor.set        fixed public;     /* if the mouse anchor point is set */
+   dcl stm.anchorx           fixed;            /* mouse anchor point used for editing sound file */
+
+   /* forward declarations */
+   dcl STM.SOUND.EDITOR.INPUT proc(fixed,fixed) recursive;    /* Sample-to-Memory Sound Editor character handler */
+   dcl SOUND.FILE.SEARCH      proc(fixed array,boolean) recursive; /* search system for file to recall */
+
+   /* $Subtitle Sample-to-Memory Sound Editor Graphic Cursor Routine */
+
+   MOVE.GRAPHIC.CURSORS: proc(ch) fixed swapable;  /* Moves Graphic Cursor and Updates Screen */
+      dcl ch fixed;
+
+      if ((ch=u.arr) or (ch=d.arr))         /* if up or down arrow */
+      then call MOVE.THROUGH.SOUND.FILE(ch);
+      else if ch=r.arr then do;
+         call erase.graphics.cursors(stm.graphx,2); /* erase previous cursor */
+
+         /* move cursor faster if continually holding cursor down */
+
+         next.r.arr:;
+
+         if (char.time-previous.char.time) ilt 100 /* if the difference is less than 100 milliseconds */
+         then stm.graphx=stm.graphx+6;
+         else stm.graphx=stm.graphx+1;             /* otherwise move a pixel at a time */
+         previous.char.time=char.time;
+
+         if  (num.of.d50.in.chars<>0)              /* new character typed */
+         and (next.d50.in.char=r.arr)              /* another right arrow */
+         then do;
+            call get.next.d50.in.char;
+            goto next.r.arr;
+         end;
+
+         if stm.graphx>display.width then stm.graphx=display.width;
+
+         call COMPUTE_PIXEL_TIME(stm.graphx,some.time);
+         if compare_times(some.time,tot.time,3)>0
+         then stm.graphx=COMPUTE_PIXEL_NUMBER(tot.time);	/* restrain graphics cursor to end of sound file */
+
+         call draw.graphics.cursors(stm.graphx,2);			/* draw new cursor */
+         if num.of.d50.in.chars=0 then do;
+            call CHANGE.CURSOR.TIME;		/* change time right now if no character waiting */
+            call CHANGE.SIGNAL.LEVEL;		/* change signal level */
+         end;
+         else do;
+            call COMPUTE_PIXEL_TIME(stm.graphx,cursor.time);
+            return 1;
+         end;
+      end;
+      else if ch=l.arr then do;
+         call erase.graphics.cursors(stm.graphx,2); /* erase previous cursor */
+
+         next.l.arr:;
+
+         /* move cursor faster if continually holding cursor down */
+         if (char.time-previous.char.time) ilt 100 /* if the difference is less than 100 milliseconds */
+         then stm.graphx=stm.graphx-6;
+         else stm.graphx=stm.graphx-1;             /* otherwise move a pixel at a time */
+         previous.char.time=char.time;
+
+         if  (num.of.d50.in.chars<>0)              /* new character typed */
+         and (next.d50.in.char=l.arr)              /* another left arrow */
+         then do;
+            call get.next.d50.in.char;
+            goto next.l.arr;
+         end;
+
+         if stm.graphx<0 then stm.graphx=0;			/* make sure cursor location does not exceed limits */
+         call draw.graphics.cursors(stm.graphx,2);	/* draw new cursor */
+         if num.of.d50.in.chars=0 then do;
+            call CHANGE.CURSOR.TIME; /* change time right now if no character waiting */
+            call CHANGE.SIGNAL.LEVEL; /* change signal level */
+         end;
+         else do;
+            call COMPUTE_PIXEL_TIME(stm.graphx,cursor.time);
+            return 1;
+         end;
+      end;
+
+      /* $page */
+
+      else if ch=home then do;
+         call erase.graphics.cursors(stm.graphx,2);	/* erase previous cursor */
+         stm.graphx=0;											/* move cursor to the left */
+         call draw.graphics.cursors(stm.graphx,2);		/* draw new cursor */
+         call CHANGE.CURSOR.TIME;
+         call CHANGE.SIGNAL.LEVEL;
+      end;
+      return 0;
+	end MOVE.GRAPHIC.CURSORS;
+
+   /* $page - handle carriage return from smt display sub menu */
+
+   dcl (new.cursor)    fixed;   /* indicates repetitive cursor keystrokes */
+
+   STM_DISPLAY_INPUT_CRET:proc swapable;    /* handle carriage return from display sub-menu */
+      dcl (i,j) fixed;
+
+      if stm.cmd.line<>0 then do;                       /* if on the command line */
+         if ((stm.choice=stm.show) and (token(0)<>0)) then do; /* show the value specified */
+            if sf.type=1                                /* if sound file available */
+            then call SHOW.SOUND.FILE(SFILE.BASE);
+            else call no.sound.file;                    /* otherwise sound file missing */
+         end;
+         else if ((stm.choice=stm.zoom) and (mg600<>0) and (token(0)<>0))
+         then call SET.RESOLUTION;
+         else if ((stm.choice=stm.label) and (token(0)<>0)) then do; /* display the value specified */
+            if sf.type=1                                 /* if sound file available */
+            then call ADD_SYMBOL(SFILE.BASE,cursor.time,token);
+            else call no.sound.file;                     /* otherwise sound file missing */
+         end;
+         else if ((stm.choice=stm.search) and (token(0)<>0)) then do;
+            if sf.type=1                                 /* if sound file available */
+            then call SEARCH.FOR.AMPLITUDE(SFILE.BASE);  /* if amplitude level from current cursor location */
+            else call no.sound.file;                     /* otherwise sound file missing */
+         end;
+         else if stm.choice=stm.unlabel then do;         /* display the value specified */
+            if sf.type=1 then do;                        /* if sound file available */
+               if (token(0)<>0) and (unlabeling.current=0) 
+               then call REMOVE_SYMBOL(SFILE.BASE,token);
+               else if (unlabeling.current<>0) then do;
+                  call REMOVE_SYMBOL(SFILE.BASE,token);
+                  unlabeling.current=0;
+               end;
+               else do;
+                  i=FIND_LABEL(SFILE.BASE,cursor.time);
+                  if i>=0 then do;
+                     call POS.STM.ALPHA.CURSOR;   /* make sure cursor is in correct spot and print token*/
+                     call ps(' [RETURN confirms]');
+                     unlabeling.current=1;
+                  end;
+               end;
+            end;
+            else call no.sound.file;              /* otherwise sound file missing */
+         end;
+         else if (inc.stmm) and (stm.choice=stm.cap) and (token(0)<>0) then do; /* if there is a caption to add */
+            if sf.type=1
+            then call ADD_CAPTION(SFILE.BASE,token);
+            else call no.sound.file;                     /* otherwise sound file missing */
+         end;
+
+         else if (stm.choice=stm.print and token(0)<>0) then do; /* if print command and printer available */
+            if eqstr(token,'OK') = 0 then do;
+               if D40_PRESENT<>0 then do;
+                  call push.mouse;
+                  call DRAW.MESSAGE('Printing...');
+                  call HARDCOPY;
+                  call pop.mouse;
+               end;
+               else call no.printer;
+            end;
+         end;                             /* of if print command */
+
+         if  (unlabeling.current=0)
+         and ((stm.choice<>stm.zoom) or (token(0)=0)) /* do not redraw menu if we have just entered resolution value from zoom */
+         then call SED.COMMAND.ATTRIBUTE.DEPOSIT;     /* enter new value, symbol, label, or filename */
+         else if (stm.choice=stm.zoom) and (token(0)<>0) then do;
+            token(0)=0;
+            call POS.STM.ALPHA.CURSOR;
+         end;
+      end;                                        /* of if on the command line */
+      else call POS.STM.ALPHA.CURSOR;             /* position menu cursor */
+   end STM_DISPLAY_INPUT_CRET;
+
+   /* $page - handle alpha character from stm display sub-menu */
+
+   STM_DISPLAY_INPUT_CHAR:proc(ch) swapable;
+      dcl ch fixed;
+
+      if (unlabeling.current<>0)                   /* if unlabeling or saving and user typed anything but carriage return */
+      then call SED.COMMAND.ATTRIBUTE.DEPOSIT;
+
+      else if ((stm.cmd.line=0) and ((asc.a<=ch) and (ch<asc.y))) then do; /* if not on the command line and typed a valid menu character */
+         stm.last.select.mode=stm.select.mode;    /* save the last selection */
+         if (((ch>=asc.a) and (ch<=asc.c)) or (ch=asc.x)) then do;
+            if ch=asc.x
+            then stm.select.mode=stm.modify2;
+            else stm.select.mode=ch-asc.a;        /* map the new selection */
+            if stm.select.mode<>stm.last.select.mode then do;
+               call ERASE.COMMAND.MENU;           /* erase previous command menu */
+               call DRAW.COMMAND.MENU;
+            end;
+         end;
+         else do;                                 /* if selecting a command */
+            stm.choice=ch-asc.a;                  /* map the new selection */
+            if stm.choice<=stm.zero then do;      /* if choice within bounds */
+
+               if
+					(	(stm.choice == stm.mark.start)
+					||	(stm.choice == stm.mark.end)
+					||	((stm.choice == stm.mark.off) && (inc.stmm))
+					)
+					then do;
+                  if sf.type=1 then do;           /* if sound file available */
+                     if			(stm.choice == stm.mark.start)	ADD_MARK(SFILE.BASE, mstart, cursor.time);
+                     else if	(stm.choice == stm.mark.end)		ADD_MARK(SFILE.BASE, mend, cursor.time);
+                     else													ADD_MARK(SFILE.BASE, markoff, cursor.time);
+                  end;
+                  else call no.sound.file;        /* otherwise sound file missing */
+               end;
+
+               else if stm.choice=stm.center then do;
+                  if sf.type=1
+                  then call CENTER.SAMPLE(cursor.time);
+                  else call no.sound.file;
+               end;
+
+               else if stm.choice=stm.left then do;	/* if left command put sample under cursor at left edge of display window */
+                  if sf.type=1
+                  then call LEFT.SAMPLE;
+                  else call no.sound.file;
+               end;	/* of if left command */
+
+               else if (inc.stmm) and (stm.choice=stm.symbols) then do;
+                  if sf.type=1 then do;
+                     stm.cmd.line=1;						/* we are in the command */
+                     new.poly.contents = new.poly.contents \ 1;
+                  end;
+                  else call no.sound.file;
+               end;
+
+               else if stm.choice=stm.lock then do;	/* if lock command lock sound file in right channel window display */
+                  if sf.type=1 then do;
+                     if locked=0 then do;
+                        call LOCK.SOUND.FILE;
+                     end;
+                  end;
+                  else call no.sound.file;
+               end;	/* of if lock command */
+
+               else if stm.choice=stm.unlock then do; /* if unlock command, unlock sound file from right channel window display */
+                  if sf.type=1 then do;
+                     if locked<>0 then do;
+                        call UNLOCK.SOUND.FILE; /* unlock the sound file */
+                        call ERASE.LOCK.NAME;   /* erase the locked sound file name */
+                        if stereo               /* if current sound file is in stereo */
+                        then call DRAW.RIGHT.CHANNEL.SYMBOLS;   /* redraw the symbols for the right channel */
+                        call DRAW.RIGHT.CHANNEL.LABEL;  /* redraw the right channel label */
+                     end;
+                  end;
+                  else call no.sound.file;
+               end;                             /* of if unlock command */
+
+               else if stm.choice = stm.dot.mode then do;
+                  if stm.is.drawing = 0 then do;
+                     if sf.type = 1 then do;
+                        call ERASE.SAMPLES(0,display.width-1,2);
+                        stm.draw.mode = stm.draw.mode XOR 1;
+                        call UPDATE.SOUND.EDITOR.DISP;
+                     end;
+                     else call no.sound.file;
+                  end;
+               end;
+
+               else if stm.choice = stm.zero then do;
+                  call DRAW.ZERO.LINE(0,display.width,2);
+                  stm.zero.line = stm.zero.line XOR 1;
+               end;
+
+               else do;
+                  stm.cmd.line=1;               /* indicate that we are on the command line */
+                  call ERASE.COMMAND.MENU;
+                  call ERASE.COMMAND.LETTERS;
+                  call DRAW.COMMAND.PROMPT(stm.choice);       
+               end;
+				end;	/*	of if choice is within bounds	*/
+			end;		/*	of if selecting a command	*/
+			POS.STM.ALPHA.CURSOR();
+		end;			/*	of if not on the command line and typed a valid menu character	*/
+		else if ((stm.choice == stm.zoom) && (stm.cmd.line != false)) then do;	/*	process valid characters from zoom	*/
+			if ((ch != a.space) && (ch != a.less) && (ch != a.greater)) {
+				if ((ch<asc.0) or (ch>asc.9))          /* only erase prompt if not a number between 0 and 9 */
+				then call ERASE.COMMAND.PROMPT(stm.choice);
+	
+				/* $page */
+				stm.last.select.mode=stm.select.mode;  /* save the last selection */
+				if (((ch>=asc.a) and (ch<=asc.c)) or (ch=asc.x)) then do;
+					if ch=asc.x
+					then stm.select.mode=stm.modify2;
+					else stm.select.mode=ch-asc.a;      /* map the new selection */
+					call DRAW.COMMAND.MENU;             /* to the new mode */
+					token(0)=0; stm.cmd.line=0;         /* get out of zoom */
+				end;
+				else if ((ch>asc.c) and (ch<asc.x)) then do;	/* a valid command so write new prompt */
+					stm.choice=ch-asc.a;
+
+					if (stm.choice ige asc.r-asc.a) {
+						DRAW.COMMAND.MENU();
+						token(0) = 0; stm.cmd.line = false;		/*	get out of zoom	*/
+					}
+
+					if (stm.choice=stm.left)
+					or (stm.choice=stm.center)
+					or (stm.choice=stm.mark.start)
+					or (stm.choice=stm.mark.end)
+					or (stm.choice=stm.mark.off) then do;
+						call DRAW.COMMAND.MENU;
+						token(0)=0; stm.cmd.line=0;		/*	get out of zoom	*/
+						call LOOK.UP.SF.INFO;				/*	things may have moved around since the last time	*/
+
+						if	stm.choice=stm.left then do;	/*	if left command put sample under cursor at left edge of display window	*/
+							if sf.type=1
+							then call LEFT.SAMPLE;
+							else call no.sound.file;
+						end;
+						else if stm.choice=stm.center then do;
+							if sf.type=1
+							then call CENTER.SAMPLE(cursor.time);
+							else call no.sound.file;
+						end;
+						else {	//	((stm.choice=stm.mark.start) or (stm.choice=stm.mark.end) or (stm.choice=stm.mark.off))
+							if (sf.type == 1) {			/*	if sound file available	*/
+								if			(stm.choice == stm.mark.start)	ADD_MARK(SFILE.BASE,mstart, cursor.time);
+								else if	(stm.choice == stm.mark.end)		ADD_MARK(SFILE.BASE,mend,   cursor.time);
+								else													ADD_MARK(SFILE.BASE,markoff,cursor.time);
+							}
+							else no.sound.file();		/*	otherwise sound file missing	*/
+						}
+					end;
+
+					else if (inc.stmm) and (stm.choice=stm.symbols) then do;
+						if sf.type=1 then do;
+							stm.cmd.line=1;            /* we are in the command */
+							new.poly.contents = new.poly.contents \ 1;
+						end;
+						else call no.sound.file;
+					end;
+
+					else if stm.choice=stm.lock then do;	/*	if lock command lock sound file in right channel window display	*/
+						if sf.type=1 then do;
+							if locked=0 then call LOCK.SOUND.FILE;
+						end;
+						else call no.sound.file;
+					end;
+
+					else if stm.choice=stm.unlock then do;	/*	if unlock command, unlock sound file from right channel window display	*/
+						if sf.type=1 then do;
+							if locked<>0 then do;
+								call UNLOCK.SOUND.FILE;	/*	unlock the sound file	*/
+								call ERASE.LOCK.NAME;	/*	erase the locked sound file name	*/
+								if stereo					/*	if current sound file is in stereo	*/
+								then call DRAW.RIGHT.CHANNEL.SYMBOLS;	/*	redraw the symbols for the right channel	*/
+								call DRAW.RIGHT.CHANNEL.LABEL;			/*	redraw the right channel label	*/
+							end;
+						end;
+						else call no.sound.file;
+					end;
+
+					else if stm.choice = stm.dot.mode then do;
+						if stm.is.drawing = 0 then do;
+							if sf.type = 1 then do;
+								call ERASE.SAMPLES(0,display.width-1,2);
+								stm.draw.mode = stm.draw.mode XOR 1;
+								call UPDATE.SOUND.EDITOR.DISP;
+							end;
+							else call no.sound.file;
+						end;
+					end;
+
+					else if stm.choice = stm.zero then do;
+						call DRAW.ZERO.LINE(0,display.width,2);
+						stm.zero.line = stm.zero.line XOR 1;
+					end;
+
+					else call DRAW.COMMAND.PROMPT(stm.choice);
+				end;
+				else if ((mg600<>0) and (ch>=asc.0) and (ch<=asc.9)) then do;
+					if token(0) ilt stm.max.tlen then do;
+						call pbyte(token,token(0),ch);
+						token(0)=token(0)+1;
+					end;
+				end;
+				else do;
+					token(0)=0; stm.cmd.line=0;
+					call DRAW.COMMAND.MENU;
+				end;
+				call POS.STM.ALPHA.CURSOR;					/* position menu cursor */
+			}
+		end;
+      else if ((stm.cmd.line<>0)							/* if on the command line, input characters in token */
+      and (token(0) ILT stm.max.tlen)) then do;		/* if token length within limits */
+         call pbyte(token,token(0),ch);
+         token(0)=token(0)+1;
+         call POS.STM.ALPHA.CURSOR;						/* echo the characters typed */
+      end;
+   end STM_DISPLAY_INPUT_CHAR;
+
+   STM_DISPLAY_INPUT: PROC(ch) SWAPABLE;				/* character handler for display commands */
+      dcl (ch)               fixed;
+      dcl (i,j)              fixed;
+
+      if (ch=cret) then do;									/* CR: if carriage return */
+         call STM_DISPLAY_INPUT_CRET;
+      end;	/* of if carriage return */
+
+      else if ((ch>=sp) and (ch<=asc.tilde)) then do;	/* if a typed character */
+         call STM_DISPLAY_INPUT_CHAR(ch);
+      end;	/* of if a typed character */
+
+      else if (ch=del) or (ch="32") then do;				/* DELETE or CTRL-Z: Erase last char */
+         if (unlabeling.current<>0)	/* if unlabeling or saving and user typed anything but carriage return */
+         then call SED.COMMAND.ATTRIBUTE.DEPOSIT;
+         else if token(0)<>0 then do;						/* chars to delete */
+            token(0)=token(0)-1;
+            call POS.STM.ALPHA.CURSOR;
+            call pc(sp); call pc(bs);
+         end;
+      end;
+
+      else if (ch=u.arr) or (ch=d.arr) or (ch=r.arr) or (ch=l.arr) or (ch=home) then do; /* if any of the arrow keys */
+         if (unlabeling.current<>0)
+			then call SED.COMMAND.ATTRIBUTE.DEPOSIT;	/*	if user typed in anything but a carriage return do not save current file	*/
+
+         else if ((stm.cmd.line<>0) and (stm.choice=stm.zoom)) then do;
+            if (ch=u.arr) or (ch=d.arr) then do;
+               if ch=u.arr then do;								/* zoom in vertically */
+                  prev.stm.vert.factor=stm.vert.factor;	/* save previous for erasing */
+                  stm.vert.factor=stm.vert.factor+1;
+                  if stm.vert.factor>stm.max.vert.factors then stm.vert.factor=stm.max.vert.factors; /* limit the zoom factor by maximum number of factors */
+                  call DRAW.SOUND.FILE.VERT.FACTOR;		/* draws current sound file vertical scale factor */
+               end;
+               else if ch=d.arr then do;						/* zoom out vertically */
+                  prev.stm.vert.factor=stm.vert.factor;	/* save previous for erasing */
+                  stm.vert.factor=stm.vert.factor-1;
+                  if stm.vert.factor<0 then stm.vert.factor=0;	/* limit the zoom factor by maximum number of factors */
+                  call DRAW.SOUND.FILE.VERT.FACTOR;		/* draws current sound file vertical scale factor */
+               end;
+            end;
+            else if (ch=r.arr) or (ch=l.arr) or (ch=home) then do;                /* zoom in horizontally */
+               if ch=r.arr then do;								/* zoom in horizontally */
+                  prev.stm.hor.scale=stm.hor.scale;		/* save previous for erasing */
+                  prev.stm.hor.factor=stm.hor.factor;		/* save previous for erasing */
+                  stm.hor.factor=stm.hor.factor-1;
+                  if stm.hor.factor<0 then stm.hor.factor=0;		/* limit the zoom factor by maximum number of factors */
+                  stm.hor.scale=hor.zoom.table(stm.hor.factor);	/* set for changing cursor time */
+                  call DRAW.SOUND.FILE.HOR.FACTOR;			/* draws current horizontal sound file scale factor */
+               end;
+               else if ch=l.arr then do;						/* zoom out horizontally */
+                  prev.stm.hor.scale=stm.hor.scale;		/* save previous for erasing */
+                  prev.stm.hor.factor=stm.hor.factor;		/* save previous for erasing */
+                  stm.hor.factor=stm.hor.factor+1;
+                  if stm.hor.factor>stm.max.hor.factors then stm.hor.factor=stm.max.hor.factors; /* limit the zoom factor by maximum number of factors */
+                  stm.hor.scale=hor.zoom.table(stm.hor.factor);	/* set for changing cursor time */
+                  call DRAW.SOUND.FILE.HOR.FACTOR;			/* draws current horizontal sound file scale factor */
+               end;
+               else do;												/* home = 512*1 */
+                  prev.stm.hor.scale=stm.hor.scale;
+                  prev.stm.vert.factor=stm.vert.factor;	/* save previous for erasing */
+                  prev.stm.hor.factor=stm.hor.factor;		/* save previous for erasing */
+                  stm.hor.factor =0;
+                  stm.vert.factor=0;
+                  call DRAW.SOUND.FILE.HOR.FACTOR;			/* draws current horizontal sound file scale factor */
+                  call DRAW.SOUND.FILE.VERT.FACTOR;		/* draws current sound file vertical scale factor */
+               end;
+               if sf.type=1
+               then call CHANGE.ZOOM.TIME;					/* make sure sample stays under cursor while zooming */
+            end;
+            if sf.type=1 then do;								/* if sound file available */
+               call CHANGE.CURSOR.TIME;
+               new.poly.contents = new.poly.contents \ 1;
+            end;
+            call POS.STM.ALPHA.CURSOR;							/* position cursor in case of an error message display */
+         end;
+         else do;														/* if paging through sound file */
+            if sf.type=1 then do;								/* if sound file available */
+               new.cursor=MOVE.GRAPHIC.CURSORS(ch);
+               if new.cursor<>0
+               then return;
+            end;
+            else call no.sound.file;                    
+            call POS.STM.ALPHA.CURSOR;							/* position menu cursor */
+         end;	/* of if paging through the sound file */
+      end;		/* of if any of the arrow keys */
+      else do;
+         if (unlabeling.current<>0)
+			then call SED.COMMAND.ATTRIBUTE.DEPOSIT;			/*	if user typed in anything but a carriage return do not save current file	*/
+         else call POS.STM.ALPHA.CURSOR;						/* reposition cursor in case error message erase */
+      end;
+   END STM_DISPLAY_INPUT;
+
+   /* $Subtitle STM Modify Mode Input Handler */
+
+   STM_MODIFY_INPUT_CRET:proc swapable;
+      dcl i fixed;
+
+      FIND.ARG:  proc (arg) fixed;	/* returns start of file name found in token or 0 if file not found */
+         dcl arg		fixed;	/* argument number (1->first, 2->second,3->third etc ) */
+         dcl found	fixed;	/* if we found two commas in token then user tried to give a name */
+         dcl (i,j)	fixed;
+
+         found=0;					/* assume nothing */
+         i=0; j=0;				/* initialize */
+         do while ((i<token(0)) and (not found));  /* go through the token array */
+            if (byte(token,i)=comma) then do;
+               j=j+1;
+               if j=(arg-1) then found=1;
+            end;
+            i=i+1;
+         end;
+         if found then return i;
+         else return 0;
+      end FIND.ARG;
+
+      if inc.stmm = 0
+      then return;
+
+      if stm.cmd.line<>0 then do;				/* if on the command line */
+
+         if (stm.choice=stm.paste) then do;
+            if token(0)<>0 then do; /* if user has typed a name or is using edit buffer */
+               call PASTE.SAMPLES(SFILE.BASE);
+               pasting.edit=0;
+            end;
+            else do;									/* perhaps the edit buffer */
+               call copy.string(editbuff,fnbuf);
+               LNBUF(0)=0;
+               if ps.search<>0 then do;
+                  call append.to.str(token,editbuff);
+                  call POS.STM.ALPHA.CURSOR; /* position cursor to print name */
+                  call ps(' [RETURN confirms]');
+                  pasting.edit=1;
+               end;
+               else call paste.no.edit;      /* indicate that .editbuf is not available for a paste */
+            end;
+         end;
+
+         else if ((stm.choice=stm.delete)
+          or      (stm.choice=stm.cut)
+          or      (stm.choice=stm.copy) 
+          or      (stm.choice=stm.loop)
+          or      (stm.choice=stm.revloop)
+          or      (stm.choice=stm.extract))
+         and (token(0)<>0)
+         then do;
+            if  (token(0) >= 2)                /* reasonable # of characters typed */
+            and (byte(token,token(0)-1)=comma) /* last one is comma        */
+            then token(0)=token(0)-1;          /* remove it.  re-inserted below if .editbuf */
+            cross.loop=FIND.ARG(3);            /* see if user typed in a crossfade time as a third argument */
+            i=FIND.ARG(4);                     /* see if a different crossfade time as a fourth argument */
+            if cross.loop<>0 then do;          /* if user has typed a crossfade or is using default */
+               if stm.choice=stm.delete
+               then call DELETE.SAMPLES(SFILE.BASE,cross.loop);
+               else if stm.choice=stm.cut
+               then call CUT.SAMPLES(SFILE.BASE,cross.loop,i);
+               else if stm.choice=stm.copy
+               then call COPY.SAMPLES(SFILE.BASE,cross.loop,i);
+               else if stm.choice=stm.loop
+               then call LOOP.SOUND.FILE(SFILE.BASE,cross.loop);
+               else if stm.choice=stm.revloop
+               then call REVERSE.LOOP(SFILE.BASE,cross.loop);
+               /* else must be extract */
+               else call EXTRACT.SAMPLES(SFILE.BASE,cross.loop,i);
+               cross.loop=0;
+            end;
+            else do;                           /* use the default crossfade */
+               tok.ptr=token(0);
+               call pbyte(token,tok.ptr,comma);
+               tok.ptr=tok.ptr+1;
+               some.time(0)=0;
+               some.time(1)=stm.crossfade;
+               some.time(2)=0;
+               call time_normalize(some.time);
+               token(0)=tok.ptr;
+               call convert.sample.time.to.string(some.time);
+               token(0)=tok.ptr;
+               call POS.STM.ALPHA.CURSOR;     /* position cursor to print name */
+               call ps(' [RETURN confirms]');
+               cross.loop=1;
+            end;
+         end;
+
+         else if (stm.choice=stm.fill) and (token(0)<>0) then do;
+            if  (token(0) >= 2)        /* reasonable # of characters typed */
+            and (byte(token,token(0)-1)=comma) /* last one is comma        */
+            then token(0)=token(0)-1;          /* remove it.  re-inserted below if .editbuf */
+            fill.file=FIND.ARG(3);             /* see if user typed in a file name for the fill as a third argument*/
+            if fill.file<>0 then do;           /* if user has typed a name or is using edit buffer */
+               call FILL.SAMPLES(SFILE.BASE,fill.file);
+               fill.file=0;
+            end;
+            else do;                           /* perhaps the edit buffer */
+               call copy.string(editbuff,fnbuf);
+               LNBUF(0)=0;
+               if ps.search<>0 then do;
+                  call append.to.str(token,',');
+                  call append.to.str(token,editbuff);
+                  call POS.STM.ALPHA.CURSOR;   /* position cursor to print name */
+                  call ps(' [RETURN confirms]');
+                  fill.file=1;
+               end;
+               else call stm.no.editbuf;       /* EDITBUF not available */
+            end;
+         end;
+
+         else if (stm.choice=stm.mix) and (token(0)<>0) then do;
+            if (token(0)<>0) and (byte(token,token(0)-1)=comma) /* if the user typed something and the last character is a comma*/
+            then token(0)=token(0)-1;                           /* remove the last comma */
+            mix.level=FIND.ARG(2);                              /* beginning location of second argument */
+            if mix.level<>0 then do;
+               call MIX.OR.MODULATE.SF(SFILE.BASE, 0);
+               mix.level=0;
+            end;
+            else do;
+               call append.to.str(token,',');
+               call append.to.str(token,mixlevel);
+               call POS.STM.ALPHA.CURSOR;
+               call ps(' [RETURN confirms]');
+               mix.level=1;
+            end;
+         end;
+
+         else if (token(0)<>0) then do;
+            if (stm.choice=stm.combine)            /* COMBINE */
+            then call COMBINE.SOUND.FILES;
+
+            else if (stm.choice=stm.extmono)       /* EXTRACT MONO sound file from stereo */
+            then call EXTMONO.SOUND.FILE(SFILE.BASE);
+
+            else if (stm.choice=stm.cross)         /* set new CROSSFADE */
+            then call SET.CROSSFADE;
+
+            else if (stm.choice=stm.volume)
+            then call VOLUME.CONTROL(SFILE.BASE);  /* scale the VOLUME */
+			
+				else if (stm.choice == stm.modulate)	/* modulate two sound files */
+				then call MIX.OR.MODULATE.SF(SFILE.BASE, 1);
+         end;
+
+         if (pasting.edit=0) and (fill.file=0) and (cross.loop=0)
+         and (mix.level=0) then do;
+            if (STM.EDIT.MODE<>0) and (STM.ANCHOR.SET<>0) then do;  /* if anchor set erase it */
+               call STM.SOUND.EDITOR.INPUT(8,0);
+               STM.ANCHOR.SET=0;
+            end;
+            call SED.COMMAND.ATTRIBUTE.DEPOSIT; /* enter new value, symbol, label, or filename */
+         end;
+      end;                                      /* of if on the command line */
+      else call POS.STM.ALPHA.CURSOR;				/* position menu cursor */
+   end STM_MODIFY_INPUT_CRET;
+
+   STM_MODIFY_INPUT: PROC(ch) swapable;			/* character handler for modify commands */
+      dcl (ch)        fixed;
+      dcl i           fixed;
+
+      if ch=cret then do;								/* CR: if carriage return */
+         call STM_MODIFY_INPUT_CRET;
+      end;	/* of if carriage return */
+      else if ((ch>=sp) and (ch<=asc.tilde)) then do; /* if a typed character */
+         if (pasting.edit<>0) or (fill.file<>0) or (cross.loop<>0) or (mix.level<>0)
+         then call SED.COMMAND.ATTRIBUTE.DEPOSIT;
+         else if ((stm.cmd.line=0) and ((asc.a<=ch) and (ch<asc.y))) then do; /* if not on the command line and typed a valid menu character */
+            stm.last.select.mode=stm.select.mode;		/* save the last selection */
+            if (((ch>=asc.a) and (ch<=asc.c)) or (ch=asc.x)) then do;
+               if ch=asc.x
+               then stm.select.mode=stm.modify2;
+               else stm.select.mode=ch-asc.a;			/* map the new selection */
+               if stm.select.mode<>stm.last.select.mode then do;
+                  call ERASE.COMMAND.MENU;				/* erase previous command menu */
+                  call DRAW.COMMAND.MENU;
+               end;
+            end;
+            else do; 											/* if selecting a command */
+               stm.choice=ch-asc.a;							/* map the new selection */
+               if stm.choice<=stm.dctrim then do;     /* if choice within bounds */
+                  if stm.choice=stm.reverse then do;        /* if reverse */
+                     if sf.type=1                           /* if sound file available */
+                     then call REVERSE.SOUND.FILE(SFILE.BASE); /* reverse the data in poly memory */
+                     else call no.sound.file;               /* otherwise sound file missing */
+                  end;
+                  else if ((stm.choice=stm.extract) or (stm.choice=stm.delete)					/* if extract mono or delete */
+                  or (stm.choice=stm.cut) or (stm.choice=stm.paste) or (stm.choice=stm.copy)	/* or cut or paste */
+                  or (stm.choice=stm.fill) or (stm.choice=stm.loop) or (stm.choice=stm.revloop)
+                  or (stm.choice=stm.volume) or (stm.choice=stm.mix) or (stm.choice == stm.modulate))
+                  then do;
+                     if sf.type=1 then do;                  /* if sound file available */
+                        stm.cmd.line=1;                     /* indicate that we are on the command line */
+                        call ERASE.COMMAND.MENU;
+                        call ERASE.COMMAND.LETTERS;
+                        call DRAW.COMMAND.PROMPT(stm.choice);       
+                     end;
+                     else call no.sound.file;               /* otherwise sound file missing */
+                  end;
+                  else if (stm.choice=stm.exchange) then do;	/* if exchange */
+                     if sf.type=1 then do;							/* if stereo sound file available */
+                        if stereo<>0 
+                        then call EXCHANGE.STEREO.SOUND(SFILE.BASE); /* exchange the left with the right channel */
+                        else call no.mono.sound;            /* must exchange a stereo sound file */
+                     end;
+                     else call no.sound.file;               /* otherwise sound file missing */
+                  end;
+
+                  /* $page */
+
+                  else if stm.choice=stm.extmono then do;   /* if extract mono sound file */
+                     if sf.type=1 then do;                  /* if stereo sound file available */
+                        if stereo=0
+                        then call split.stereo.sound;       /* must split a stereo sound file */
+                        else do;
+                           stm.cmd.line=1;                  /* indicate that we are on the command line */
+                           call ERASE.COMMAND.MENU;
+                           call ERASE.COMMAND.LETTERS;
+                           call DRAW.COMMAND.PROMPT(stm.choice);       
+                        end;
+                     end;
+                     else call no.sound.file;               /* otherwise sound file missing */
+                  end;
+                  else if (inc.stmm) and (stm.choice=stm.normalize) then do;   /* if extract mono sound file */
+                     if sf.type=1                           /* if sound file available */
+                     then call NORMALIZE(SFILE.BASE);       /* normalize the volume */
+                     else call no.sound.file;               /* otherwise sound file missing */
+                  end;
+                  else if (inc.stmm) and (stm.choice=stm.invert) then do;        /* if invert */
+                     if sf.type=1                           /* if sound file available */
+                     then call INVERT.SOUND.FILE(SFILE.BASE);	/* invert the data in poly memory */
+                     else call no.sound.file;               /* otherwise sound file missing */
+                  end;
+                  else if (inc.stmm) and (stm.choice=stm.dctrim) then do; /* if dc trim */
+                     if sf.type=1                           /* if sound file available */
+                     then call DC.TRIM.SOUND.FILE(SFILE.BASE);	/* invert the data in poly memory */
+                     else call no.sound.file;               /* otherwise sound file missing */
+                  end;
+                  else do;
+                     stm.cmd.line=1;                        /* indicate that we are on the command line */
+                     call ERASE.COMMAND.MENU;
+                     call ERASE.COMMAND.LETTERS;
+                     call DRAW.COMMAND.PROMPT(stm.choice);       
+                  end;
+					end;	/*	of if mode is modify	*/
+				end;		/*	of if selecting a command	*/
+				POS.STM.ALPHA.CURSOR();
+         end;	/* of if not on the command line and typed a valid menu character */
+         else if ((stm.cmd.line<>0)                  /* if on the command line, input characters in token */
+         and (token(0) ILT stm.max.tlen)) then do;   /* if token length within limits */
+            call pbyte(token,token(0),ch);
+            token(0)=token(0)+1;
+            call POS.STM.ALPHA.CURSOR;               /* echo the characters typed */
+         end;
+      end;	/* of if a typed character */
+      else if (ch=del) or (ch="32") then do;      /* DELETE or CTRL-Z: Erase last char */
+         if (pasting.edit<>0) or (fill.file<>0) or (cross.loop<>0) or (mix.level<>0)
+         then call SED.COMMAND.ATTRIBUTE.DEPOSIT;
+         else if token(0)<>0 then do;                /* chars to delete */
+            token(0)=token(0)-1;
+            call POS.STM.ALPHA.CURSOR;
+            call pc(sp); call pc(bs);
+         end;
+      end;
+      else if (ch=u.arr) or (ch=d.arr) or (ch=r.arr) or (ch=l.arr) or (ch=home) then do; /* if any of the arrow keys */
+         if (pasting.edit<>0) or (fill.file<>0) or (cross.loop<>0) or (mix.level<>0)
+         then call SED.COMMAND.ATTRIBUTE.DEPOSIT;
+         else do;
+            if sf.type=1 then do;                    /* if sound file available */
+               new.cursor=MOVE.GRAPHIC.CURSORS(ch);
+               if new.cursor<>0
+               then return;
+            end;
+            else call no.sound.file;                    
+            call POS.STM.ALPHA.CURSOR;               /* position menu cursor */
+         end;
+      end;	/* of if an arrow key */
+      else do;
+         if (pasting.edit<>0) or (fill.file<>0) or (cross.loop<>0) or (mix.level<>0)
+         then call SED.COMMAND.ATTRIBUTE.DEPOSIT;
+         else call POS.STM.ALPHA.CURSOR;             /* reposition cursor in case error message erase */
+      end;
+   END STM_MODIFY_INPUT;
+
+   /* $Subtitle STM Store/Recall Mode Input Handler */
+
+   STM_STORE_INPUT: PROC(ch) SWAPABLE;	/* character handler for while in store mode */
+      dcl (ch)			fixed;
+      dcl i				fixed;
+      dcl faddr (1)	fixed;
+      dcl flen  (1)	fixed;
+      dcl level		lit '1';	/* current catalog */
+
+      if ch=cret then do;                      /* CR: if carriage return */
+         if stm.cmd.line<>0 then do;           /* if on the command line */
+            if stm.choice=stm.save then do;
+               if sf.type=1 then do;
+						if (replace.file == true)
+						{	//	this <RETURN> is a confirmation to overwrite a file on disk with the same name
+							SAVE.SOUND.FILE(SFILE.BASE,token);
+							replace.file = false;
+						}
+						else if (saving.current == true)
+						{	//	this <RETURN> is a confirmation to use the soundfile's current name
+							if (LOCATE(token,level) == true)
+							{	//	there's already a file saved with the specified name, so ask the user if an overwrite is intended
+								ERASE.COMMAND.PROMPT(stm.choice);	//	erase the command line
+								cpos(18,19);
+								ps('File "');
+								ps(f#name);
+								ps('" is already saved. Press <RETURN> to replace');
+								cpos(19,19);
+								ps('the file or press <DELETE> to abort the command.');
+								replace.file = true;
+							}
+							else SAVE.SOUND.FILE(SFILE.BASE,token);
+							saving.current = false;
+						}
+						else
+						{	//	this is the first <RETURN> issued on this command line
+							//	if the token is either empty or is a directory path, then we should append the soundfile's
+							//	current name and ask the user to confirm
+							if ((token[0] == 0) || (byte(token,token[0]-1) == a.colon))
+							{	do i = 0 to stm.file.name[0]-1;
+									ch = byte(stm.file.name,i);
+									if ch ine a.space then do;	// parse off the space padding at the end
+										call pbyte(token, token[0], ch);
+										token[0] = token[0]+1;
+									end;
+								end;
+								POS.STM.ALPHA.CURSOR();			// make sure cursor is in correct spot and print file name
+								ps(' [RETURN confirms]');
+								saving.current = true;
+							}
+							//	otherwise the user provided a filename, so go for it
+							else
+							{	if (LOCATE(token,level) == true)
+								{	//	there's already a file saved with the specified name, so ask the user if an overwrite is intended
+									ERASE.COMMAND.PROMPT(stm.choice);	//	erase the command line
+									cpos(18,19);
+									ps('File "');
+									ps(f#name);
+									ps('" is already saved. Press <RETURN> to replace');
+									cpos(19,19);
+									ps('the file or press <DELETE> to abort the command.');
+									replace.file = true;
+								}
+								else SAVE.SOUND.FILE(SFILE.BASE,token);
+							}
+						}
+               end;
+               else call no.sound.file;
+            end;
+
+            else if (stm.choice=stm.unsave) and (token(0)<>0)
+            then call UNSAVE.SOUND.FILE(token);	/* remove specified sound file */
+
+            else if ((stm.choice=stm.rename) and (token(0)<>0)) then do;
+               if sf.type=1
+               then call RENAME.SOUND.FILE(SFILE.BASE,token);
+               else call no.sound.file;
+            end;
+
+            else if ((stm.choice=stm.recall) and (token(0)<>0)) then do;
+               if SOUND.FILE.SEARCH (token, false) /* look for file, don't audition it */
+               then do;                            /* found the file */
+                  EXIT.MY.SCREEN = 0;
+                  new.poly.contents = new.poly.contents \ 1;
+                  call POS.STM.ALPHA.CURSOR;
+               end;
+            end;
+
+            else if ((stm.choice=stm.collect) and (token(0)<>0)) then do;
+               if eqstr(token,'OK') = 0 then do;
+                  call DRAW.MESSAGE('Collecting Poly Memory...');
+                  call PS.SHUFFLE(1);             /* delete unused files & shuffle memory */
+                  call ERASE.MESSAGE;
+                  call POS.STM.ALPHA.CURSOR;
+               end;
+            end;
+
+            else if ((stm.choice=stm.max.time) and (token(0)<>0)) then do;
+               if eqstr(token,'OK') = 0 then do;
+                  call DRAW.MESSAGE('Shuffling for maximum recording time...');
+                  call PS.MAX.TIME;
+                  call ERASE.MESSAGE;
+                  call POS.STM.ALPHA.CURSOR;
+               end;
+            end;
+
+            else if (stm.choice=stm.record) then do; 
+               if token(0)<>0 then do;             /* if there is a token value */
+                  call CHANGE.RECORD.MENU(stm.record.choice); /* change record parameter */
+                  call POS.STM.ALPHA.CURSOR;       /* position menu cursor */
+               end;
+               else SAMPLE.TO.MEMORY=1;
+               new.poly.contents = new.poly.contents \ 1;
+            end;
+
+            if (saving.current=0) and (replace.file=0)
+            and (stm.choice<>stm.record)
+            then call SED.COMMAND.ATTRIBUTE.DEPOSIT; /* enter new value, symbol, label, or filename */
+
+         end;	/* of if on the command line */
+         else call POS.STM.ALPHA.CURSOR;        /* position menu cursor */
+      end;	/* of if carriage return */
+
+      else if ((ch>=sp) and (ch<=asc.tilde)) then do;	/* if a typed character */
+         if (saving.current<>0) or (replace.file<>0)	/* if saving or replacing and user typed anything but carriage return */
+         then call SED.COMMAND.ATTRIBUTE.DEPOSIT;
+
+         else if ((stm.cmd.line=0) and ((asc.a<=ch) and (ch<asc.y))) then do; /* if not on the command line and typed a valid menu character */
+            stm.last.select.mode=stm.select.mode;		/* save the last selection */
+            if (((ch>=asc.a) and (ch<=asc.c)) or (ch=asc.x)) then do;
+               if ch=asc.x
+               then stm.select.mode=stm.modify2;
+               else stm.select.mode=ch-asc.a;			/* map the new selection */
+               if stm.select.mode<>stm.last.select.mode then do;
+                  call ERASE.COMMAND.MENU;				/* erase previous command menu */
+                  call DRAW.COMMAND.MENU;
+               end;
+               call POS.STM.ALPHA.CURSOR;					/* position menu cursor */
+            end;
+
+            /* $page */
+
+            else do;
+               stm.choice=ch-asc.a;							/* map the new selection */
+               if stm.choice<=stm.max.time then do;	/* if choice is within bounds */
+                  /* stm.save, stm.unsave, stm.rename, stm.record, stm.max.time, stm.collect */
+                  stm.cmd.line=1;							/* indicate that we are on the command line */
+                  call ERASE.COMMAND.MENU;
+                  call ERASE.COMMAND.LETTERS;
+                  call DRAW.COMMAND.PROMPT(stm.choice);       
+               end;
+               else call POS.STM.ALPHA.CURSOR;			/* position menu cursor */
+            end;
+         end;
+
+         else if ((stm.cmd.line<>0)							/* if on the command line, input characters in token */
+         and (token(0) ILT stm.max.tlen)) then do;		/* if token length within limits */
+            if (stm.choice=stm.record) then do;			/* if setting recording sampling rate or scale */
+               if ((((ch>=asc.0) and (ch<=asc.9)) or (ch=dot))
+                   and (stm.record.choice>1))
+               or ((ch=asc.min) and (stm.record.choice=4)		/* Allow neg nums for	*/
+                   and ((READ.STM.CONFIG(0) & "H8000") <> 0))	/* gain if new SAFE		*/
+               then do;
+                  call pbyte(token,token(0),ch);		/* Add char to token */
+                  token(0)=token(0)+1;
+               end;
+               else if ch=sp then do;
+                  if stm.record.choice<2 
+                  then do;
+                     call CHANGE.RECORD.MENU(stm.record.choice);	/* toggle if record mode or trigger menu selection */
+                     new.poly.contents = new.poly.contents \ 1;
+                  end;
+               end;
+				end;
+				else do;	/*	echo the characters typed	*/
+					call pbyte(token,token(0),ch);
+					token(0)=token(0)+1;
+				end;
+				POS.STM.ALPHA.CURSOR();
+			end;
+      end;	/* of if a typed character */
+
+      else if (ch=del) or (ch="32") then do;           /* DELETE or CTRL-Z: Erase last char */
+         if (saving.current<>0) or (replace.file<>0)   /* if saving or replacing and user typed anything but carriage return */
+         then call SED.COMMAND.ATTRIBUTE.DEPOSIT;
+         else if token(0)<>0 then do;                  /* chars to delete */
+            token(0)=token(0)-1;
+            call POS.STM.ALPHA.CURSOR;
+            call pc(sp); call pc(bs);
+         end;
+      end;	/* of if delete */
+
+      else if (ch=3)                        /* CTRL-C: goto recall sound file screen */
+      and     (stm.choice=stm.recall)       /* If recall then view catalog */
+      then do;                
+         call GET_DISABLE(get.mouse.button);
+         i = RECALL.SOUND.FILE.SCREEN(0,0,1);
+         call GET_ENABLE (get.mouse.button);
+         if i=0 then do;
+            call STM.SOUND.EDITOR.DISP;     /* draw sound editor screen frame */
+            new.poly.contents = new.poly.contents \ 1;
+            call POS.STM.ALPHA.CURSOR;      /* position cursor */
+         end;
+         else if i>0 then do;
+            GOTO.THIS.SCREEN = i;
+            EXIT.MY.SCREEN   = 1;
+         end;
+      end;
+
+      /* $page */
+      else if (ch=u.arr) or (ch=d.arr) or (ch=r.arr) or (ch=l.arr) or (ch=home) then do; /* if any of the arrow keys */
+         if (saving.current<>0) or (replace.file<>0)
+			then call SED.COMMAND.ATTRIBUTE.DEPOSIT;	/*	if user typed in anything but a carriage return do not save current file	*/
+
+         else if ((stm.cmd.line<>0) and (stm.choice=stm.record)) then do;
+            /* if we just typed in a recording sampling rate or scale set the values*/
+            if stm.record.choice>1
+            then call CHANGE.RECORD.MENU(stm.record.choice);
+            stm.last.record.choice=stm.record.choice;					/* save previous record menu selection */
+            if ((ch=u.arr) or (ch=d.arr)) then do;						/* up or down arrow */ 
+               if ch=d.arr then do;
+                  stm.record.choice=stm.record.choice+1;
+                  if stm.record.choice>4 then stm.record.choice=stm.last.record.choice;
+                  if ((stm.record.device==stm.record.device.d66)||(stm.record.device==stm.record.device.dig))&(stm.record.choice==4)
+                  then stm.record.choice=stm.last.record.choice;	/* no scale for d66 or dig stm */
+               end;
+               else do;
+                  stm.record.choice=stm.record.choice-1;
+                  if stm.record.choice<0 then stm.record.choice=stm.last.record.choice;
+               end;
+            end;
+            else if ((ch=r.arr) or (ch=l.arr)) then do;				/* right or left arrow */
+               if ch=r.arr then do;
+                  stm.record.choice=stm.record.choice+2;
+                  if stm.record.choice>4 then stm.record.choice=stm.last.record.choice;
+                  if ((stm.record.device==stm.record.device.d66)||(stm.record.device==stm.record.device.dig))&(stm.record.choice==4)
+                  then stm.record.choice=stm.last.record.choice;	/* no scale for mono record */
+               end;
+               else do;
+                  stm.record.choice=stm.record.choice-2;
+                  if stm.record.choice<0 then stm.record.choice=stm.last.record.choice;
+               end;
+            end;
+            else stm.record.choice=0;					/* home */
+            call POS.STM.ALPHA.CURSOR;					/* position menu cursor */
+         end;
+
+         else do;												/* if paging through sound file */
+            if sf.type=1 then do;						/* if sound file available */
+               new.cursor=MOVE.GRAPHIC.CURSORS(ch);
+               if new.cursor<>0
+               then return;
+            end;
+            else call no.sound.file;                    
+            call POS.STM.ALPHA.CURSOR;					/* position menu cursor */
+         end;	/* of if paging through the sound file */
+      end;		/* of if any of the arrow keys */
+      else do;
+         if (saving.current<>0) or (replace.file<>0)
+			then call SED.COMMAND.ATTRIBUTE.DEPOSIT;	/*	if user typed in anything but a carriage return do not save current file	*/
+         else call POS.STM.ALPHA.CURSOR;				/* reposition cursor in case error message erase */
+      end;
+
+   END STM_STORE_INPUT;
+
+   /* $page */
+
+   PARSE.TOKEN: proc(parm) fixed public swapable;	/* determines if parameter is a symbol or time value */
+     /*  1 -> symbol  0 -> time value */
+      dcl parm	fixed array;
+      dcl ch	fixed;	/* character from token  */
+      dcl dp	fixed;	/* if decimal point */
+      dcl i		fixed;
+
+      dp=0;                                       /* assume no decimal points as of yet */
+      do i=0 to parm(0)-1;
+         ch=byte(parm,i);
+         if ch=dot then dp=dp+1;                  /* indicate there is a decimal point */
+         if (((ch>=asc.exclam) and (ch<=slash))   /* if a character and not a number */
+         or ((ch>=colon) and (ch<=asc.tilde))) and (dp<>1)  /* excluding a decimal point */   
+         then return 1;
+      end;
+      return 0;
+   end PARSE.TOKEN;
+
+   GET.SAMPLE.TIME: proc (base,parm) fixed public swapable; /* gets the token sample time and puts result in some.time */
+      /* returns 1 if successful and 0 if not successful */
+      dcl base          fixed array; /* file base of current sound file in poly */
+      dcl parm          fixed array; /* token value */
+      dcl symbol_index  fixed;
+      dcl sav.err      fixed;
+      dcl i             fixed;
+
+      if PARSE.TOKEN(parm)<>0 then do;			/* if the token is a symbol */
+         if (parm(0)=1) and (byte(parm,0)=asc.star) then do; /* if symbol for current cursor location */
+            do i=0 to 2;
+               some.time(i)=cursor.time(i);	/* set beginning time to current cursor time */
+            end;
+         end;
+         else do;										/* if symbol other than current cursor location */
+            symbol_index=FIND_NAME(base,parm);
+            if symbol_index<0 then do;			/* if symbol does not exist */
+               do i=0 to parm(0)-1;
+                  call pbyte(token,i,byte(parm,i));
+               end;
+               token(0)=parm(0);
+               call no.symbol;
+               return 0;
+            end;
+            else do;                         /* if symbol exists */
+               call psmread(base,SF.SYM,symbol_index * symbol_length);  /* point to the symbol */
+               do i=0 to 2;                  /* get the associated time */
+                  some.time(i)=read(psd);
+               end;
+            end;
+         end;                                /* of if symbol other than current cursor location  */
+      end;                                   /* of if the first location specified by a symbol */
+      else do;                               /* if time value */
+         sav.err = ertyp;					/* Save any pending error */
+         ertyp = 0;							/* Be sure error we see is ours */
+         call CONV.STR.TO.SFTIME(parm,some.time);
+         if ertyp<>0
+         then return 0;
+         ertyp = sav.err;					/* Restore pending error (if any) */
+      end;
+      return 1;
+   end GET.SAMPLE.TIME;
+
+   insert ':synsou:stmmod:stinsou1';	/* code to handle Modify 2 menu input */
+   insert ':synsou:stmmod:stmpbsou';	/* Mouse playback; also anchor routines for editing */
+   insert ':synsou:stmmod:stmlssou';	/* Landscape real time drawing */
+   insert ':synsou:stmmod:stinsoua';	/* Main input handling, mouse positioning */
+
+end STINMOD;
+

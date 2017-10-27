@@ -1,0 +1,1098 @@
+/* ARC-ACT  $TITLE  Archive Command Button Routines */
+
+/* Modified:
+
+   05/03/89 - SGS - Moved Transfer.Optical.Data from here to OPTICAL
+   05/03/89 - TSS - Merged changes for Optical disk to DTD transfer project
+   11/12/87 - LSS - VERIFY mode bug fixes
+   11/05/87 - LSS - added code for optical to CC copy
+*/
+
+Open.Action.Buttons: proc (WhichMode) swapable;  /* puts up command buttons */
+   dcl WhichMode   fixed; /* NullMode, SFMode, CatalogMode, CategoryMode, LaserEditMode (0,1,2,3,4) */
+   dcl NewBits     fixed;
+   dcl OldBits     fixed;
+   dcl DevName (8) fixed;
+   dcl (Id,I)      fixed;
+
+   Define.New.Action.Button: proc (PidLoc, Str, Row, Col, Style, UserData);
+      dcl PidLoc		fixed;
+      dcl Str			array;
+      dcl (Row, Col)	fixed; /* transparent coords * 100 */
+      dcl Style		fixed;
+      dcl UserData	fixed;
+
+      dcl id			fixed;
+
+      id	= Define.Button.Icon(OBJ$Action+PidLoc-FirstActionButton, Col, Row, 0, Str, Style);
+      Deposit.Object.Info(id, O#UserData, UserData);
+      PID(PidLoc, id);
+
+   end Define.New.Action.Button;
+
+   Define.New.Action.Label: proc (PidLoc,Str,Row,Col,UserData);
+      dcl PidLoc    fixed;
+      dcl Str       array;
+      dcl (Row,Col) fixed; /* transparent coords * 100 */
+      dcl UserData  fixed;
+      dcl TStr (16) fixed;
+
+      TStr(0)=0; call Append.To.Str(TStr,Str);
+      call PID(PidLoc,Define.Graphics.Label(OBJ$Action+PidLoc-FirstActionButton,Row,Col,TStr));
+      call Deposit.Object.Info(GID(PidLoc),O#UserData,UserData);
+
+   end Define.New.Action.Label;
+
+   if GID(ActionGrp)=(-1) then do; /* no buttons defined yet */
+      call PID(ActionGrp,Group.Objects(GRP$Action,OBJ$Action,OBJ$Action+NumActionButtons-1,Get#Screen.Event));
+      call PID(ActionButtonBits,0); /* no buttons displayed yet */
+   end;
+
+   NewBits=Bit#Clear;                 /* Clear always on */
+
+   if WhichMode=SFMode then do;
+      if (OpenWindowBits&Bits(OptWindowId))<>0 then do;
+         if GID(FileOnOptical)=0         /* file not already on optical disk */
+         then NewBits=NewBits|Bit#Store; /* Save button     */
+         else NewBits=NewBits|Bit#Rep|Bit#UpdOptical; /* Replace and Update buttons  */
+      end;
+      NewBits=NewBits|Bit#UpdLabel|Bit#UpdSource;  /* give update label & source update button */
+   end;
+   else if WhichMode=CatalogMode then do;
+      if (OpenWindowBits&Bits(OptWindowId))<>0 then do;
+         NewBits=NewBits|Bit#StoreCatlg;           /* will open dialog box */
+      end;
+   end;
+   else if WhichMode=CategoryMode then do;
+      if (OpenWindowBits&Bits(OptWindowId))<>0 then do;
+         NewBits=NewBits|Bit#CopyCtgry|Bit#CatInfo;
+      end;
+   end;
+   else if WhichMode=LaserEditMode then do;
+      if (OpenWindowBits&Bits(OptWindowId))<>0 then do;
+         NewBits=NewBits|Bit#UpdLabel|Bit#UpdOptical|Bit#Delete|Bit#Copy;
+      end;
+   end;
+
+   /* $page */
+
+   OldBits=GID(ActionButtonBits); /* currently displayed buttons */
+
+   if (OldBits&Bit#UpdSource)<>0 then do;              /* button should already be there */
+      Id=GID(UpdSourceButton);                         /* get object id of device button */
+      if (((NewBits xor OldBits) & Bit#UpdOptical)<>0) /* or change in update button position */
+      then do;                                         /* need to erase existing button and redefine it below */
+         call Erase.Object   (Id);                     /* erase from screen */
+         call Undefine.Object(Id);                     /* undefine from screen manager */
+         call PID(UpdSourceButton,0);                  /* button not there any more */
+         OldBits=OldBits&(Not Bit#UpdSource);          /* reset bit in local state var */
+         call PID(ActionButtonBits,OldBits);           /* reset global state var bit */
+      end;
+   end;
+
+   if NewBits<>OldBits then do;
+      do I=0 to NumActionButtons-1; /* first erase buttons which should be off */
+         if ((NewBits xor OldBits) & Bits(I))<>0 then do;
+            if (NewBits&Bits(I))=0 then do; /* erase & undefine buttons */
+               Id=GID(FirstActionButton+I);
+               write(md)=0;     /* button about to be undefined */
+               call Erase.Object   (Id);
+               call Undefine.Object(Id);
+            end;
+         end;
+      end;
+      do I=0 to NumActionButtons-1; /* now turn on any new buttons */
+         if ((NewBits xor OldBits) & Bits(I))<>0 then do;
+            if (NewBits&Bits(I))<>0 then do; /* define, enable, and display button */
+               do case I; /* ORDER IS VERY IMPORTANT HERE */
+                  call Define.New.Action.Button(     ClearButton,'CLEAR'        ,450, 200,1,     ClearButton);
+                  call Define.New.Action.Button(     StoreButton,'STORE'        , 95,4400,1,     StoreButton);
+                  call Define.New.Action.Button(       RepButton,'REPLACE'      , 95,4400,1,       RepButton);
+                  call Define.New.Action.Button(StoreCatlgButton,'STORE CATALOG', 95,4600,0,  StoreCatlgButton);
+                  call Define.New.Action.Label (        UpdLabel,'UPDATE:'      , 70,5400,          UpdLabel);
+                  call Define.New.Action.Button(UpdOpticalButton,'OPTICAL'      , 95,6200,1,UpdOpticalButton);
+                  do;
+                     if (NewBits&Bit#UpdOptical)<>0 /* might need to adjust placement a little */
+                     then call Define.New.Action.Button(UpdSourceButton,'SOURCE',95,7200,1,UpdSourceButton);
+                     else call Define.New.Action.Button(UpdSourceButton,'SOURCE',95,6200,1,UpdSourceButton);
+                  end;
+                  call Define.New.Action.Button(    DeleteButton,'DELETE'       , 95,4400,1,    DeleteButton);
+                  call Define.New.Action.Button(      CopyButton,'CPY'          ,200,7530,1,      CopyButton); /* copy button pos */
+                  call Define.New.Action.Button( CopyCtgryButton,'COPY CATEGORY', 95,4600,0, CopyCtgryButton);
+                  call Define.New.Action.Button(   CatInfoButton,'INFO'         , 95,6500,0,   CatInfoButton);
+               end;
+               Id=GID(FirstActionButton+I);
+               call Enable.Object(Id);
+               call Update.Object(Id);
+            end;
+         end;
+      end;
+      call PID(ActionButtonBits,NewBits); /* present state of buttons displayed */
+   end;
+   
+end Open.Action.Buttons;
+
+Close.Action.Buttons: proc swapable;
+
+   call Erase.Group.Objects   (GID(ActionGrp));
+   call Undefine.Group.Objects(GID(ActionGrp));
+   call Ungroup.Objects       (GID(ActionGrp));
+
+   call PID(ActionGrp,-1);       /* no longer defined */
+   call PID(ActionButtonBits,0); /* no buttons displayed */
+end Close.Action.Buttons;
+
+/* $SUBTITLE */
+
+Stuff.Categories: proc(buf) boolean swapable; /* get categories from user */
+   dcl buf       fixed array; /* output buffer for sound file header */
+   dcl category (shr(CategoryStringLength,1)) fixed; /* category space */
+   dcl start     fixed; /* starting index */
+   dcl limit     fixed; /* limit for category info in header */
+   dcl (i,k)     fixed;
+
+   limit = sf.id.field + shr(buf(sf.id.field.bytes) + 1,1); /* lower limit of category area */
+   buf(sf.index.base)=0;          /* re-init category base pointer to indicate no categories */
+	start = 256; /* no index data, so start at end of header */
+
+   k=7;
+   do while k>=0;                 /* write categories in reverse order */
+      call Fetch.Table (GID(CatTable),k&1,shr(k,1));
+      call Fetch.String(GID(CatTable.Type.Obj),Category);
+      call Remove.Spaces.From.String(category,category);
+      call UpperCase.String         (category,category);
+
+      if Category(0)<>0 then do;
+         start = start - (1 + shr(category(0) + 1,1)); /* calculate starting word for new index data */
+
+         if start < limit then return false; /* not enough room for new index data */
+
+         buf(sf.index.base) = start; /* point to beginning of category area */
+         do i = 0 to shr(category(0) + 1,1);
+            buf(start + i) = category(i);
+         end;
+         if category(0) then call pbyte(Loc(Addr(buf(start))),category(0),0);
+      end;
+
+      k=k-1;
+   end;
+
+   return true;
+end Stuff.Categories;
+
+Verify.File.Info: proc (Dev,Name,FileAddr,FileLen) fixed swapable; /* check for devices that might have changed */
+   dcl Dev      fixed;
+   dcl Name     array;
+   dcl FileAddr array;
+   dcl FileLen  array;
+   dcl I        fixed;
+   dcl Temp(1)  fixed;
+
+   call copy.string(name,fnbuf);                   /* copy to global buf */
+   do i=fnbuf(0) to 7; call pbyte(fnbuf,i,0); end; /* zero fill file name */
+
+   // If for some reason a long name is available, use it
+   if (name(0) > 8)
+      copy.string(name,lnbuf);
+   else
+      lnbuf(0)=0;                                     // long name not available
+
+   if ((Dev=1) & (CurTyp=0))
+   or ((Dev>1) & (Dev<6))
+   then do;    /* look for file on floppy */
+      if Locate(FNBuf,Dev) then do;
+         FileAddr(0)=F#MS_Sector;
+         FileAddr(1)=F#LS_Sector;
+         FileLen (0)=F#MS_Length;
+         FileLen (1)=F#LS_Length;
+         return true;
+      end;
+      else return false; /* file not there anymore - floppy changed? */
+   end;
+   else if Dev=PolyMemDev then do;
+      if PS.SEARCH<>0 then do; /* compute ptr to file */
+         call COPY32(Sfile.Base,FileAddr); /* get file base in poly   */
+         call ADD16 (1,FileAddr);          /* +1 points to sound file */
+         call Psmread(SFile.Base,0,0);
+         FileLen(0)=0; FileLen(1)=read(psd)-1; /* get length again */
+         return true;
+      end;
+      else return false; /* SYSTEM ERROR?? */
+   end;
+
+   return true; /* assume all other devices are okay */
+
+end Verify.File.Info;
+
+/* $SUBTITLE Build a new Header for a Sound File before Archival */
+
+Build.New.Sound.File.Header: proc (Name,MS_Sector,LS_Sector,Device,Buf,CaptionFromScreen,CatsFromScreen) boolean swapable;
+   dcl Name                  array;
+   dcl (MS_Sector,LS_Sector) fixed; /* absolute addr (including device if applicable) */
+   dcl Device                fixed; /* logical device # for file */
+   dcl Buf                   array; /* output buffer (at least 256 words long) */
+   dcl CaptionFromScreen     boolean; /* true -> get caption from menu, else take from sound file */
+   dcl CatsFromScreen        boolean; /* true -> get categories from menu, else take from sound file */
+   dcl TStr (40)             fixed;
+   dcl RecBuf (L#Rec_Length-1) fixed;
+   dcl I                     fixed;
+
+   /* Build the correct header for the sound file by stuffing */
+   /* header with caption & categories from menu area.        */
+
+   if Device<>LaserDev then do; /* file did not come from Laser disk */
+      if Device<>PolyMemDev then do; /* file is on disk */
+         call Readdata(MS_Sector,LS_Sector,Buf,256); /* read current header into temp */
+         if (Buf(SF.Compatibility)=0) or (Buf(SF.Compatibility) IGT 10)
+         then return false;
+      end;
+      else do;  /* file is in poly memory */
+         call Psmread(Loc(Addr(MS_Sector)),0,0);
+         call Poly.In(Addr(Buf(0)),256);
+         if (Buf(SF.Compatibility) ILT 4) or (Buf(SF.Compatibility) IGT 10)
+         then return false;
+      end;
+   end;
+   else do; /* get current header from optical disk */
+      call Copy.String(Name,FNBuf); /* set up string in case of error */
+      if Index_Locate(Name,RecBuf,Laserdev) then do;
+         if ReadEntry(RecBuf(L$Dir_Entry),LaserDev)=S$Good then do;
+            if O$BufMed=1 then do; /* optical buffer is in external memory */
+               write(mam)=O$BufPtr+shr(E$Header,8);
+               write(mal)=E$Header;
+               call Copy.In(Addr(Buf(0)),256);
+            end;
+            else do; /* optical buffer is in internal memory */
+               do I=0 to 255; Buf(I)=core(O$BufPtr+E$Header+I); end;
+            end;
+         end;
+         else return false;
+      end;
+      else do;
+         call Generate.Optical.Error.Message; /* generates messages for a bunch of situations */
+         return false;
+      end;
+   end;
+
+   if CaptionFromScreen then do;            /* stuff caption from screen into header */
+      call Fetch.String(GID(Caption),TStr); /* copy caption into header */
+      if not CatsFromScreen then do;        /* need to make sure caption will fit */
+         if Buf(SF.Index.Base)<(SF.ID.Field+shr(TStr(0)+1,1)) /* not enough room for new caption */
+         then do;
+            call Copy.String(Name,FNBuf);   /* so error message has name of file */
+            call Set.Optical.Error(ERR#NoRoomForCaption); /* no room for caption */
+            return false;
+         end;
+      end;
+      call Copy.String(TStr,Loc(Addr(Buf(SF.Id.Field.Bytes))));
+   end;
+
+   if CatsFromScreen then do;       /* take categories from menu */
+      if not Stuff.Categories(Buf)  /* true if categories fit, else false */
+      then do;
+         call Copy.String(Name,FNBuf); /* so error message has name of file */
+         call Set.Optical.Error(ERR#NoRoomForCategory); /* no room for categories */
+         return false;
+      end;
+   end;
+
+   return true;
+end Build.New.Sound.File.Header;
+
+/* $SUBTITLE Code to Write and Update Headers on Optical Disk */
+
+Write.Non.Optical.Sound.File.Header: proc (Device,MS_Sector,LS_Sector,Buf) swapable;
+   dcl Device                fixed;
+   dcl (MS_Sector,LS_Sector) fixed; /* absolute addr (including device if applicable) */
+   dcl Buf                   array; /* buffer containing new header */
+   dcl Temp (SF.Compatibility) fixed;
+
+   if Device=LaserDev then return;
+
+   if Device<>PolyMemDev then do; /* file is on disk */
+      call Readdata(MS_Sector,LS_Sector,Temp,1); /* read current header into temp */
+      if (Temp(SF.Compatibility)=0) or (Temp(SF.Compatibility) IGT 10)
+      or (Buf (SF.Compatibility)=0) or (Buf (SF.Compatibility) IGT 10)
+      then return;
+
+      // Can't update file on disk W0:CLARA3
+      if ((interp_w0_write_protected(0) != 0)
+      &&  (shr(MS_Sector, 8) == 6)
+      &&  ((((MS_Sector & 0xFF) ilt interp_w0_allow_write_ms(0)))
+      ||   (((MS_Sector & 0xFF) ieq interp_w0_allow_write_ms(0))
+      &&    ((LS_Sector       ) ilt interp_w0_allow_write_ls(0)))))
+         return;
+
+      call Writedata(MS_Sector,LS_Sector,Buf,256); /* write new header to disk file */
+   end;
+   else do;  /* file is in poly memory */
+      call Psmread(Loc(Addr(MS_Sector)),0,0);
+      Temp(SF.Compatibility)=read(psd);
+      if (Temp(SF.Compatibility) ILT 4) or (Temp(SF.Compatibility) IGT 10)
+      or (Buf (SF.Compatibility) ILT 4) or (Buf (SF.Compatibility) IGT 10)
+      then return;
+      call Psmwrite(Loc(Addr(MS_Sector)),0,0);
+      call Poly.Out(Addr(Buf(0)),256); /* write new header to poly memory file */
+   end;
+end Write.Non.Optical.Sound.File.Header;
+
+
+Update.Non.Optical.Sound.File.Header: proc (Name,MS_Sector,LS_Sector,MS_Len,LS_Len,Device) fixed swapable; /* writes new header to Non-Optical sound file header */
+   dcl Name                    array; /* name of sound file to archive */
+   dcl (MS_Sector,LS_Sector)   fixed; /* absolute addr (including device if applicable) */
+   dcl (MS_Len,LS_Len)         fixed; /* sector length of file to archive */
+   dcl Device                  fixed; /* logical device # for file (optical, polymem, or disk drive) */
+
+   if Device=LaserDev then return false;
+
+   /* recompute file info for poly memory &    */
+   /* floppy devices in case things have moved */
+
+   if not Verify.File.Info(Device,Name,Loc(Addr(MS_Sector)),Loc(Addr(MS_Len)))
+   then do;
+      call Copy.String(Name,FNBuf); /* set up for error call */
+      call Set.Optical.Error(ERR#FileNotFound);
+      return false;
+   end;
+
+   /* 1. build the correct header for the sound file by stuffing */
+   /*    header with caption & categories from menu area.        */
+
+   if Build.New.Sound.File.Header(Name,
+                                  MS_Sector,LS_Sector,
+                                  Device,Misc.Buf,
+                                  true,true)
+   then do;
+      call Write.Non.Optical.Sound.File.Header(Device,MS_Sector,LS_Sector,Misc.Buf);
+      return true;
+   end;
+   else do;
+      return false;
+   end;
+
+end Update.Non.Optical.Sound.File.Header;
+
+/* $SUBTITLE Write a File out to the Optical Disk */
+
+Archive.Sound.File: proc (OrigName,NewName,MS_Sector,LS_Sector,MS_Len,LS_Len,Device,CaptionFromScreen,CatsFromScreen) fixed swapable; /* archives file to Optical disk */
+   dcl OrigName                array; /* name of sound file on source */
+   dcl NewName                 array; /* name of sound file for destination (could be the save as OrigName) */
+   dcl (MS_Sector,LS_Sector)   fixed; /* absolute addr (including device if applicable) */
+   dcl (MS_Len,LS_Len)         fixed; /* sector length of file to archive */
+   dcl Device                  fixed; /* logical device # for file (optical, polymem, or disk drive) */
+   dcl CaptionFromScreen       boolean; /* true -> get caption from menu, else take from sound file */
+   dcl CatsFromScreen          boolean; /* true -> get categories from menu, else take from sound file */
+   dcl Recbuf (l#rec_length-1) fixed;
+
+   /* NOTE: Routine assumes ACTIVATE.OPTICAL has */
+   /*       been called to set up Optical disk.  */
+
+   /*       This routine is only used to write sounds from a  */
+   /*       NON-LASER DISK DEVICE to the Laser Disk           */
+
+   if Device=LaserDev then return false;
+
+   /* recompute file info for poly memory &    */
+   /* floppy devices in case things have moved */
+
+   if not Verify.File.Info(Device,OrigName,Loc(Addr(MS_Sector)),Loc(Addr(MS_Len)))
+   then do;
+      call Copy.String(OrigName,FNBuf); /* set up for error call */
+      call Set.Optical.Error(ERR#FileNotFound);
+      return false;
+   end;
+
+   /* 1. build the correct header for the sound file by stuffing */
+   /*    header with caption & categories from menu area.        */
+
+   if Build.New.Sound.File.Header(OrigName,
+                                  MS_Sector,LS_Sector,
+                                  Device,Misc.Buf,
+                                  CaptionFromScreen,CatsFromScreen)
+   then do;
+
+      /* 2. try to save or replace the current file onto the Laser Disk */
+
+      call Copy.String(NewName,FNBuf); /* set up string in case of error */
+
+      if Index_Replace(NewName,T#Sound,MS_Len,LS_Len,shl(LS_Len,8),Misc.Buf,Recbuf,LaserDev)
+      then do;      /* all ready to write data to disk */
+
+         call Set.Term.Attr(Attr#Normal);
+         call Draw.Message('Writing to Optical Disk...');
+
+         call Transfer.Optical.Data(MS_Sector,LS_Sector,     /* source address */
+                                    F#MS_Sector,F#LS_Sector, /* dest   address */
+                                    F#MS_Length,F#LS_Length, /* file   length  */
+                                    Device,LaserDev);        /* source, destination device numbers */
+
+         call Draw.Message('Operation Completed');
+
+         /* 3. Update the caption and category info */
+         /*    in the header for the Original sound */
+
+         call Write.Non.Optical.Sound.File.Header(Device,MS_Sector,LS_Sector,Misc.Buf);
+
+         return true;
+      end; /* if index_replace */
+      else do;
+         call Generate.Optical.Error.Message; /* generates messages for a bunch of situations */
+         return false;
+      end;
+   end;
+   else return false;                         /* error */
+
+end Archive.Sound.File;
+
+/* $SUBTITLE Update the Header for a file on Optical Disk */
+
+Update.Sound.File: proc (OrigName,NewName,MS_Sector,LS_Sector,MS_Len,LS_Len,Device,CaptionFromScreen,CatsFromScreen) fixed swapable; /* archives file to Optical disk */
+   dcl OrigName                array; /* name of sound file on source */
+   dcl NewName                 array; /* name of sound file for destination (could be the save as OrigName) */
+   dcl (MS_Sector,LS_Sector)   fixed; /* absolute addr (including device if applicable) */
+   dcl (MS_Len,LS_Len)         fixed; /* sector length of file to archive */
+   dcl Device                  fixed; /* logical device # for file (optical, polymem, or disk drive) */
+   dcl CaptionFromScreen       boolean; /* true -> get caption from menu, else take from sound file */
+   dcl CatsFromScreen          boolean; /* true -> get categories from menu, else take from sound file */
+   dcl Record (L#Rec_Length-1) fixed;
+
+   /* NOTE: Routine assumes ACTIVATE.OPTICAL has */
+   /*       been called to set up Optical disk.  */
+
+   /* recompute file info for poly memory &    */
+   /* floppy devices in case things have moved */
+
+   if not Verify.File.Info(Device,OrigName,Loc(Addr(MS_Sector)),Loc(Addr(MS_Len)))
+   then do;
+      call Copy.String(OrigName,FNBuf); /* set up for error call */
+      call Set.Optical.Error(ERR#FileNotFound);
+      return false;
+   end;
+
+   /* 1. build the correct header for the sound file by stuffing */
+   /*    header with caption & categories from menu area.        */
+
+   if Build.New.Sound.File.Header(OrigName,
+                                  MS_Sector,LS_Sector,
+                                  Device,Misc.Buf,
+                                  CaptionFromScreen,CatsFromScreen)
+   then do;
+
+      /* 2. try to save or replace the current file onto the Laser Disk */
+
+      call Copy.String(NewName,FNBuf); /* set up string in case of error */
+
+      if Index_Update(OrigName,NewName,Misc.Buf,Record,LaserDev)
+      then do;  /* rewrite header for this file */
+
+         /* 3. Update the caption and category info */
+         /*    in the header for the Original sound */
+
+         call Write.Non.Optical.Sound.File.Header(Device,MS_Sector,LS_Sector,Misc.Buf);
+
+         return true;
+      end;
+      else do;
+         call Generate.Optical.Error.Message; /* generates messages for a bunch of situations */
+         return false;
+      end;
+   end;
+   else return false;
+
+end Update.Sound.File;
+
+/* $SUBTITLE Routine to Archive an Entire Catalog of Sound Files */
+
+Archive.Catalog: proc (CatStoreBits) boolean swapable; /* does archive operations on entire subcat */
+   dcl CatStoreBits  fixed; /* list of control bits, defs in ARC-DLG */
+   dcl AnyWrites     fixed; /* set true if any writes were successful */
+   dcl Status        fixed;
+   dcl FCB (F#Len)   fixed;
+   dcl Temp.Base (1) fixed;
+   dcl Base      (1) fixed;
+   dcl (Bin,Len,I)   fixed;
+   dcl StatusLine    fixed static;
+
+   Erase.Status: proc;
+      call Set.Term.Attr(ATTR#Normal);
+      call Cpos(StatusLine,0); call Erase.To.End.Of.Line;
+   end Erase.Status;
+
+   Generate.Status: proc (Code,FileName);
+      dcl Code     fixed;
+      dcl FileName array;
+
+      call Set.Term.Attr(ATTR#Reverse|ATTR#AltIntensity);
+      call Cpos(StatusLine,0);
+      call Ps('STORE CATALOG: ');
+
+      do case Code;
+         call ps('Storing');
+         call ps('Replacing');
+         call ps('Updating');
+         call ps('Checking categories for');
+      end;
+
+      call ps(' Sound File "'); call ps(FileName); call ps('"');
+      call erase.to.end.of.line;
+   end Generate.Status;
+
+   Test.For.Valid.Header: proc (FCB,CatStoreBits) fixed; /* set up FCB with FCB before calling */
+      dcl FCB           array; /* valid FCB for this file */
+      dcl CatStoreBits  fixed; /* list of control bits, defs in ARC-DLG */
+      dcl Name      (4) fixed;
+      dcl Status        fixed;
+      dcl FileThere     fixed;
+
+      Name(0)=0;           /* build XPL string format filename */
+      call Append.Bytes.To.Str(Loc(Addr(FCB(F#NM))),8,Name,8);
+      call Remove.Spaces.From.String(Name,Name);
+      call UpperCase.String         (Name,Name);
+      call Copy.String              (Name,FNBuf); /* in case of error */
+
+      call Generate.Status(3,Name);
+
+      FileThere=Index_Locate(Name,Misc.Buf,Laserdev); /* see if file exists */
+
+      if  ((not FileThere)                  /* does not exist yet */
+      and ((CatStoreBits&CAT#Store)<>0))    /* and we want to save new files */
+      or  (FileThere                        /* or file exists on Optical */
+      and (((CatStoreBits&CAT#Replace)<>0)  /* and we want to replace existing files */
+      or   ((CatStoreBits&CAT#Update)<>0))) /* or we want to update file headers */
+      then do;                              /* make sure we can build it's header */
+         Status=Build.New.Sound.File.Header(Name,
+                               FCB(F#MS),FCB(F#LS),
+                               GID(FileDevice),Misc.Buf,
+                               (CatStoreBits&CAT#CaptionSource)<>0,
+                               (CatStoreBits&CAT#CatSource)    <>0);
+      end;
+      else Status=true;
+
+      if Status=false then call Set.Optical.Error(ERR#NoRoomInHeader);
+
+      return Status;
+   end Test.For.Valid.Header;
+
+   /* $PAGE */
+
+   Store.File: proc (FCB,CatStoreBits) fixed; /* set up FCB with FCB before calling */
+      dcl FCB              array; /* valid FCB for this file */
+      dcl CatStoreBits     fixed; /* list of control bits, defs in ARC-DLG */
+      dcl Name      (4)    fixed;
+      dcl OrigName  (4)    fixed;
+      dcl Status           fixed;
+      dcl FileThere        fixed;
+      dcl Do.Source.Rename boolean;
+
+      Name(0)=0;           /* build XPL string format filename */
+      call Append.Bytes.To.Str(Loc(Addr(FCB(F#NM))),8,Name,8);
+      call Remove.Spaces.From.String(Name,Name);
+      call UpperCase.String         (Name,Name);
+      call Copy.String              (Name,OrigName);
+
+      FileThere=Index_Locate(Name,Misc.Buf,Laserdev); /* see if file exists */
+
+      if (     FileThere  & ((CatStoreBits&CAT#PromptExist)<>0))
+      or ((Not FileThere) & ((CatStoreBits&CAT#PromptNew  )<>0))
+      then do;
+         call Erase.Status; /* clear prior status before opening dialog */
+         StatusLine=DialogRow+2;
+
+         if GID(SFDDlgGrp)=(-1)   /* open up dialog prompt first time through */
+         then call Open.Store.File.Dialog(CatalogMode,DialogRow);
+
+         CatStoreBits=CatStoreBits&(CAT#CaptionSource|CAT#CatSource); /* only keep these two bits */
+         CatStoreBits=CatStoreBits|Get.Store.File.Response(CatalogMode,Name,FileThere); /* routine might return different name & bits */
+
+         if (CatStoreBits&CAT#Abort)<>0 then do; /* we want to quit catalog store */
+            return (-1);
+         end;
+
+         if (CatStoreBits&CAT#DoIt)=0 then do; /* we want to skip this file */
+            return 0;
+         end;
+
+         if EqStr(OrigName,Name)<>0 then do; /* got a different name back */
+            if      (CatStoreBits& CAT#Store)              <>0 then FileThere=false;
+            else if (CatStoreBits&(CAT#Replace|CAT#Update))<>0 then FileThere=true;
+            Do.Source.Rename=true;                          /* rename source file */
+         end;
+      end;
+
+      if  ((not FileThere)                 /* does not exist yet */
+      and ((CatStoreBits&CAT#Store)<>0))   /* and we want to save new files */
+      or  (FileThere                       /* or file exists on Optical */
+      and ((CatStoreBits&CAT#Replace)<>0)) /* and we want to replace existing files */
+      then do;                             /* do Index_Replace operation */
+         call Generate.Status(FileThere,Name);
+
+         if Archive.Sound.File(OrigName,Name,
+                               FCB(F#MS),FCB(F#LS),
+                               FCB(F#ML),FCB(F#LL),
+                               GID(FileDevice),
+                               (CatStoreBits&CAT#CaptionSource)<>0,
+                               (CatStoreBits&CAT#CatSource)    <>0)
+         then Status=(+1);
+         else Status=(-1);
+
+         if (Status>0) & Do.Source.Rename then do;
+            if need.to.clean.up then do; end;
+         end;
+      end; 
+      else if (FileThere)                             /* file exists on Optical disk */
+      and    ((CatStoreBits&CAT#Update)<>0) then do; /* and we want to update file headers */
+         call Generate.Status(2,Name); /* update status message */
+
+         if Update.Sound.File(OrigName,Name,
+                              FCB(F#MS),FCB(F#LS),
+                              FCB(F#ML),FCB(F#LL),
+                              GID(FileDevice),
+                              (CatStoreBits&CAT#CaptionSource)<>0,
+                              (CatStoreBits&CAT#CatSource)    <>0)
+         then Status=(+1);
+         else Status=(-1);
+
+         if (Status>0) & Do.Source.Rename then do;
+            if need.to.clean.up then do; end;
+         end;
+      end;
+
+      return Status;
+   end Store.File;
+
+   /* $PAGE */
+
+   if (CatStoreBits&CAT#DoIt)=0 then return false; /* nothing to do */
+   if (CatStoreBits&(CAT#Store|CAT#Update|CAT#Replace|CAT#PromptNew|CAT#PromptExist))=0
+   then return false;                              /* nothing to do */
+
+   if not Activate.Optical(O#NoErrors) then return false; /* don't allow any errors here */
+
+   Optical.Disk.Ready=0; /* reset global flag */
+   StatusLine=DialogRow;
+
+   if GID(FileDevice)<>PolyMemDev then do; /* not polymemory */
+      if Read_Catalog('',GID(FileDevice)) then do; /* read catalog for our device */
+         load C#Dir_Size; div C#Len; I=res;
+         do I=0 to I-1; /* loop over all FCBs */
+
+            call Get_FCB(I,FCB); /* get next fcb from catalog buffer */
+
+            FCB(F#MS)=FCB(F#MS)+C#MS_Sector;
+            FCB(F#LS)=FCB(F#LS)+C#LS_Sector;
+            if FCB(F#LS) ilt C#LS_Sector then FCB(F#MS)=FCB(F#MS)+1;
+
+            // Ignore sound files beginning with period (.macfile)
+            if ((FCB(F#NM)<>0) and (FCB(F#TY)=T#Sound) and ((FCB(F#NM)&0xFF)!=a.period))
+            then do;               /* this is a sound file */
+               if not Test.For.Valid.Header(FCB,CatStoreBits)
+               then do;
+                  call Erase.Status;
+                  return false;
+               end;
+
+               call Read_Catalog('',GID(FileDevice)); /* reread catalog to be safe */
+            end;
+         end; /* looping over file entries */
+      end;
+
+      /* now we will actually try to write out the sound file data */
+
+      if Read_Catalog('',GID(FileDevice)) then do; /* read catalog for our device */
+         load C#Dir_Size; div C#Len; I=res;
+         do I=0 to I-1; /* loop over all FCBs */
+
+            call Get_FCB(I,FCB); /* get next fcb from catalog buffer */
+
+            FCB(F#MS)=FCB(F#MS)+C#MS_Sector;
+            FCB(F#LS)=FCB(F#LS)+C#LS_Sector;
+            if FCB(F#LS) ilt C#LS_Sector then FCB(F#MS)=FCB(F#MS)+1;
+
+            if ((FCB(F#NM)<>0) and (FCB(F#TY)=T#Sound) and ((FCB(F#NM)&0xFF)!=a.period))
+            then do;               /* this is a sound file */
+
+               Status=Store.File(FCB,CatStoreBits);
+
+               if Status=1         /* actually wrote file to disk */
+               then AnyWrites=true;
+               else if Status=(-1) then do; /* had an error trying to write file */
+                  if GID(SFDDlgGrp)<>(-1) then do;
+                     /* enable group objects before erase to avoid smgr bug */
+                     call Activate.Group.Objects(GID(SFDDlgGrp));
+                     call Set.Term.Attr(Attr#Normal);
+                     call Close.Dialog.Panel;
+                  end;
+                  call Erase.Status;
+                  return AnyWrites;
+               end;
+
+               call Read_Catalog('',GID(FileDevice)); /* reread catalog to be safe */
+            end;
+         end; /* looping over file entries */
+      end;
+   end;       /* not storing a bunch of files from poly memory */
+
+   /* $PAGE */
+
+   else if inc.poly then do;   /* save files from poly memory */
+      Bin=0;
+      do while (Bin ILT PolyNumS);    /* more bins to look at */
+
+         call Set.Cur.Bin(Bin);
+         call Copy32(PsFirst,Base);    /* start from here */
+
+         do while (Com32(Base,PsLast)<>LW#IEQ); /* not at end of memory */
+
+            call Copy32(Base,Temp.Base);
+            Temp.Base(LW#MSB)=Temp.Base(LW#MSB)|shl(Bin,14);
+
+            call PsmRead(Temp.Base,0,0);    /* set up to read 1st sector of next block */
+
+            Len=read(psd);                  /* read block length */
+            write(ATNV) =read(psd);         /* skip past # of users field */
+
+            write("313")=addr(FCB(F#NM)); /* set up for quick reads */
+            write("373")=read(psd); write("373")=read(psd); /* read in filename */
+            write("373")=read(psd); write("373")=read(psd);
+            call ADD16(1,Temp.Base);        /* get pointer to sf itself */
+            FCB(F#MS)=Temp.Base(LW#MSB);
+            FCB(F#LS)=Temp.Base(LW#LSB);
+            FCB(F#ML)=0;               /* MS length = 0 */
+            FCB(F#LL)=Len-1;           /* length of sound file */
+
+            if  ((FCB(F#NM)&255)>32)   /* first char in valid range */
+            and ((FCB(F#NM)&255)<127)  /* (skip over cache & deleted files) */
+            then do;                        /* save file in snap shot area */
+               if not Test.For.Valid.Header(FCB,CatStoreBits)
+               then do;
+                  call Erase.Status;
+                  return false;
+               end;
+            end;
+
+            call Add16(Len,Base);    /* add file len to cur ptr (step to next poly file) */
+         end;
+
+         Bin=Bin+1;                         /* step to next poly bin */
+      end;
+
+      /* $PAGE */
+
+      /* now actually try to write out the sound files */
+
+      Bin=0;
+      do while (Bin ILT PolyNumS);    /* more bins to look at */
+
+         call Set.Cur.Bin(Bin);
+         call Copy32(PsFirst,Base);    /* start from here */
+
+         do while (Com32(Base,PsLast)<>LW#IEQ); /* not at end of memory */
+
+            call Copy32(Base,Temp.Base);
+            Temp.Base(LW#MSB)=Temp.Base(LW#MSB)|shl(Bin,14);
+
+            call PsmRead(Temp.Base,0,0);    /* set up to read 1st sector of next block */
+
+            Len=read(psd);                  /* read block length */
+            write(ATNV) =read(psd);         /* skip past # of users field */
+
+            write("313")=addr(FCB(F#NM)); /* set up for quick reads */
+            write("373")=read(psd); write("373")=read(psd); /* read in filename */
+            write("373")=read(psd); write("373")=read(psd);
+            call ADD16(1,Temp.Base);        /* get pointer to sf itself */
+            FCB(F#MS)=Temp.Base(LW#MSB);
+            FCB(F#LS)=Temp.Base(LW#LSB);
+            FCB(F#ML)=0;               /* MS length = 0 */
+            FCB(F#LL)=Len-1;           /* length of sound file block */
+
+            if  ((FCB(F#NM)&255)>32)   /* first char in valid range */
+            and ((FCB(F#NM)&255)<127)  /* (skip over cache & deleted files) */
+            then do;                        /* save file in snap shot area */
+               Status=Store.File(FCB,CatStoreBits);
+
+               if Status=1         /* actually wrote file to disk */
+               then AnyWrites=true;
+               else if Status=(-1) then do; /* had an error trying to write file */
+                  if GID(SFDDlgGrp)<>(-1) then do;
+                     /* enable group objects before erase to avoid smgr bug */
+                     call Activate.Group.Objects(GID(SFDDlgGrp));
+                     call Set.Term.Attr(Attr#Normal);
+                     call Close.Dialog.Panel;
+                  end;
+                  call Erase.Status;
+                  return AnyWrites;
+               end;
+            end;
+
+            call Add16(Len,Base);    /* add file len to cur ptr (step to next poly file) */
+         end;
+
+         Bin=Bin+1;                         /* step to next poly bin */
+      end;
+   end;       /* of save files from poly memory */
+
+   if GID(SFDDlgGrp)<>(-1) then do;
+      /* enable group objects before erase to avoid smgr bug */
+      call Activate.Group.Objects(GID(SFDDlgGrp));
+      call Set.Term.Attr(Attr#Normal);
+      call Close.Dialog.Panel;
+   end;
+   call Erase.Status;
+
+   return AnyWrites;   /* everything went A-OK */
+end Archive.Catalog;
+
+/* $SUBTITLE Clean up Procedure to Update Index and Refresh Screen */
+
+Clean.Up.After.Laser.Operation: proc (write) swapable;
+   dcl write             boolean; /* true if the operation was optical write */
+   dcl (sx,sy,swindowid) fixed;
+   dcl TStr(20)          fixed;
+
+   swindowid=ActiveWindowId;
+   sy=GID(DirTableYPos); sx=GID(DirTableXPos); /* save highlight pos on current window */
+
+   call Set.DirTable.Position(-1,-1);          /* turn off highlighting on current window */
+
+   if write then call Update.Laser.Index;      /* Update Optical Disk Index File */
+
+   call Refresh.All.Display.Windows;
+   call Refresh.OptWindow.Title(OptWindowId);
+
+   call Select.Active.Window(SWindowId);
+   call Set.DirTable.Position(sy,sx);          /* restore highlighting */
+
+   call Display.Optical.Statistics(TStr);      /* show some info about current volume */
+   Disable.Deposits=true;
+   call Deposit.Label(GID(StatsLabel),TStr);
+   Disable.Deposits=false;
+
+   if ertyp=0 then do;
+      call Set.Term.Attr(ATTR#Reverse);
+      call Draw.Message('Optical disk operation completed successfully.');
+   end;
+
+   call PID(MenuModified,false);               /* presumably, write operation has saved menu info */
+
+end Clean.Up.After.Laser.Operation;
+
+/* $SUBTITLE Delete Sound File from Optical Disk */
+
+dcl Stuff.Menu.Items           proc (array,array,fixed,fixed,fixed,fixed) recursive;
+dcl Erase.Menu.Categories      proc recursive; /* clear out any existing categories */
+dcl Compute.Free.Bytes.Display proc recursive; /* compute available header bytes */
+
+Delete.Sound.File: proc (Name) fixed swapable;
+   dcl Name                    array;
+   dcl Record (L#Rec_Length-1) fixed;
+   dcl I                       fixed;
+
+   call Copy.String(Name,FNBuf); /* set up string in case of error */
+
+   if Index_Delete(Name,Record,LaserDev) then do;
+      do i=0 to 255; misc.buf(i)=0; end; /* build a null header */
+
+      call Stuff.Menu.Items(Name,Misc.Buf,GID(SFName),GID(Caption),GID(CatTable.Type.Obj),GID(CatTable));
+      call Stuff.Menu.Items(Name,Misc.Buf,GID(SavedSFName),GID(SavedCaption),GID(SavedCatTable.Type.Obj),GID(SavedCatTable));
+      call Open.Action.Buttons(NullMode); /* really closes all buttons */
+
+      /* above lines will erase the entire contents of */
+      /* the storage screen info panel                 */
+
+      call PID(MenuModified,false);       /* all ready to call up new file */
+   end;
+   else do;
+      call Generate.Optical.Error.Message; /* generates messages for a bunch of situations */
+   end;
+end Delete.Sound.File;
+
+insert ':synsou:stormod:arc-act2'; /* contains Copy.Category and Copy.Sound.File */
+
+/* $SUBTITLE Deal with Command Buttons on Archive Screen */
+
+Get.Next.Action.Button.Event: proc swapable; /* command button code */
+   dcl Name    (40) fixed;
+   dcl FTyp         fixed;
+   dcl FAddr(1)     fixed;
+   dcl CatStoreBits fixed;
+   dcl LineNumber   fixed;
+   dcl FileThere    fixed; /* for COPY operation - true if file already in current catalog */
+
+   do while Exit.My.Screen=0;           /* wait for exit condition */
+      if Screen.Event.Group<>GID(ActionGrp) then return;
+
+      if Screen.Event.Code=Get.Screen.Event then do;
+
+         if (Screen.Event.Info=S#MouseSelect)
+         or (Screen.Event.Info=S#MouseActivate)
+         or (Screen.Event.Info=S#KeyActivate)
+         then do;
+           call Flash.Object(Screen.Event.Id);
+
+           if Screen.Event.Id=GID(ClearButton) then do;
+              call Erase.Menu.Categories;
+              call Compute.Free.Bytes.Display;
+           end;
+
+           else if (Screen.Event.Id=GID(StoreButton))
+           or      (Screen.Event.Id=GID(RepButton ))
+           then do;     /* archive a single file */
+              if GID(FileType)=T#Sound then do;
+                 if Screen.Event.Id=GID(StoreButton)
+                 then call Copy.String('STORE'  ,Name);
+                 else call Copy.String('REPLACE',Name);
+
+                 call Open.Write.Optical.Dialog(DialogRow,Name);
+
+                 if Get.Dialog.Response then do;
+                    if Activate.Optical(O#FormatDialog|O#UpdateDialog) then do;
+                       Optical.Disk.Ready=0; /* reset global flag */
+                       call Fetch.String(GID(SFName),Name); /* get file name */
+                       if Archive.Sound.File(Name,Name,
+                                             GID(FileAddress),GID(FileAddress+1),
+                                             GID(FileLength) ,GID(FileLength +1),
+                                             GID(FileDevice),true,true)
+                       then call Clean.Up.After.Laser.Operation (true); /* successful */
+                    end;
+                 end;
+              end;
+           end;
+
+           else if (Screen.Event.Id=GID(UpdOpticalButton))
+           then do;     /* update a single file */
+              if GID(FileType)=T#Sound then do;
+                 call Copy.String('UPDATE',Name);
+
+                 call Open.Write.Optical.Dialog(DialogRow,Name);
+
+                 if Get.Dialog.Response then do;
+                    if Activate.Optical(O#FormatDialog|O#UpdateDialog) then do;
+                       Optical.Disk.Ready=0; /* reset global flag */
+                       call Fetch.String(GID(SFName),Name); /* get file name */
+                       if Update.Sound.File(Name,Name,
+                                            GID(FileAddress),GID(FileAddress+1),
+                                            GID(FileLength) ,GID(FileLength +1),
+                                            GID(FileDevice),true,true)
+                       then call Clean.Up.After.Laser.Operation (true); /* successful */
+                    end;
+                 end;
+              end;
+           end;
+
+           /* $PAGE */
+
+           else if (Screen.Event.Id=GID(UpdSourceButton))
+           then do;     /* update info to non-laser device */
+              if GID(FileType)=T#Sound then do;
+                 call Fetch.String(GID(SFName),Name); /* get file name */
+
+                 if Update.Non.Optical.Sound.File.Header(Name,
+                                      GID(FileAddress),GID(FileAddress+1),
+                                      GID(FileLength) ,GID(FileLength +1),
+                                      GID(FileDevice))
+                 then do; /* was successful */
+                    call PID(MenuModified,false); /* clear flag after save */
+
+                    /* update file info in window if it is there */
+                    if (Fetch.Switch(GID(DirFormatSwitchId)) > 0) then do;
+                       FAddr(0) = GID(FileAddress); 
+                       FAddr(1) = GID(FileAddress+1); 
+                       LineNumber = Find.DirTable.Entry(DirWindowId,FAddr);
+                       if (LineNumber <> -1)
+                       then call Update.DirTable.Entry(LineNumber);
+                    end;
+                 end;
+              end;
+           end;
+
+           else if (Screen.Event.Id=GID(DeleteButton))
+           then do;     /* delete a single file */
+              if GID(FileType)=T#Sound then do;
+                 call Copy.String('DELETE',Name);
+
+                 call Open.Write.Optical.Dialog(DialogRow,Name);
+
+                 if Get.Dialog.Response then do;
+                    if Activate.Optical(O#UpdateDialog) then do;
+                       Optical.Disk.Ready=0; /* reset global flag */
+                       call Fetch.String(GID(SFName),Name); /* get file name */
+                       if Delete.Sound.File(Name)
+                       then call Clean.Up.After.Laser.Operation (true); /* successful */
+                    end;
+                 end;
+              end;
+           end;
+
+           else if (Screen.Event.Id=GID(StoreCatlgButton))
+           then do;     /* archive an entire catalog */
+
+              call Open.Store.Catalog.Dialog(DialogRow);
+
+              CatStoreBits=Get.Store.Catalog.Response;
+
+              FTyp=GID(FileType);
+
+              if (FTyp=T#Subc) or (FTyp=T#LSubc) then do;
+                 if (CatStoreBits&CAT#DoIt)<>0 then do;
+
+                    if Archive.Catalog(CatStoreBits) then do;
+                       call Clean.Up.After.Laser.Operation (true); /* successful */
+                    end;
+                 end;
+              end;
+           end;
+
+           /* $page */
+
+           else if (Screen.Event.Id=GID(CopyCtgryButton))
+           then do;     /* archive an entire category */
+              if (Screen.Event.Info=S#MouseSelect)
+              or (Screen.Event.Info=S#MouseActivate) then do;
+                 call Open.Copy.Category.Dialog(DialogRow,-1);
+                 CatStoreBits=Get.Copy.Category.Response;
+                 if (CatStoreBits&CAT#DoIt)<>0 then do;
+                    if Copy.Category(CatStoreBits) then do;
+                       call Clean.Up.After.Laser.Operation (false); /* successful */
+                    end;
+                 end;
+              end;
+           end;
+
+           else if (Screen.Event.Id=GID(CatInfoButton))
+           then do;     /* get information on current category and catalog */
+              if (Screen.Event.Info=S#MouseSelect)
+              or (Screen.Event.Info=S#MouseActivate) then do;
+                 call Set.DlgOrigObj;
+                 if Get.Next.Cat.Info.Event then do; end;
+                 /* else pass Exit.My.Screen on */
+              end;
+           end;
+
+           else if (Screen.Event.Id=GID(CopyButton))
+           then do;     /* copy file from optical into current catalog */
+              if (GID(FileType)=T#Sound) and (GID(FileOnOptical)) then do; /* display file is stored on optical disk */
+                 call Fetch.String (GID(SFName),Name); /* get the name of the file */
+                 FileThere = Locate (Name,1); /* see if file already in current catalog */
+                 call Open.Copy.File.Dialog (DialogRow, FileThere); /* put up appropriate dialog confirmation message */
+
+                 if Get.Dialog.Response then do; /* if they said go ahead and copy */
+                    if Activate.Optical(O#UpdateDialog) then do;
+                       Optical.Disk.Ready=0; /* reset global flag */
+                       if Copy.Sound.File (Name, 1)
+                       then call Clean.Up.After.Laser.Operation (false); /* successful */
+                    end;
+                 end;
+              end; /* if the file is on the optical */
+           end; /* if the copy button */
+
+         end;
+
+         call Get.Next.Optical.Event;          /* not interested, just get a new event */
+
+      end;
+
+      else call Get.Next.Optical.Event;         /* get the next event to handle */
+
+   end;
+
+end Get.Next.Action.Button.Event;

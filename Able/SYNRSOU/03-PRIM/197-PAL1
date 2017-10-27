@@ -1,0 +1,1396 @@
+/*	$page  :SYNRSOU:03-PRIM:197-PAL1  ADDITIONAL CODE FOR :SYNRSOU:03-PRIM:197-PAL	*/
+
+/*
+Modified:
+2002/02/02 - TY  - Added checks for zeroed sf.data.end and sf.mark.end to Analyze.Sound.File.Info()
+						 (The bug mentioned in the 2001/01/29 entry in :SYNSOU:AUDMOD:AUD-OPT1 allowed
+						 the Q-page's optical panel to write soundfiles in this condition.)
+1991/11/06 - PF  - Expanded Quick Update to include poly files
+1991/08/22 - PF  - Stop audition from protocol when file is done loading but still playing
+1990/10/31 - cj  - Tricked & treated check.next.event calls so can audition
+						 sound files via protocol
+1990/10/09 - cj  - changed chunk size for tahiti to work around
+						 buffering bug.  Further improved 10/17/90.
+1989/06/15 - TSS - Increased amount to read before starting AUDITION from optical
+1989/02/24 - TSS - Fixed poly ram >> 32mb bugs (sign extend into page bits)
+1989/03/08 - cj  - broke PS.LOAD into several pieces for compatibility
+						 with Audition.SF.Using.DTD, which was added at this time.
+						 Also some 32-bit math for humongo sound files (allowed for
+						 audition, but not allowed to load into ram)
+1988/12/12 - cj  - showed 'loading' and 'moving' messages for all
+						 sound files (even short ones) per request
+						 of Fred Haas
+1988/10/14 - TSS - Added code to keep protocol running during PS.LOAD
+1988/07/21 - LS  - bug fix for loading files longer than 16MB
+1988/03/28 - LS  - created 197-PAL2; 197-PAL1 now has PS.LOAD,PS.EXTRACT
+1988/02/18 -LS,TS- changed PS.LOAD to load entire sound file
+1988/02/16 - LS  - fixed file loading so data word lengths are correct
+1987/10/20 - LS  - compensation for stereo files in PS.LOAD to fix audition bug
+1987/07/28 - CJ  - changed PS.LOAD to take more arguments
+1986/07/28 -CJ,KC- changed PS.EXTRACT for stereo
+*/
+
+/*	Analyze Sound File Info - This procedure reads in the sound file header	*/
+/*	from disk, and analyzes it.  It computes how long it is (in sectors)		*/
+/*	what the sampling rate is, where the mark start & end points are, etc.	*/
+
+dcl (checksum    )	fixed;	/*	holds checksum from file		*/
+dcl (compat      )	fixed;	/*	holds campat number from file	*/
+dcl (srate       )	fixed;	/*	holds sample rate info			*/
+dcl (stereo      )	fixed;	/*	true if stereo SF					*/
+dcl (ssm         )	fixed;	/*	Sound Start Msb Sector			*/
+dcl (sss         )	fixed;	/*	Sound Start Sector				*/
+dcl (ssw         )	fixed;	/*	Sound Start Word					*/
+dcl (sem         )	fixed;	/*	Sound End   Msb Sector			*/
+dcl (ses         )	fixed;	/*	Sound End   Sector				*/
+dcl (sew         )	fixed;	/*	Sound End   Word					*/
+dcl (orig.srate  )	fixed;	/*	original srate info				*/
+dcl (orig.per    )	fixed;	/*	original sampling period info	*/
+
+dcl (total.msb   )	fixed;	/*	total length msb					*/
+dcl (total.len   )	fixed;	/*	total sector length allocated for file in poly	*/
+dcl (data.sec.msb)	fixed;	/*	valid data length of file		*/
+dcl (data.sec.len)	fixed;	/*	valid data length of file		*/
+dcl (data.wrd.len)	fixed;	/*	valid data length of file		*/
+
+Analyze.Sound.File.Info: proc(ddev, dsec, hdev, hsec) returns (fixed) swapable;
+	dcl (ddev, dsec)	fixed;	//	sector and word of data area
+	dcl (hdev, hsec)	fixed;	//	sector and word of header
+
+	dcl (samp.len  )	fixed;	//	word length of one sample (1 for mono, 2 for stereo)
+	dcl (h,i,j,k   )	fixed;
+
+	disk.io.setup();
+
+	call readdata (HDEV,HSEC,misc.buf,256);		//	read sound file header from disk
+
+	if (disk.io.cleanup() != 0)
+		return false;
+
+	checksum=0;												//	compute check sum for first
+	do i=0 to 255;											//	sector to detect different file
+		checksum=checksum+misc.buf(i);
+	end;
+
+	compat=misc.buf(sf.compatibility);				//	get orig compat number
+	if compat<0 then compat=0;
+
+	srate  = misc.buf(sf.sample.rate);				//	see if sample rate defined
+	stereo = misc.buf(sf.stereo);						//	look up sound file type (stereo or mono )
+
+	orig.per   = misc.buf(sf.period.index);		//	save original sampling period (600=50 khz) for label time correction below
+	orig.srate = srate;									//	save original sampling rate too
+
+	/*	Get starting and ending file locations to load into poly.
+		LOAD.WHOLE.FILE = true  --> ORIGIN (zero) to DATA.END
+		LOAD.WHOLE.FILE = false --> MARK.START to MARK.END		*/
+
+	if (srate == 0) then do;							//	handle old sfm files
+		if (compat < 1)		then orig.per=600;	//	not set in old files
+		if (orig.per < 300)	then orig.per=300;	//	handle old files
+
+		if LOAD.WHOLE.FILE then do;					//	load the entire sound file
+			ssm=0; sss=0; ssw=0;							//	start is ORIGIN
+
+			if ((misc.buf(sf.data.end)|misc.buf(sf.data.end+1)|misc.buf(sf.data.end+2)) == 0)
+			{
+				sem=misc.buf(sf.valid.data  );		//	ending msb    of data
+				ses=misc.buf(sf.valid.data+1);		//	ending sector of data
+				sew=misc.buf(sf.valid.data+2);		//	ending word offset
+				//	must subtract 1 sample frame so that sew is the last sample to be heard
+				sew = sew - (1 + stereo);
+				if (sew < 0)
+				{	sew = sew&255;
+					ses = ses-1;
+					if (ses == -1) sem = sem-1;
+				}
+			}
+			else
+			{
+				call period_time_to_index(misc.buf(sf.data.end),misc.buf(sf.data.end+1),misc.buf(sf.data.end+2),orig.per);
+				sem=sector.msb;							//	ending msb    of data
+				ses=sector.numb;							//	ending sector of data
+				sew=sector.offset;						//	ending word offset
+			}
+		end;
+		else do;												//	load the file from MARK.START to MARK.END
+			call period_time_to_index(misc.buf(sf.mark.start),misc.buf(sf.mark.start+1),misc.buf(sf.mark.start+2),orig.per);	//	get sector address of mark start
+			ssm=sector.msb;								//	starting sector MSB
+			sss=sector.numb;								//	starting sector is MARK.START
+			ssw=sector.offset;							//	word offset in that sector
+
+			if ((misc.buf(sf.mark.end)|misc.buf(sf.mark.end+1)|misc.buf(sf.mark.end+2)) == 0)
+			{
+				sem=misc.buf(sf.valid.data  );		//	ending msb    of data
+				ses=misc.buf(sf.valid.data+1);		//	ending sector of data
+				sew=misc.buf(sf.valid.data+2);		//	ending word offset
+				//	must subtract 1 sample frame so that sew is the last sample to be heard
+				sew = sew - (1 + stereo);
+				if (sew < 0)
+				{	sew = sew&255;
+					ses = ses-1;
+					if (ses == -1) sem = sem-1;
+				}
+			}
+			else
+			{
+				call period_time_to_index(misc.buf(sf.mark.end),misc.buf(sf.mark.end+1),misc.buf(sf.mark.end+2),orig.per);		//	get address of mark end
+				sem=sector.msb;							//	last sector msb
+				ses=sector.numb;							//	last sector of file is MARK.END
+				sew=sector.offset;						//	word offset in that sector
+			}
+		end;
+
+		//	convert possibly modified orig.per to corresponding srate
+		load 1000; mul 300; mwait; div orig.per;
+		if (shl(rem,1) >= orig.per)	srate = res+1;
+		else									srate = res;
+	end;
+	else do;													//	handle khz * 10 files
+		if LOAD.WHOLE.FILE then do;					//	load the entire sound file
+			ssm=0; sss=0; ssw=0;							//	start is ORIGIN
+
+			if ((misc.buf(sf.data.end)|misc.buf(sf.data.end+1)|misc.buf(sf.data.end+2)) == 0)
+			{
+				sem=misc.buf(sf.valid.data  );		//	ending msb    of data
+				ses=misc.buf(sf.valid.data+1);		//	ending sector of data
+				sew=misc.buf(sf.valid.data+2);		//	ending word offset
+				//	must subtract 1 sample frame so that sew is the last sample to be heard
+				sew = sew - (1 + stereo);
+				if (sew < 0)
+				{	sew = sew&255;
+					ses = ses-1;
+					if (ses == -1) sem = sem-1;
+				}
+			}
+			else
+			{
+				call time_to_index(misc.buf(sf.data.end),misc.buf(sf.data.end+1),misc.buf(sf.data.end+2),srate,stereo);
+				sem=sector.msb;							//	ending sector msb
+				ses=sector.numb;							//	ending sector of data
+				sew=sector.offset;						//	ending word offset
+			}
+		end;
+		else do;												//	load the file from MARK.START to MARK.END
+			call time_to_index(misc.buf(sf.mark.start),misc.buf(sf.mark.start+1),misc.buf(sf.mark.start+2),srate,stereo);
+			ssm=sector.msb;								//	starting sector msb
+			sss=sector.numb;								//	starting sector is MARK.START
+			ssw=sector.offset;							//	word offset in that sector
+
+			if ((misc.buf(sf.mark.end)|misc.buf(sf.mark.end+1)|misc.buf(sf.mark.end+2)) == 0)
+			{
+				sem=misc.buf(sf.valid.data  );		//	ending msb    of data
+				ses=misc.buf(sf.valid.data+1);		//	ending sector of data
+				sew=misc.buf(sf.valid.data+2);		//	ending word offset
+				//	must subtract 1 sample frame so that sew is the last sample to be heard
+				sew = sew - (1 + stereo);
+				if (sew < 0)
+				{	sew = sew&255;
+					ses = ses-1;
+					if (ses == -1) sem = sem-1;
+				}
+			}
+			else
+			{
+				call time_to_index(misc.buf(sf.mark.end),misc.buf(sf.mark.end+1),misc.buf(sf.mark.end+2),srate,stereo);
+				sem=sector.msb;							//	last sector msb
+				ses=sector.numb;							//	last sector of file is MARK.END
+				sew=sector.offset;						//	word offset in that sector
+			}
+		end;
+	end;
+
+	/*	$page - Find a place in memory for the file	*/
+
+	/*	Extra check here - some old sound files (Release M, N) have
+		the DATA.END or MARK.END point out past VALID.DATA because of
+		bugs in the Sound Editor.  Fix this here so that the file is
+		okay once in poly memory.  LSS - 02/23/88	*/
+
+	if stereo then samp.len = 2;						//	samples are 2 data words in stereo files
+	else           samp.len = 1;						//	and one word in mono files
+
+	h = misc.buf(sf.valid.data  );					//	valid sectors msb
+	i = misc.buf(sf.valid.data+1);					//	sectors of valid data
+	j = misc.buf(sf.valid.data+2);					//	words
+
+		j = j - samp.len;									//	subtract one sample length from it
+
+	if j < 0 then do;										//	check for borrow
+		if i = 0 then h = h - 1;						//	borrow to msb
+		i = i - 1; j = j + 256;							//	borrow to lsb
+	end;
+
+	if ((sem igt h))										//	if data.end is out past valid data - 1 sample
+	or ((sem  =  h) and (ses igt i))
+	or ((sem  =  h) and (ses  =  i) and (sew igt j))
+	then do;													//	then limit it
+		SEM = h; SES = i; SEW = j;						//	truncate ending sample to VALID.DATA - 1
+	end;
+
+	//	Get the first sector of sound file data and compute checksum
+
+	i = DDEV; j = DSEC+3;								//	compute start of file data area
+	if j ilt 3 then i=i+1;								//	check for carry
+
+	disk.io.setup();
+
+	call readdata (i,j,misc.buf,256);				//	read first data sector of sound file
+
+	if (disk.io.cleanup() != 0)
+		return false;
+
+	do i=0 to 255;											//	calculate check sum
+		checksum=checksum+misc.buf(i);				//	(hopefully not off end of disk)
+	end;
+
+
+	/*	compute the sector and word length of sound data to transfer into poly	*/
+
+	//	at this point, SSM, SSS, SSW point to the first sample that should be heard, and SEM, SES, SEW
+	//	point to the last sample that should be heard.  Subtract the two points, then add
+	//	1 (or 2 for stereo) to compute the number of samples we should actually here.
+
+	data.sec.msb = SEM - SSM;								//	get msb sector length
+	if SES ilt SSS then data.sec.msb = data.sec.msb - 1;	//	borrow
+	data.sec.len = SES - SSS;								//	subtract to get sector length
+	data.wrd.len = SEW - SSW;								//	subtract to get words
+	if SEW ilt SSW then do;									//	need to borrow
+		if data.sec.len = 0 then data.sec.msb = data.sec.msb - 1;
+		data.sec.len = data.sec.len - 1;					//	take one from sectors
+		data.wrd.len = data.wrd.len + 256;				//	get words back to normal
+	end;
+
+	//	increment by 1 (or 2 if stereo) to compute number of samples that should be heard
+	data.wrd.len = data.wrd.len + samp.len;			//	add one sample so numbers represent length
+	if ((data.wrd.len&255) < samp.len) then do;		//	need to carry
+		data.sec.len = data.sec.len + 1;					//	add one to sector count
+		if data.sec.len = 0 then data.sec.msb = data.sec.msb + 1;
+		data.wrd.len = data.wrd.len&255;
+	end;
+
+	total.msb = data.sec.msb;
+	total.len = data.sec.len;
+	k = (data.wrd.len<>0) + shr(BL.POLY,8);			//	total sectors needed in poly
+
+	if (SEW ilt SSW) then k = k + 1;						//	need to read one more sector from disk to get all the data
+
+	total.len = total.len + k;
+	if total.len ILT k then total.msb = total.msb + 1;
+
+	return (true);
+end Analyze.Sound.File.Info;
+
+Get.Optimal.Preload.Chunk.Len: proc (device,srate,stereo,dtd,max) fixed swapable;
+	dcl device	fixed;	/*	device to load from: 2-5=> floppy, 6-7=> winchester, 10=optical	*/
+	dcl srate	fixed;	/*	sample rate in kHz*10 of file	*/
+	dcl stereo	fixed;	/*	1=> stereo file, 0=> mono file	*/
+	dcl dtd		fixed;	/*	1=> audition from DTD hardware, 0=> from poly hardware	*/
+	dcl max		fixed;	/*	largest chunk allowed	*/
+	dcl len		fixed;
+
+	if (device=6) or (device=7) then do;	/*	if device is a winchester disk	*/
+		len = shl(100, stereo + dtd);			/*	read in 100 sectors, twice as much if stereo file or loading from dtd	*/
+		if srate IGT 505							/*	if > 50.5 khz							*/
+		then len = shl(len, 1);
+	end;
+	else if (device > 9) then do;				/*	optical disk						*/
+		if (stereo = 0) & (srate <= 505)		/*	mono 50 khz, read 200			*/
+		then len = 200;
+		else if srate <= 505						/*	stereo 50 khz, read 800			*/
+		then len = 800;
+		else len = 1600;							/*	stereo 100 khz, read 1600		*/
+	end;
+	else len = max;								/*	reading the floppy?? read all we can	*/
+
+	if len IGT max then len = max;			/*	truncate if over total to read in	*/
+
+	return len;
+end Get.Optimal.Preload.Chunk.Len;
+
+/*	PS.LOAD - loads a sound file into polyphonic memory	*/
+
+/*	Arguments for PS.LOAD:
+
+	DDEV, DSEC	= FILE DEVICE AND SECTOR   - DISK LOCATION OF SOUND FILE
+	HDEV, HSEC	= HEADER DEVICE AND SECTOR - DISK LOCATION OF SOUND FILE HEADER
+	AUDITION		= 1 TO AUDITION THE SOUND FILE WHILE LOADING
+
+	NOTE:	DDEV AND DSEC WILL EQUAL HDEV AND HSEC IN ALL CASES EXCEPT WHEN
+			CALLING UP A SOUND FILE FROM THE OPTICAL DISK	*/
+
+/*	NOTE:	PS.LOAD MUST RETURN SFILE.BASE POINTING TO WHERE IN POLY
+			THE LOADED SOUND FILE IS LOCATED	*/
+
+/*	If LOAD.WHOLE.FILE is FALSE, then:	*/
+/*	PS.LOAD recalls the file from the MARK START to the MARK END.
+	These points in the file are at sector and word offset locations.
+	Data can be recalled from the disk only at even sector boundaries,
+	but can be read into poly memory at sector and word locations.
+	In order to get the sound data to start at time zero (0) in poly
+	memory, the data is read into poly starting at a place BEFORE where
+	we want the data to be, so that the leading zeroes in the first sector
+	are not included as part of the poly sound file.
+*/
+
+PS.LOAD: PROC (DDEV,DSEC,HDEV,HSEC,AUDITION) PUBLIC SWAPABLE;
+	DCL (DDEV,DSEC)	FIXED;	/*	device and sector of file to load	*/
+	DCL (HDEV,HSEC)	FIXED;	/*	device and sector of file header		*/
+	DCL (AUDITION)		FIXED;	/*	true to audition file while loading	*/
+
+	dcl (ms.disk,ls.disk)	fixed;	/*	disk location of sound data	*/
+	dcl (poly.sec,poly.wrd)	fixed;	/*	offset in poly to read into	*/
+	dcl (total.to.copy)		fixed;	/*	sector count left to read into poly	*/
+	dcl (p)						fixed;
+	dcl (failed)				fixed;	/*	set if disk error	*/
+
+	DCL (REENTRY)		FIXED;
+	DCL (AUDITIONING)	FIXED;	/*	true if file is currently being played	*/
+	DCL (I,J,LEN)		FIXED;
+	DCL (OURLEN,TLEN)	FIXED;
+	DCL SAVED			FIXED;
+
+	DCL REC(POLY.HIST.REC.LEN-1)	FIXED;
+
+	/*	$page	*/
+
+	IF REENTRY<>0 THEN RETURN 0;	/*	detect sound file recall from button panel while auditioning sound file	*/
+
+	PUSH.SYSTEM.PDL;					/*	save system PDL stack	*/
+
+	REENTRY = 1;						/*	prevent button panel re-entry	*/
+	SAVED = RUN.SYN; RUN.SYN = 0;	/*	keep run syns off anyways	*/
+	POLY.READ.ABORTED = 0;			/*	clear aborted flag	*/
+	failed = false;
+
+	/*	Look up some information about the sound file and store it	*/
+	/*	in global variables:														*/
+
+	if (Analyze.Sound.File.Info(ddev, dsec, hdev, hsec) == false)
+	{
+		CALL DISPLAY.ERR(60);		/*	cannot read snd file from disk	*/
+		POP.SYSTEM.PDL;
+		REENTRY = 0;
+		RUN.SYN = SAVED;
+		RETURN 0;
+	}
+
+	/*	disallow load of sound file > 32 megs	*/
+
+	if (total.msb <> 0) then do;
+		CALL DISPLAY.ERR(14);		/*	NOT ENOUGH ROOM IN MEMORY	*/
+		CALL NOROOM.ERROR;
+		POP.SYSTEM.PDL;
+		REENTRY = 0;
+		RUN.SYN = SAVED;
+		RETURN 0;
+	end;
+
+	/*	Find a place in poly to put the file	*/
+
+	I = PS.ALLOCATE (TOTAL.LEN,POLY.TOGGLE,AUDITION);	/*	ALLOCATE SPACE IN BIN POLY.TOGGLE	*/
+
+	IF I=0 THEN DO;							/*	IF NO ROOM IN PREFERED BIN	*/
+		J = POLY.TOGGLE;						/*	REMEMBER WHICH BIN WAS OUT OF ROOM	*/
+		POLY.TOGGLE = POLY.TOGGLE + 1;								/*	NEXT BIN	*/
+		IF POLY.TOGGLE >= POLYNUMS THEN POLY.TOGGLE = 0;		/*	WRAP AROUND	*/
+		DO WHILE ((J<>POLY.TOGGLE) AND (I=0));	/*	TRY ALL OTHER BINS UNTIL WE FIND SOME ROOM	*/
+			I = PS.ALLOCATE (TOTAL.LEN,POLY.TOGGLE,AUDITION);	/*	TRY THIS BIN	*/
+			POLY.TOGGLE = POLY.TOGGLE + 1;
+			IF POLY.TOGGLE >= POLYNUMS THEN POLY.TOGGLE = 0;
+		END;
+		IF I=0 THEN DO;						/*	TRIED THEM ALL, NO ROOM IN ANY BIN	*/
+			IF  (AUDITION<>0)					/*	IF AUDITION DESIRED			*/
+			AND ((NEW.MOUSE.BUTTON<>0)\(NEW.IN.CHAR<>0))
+			THEN DO;
+				/*	JUST RETURN WITH NO ERROR MESSAGE	*/
+			END;
+			ELSE DO;								/*	ELSE DISPLAY MESSAGE			*/
+				CALL DISPLAY.ERR(14);		/*	NOT ENOUGH ROOM IN MEMORY	*/
+				CALL NOROOM.ERROR;
+			END;
+			POP.SYSTEM.PDL;					/*	RESTORE STACK					*/
+			REENTRY = 0;
+			RUN.SYN = SAVED;
+			RETURN 0;							/*	BUT LEAVE REST OF MEMORY INTACT	*/
+		END;
+	END;
+
+	/*	$page - Set up to load the file into the memory block	*/
+
+	CALL PS.LOCK;												//	lock up in case of system bomb
+	CALL PSMWRITE(SFILE.BASE, 0, BL.LEN);				//	set up sector in poly header
+	WRITE(PSD)=TOTAL.LEN;									//	save block length in sectors
+
+	DO J=BL.LEN+1 TO BL.POLY-1;							//	initialize entire management area to zeroes
+		WRITE(PSD)=0;
+	END;
+
+	DO J=1 TO 4;												//	copy in file name for printing terminal message
+		MSGNAME(J)=FNBUF(J);
+	END;
+	MSGNAME(0)=8;												//	assume file name is 8 characters long
+	DO WHILE (MSGNAME(0)<>0)&(BYTE(MSGNAME,MSGNAME(0)-1)=0);	/*	calculate how long file name actually is	*/
+		MSGNAME(0)=MSGNAME(0)-1;
+	END;
+	CALL PBYTE(MSGNAME,MSGNAME(0),34);	/*	add in a trailing "	*/
+	MSGNAME(0)=MSGNAME(0)+1;				/*	include " in string length	*/
+
+	//	zero out the last sector of data area to prevent audition pop.  Probably a meaningless
+	//	operation at this point, since we are loading the whole sound file...
+	call PSMWRITE (sfile.base, total.len-1, 0);	/*	move to start of last sector	*/
+	do j = 0 to 255;							//	do for the whole sector
+		write (PSD) = 0;						//	write zeros
+	end;
+
+	/*	SET UP FILE INFO IN POLY MEMORY	*/
+
+	IF  (NEW.PAN<>0)							/*	new panel code only	*/
+	AND (TOTAL.LEN IGT FILE.MESSAGE.SIZE)
+	THEN DO;										/*	write message on long loads	*/
+		CALL CLEAR.DISPLAY;
+		CALL EMIT.STRING(0 ,'LOADING SOUND   FILE "');
+		CALL EMIT.STRING(22,MSGNAME);		/*	print the filename	*/
+		UPPER.DISP=LOADM.DISP;
+		BOTH.DISPLAY=1;
+
+		/*	Force an immediate update to the VK display on remote devices	*/
+		/*	to provide an immediate update of the VK window display while	*/
+		/*	we are loading sound files:												*/
+
+		call Flush.VK.Display.To.Termulators;
+	END;
+
+	IF  (SHOW.FILE.LOADING.MESSAGE <> 0)	/*	show message on terminal	*/
+	AND (TOTAL.LEN IGT FILE.MESSAGE.SIZE)	/*	long-ish sound file	*/
+	THEN DO;
+		CALL CPOS(SHR(SHOW.FILE.LOADING.MESSAGE,8), SHOW.FILE.LOADING.MESSAGE&255);
+		call erase.to.end.of.line;
+		if AUDITION = 0
+		then call ps('Loading Sound File "');
+		else call ps('Reading audition data for "');
+		call PS(LNBUF);	/*	print the filename	*/
+      call PC(34);
+      interp_flush_char_output();
+	END;
+
+	//	compute the sector on disk where sound data to load starts.  That is, we skip over the
+	//	3-sector sound file header, and then add in the offset to the sample number
+	//	we want to start reading from (which, by now, will always be zero...).
+	ms.disk = DDEV;
+	ls.disk = DSEC + 3;										//	find the start of actual sound data
+	if ls.disk ilt 3 then ms.disk = ms.disk + 1;		//	with carry
+
+	ms.disk = ms.disk + SSM;								//	add in msb offset
+	ls.disk = ls.disk + SSS;								//	add in the offset of sector to load
+	if ls.disk ilt SSS then ms.disk = ms.disk + 1;	//	with carry
+
+	/*	$page - Load the first segment of data and start the audition	*/
+
+	/*	Find the location in poly memory to put data.  The first sector
+		from the disk has leading zeroes up until word offset SSW, and
+		we do.not want these zeroes in poly.  So...
+			1.  Find the sector in poly for the data (after the header).
+			2.  If there is a word offset, back up SSW words into the
+				 previous sector.
+			3.  Read the first chunk of data.  The start of sound data will
+				 line up with the sector boundary in poly memory.
+		Note that the header (or at least the labels) must be read into
+		poly AFTER the start of the data, because the last sector of the
+		header is overwritten by this algorithm.
+	*/
+
+	poly.sec = shr(bl.poly, 8);							//	start in poly out past the header
+	poly.wrd = 0;												//	usually going to start on sector boundary
+	if (SSW&255) <> 0 then do;								//	need to compensate for a word amount
+		poly.sec = poly.sec - 1;							//	back up one sector in poly
+		poly.wrd = 256 - SSW;								//	set words in that sector
+	end;
+
+	total.to.copy = total.len - shr(BL.POLY,8);	/*	number of data sectors to read from disk	*/
+
+	/*	Read in the first segment of data before starting audition.  If
+		reading a floppy disk, get the whole file.	*/
+
+	p = Find_Device (10);									//	get the optical entry
+
+	len = Get.Optimal.Preload.Chunk.Len(shr(ms.disk,8),srate,stereo,0,total.to.copy);
+
+	ourlen = len; tlen = 0;									//	initialize for loop
+
+	if  (shr(ms.disk,8) = 10)								//	if reading optical
+	and (p <> 0)												//	valid entry found
+	and ((shr(core(p + s#devtyp),10) and 1) <> 0)	//	tahiti
+	and (ourlen IGT 64)										//	and bigger than needed chunk
+	then ourlen = 64;											//	limit to 64 sectors
+
+	/*	note: small chunk size is used to work around Tahiti-1 buffer		*/
+	/*	bug...																				*/
+
+	do while ((tlen != len) && (failed == false));
+		timeshare_with_host();
+
+		if (len-tlen) ILT ourlen							//	limit read to desired end
+		then ourlen = len-tlen;								//	of file
+
+		disk.io.setup();
+
+		call POLY.READDATA (ms.disk, ls.disk, sfile.base, poly.sec, poly.wrd, ourlen);	/*	read in first block of data	*/
+
+		if (disk.io.cleanup() != 0)
+			failed = true;
+
+		ls.disk = ls.disk + ourlen;								//	advance disk location
+		if ls.disk ilt ourlen then ms.disk = ms.disk + 1;	//	with carry
+		poly.sec = poly.sec + ourlen;								//	advance poly position (OURLEN is in sectors - keep POLY.WRD the same)
+		total.to.copy = total.to.copy - ourlen;				//	decrease the length needed to copy
+		tlen = tlen + ourlen;
+	end;
+
+	/*	Read in 3 sectors of header information from disk	*/
+
+	if (failed == false)												//	if we got the pre-load chunk...
+	{
+		disk.io.setup();
+
+		call POLY.READDATA (HDEV,HSEC, sfile.base, SF.HDR, 0, 1);	//	read in first sector of header
+
+		if (disk.io.cleanup() != 0)
+			failed = true;
+
+		else
+		{
+			i = DDEV; j = DSEC + 1;											//	compute disk address of labels (sectors 2 and 3 of disk header)
+			if j = 0 then i = i + 1;										//	with carry
+
+			disk.io.setup();
+
+			call POLY.READDATA (i, j, sfile.base, SF.SYM, 0, 2);	//	read in the labels
+
+			if (disk.io.cleanup() != 0)
+				failed = true;
+		}
+	}
+
+	if (failed != 0)						/*	if couldn't read first chunk or header, then	*/
+	{											/*	quit now...												*/
+		IF UPPER.DISP=LOADM.DISP THEN DO;		/*	CLEAR 'LOADING' MESSAGE	*/
+			CALL CLEAR.DISPLAY;
+		END;
+
+		IF  (SHOW.FILE.LOADING.MESSAGE <> 0)	/*	SHOW MESSAGE ON TERMINAL	*/
+		AND (TOTAL.LEN IGT FILE.MESSAGE.SIZE)	/*	long-ish sound file	*/
+		THEN DO;
+			CALL CPOS(SHR(SHOW.FILE.LOADING.MESSAGE,8), SHOW.FILE.LOADING.MESSAGE&255);
+			call erase.to.end.of.line;
+		END;
+
+		CALL PS.UNLOCK;					/*	unlock now; block length set; name is 0000	*/
+
+		CALL DISPLAY.ERR(60);			/*	cannot read snd file from disk					*/
+		POP.SYSTEM.PDL;
+		REENTRY = 0;
+		RUN.SYN = SAVED;
+		RETURN 0;
+	}
+
+	/*	Set up the poly header and Synclavier info for the file	*/
+
+	call CONVERT.SOUNDFILE.INFO (sfile.base, compat, srate, stereo, sss, ssw, ses, sew, orig.srate, orig.per);
+	call PS.SETUP (sfile.base);					/*	set up Synclavier info	*/
+
+	/*	Start the audition here	*/
+
+	AUDITIONING = 0;									/*	ASSUME NO AUDITION	*/
+	IF AUDITION<>0 THEN DO;							/*	IF AUDITION IS DESIRED	*/
+
+		IF  (SHOW.FILE.LOADING.MESSAGE <> 0)	/*	show message on terminal	*/
+		THEN DO;
+			CALL CPOS(SHR(SHOW.FILE.LOADING.MESSAGE,8), SHOW.FILE.LOADING.MESSAGE&255);
+			call erase.to.end.of.line;
+			CALL PS('Auditioning Sound File "');
+			call PS(LNBUF);	/*	print the filename	*/
+         call PC(34);
+         interp_flush_char_output();
+		END;
+
+		IF POLY.PLAY.SFILE(SFILE.BASE)<>0	/*	THEN TRY TO START IT	*/
+		THEN DO;
+			AUDITIONING = 1;						/*	SET FLAG IF GOTTEN	*/
+			DISABLE;									/*	LIMIT PLAYBACK TO		*/
+			WRITE(PSC)=PB.LEFT;					/*	DATA THAT HAS BEEN	*/
+			WRITE(PSF)=PSWL;						/*	READ IN					*/
+			WRITE(PSD)=(-(POLY.SEC-SHR(BL.POLY,8)));	/*	sector length of data read into poly so far	*/
+			WRITE(PSD)="177400";								/*	SIGN EXTEND INTO PAGE BITS	*/
+			ENABLE;
+		END;
+	END;
+
+	/*	$page - Read the rest of the sound file data into poly memory.	*/
+
+	//	Note: Scrubbing in EditView while loading a sound file will likely hang until the sound file
+	//	is finished loading...
+	do while ((total.to.copy IGT 0) and (POLY.READ.ABORTED=0) and (failed == false));	/*	read rest of data	*/
+
+		timeshare_with_host();
+
+		len = total.to.copy;					/*	set up xpl registers			*/
+
+		if  (shr(ms.disk,8) = 10)			/*	if reading optical			*/
+		and (p <> 0)							/*	valid entry found				*/
+		and ((shr(core(p + s#devtyp),10) and 1) <> 0)	/*	tahiti		*/
+		then len = 64;							/*	limit to 64 sectors			*/
+		else if audition<>0 then do;		/*	if we are auditioning		*/
+			if shr(ms.disk,8)<8				/*	if on a Winchester disk		*/
+			then len =  75;					/*	Winchester is pretty fast	*/
+			else len = shl(150,stereo);	/*	the optical disk is slower, stereo a lot slower	*/
+			if srate IGT 500 then len = len * srate / 500;	/*	even more if > 50 khz	*/
+		end;
+		else do;	/*	not auditioning the file	*/
+			len = 200;	/*	use regular buffer size	*/
+		end;
+		if len igt total.to.copy then len = total.to.copy;	/*	restrict to amount left to copy	*/
+
+		disk.io.setup();
+
+		call POLY.READDATA (ms.disk,ls.disk,sfile.base,poly.sec,poly.wrd,len);	/*	read in a chunk of data	*/
+
+		if (disk.io.cleanup() != 0)
+			failed = true;
+
+		ls.disk = ls.disk + len;	/*	advance disk location	*/
+		if ls.disk ilt len then ms.disk = ms.disk + 1;	/*	with carry	*/
+		poly.sec = poly.sec + len;	/*	advance poly position (LEN is in sectors - keep POLY.WRD the same)	*/
+		total.to.copy = total.to.copy - len;	/*	decrease the length needed to copy	*/
+
+		IF AUDITIONING<>0 THEN DO;	/*	KEEP MOUSE GOING TO DETECT NEXT AUDITION	*/
+
+			/*	FIGURE OUT HOW MANY SAMPLES HAVE PLAYED	*/
+			/*	SO WE CAN TURN OFF THE VOICE IF WE			*/
+			/*	GET BEHIND											*/
+
+			DISABLE;							/*	SEE IF THE AUDITIONING VOICE	*/
+			WRITE(PSC) = PB.LEFT;		/*	IS STILL PLAYING					*/
+			WRITE(PSF) = PSRON;
+			I = READ(PSD);
+			ENABLE;
+
+			IF I=0 THEN DO;						/*	VOICE HAS STOPPED - MUST MEAN IT RAN INTO END OF THE DATA WE READ IN	*/
+				CALL POLY.FREE.CHANS;			/*	FREE UP CHANNELS					*/
+				AUDITIONING=0;						/*	NO LONGER AUDITIONING			*/
+			END;
+			ELSE DO;
+				DISABLE;								/*	LIMIT PLAYBACK TO		*/
+				WRITE(PSC)=PB.LEFT;				/*	DATA THAT HAS BEEN	*/
+				WRITE(PSF)=PSWL;					/*	READ IN					*/
+				WRITE(PSD)=(-(POLY.SEC-SHR(BL.POLY,8)));	/*	sector length of data read into poly so far	*/
+				WRITE(PSD)="177400";								/*	SIGN EXTEND INTO PAGE BITS	*/
+				ENABLE;
+				IF  (SHOW.FILE.LOADING.MESSAGE <> 0)	/*	show message on terminal		*/
+				THEN CALL CHECK.NEXT.EVENT;				/*	KEEP MOUSE GOING - CHECK FOR MOVEMENTS AND BUTTON RELEASES	*/
+				IF (new.mouse.button   <>0)				/*	BOMB OUT IF ANY MOUSE PRESS	*/
+				or (new.in.char        <>0)				/*	or character typed				*/
+				THEN POLY.READ.ABORTED = 1;
+				if (interp_poll_for_stop(0) != 0)		//	interp request to stop audition
+					POLY.READ.ABORTED = 1;
+			END;
+		END;
+
+		ELSE IF AUDITION<>0 THEN DO;			/*	TRY TO RESTART AUDITION AGAIN IF WE ABORTED IT - BUT WAIT UNTIL NEXT BLOCK HAS BEEN READ SO USER GET'S A CLUE ABOUT WHAT IS GOING ON	*/
+			IF POLY.PLAY.SFILE(SFILE.BASE)<>0		/*	THEN TRY TO START IT	*/
+			THEN DO;
+				AUDITIONING = 1;							/*	SET FLAG IF GOTTEN	*/
+				DISABLE;										/*	LIMIT PLAYBACK TO		*/
+				WRITE(PSC)=PB.LEFT;						/*	DATA THAT HAS BEEN	*/
+				WRITE(PSF)=PSWL;							/*	READ IN					*/
+				WRITE(PSD)=(-(POLY.SEC-SHR(BL.POLY,8)));	/*	sector length of data read into poly so far	*/
+				WRITE(PSD)="177400";								/*	SIGN EXTEND INTO PAGE BITS	*/
+				ENABLE;
+			END;
+		END;
+
+		ELSE IF  (SHOW.FILE.LOADING.MESSAGE <> 0)	/*	ELSE KEEP MOUSE MOVING	*/
+		AND      (TOTAL.LEN IGT 100)					/*	ON TERMINAL					*/
+		THEN DO;
+			CALL CHECK.NEXT.EVENT;
+			IF (M$PRESSES<>0)								/*	BOMB OUT IF ANY MOUSE PRESS	*/
+			THEN POLY.READ.ABORTED = 1;
+		END;
+
+		else if (interp_poll_for_stop(0) != 0)		//	interp request to stop audition
+			POLY.READ.ABORTED = 1;
+
+	END;
+
+	/*	$page - File data is copied into poly, now finish up	*/
+
+	/*	In the case where SEW is less than SSW, we needed to allocate an
+		extra sector to get all the data from disk.  So now after the data
+		is loaded, shorten BL.LEN by one and free up that extra sector.	*/
+
+	if (SEW ilt SSW) then do;									//	clean up poly after this special case
+		call PSMWRITE (sfile.base, 0, BL.LEN);				//	move to where file length is stored
+		write (PSD) = total.len - 1;							//	get rid of extra sector we don't need
+		call PSMWRITE (sfile.base, total.len-1, 0);		//	move to that extra last sector
+		do i = 0 to 255;											//	zero out the sector to be safe
+			write (PSD) = 0;
+		end;
+		call PSMWRITE (sfile.base, total.len-1, BL.LEN);	//	set up the length of the block
+		write (PSD) = 1;												//	length is one sector
+	end;
+
+	IF UPPER.DISP=LOADM.DISP THEN DO;		/*	CLEAR 'LOADING' MESSAGE	*/
+		CALL CLEAR.DISPLAY;
+	END;
+
+	IF  (SHOW.FILE.LOADING.MESSAGE <> 0)	/*	SHOW MESSAGE ON TERMINAL	*/
+	AND (TOTAL.LEN IGT FILE.MESSAGE.SIZE)	/*	long-ish sound file	*/
+	THEN DO;
+		CALL CPOS(SHR(SHOW.FILE.LOADING.MESSAGE,8), SHOW.FILE.LOADING.MESSAGE&255);
+		call erase.to.end.of.line;
+	END;
+
+	IF POLY.READ.ABORTED<>0						/*	CHECK FOR 'STOP'	*/
+	THEN DO;
+		CALL DISPLAY.ERR(30);					/*	LOADING HALTED	*/
+		CALL PS.UNLOCK;							/*	STORE INFO FOR LATER LOAD	*/
+		IF AUDITIONING<>0							/*	TURN OFF CHANNELS				*/
+		THEN CALL POLY.FREE.CHANS;
+		AUDITIONING = 0;							/*	DONE WITH AUDITION			*/
+		POP.SYSTEM.PDL;							/*	RESTORE STACK					*/
+		REENTRY = 0;
+		RUN.SYN = SAVED;
+		RETURN 0;									/*	INDICATE FILE NOT LOADED	*/
+	END;
+
+	IF (failed == true)							/*	CHECK FOR disk error occurred	*/
+	THEN DO;
+		CALL DISPLAY.ERR(60);					/*	could not read snd file from disk	*/
+		CALL PS.UNLOCK;							/*	STORE INFO FOR LATER LOAD	*/
+		IF AUDITIONING<>0							/*	TURN OFF CHANNELS				*/
+		THEN CALL POLY.FREE.CHANS;
+		AUDITIONING = 0;							/*	DONE WITH AUDITION			*/
+		POP.SYSTEM.PDL;							/*	RESTORE STACK					*/
+		REENTRY = 0;
+		RUN.SYN = SAVED;
+		RETURN 0;									/*	INDICATE FILE NOT LOADED	*/
+	END;
+
+	IF AUDITIONING<>0 THEN DO;					/*	FINISH UP AUDITION			*/
+		LEN = 1;
+		DO WHILE LEN <> 0;						/*	WAIT FOR VOLUME TO BE ZERO	*/
+			DISABLE;
+			WRITE(PSC) = PB.LEFT;
+			WRITE(PSF) = PSRON;
+			LEN = READ(PSD);
+			ENABLE;
+			IF LEN <> 0 THEN DO;
+				chill.out.and.run.syn();
+
+				IF  (SHOW.FILE.LOADING.MESSAGE <> 0)	/*	show message on terminal	*/
+				THEN CALL CHECK.NEXT.EVENT;				/*	KEEP MOUSE GOING - CHECK FOR MOVEMENTS AND BUTTON RELEASES	*/
+
+				if (interp_poll_for_stop(0) != 0)		//	interp request to stop audition
+					POLY.READ.ABORTED = 1;
+
+				IF (new.mouse.button   <>0)	/*	BOMB OUT IF ANY MOUSE PRESS			*/
+				or (new.in.char        <>0)	/*	or character typed						*/
+				or (newkey             <>0)	/*	or clavier key								*/
+				or (poly.read.aborted  <>0)	/*	protocol stop								*/
+				THEN LEN=0;
+			END;
+		END;
+		CALL POLY.FREE.CHANS;
+	END;	/*	done reading in sectors of sound data from the disk	*/
+
+	/*	zero out the unused part of last sector just to be sure	*/
+	if ((data.wrd.len&255) <> 0) then do;	/*	if the end is not a sector boundary	*/
+		call PSMWRITE (sfile.base, shr(BL.POLY,8)+data.sec.len, data.wrd.len);	/*	move to one word past valid data	*/
+
+		do j = data.wrd.len to 255;	/*	from here to the end of the sector	*/
+			write (PSD) = 0;				/*	zero it out	*/
+		end;
+	end;
+
+	CALL SET.BIN.FROM.BASE(SFILE.BASE);		/*	USE PSHERE FROM CORRECT BIN	*/
+	CALL COPY32(SFILE.BASE,PSHERE);			/*	SAVE LOAD POINT FOR NEXT FILE	*/
+	PSHERE.MSB = PSHERE.MSB & BASE#PAGE_B;	/*	SAVE PAGE BITS BUT NOT BIN		*/
+	CALL ADD16(TOTAL.LEN,PSHERE);
+
+	CALL PSMWRITE(SFILE.BASE,0,BL.FNAME);
+	DO J=1 TO 4;									/*	BL.FNAME - STORE FILE NAME IN BLOCK SO OTHERS CAN FIND IT	*/
+		WRITE(PSD)=FNBUF(J);						/*	STORE FILE NAME	*/
+	END;
+	WRITE(PSD)=HDEV;								/*	BL.DEV - SAVE ORIGINAL DEVICE AND SECTOR		*/
+	WRITE(PSD)=HSEC;								/*	BL.SEC - TO SIMPLIFY RELOAD - BL.DEV, BL.SEC	*/
+
+	CALL PSMWRITE(SFILE.BASE,0,BL.CHECK);
+	WRITE(PSD)=CHECKSUM;							/*	BUT RE-STORE ORIGINAL CHECK SUM TO MATCH DISK NOW	*/
+	CALL PSMWRITE(SFILE.BASE,0,BL.SAVED);
+	WRITE(PSD)=1;									/*	INDICATE FILE IS ACTUALLY SAVED AFTER LOAD	*/
+
+	REENTRY = 0;
+	RUN.SYN = SAVED;
+
+	POP.SYSTEM.PDL;
+
+	CALL BUILD.POLY.HIST.REC(SFILE.BASE,0,REC);
+	CALL ADD.POLY.TO.HIST(REC);
+
+	RETURN (1);										/*	LOADED INTO SFILE.BASE	*/
+END PS.LOAD;
+
+/*	$page - Audition.SF.Using.DTD: Audition sound file using DTD hardware	*/
+
+/*	Arguments for Audition.SF.Using.DTD:
+
+	DDEV, DSEC	= FILE DEVICE AND SECTOR   - DISK LOCATION OF SOUND FILE
+	HDEV, HSEC	= HEADER DEVICE AND SECTOR - DISK LOCATION OF SOUND FILE HEADER
+	UNUSED		= SPARE
+
+	NOTE:	DDEV AND DSEC WILL EQUAL HDEV AND HSEC IN ALL CASES EXCEPT WHEN
+			CALLING UP A SOUND FILE FROM THE OPTICAL DISK	*/
+
+
+
+Audition.SF.Using.DTD: PROC (DDEV,DSEC,HDEV,HSEC,UNUSED) PUBLIC SWAPABLE;
+	DCL (DDEV,DSEC)	FIXED;	/*	device and sector of file to load	*/
+	DCL (HDEV,HSEC)	FIXED;	/*	device and sector of file header		*/
+	DCL (UNUSED   )	FIXED;	/*	not used at the moment					*/
+
+	dcl (ms.disk,ls.disk)	fixed;	/*	disk location of sound data	*/
+	dcl (poly.sec,poly.wrd)	fixed;	/*	offset in poly to read into	*/
+	dcl (total.to.copy)		fixed;	/*	sector count left to read into poly	*/
+	dcl (lod.poly)				fixed;	/*	amount of poly in lod			*/
+
+	dcl Audition	lit '1';
+
+	dcl (ExtPtr)				fixed;
+	dcl (ExtLen)				fixed;
+	dcl (ScsiAvail)			fixed;
+	dcl (Target#)				fixed;
+	dcl (Loon#)					fixed;
+	dcl (BlockSize)			fixed;
+	dcl (EricRichardson)		fixed;
+	dcl (saved)					fixed;
+	dcl (failed)				fixed static;
+
+	DCL (I,J,K,L,LEN)	FIXED;
+
+	dcl GetCachedBlockSize  proc (fixed) returns (fixed) external;	/*	Quickly get block size for device	*/
+
+
+	/*	SUBROUTINE TO READ DATA INTO LOD MEMORY	*/
+
+	LOD.READDATA: proc(ScsiAvail, ExtPtr, ExtLen,
+							 ms.disk, ls.disk, poly.sec, poly.wrd, len);
+		dcl (ScsiAvail)			fixed;	/*	pass true if LOD can read itself		*/
+		dcl (ExtPtr)				fixed;	/*	ext memory buffer if ScsiAVail = 0	*/
+		dcl (ExtLen)				fixed;	/*	len of ext memory buffer				*/
+		dcl (ms.disk,ls.disk)	fixed;	/*	disk address								*/
+		dcl (poly.sec,poly.wrd)	fixed;	/*	LOD's poly address						*/
+		dcl (len)					fixed;	/*	length in sectors							*/
+		dcl (ourlen)				fixed;
+		dcl (p)						fixed;
+
+		p = Find_Device (10);			/*	get the optical entry, if one	*/
+
+		do while len <> 0;				/*	process the length needed	*/
+
+			timeshare_with_host();
+
+			ourlen = len;
+
+			if ourlen IGT 250				/*	must limit to 250 sectors	*/
+			then ourlen = 250;			/*	at a crack for now			*/
+												/*	to avoid math overflow		*/
+
+			if  (shr(ms.disk,8) = 10)	/*	if reading optical				*/
+			and (p <> 0)					/*	valid entry found					*/
+			and ((shr(core(p + s#devtyp),10) and 1) <> 0)	/*	tahiti	*/
+			and (ourlen IGT 64)			/*	and bigger than needed chunk	*/
+			then ourlen = 64;				/*	limit to 64 sectors				*/
+
+			if  (ScsiAvail  =  0         )	/*	if no scsi transfer avail	*/
+			and (ourlen    IGT (ExtLen-1))	/*	then limit chunk to ext		*/
+			then ourlen     =  (ExtLen-1);	/*	buffer size						*/
+
+			/*	2 = disk sector msb			*/
+			/*	3 = disk sector lsb			*/
+			/*	4 = memory media				*/	/*	must be 0 for now	*/
+			/*	5 = memory sector # (mmsb)	*/	/*	must be 0 for now	*/
+			/*	6 = memory sector # (mlsb)	*/
+			/*	7 = memory word offset		*/
+			/*	8 = sectors to transfer		*/	/*	limit of 65535 words	*/
+			/*	9 = words to transfer		*/	/*	total at this time	*/
+
+			if ScsiAvail then do;			/*	if lod can read scsi		*/
+				write(mam) = SCSI.PTR;		/*	to LOD so it can use its own	*/
+				write(mdi) = 47;				/*	readdata/writedata functions	*/
+				write(mdi) = ms.disk;		/*	disk					*/
+				write(mdi) = ls.disk;		/*	     address		*/
+				write(mdi) = 0;				/*	memory media		*/
+				write(mdi) = 0;				/*	memory mmsb			*/
+				write(mdi) = poly.sec;		/*	memory sector		*/
+				write(mdi) = poly.wrd;		/*	memory word			*/
+				write(mdi) = ourlen;			/*	sector length		*/
+				write(mdi) = 0;				/*	word length			*/
+				rpc 20;
+				write(mdi) = 0;
+				call Send.To.Lod(144,32);
+				do while Check.For.Scsi.Reselect(0, Misc.Buf)=0;
+					interp_run_host_non_timer();
+				end;
+			end;
+
+			else do;								/*	else if lod cannot access	*/
+				write(mam) = ExtPtr;			/*	device directly, then		*/
+				write(mdi) = poly.sec;		/*	read data into ext memory	*/
+				write(mdi) = poly.wrd;		/*	then send it over				*/
+				write(mdi) = shl(ourlen,8);
+
+				disk.io.setup();				/*	prepare for errors				*/
+
+				call EXT.READDATA(ms.disk,ls.disk,ExtPtr,3,ourlen,0);
+
+				if (disk.io.cleanup() != 0)
+					failed = true;
+
+				call Send.To.Lod.Subroutine(179,6,ExtPtr);
+			end;
+
+			ls.disk = ls.disk + ourlen;
+			if ls.disk ILT ourlen then ms.disk = ms.disk + 1;
+			poly.sec = poly.sec + ourlen;
+			len = len - ourlen;
+
+		end;
+
+	end LOD.READDATA;
+
+	PUSH.SYSTEM.PDL;					/*	save system PDL stack		*/
+
+	SAVED = RUN.SYN; RUN.SYN = 0;	/*	keep run syns off anyways	*/
+	POLY.READ.ABORTED = 0;			/*	clear aborted flag			*/
+	failed = false;
+
+
+	/*	Look up some information about the sound file and store it	*/
+	/*	in global variables:														*/
+
+	if (Analyze.Sound.File.Info(ddev, dsec, hdev, hsec) == false)
+	{
+		CALL DISPLAY.ERR(60);		/*	cannot read snd file from disk	*/
+		POP.SYSTEM.PDL;
+		RUN.SYN = SAVED;
+		RETURN 0;
+	}
+
+	/*	Get some external memory to use as a buffer in case we	*/
+	/*	need to read the data ourselves:									*/
+
+	ExtPtr = nah.ptr + nah.len;		/*	start of external memory free area	*/
+	ExtLen = bnk.ptr - ExtPtr;			/*	length of external memory free area	*/
+
+	if ExtLen ILT EXTBUF.LEN			/*	use global 4 sector buffer (ugh)		*/
+	then do;									/*	if no larger one available				*/
+		ExtPtr = EXTBUF.PTR;
+		ExtLen = EXTBUF.LEN;
+	end;
+
+	/*	Find out whether this device is scsi and connected to the LOD SCSI	*/
+	/*	port or not:																			*/
+
+	ScsiAvail = 0;							/*	assume will not be scsi avail		*/
+
+	i = find_device(shr(ddev,8));		/*	get pointer to storage table		*/
+	if i <> 0 then do;					/*	big trouble if not there			*/
+
+		if ((core(i+s#devtyp) & "001417") = "401")	/*	scsi winch			*/
+		or ((core(i+s#devtyp) & "001417") = "404")	/*	scsi worm			*/
+		then do;
+
+			j = shr(core(i+s#devadr),4) & 15;			/*	get d24 #			*/
+
+			if j = lod.d24.# then do;						/*	if is d24 then ok	*/
+
+				/*	see if end of sound file is before end of drive (could	*/
+				/*	be two winchesters on w0											*/
+
+				k = (ddev & 255) + total.msb;		/*	compute sector address	*/
+				l = dsec + total.len;				/*	of end of sound file		*/
+				if l ILT dsec then k = k + 1;
+
+				load core(i+s#totcyl);
+				mul  core(i+s#seccyl);
+
+				if  ((ures IGT k))					/*	if more storage is on	*/
+				or  ((ures  =  k)						/*	disk than needed, then	*/
+				and  (res  IGT l))					/*	can read directly			*/
+				then do;
+					Target#	= core(i + s#devadr) & 15;
+					Loon#		= shr(core(i + s#devadr), 8) & 15;
+
+					if (j == 1)							/*	substitute lun 0 if		*/
+						Loon# = 0;						/*	using d24 #1				*/
+
+					disk.io.setup();					/*	prepare for errors		*/
+					BlockSize = GetCachedBlockSize(core(i + s#devadr));
+					disk.io.cleanup();
+
+					if (BlockSize == 512 || BlockSize == 1024)
+						ScsiAvail = 1;
+				end;
+			end;
+		end;
+	end;
+
+	/*	Send info to LOD for read function	*/
+
+	if ScsiAvail then do;			/*	send target#, loon#, and block size	*/
+		write(mam) = SCSI.PTR;		/*	to LOD so it can use its own			*/
+		write(mdi) = 43;				/*	readdata/writedata functions			*/
+		write(mdi) = Target#;
+		write(mdi) = Loon#;
+		write(mdi) = BlockSize;
+		rpc 20;
+		write(mdi) = 0;
+		call Send.To.Lod(144,32);
+	end;
+
+	DO J=1 TO 4;	/*	copy in file name for printing terminal message	*/
+		MSGNAME(J)=FNBUF(J);
+	END;
+	MSGNAME(0)=8;	/*	assume file name is 8 characters long	*/
+	DO WHILE (MSGNAME(0)<>0)&(BYTE(MSGNAME,MSGNAME(0)-1)=0);	/*	calculate how long file name actually is	*/
+		MSGNAME(0)=MSGNAME(0)-1;
+	END;
+	CALL PBYTE(MSGNAME,MSGNAME(0),34);	/*	add in a trailing "	*/
+	MSGNAME(0)=MSGNAME(0)+1;				/*	include " in string length	*/
+
+	IF  (NEW.PAN<>0)							/*	new panel code only	*/
+	THEN DO;										/*	write message on long loads	*/
+		CALL CLEAR.DISPLAY;
+		CALL EMIT.STRING(0 ,'AUDITIONING SND FILE "');
+		CALL EMIT.STRING(22,MSGNAME);		/*	print the filename	*/
+		UPPER.DISP=LOADM.DISP;
+		BOTH.DISPLAY=1;
+
+		/*	Force an immediate update to the VK display on remote devices	*/
+		/*	to provide an immediate update of the VK window display while	*/
+		/*	we are loading sound files:												*/
+
+		call Flush.VK.Display.To.Termulators;
+	END;
+
+	IF  (SHOW.FILE.LOADING.MESSAGE <> 0)	/*	show message on terminal	*/
+	THEN DO;
+		CALL CPOS(SHR(SHOW.FILE.LOADING.MESSAGE,8), SHOW.FILE.LOADING.MESSAGE&255);
+		call erase.to.end.of.line;
+		CALL PS('Reading audition data for "');
+		call PS(LNBUF);	/*	print the filename	*/
+      call PC(34);
+      interp_flush_char_output();
+	END;
+
+	/*	For auditioning purposes, the following information is set up	*/
+	/*	in the LOD's poly memory:													*/
+
+	/*		Sector 0 - unused - similar to SYNCLAV's sound file			*/
+	/*								  header block										*/
+	/*		Sectors 1,2,3 - holds info & symbol table from SF				*/
+	/*		Sector 4 and on - holds audio data									*/
+
+	/*	get the sector on disk where sound data to load starts	*/
+	ms.disk = DDEV; ls.disk = DSEC + 3;	/*	find the start of actual sound data	*/
+	if ls.disk ilt 3 then ms.disk = ms.disk + 1;	/*	with carry	*/
+
+	ms.disk = ms.disk + SSM;	/*	add in msb offset							*/
+	ls.disk = ls.disk + SSS;	/*	add in the offset of sector to load	*/
+	if ls.disk ilt SSS then ms.disk = ms.disk + 1;		/*	with carry	*/
+
+	/*	$page - Load the first segment of data and start the audition	*/
+
+	/*	Find the location in poly memory to put data.  The first sector
+		from the disk has leading zeroes up until word offset SSW, and
+		we do.not want these zeroes in poly.  So...
+			1.  Find the sector in poly for the data (after the header).
+			2.  If there is a word offset, back up SSW words into the
+				 previous sector.
+			3.  Read the first chunk of data.  The start of sound data will
+				 line up with the sector boundary in poly memory.
+		Note that the header (or at least the labels) must be read into
+		poly AFTER the start of the data, because the last sector of the
+		header is overwritten by this algorithm.
+	*/
+
+	poly.sec = shr(bl.poly, 8);	/*	start in poly out past the header	*/
+	poly.wrd = 0;						/*	usually going to start on sector boundary	*/
+
+	/*	See how much poly memory is available in the lod	*/
+
+	write(mam) = SCSI.PTR;		/*	send 144:45 message to	*/
+	write(mdi) = 45;				/*	find out how much poly	*/
+	rpc 20;							/*	is there						*/
+	write(mdi) = 0;
+	call Send.To.Lod(144,32);
+	lod.poly = dtd.cue#;			/*	answer is here				*/
+	if lod.poly ILT shr(bl.poly,8)	/*	but avoid math		*/
+	then lod.poly = shr(bl.poly,8);	/*	errors if no poly	*/
+
+	/*	put lod into data function mode and wait for the LOD's poly to	*/
+	/*	come free																		*/
+
+	call Send.To.Lod(68,0);				/*	stop all other data transfer	*/
+
+	waitmore:;
+	write(mam) = SCSI.PTR;		/*	send 144:46 message to		*/
+	write(mdi) = 46;				/*	wait for all other I/O		*/
+	rpc 20;							/*	over there to stop.  When	*/
+	write(mdi) = 0;				/*	this is done, then we		*/
+	call Send.To.Lod(144,32);	/*	know we can read into		*/
+	if dtd.cue# <> 1				/*	poly.								*/
+	then goto waitmore;
+
+	EricRichardson = FALSE;		/*	initialize to no timeout occurred	*/
+
+	audition.next.segment:;		/*	return from below to audition next	*/
+										/*	segment (all that will fit in DTD	*/
+										/*	ram)											*/
+
+	/*	compute how much we can audition this time around	*/
+
+	if total.msb <> 0 then total.to.copy = lod.poly - shr(bl.poly,8);
+	else do;
+		total.to.copy = total.len - shr(BL.POLY,8);
+		if total.to.copy IGT (lod.poly-shr(BL.POLY,8))
+		then total.to.copy = (lod.poly-shr(BL.POLY,8));
+	end;
+
+	/*	account for length here, because total.len gets clobbered as	*/
+	/*	we audition:																	*/
+
+	if total.len ILT total.to.copy then total.msb = total.msb - 1;
+	total.len = total.len - total.to.copy;
+
+	/*	Read in the first segment of data before starting audition.  If
+		reading a floppy disk, get the whole file.	*/
+
+	if EricRichardson = TRUE	/*	if we timed out playing last segment,	*/
+	then len = total.to.copy;	/*	then read in the whole segment here.	*/
+	else len = Get.Optimal.Preload.Chunk.Len(shr(ms.disk,8),srate,stereo,1,total.to.copy);
+
+	call LOD.READDATA (ScsiAvail, ExtPtr, ExtLen,
+							 ms.disk, ls.disk, poly.sec, poly.wrd, len);	/*	read in first block of data	*/
+
+	ls.disk = ls.disk + len;	/*	advance disk location	*/
+	if ls.disk ilt len then ms.disk = ms.disk + 1;	/*	with carry				*/
+	poly.sec = poly.sec + len;	/*	advance poly position (LEN is in sectors - keep POLY.WRD the same)	*/
+	total.to.copy = total.to.copy - len;				/*	decrease the length needed to copy	*/
+
+	/*	Read in 3 sectors of header information from disk	*/
+
+	call LOD.READDATA (ScsiAvail, ExtPtr, ExtLen,
+							 HDEV, HSEC, SF.HDR, 0, 1);	/*	read in first sector of header	*/
+	i = DDEV; j = DSEC + 1;									/*	compute disk address of labels (sectors 2 and 3 of disk header)	*/
+	if j = 0 then i = i + 1;								/*	with carry				*/
+	call LOD.READDATA (ScsiAvail, ExtPtr, ExtLen,
+							 i, j, SF.SYM, 0, 2);			/*	read in the labels	*/
+
+	/*	Start the audition here	*/
+
+	IF AUDITION<>0 THEN DO;							/*	IF AUDITION IS DESIRED		*/
+
+		IF  (SHOW.FILE.LOADING.MESSAGE <> 0)	/*	show message on terminal	*/
+		THEN DO;
+			CALL CPOS(SHR(SHOW.FILE.LOADING.MESSAGE,8), SHOW.FILE.LOADING.MESSAGE&255);
+			call erase.to.end.of.line;
+			CALL PS('Auditioning Sound File "');
+			call PS(LNBUF);	/*	print the filename	*/
+         call PC(34);
+         interp_flush_char_output();
+		END;
+
+		/*	Send a message over to the direct-to-disk to tell him to	*/
+		/*	start the audition process.										*/
+
+		write(mam) = SCSI.PTR;
+		write(mdi) = 48;								/*	0 = code 48					*/
+		write(mdi) = srate;							/*	1 = khz * 10				*/
+		write(mdi) = stereo;							/*	2 = stereo					*/
+		write(mdi) = 0;								/*	3 = poly sector msb		*/
+		write(mdi) = shr(bl.poly, 8);				/*	4 = poly sector lsb		*/
+		write(mdi) = 0;								/*	5 = poly word				*/
+		write(mdi) = 0;								/*	6 = sector length msb	*/
+		write(mdi) = poly.sec-shr(bl.poly,8);	/*	7 = sector length lsb	*/
+		write(mdi) = 0;								/*	8 = word length			*/
+		rpc 20;
+		write(mdi) = 0;
+		call Send.To.Lod(144,32);
+
+	END;
+
+	/*	$page - Read the rest of the sound file data into poly memory.	*/
+
+	do while (total.to.copy IGT 0) and (POLY.READ.ABORTED = 0) and (failed == false);	/*	read rest of data	*/
+
+		timeshare_with_host();
+
+		len = total.to.copy;	/*	initialize amount to read to total left to read	*/
+
+		if audition<>0 then do;	/*	if we are auditioning	*/
+			if shr(ms.disk,8)<8	/*	if on a Winchester disk	*/
+			then len =  75;		/*	Winchester is pretty fast	*/
+			else len = shl(150,stereo);	/*	the optical disk is slower, stereo a lot slower	*/
+			if srate IGT 505 then len = shl(len, 1);
+		end;
+		else do;	/*	not auditioning the file	*/
+			len = 200;	/*	use regular buffer size	*/
+		end;
+		if len igt total.to.copy then len = total.to.copy;	/*	restrict to amount left to copy	*/
+
+		call LOD.READDATA (ScsiAvail, ExtPtr, ExtLen,
+								 ms.disk, ls.disk, poly.sec, poly.wrd, len);	/*	read in a chunk of data	*/
+
+		ls.disk = ls.disk + len;	/*	advance disk location	*/
+		if ls.disk ilt len then ms.disk = ms.disk + 1;	/*	with carry	*/
+		poly.sec = poly.sec + len;	/*	advance poly position (LEN is in sectors - keep POLY.WRD the same)	*/
+		total.to.copy = total.to.copy - len;				/*	decrease the length needed to copy	*/
+
+		/*	If we are auditioning and the disk is keeping up with the	*/
+		/*	audio, then re-write disk pointers.  Otherwise, wait			*/
+		/*	until all the data is read in before restarting.				*/
+
+		if audition then do;
+			write(mam) = SCSI.PTR;				/*	send 144:49 message to	*/
+			write(mdi) = 49;						/*	see if we are still		*/
+			write(mdi) = 0;						/*	auditioning.				*/
+			rpc 20;
+			write(mdi) = 0;
+			call Send.To.Lod(144,32);
+			if dtd.cue# = 1						/*	if audition timed out	*/
+			then EricRichardson = TRUE;		/*	then set flag				*/
+		end;
+
+		/*	Resset pointers if we are still playing, or restart the		*/
+		/*	audition if we have just read in the last chunk:				*/
+
+		if (audition)
+		and ((dtd.cue# <> 1) or (total.to.copy = 0))
+		then do;
+			write(mam) = SCSI.PTR;
+			write(mdi) = 48;								/*	0 = code 48					*/
+			write(mdi) = srate;							/*	1 = khz * 10				*/
+			write(mdi) = stereo;							/*	2 = stereo					*/
+			write(mdi) = 0;								/*	3 = poly sector msb		*/
+			write(mdi) = shr(bl.poly, 8);				/*	4 = poly sector lsb		*/
+			write(mdi) = 0;								/*	5 = poly word				*/
+			write(mdi) = 0;								/*	6 = sector length msb	*/
+			write(mdi) = poly.sec-shr(bl.poly,8);	/*	7 = sector length lsb	*/
+			write(mdi) = 0;								/*	8 = word length			*/
+			rpc 20;
+			write(mdi) = 0;
+			call Send.To.Lod(144,32);
+		end;
+
+		IF  (SHOW.FILE.LOADING.MESSAGE <> 0)	/*	show message on terminal		*/
+		THEN CALL CHECK.NEXT.EVENT;				/*	KEEP MOUSE GOING - CHECK FOR MOVEMENTS AND BUTTON RELEASES	*/
+
+		IF (new.mouse.button        <>0)			/*	BOMB OUT IF ANY MOUSE PRESS	*/
+		or (new.in.char             <>0)			/*	or character typed				*/
+		or (interp_poll_for_stop(0) <>0)			/*	or interp request to stop		*/
+		THEN POLY.READ.ABORTED = 1;
+
+	END;
+
+	/*	$page - File data is copied into poly, now finish up			*/
+
+	/*	Send a message to the LOD to tell it to stop auditioning		*/
+
+	wait.for.audition:;
+	write(mam) = SCSI.PTR;				/*	send 144:49 message to		*/
+	write(mdi) = 49;						/*	wait for audition to			*/
+	write(mdi) = poly.read.aborted	/*	stop.  Tell lod to abort	*/
+				  | failed;
+	rpc 20;									/*	the audition if the user	*/
+	write(mdi) = 0;						/*	wants to bail out.			*/
+	call Send.To.Lod(144,32);
+	if dtd.cue# <> 1 then do;
+
+		CHILL.OUT.AND.RUN.SYN();
+
+		IF  (SHOW.FILE.LOADING.MESSAGE <> 0)	/*	show message on terminal		*/
+		THEN CALL CHECK.NEXT.EVENT;				/*	KEEP MOUSE GOING - CHECK FOR MOVEMENTS AND BUTTON RELEASES	*/
+
+		IF (new.mouse.button        <>0)			/*	BOMB OUT IF ANY MOUSE PRESS	*/
+		or (new.in.char             <>0)			/*	or character typed				*/
+		or (interp_poll_for_stop(0) <>0)			/*	or interp request to stop		*/
+		THEN POLY.READ.ABORTED = 1;
+
+		goto wait.for.audition;
+	end;
+
+	/*	restart audition for next segment if we did not get the whole thing			*/
+
+	if  (POLY.READ.ABORTED =  0)					/*	if user has not stopped audition	*/
+	and (failed == false)							/*	and no disk error occurred			*/
+	and ((total.msb        <> 0)					/*	and there is more to do				*/
+	or   (total.len IGT shr(bl.poly,8)))		/*	(either msb or lsb)					*/
+	then do;												/*	then go back for more				*/
+
+		IF  (SHOW.FILE.LOADING.MESSAGE <> 0)	/*	show message on terminal			*/
+		THEN DO;
+			CALL CPOS(SHR(SHOW.FILE.LOADING.MESSAGE,8), SHOW.FILE.LOADING.MESSAGE&255);
+			call erase.to.end.of.line;
+			CALL PS('Reading more data from "');
+			call PS(LNBUF);	/*	print the filename	*/
+         call PC(34);
+         interp_flush_char_output();
+		END;
+
+		poly.sec = shr(bl.poly,8);
+		goto audition.next.segment;
+	end;
+
+
+	/*	turn off data function mode reading	*/
+
+	call send.to.lod(33,0);		/*	restore normal play buffers					*/
+
+	IF UPPER.DISP=LOADM.DISP THEN DO;		/*	CLEAR 'AUDITIONING' MESSAGE	*/
+		CALL CLEAR.DISPLAY;
+	END;
+
+	IF  (SHOW.FILE.LOADING.MESSAGE <> 0)	/*	SHOW MESSAGE ON TERMINAL		*/
+	THEN DO;
+		CALL CPOS(SHR(SHOW.FILE.LOADING.MESSAGE,8), SHOW.FILE.LOADING.MESSAGE&255);
+		call erase.to.end.of.line;
+	END;
+
+	if (failed != 0)
+		CALL DISPLAY.ERR(60);					/*	cannot read snd file from disk	*/
+
+	RUN.SYN = SAVED;
+
+	POP.SYSTEM.PDL;
+
+	RETURN (1);
+END Audition.SF.Using.DTD;
+
+/*	$PAGE GET FILE INFO INTO MISC.BUF FROM EXT MEM	*/
+
+PS.EXTRACT:PROC	FIXED PUBLIC SWAPABLE;
+	DCL I	FIXED;
+
+	CALL PSMREAD(SFILE.BASE, 0, BL.LEN);				//	READ INFO
+	DO I = BL.LEN TO BL.COPYL-1;
+		MISC.BUF(I)=READ(PSD);
+	END;
+
+	IF MISC.BUF(BL.STEREO)<>0 THEN DO;					//	STEREO SOUND FILE
+		I=SHR(SFILE.BASE(LW#MSB),BASE#BIN_P);			//	GET POLY BIN NUMBER
+		IF POLYADCS(I)=0 THEN MISC.BUF(BL.STEREO)=0;	//	MAKE SURE HARDWARE IS THERE
+	END;															//	COULD DISPLAY ERROR HERE
+
+	RETURN MISC.BUF(BL.STEREO);
+END PS.EXTRACT;

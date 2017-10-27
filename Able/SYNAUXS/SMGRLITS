@@ -1,0 +1,426 @@
+/* SMGRLITS   $TITLE  Literals for the screen manager
+
+   Modified:
+   10/09/89 - cj - removed o#msec.remap; added o#msec.realtime
+   10/12/88 - cj - added o#msec.remap
+                   dcl O#MSEC.Remap lit '1024';
+   08/05/88 - cj  - added O#MSEC.Allow.Minus
+   06/23/88 - cj  - Added O#ICON.BlockModeOn, O#ICON.BlockModeOff
+   04/22/88 - TSS,KJO - Added O#ICON.StartPoly & O#ICON.EndPoly
+   04/04/88 - MWH - Add scroll bar bit to suppress arrows
+   03/18/88 - MWH - Add scroll bar bit for transparent mode
+   12/01/87 - MWH - Add event for delete key on a field
+   11/17/87 - MWH - Split into 2 libraries; SMGR is too big
+   11/02/87 - MWH - Merge in Cameron's newest code: "cj - 9/10/87"
+   10/15/87 - MWH - Switch doesn't use "Bit8" for an animate flag anymore
+   10/09/87 - MWH - Add wrap bit for tables
+   10/07/87 - MWH - Add comments
+   10/01/87 - MWH - Remove unused error codes
+   09/25/87 - MWH - Fix graphics strings
+   09/24/87 - MWH - Keep like data together
+   
+*/
+
+/*  All objects in the screen manager are stored in a contiguous block of
+ *  external memory.  The first word of each object is the length in words
+ *  (or -1 when beyond the last object).  The start of the object block
+ *  is pointed to by the global variable "Screen.Base".
+ *
+ *  Each object is made up of a HEADER, which uses the same format for
+ *  all objects, followed by a SUFFIX, which is different for each kind
+ *  of object.
+ */
+
+
+/*******************/
+/*  Object Header  */
+/*******************/
+
+/* Literals for Object Header */
+dcl O#Length                  lit '0';    /* Total length of the object */
+dcl O#Type                    lit '1';    /* Object type */
+dcl O#Status                  lit '2';    /* Object status */
+dcl O#ULX                     lit '3';    /* Graphics region upper left corner */
+dcl O#ULY                     lit '4';
+dcl O#LRX                     lit '5';    /* Graphics region lower right corner */
+dcl O#LRY                     lit '6';
+dcl O#ID                      lit '7';    /* Unique object ID# */
+dcl O#Attr                    lit '8';    /* Object attribute bits */
+dcl O#Input                   lit '9';    /* Object input routine */
+dcl O#ObjectGets              lit '10';   /* Object standard gets */
+dcl O#UserGets                lit '11';   /* User special gets */
+dcl O#Action                  lit '12';   /* Object action bits */
+dcl O#EraseMethod             lit '13';   /* Bits specifying how to erase object */
+dcl O#ObjLeft                 lit '14';   /* Adjacent object id# to the left */
+dcl O#ObjRight                lit '15';   /* Adjacent object id# to the right */
+dcl O#ObjAbove                lit '16';   /* Adjacent object id# above */
+dcl O#ObjBelow                lit '17';   /* Adjacent object id# below */
+dcl O#UserData                lit '18';   /* One word of User defineable info */
+dcl O#JogAmount               lit '19';   /* Amount to jog with mousel and mouser */
+dcl O#Suffix                  lit '20';   /* First word of suffix */
+
+dcl O#Hlen                    lit '21';   /* Length of object header (words) */
+
+
+/**************************************/
+/*  Values used in the Object Header  */
+/**************************************/
+
+/* O#Length: */
+dcl O#Len.End                 lit  '-1';
+
+/* O#Type: */                 /* Note, "+" is transparent, "-" is graphics mode object*/
+dcl O$Delete                  lit   '0';  /* Special marker for garbage collection */
+dcl O$Graphics.Region         lit  '-1';  /* Graphics region */
+dcl O$Fixed.Point             lit   '2';  /* Fixed point number */
+dcl O$32bit.Msec              lit   '3';  /* 32 bit millisecond */
+dcl O$32bit.SMPTE             lit   '4';  /* 32 bit SMPTE time */
+dcl O$Sound.File.Time         lit   '5';  /* Sound file time */
+dcl O$String                  lit   '6';  /* String */
+dcl O$Graphics.String         lit  '-6';  /* Graphics string */
+dcl O$Switch                  lit   '7';  /* Switch */
+dcl O$Table                   lit   '8';  /* Table of transparent mode objects */
+dcl O$Scroll.Bar              lit  '-9';  /* Scroll bar */
+dcl O$Label                   lit  '10';  /* Text label */
+dcl O$Frame                   lit  '11';  /* Frame */
+dcl O$Graphics.Box            lit '-12';  /* Graphics box */
+dcl O$Graphics.Icon           lit '-13';  /* Graphics icon */
+
+/* O#Status: */
+dcl O#STAT.Enable             lit '01';   /* Object may be drawn on screen */
+dcl O#STAT.Exhibit            lit '02';   /* Object has been drawn on screen */
+dcl O#STAT.Update             lit '04';   /* Do unconditional re-draw */
+dcl O#STAT.Attr.Set           lit '08';   /* Use: 0 => "unselected" 1 => "selected" attribute set */
+dcl O#STAT.Disp.Attr.Set      lit '16';   /* Same but last displayed attribute set */
+dcl O#STAT.Special.Draw       lit '32';   /* Use special trable drawing logic */
+
+/* O#Attr: */
+/* Bits settings of O#Attr word used by the Screen Manager. */
+/* See SYNAUXS:TTYLITS for literals used by Set.Term.Attr.  */
+/* Note: ATTR#GBox and ATTR#NoGBox literals are not used by */
+/* the SET.TERM.ATTR routine in TTYMOD:TTYSOU.              */
+/* dcl ATTR#Normal       lit '128';                         */
+/* dcl ATTR#Reverse      lit '1\256';                       */
+/* dcl ATTR#NoReverse    lit '1';                           */
+/* dcl ATTR#AltIntensity lit '2\512';                       */
+/* dcl ATTR#RegIntensity lit '2';                           */
+/* dcl ATTR#Blink        lit '4\1024';                      */
+/* dcl ATTR#NoBlink      lit '4';                           */
+/* dcl ATTR#Underline    lit '8\2048';                      */
+/* dcl ATTR#NoUnderline  lit '8';                           */
+   dcl ATTR#GBox         lit '064\4096'; /* NOTE: Not a Set.Term.Attr bit */
+   dcl ATTR#NoGBox       lit '064';      /* NOTE: Not a Set.Term.Attr bit */
+
+/* O#Action: */
+dcl O#ACT.Prev.Obj              lit '"000001"';  /* After selecting, return to previous object */
+dcl O#ACT.Update.On.Dep         lit '"000002"';  /* Re-draw screen right away on change */
+dcl O#ACT.Drag.Enabled          lit '"000004"';  /* Object may be dragged */
+dcl O#ACT.Drag.Type.Check       lit '"000010"';  /* Check type on doing drag/deposit */
+dcl O#ACT.Animate.Disabled      lit '"000020"';  /* Animate the object */
+dcl O#ACT.Deposit.Rept.Disabled lit '"000040"';  /* Disable reporting deposit events */
+dcl O#ACT.RealTime.Object       lit '"000100"';  /* Set to do RUN.SYN.LOOPs during updates */
+dcl O#ACT.Get.Disabled          lit '"000200"';  /* Set to disable ALL gets */
+dcl O#ACT.Left.Press            lit '"000400"';  /* Mouse presses */
+dcl O#ACT.Middle.Press          lit '"001000"';
+dcl O#ACT.Right.Press           lit '"002000"';
+dcl O#ACT.Left.Release          lit '"004000"';  /* Mouse releases */
+dcl O#ACT.Middle.Release        lit '"010000"';
+dcl O#ACT.Right.Release         lit '"020000"';
+dcl O#ACT.Jog.Enabled           lit '"040000"';  /* Allow jogging value with left/right mouse buttons */
+dcl O#ACT.POAct.Changed         lit '"100000"';  /* Manipulation for tables of switches */
+
+/* O#EraseMethod: */
+dcl O#ERAS.End.of.Line        lit '01';   /* Erase from Left Edge of object to end of line */
+dcl O#ERAS.Start.of.Line      lit '02';   /* Erase from Right Edge of object to start of line */
+dcl O#ERAS.Whole.Line         lit '04';   /* Erase entire line on which object is displayed */
+dcl O#ERAS.End.of.Screen      lit '08';   /* Erase from Right Edge of object to bottom of screen */
+dcl O#ERAS.Start.of.Screen    lit '16';   /* Erase from Left Edge of object to top of screen */
+dcl O#ERAS.Whole.Screen       lit '32';   /* Erase entire screen on which object is displayed */
+dcl O#ERAS.Null.Fill.On.Erase lit '64';   /* Fill label table with null strings upon erasing it. */
+
+
+/*******************************************/
+/*  Transparent Object Suffix Definitions  */
+/*******************************************/
+
+
+/* ALL Transparent Mode Objects begin with these words... */
+dcl O#Trans.Row          lit  ' O#Suffix   ';  /* Top-left coordinates */
+dcl O#Trans.Col          lit  '(O#Suffix+1)';
+dcl O#Trans.Width        lit  '(O#Suffix+2)';  /* Length in characters */
+dcl O#Trans.Size         lit  '2';             /* This suffix's extension */
+/* ...followed by one of the data types below, depending on O#Type in the header */
+
+/* Fixed Point (O$Fixed.Point) */
+dcl O#FIXP.DP            lit  '(O#Suffix+3)';  /* Decimal point position */
+dcl O#FIXP.Value         lit  '(O#Suffix+4)';  /* 16-bit value */
+dcl O#FIXP.Disp.DP       lit  '(O#Suffix+5)';  /* Last displayed decimal position */
+dcl O#FIXP.Disp.Value    lit  '(O#Suffix+6)';  /* Last displayed value */
+dcl O#FIXP.Format        lit  '(O#Suffix+7)';  /* TFORMMOD format word */
+dcl O#FIXP.Size          lit  '7';             /* This suffix's extension */
+
+/* 32-Bit Millisecond Time (O$32bit.Msec) */
+dcl O#MSEC.Format        lit  '(O#Suffix+3)';  /* SMPTE,Beats,Measure,Seconds... */
+   dcl O#MSEC.Sec.Msec        lit    '0';      /* literals for O#MSEC.Format */
+   dcl O#MSEC.Beats           lit    '1';      /*     and O#MSEC.Disp.Format */
+   dcl O#MSEC.Measures.Beats  lit    '2';
+   dcl O#MSEC.SMPTE           lit    '3';
+   dcl O#MSEC.Feet.Frames     lit    '4';
+   dcl O#MSEC.Minutes.Seconds lit    '5';
+   dcl O#MSEC.Alt.Offset      lit  '256';
+   dcl O#MSEC.Allow.Minus     lit  '512';
+   dcl O#MSEC.RealTime        lit '1024';
+dcl O#MSEC.Type          lit  '(O#Suffix+4)';  /* CF#TIME or CF#DUR */
+dcl O#MSEC.MSW           lit  '(O#Suffix+5)';  /* 32-bit start time */
+dcl O#MSEC.LSW           lit  '(O#Suffix+6)';
+dcl O#MSEC.Dur           lit  '(O#Suffix+7)';  /* 32-bit duration   */
+                                               /* (two words)       */
+dcl O#MSEC.Disp.Format   lit  '(O#Suffix+9)';  /* Last displayed format, */
+dcl O#MSEC.Disp.Type     lit  '(O#Suffix+10)';  /* ...type */
+dcl O#MSEC.Disp.MSW      lit  '(O#Suffix+11)';  /* ...and 32-bit value */
+dcl O#MSEC.Disp.LSW      lit  '(O#Suffix+12)';
+dcl O#MSEC.Maxl          lit  '(O#Suffix+13)';
+dcl O#MSEC.Maxr          lit  '(O#Suffix+14)';
+dcl O#MSEC.Size          lit  '14';            /* This suffix's extension */
+
+/* 32-Bit SMPTE Time (O$32bit.SMPTE) */
+dcl O#SMPTE.MSW          lit  '(O#Suffix+3)';  /* 32-bit value */
+dcl O#SMPTE.LSW          lit  '(O#Suffix+4)';
+dcl O#SMPTE.Disp.MSW     lit  '(O#Suffix+5)';  /* Displayed 32-bit value */
+dcl O#SMPTE.Disp.LSW     lit  '(O#Suffix+6)';
+dcl O#SMPTE.Size         lit  '6';             /* This suffix's extension */
+
+/* Sound File Time (O$Sound.File.Time) */
+dcl O#SF.Sec             lit  '(O#Suffix+3)';
+dcl O#SF.Msec            lit  '(O#Suffix+4)';
+dcl O#SF.Usec            lit  '(O#Suffix+5)';
+dcl O#SF.Disp.Sec        lit  '(O#Suffix+6)';
+dcl O#SF.Disp.Msec       lit  '(O#Suffix+7)';
+dcl O#SF.Disp.Usec       lit  '(O#Suffix+8)';
+dcl O#SF.Maxl            lit  '(O#Suffix+9)';
+dcl O#SF.Maxr            lit  '(O#Suffix+10)';
+dcl O#SF.Size            lit  '10';            /* This suffix's extension */
+
+/* String (O$String) */
+dcl O#STR.Type           lit  '(O#Suffix+3)';
+   dcl O#STR.General     lit  '0';
+   dcl O#STR.Pitch       lit  '1';
+   dcl O#STR.Treename    lit  '2';
+   dcl O#STR.Filename    lit  '3';
+dcl O#STR.Max.Chars      lit  '(O#Suffix+4)';
+dcl O#STR.String         lit  '(O#Suffix+5)';  /* String value */
+dcl O#STR.Size           lit  '5';             /* This suffix's extension */
+
+/* Switch (O$Switch) */
+dcl O#SWCH.Info          lit  '(O#Suffix+3)';  /* Number of switch positions */
+dcl O#SWCH.Pos           lit  '(O#Suffix+4)';  /* Current position */
+dcl O#SWCH.Disp.Pos      lit  '(O#Suffix+5)';  /* Last displayed position */
+dcl O#SWCH.Format        lit  '(O#Suffix+6)';
+dcl O#SWCH.Settings      lit  '(O#Suffix+7)';  /* Switch settings string */
+dcl O#SWCH.Size          lit  '7';             /* This suffix's extension */
+
+/* Table (O$Table) */
+dcl O#TABL.Cell.Type.Id  lit  '(O#Suffix+ 3)';
+dcl O#TABL.Bits          lit  '(O#Suffix+ 4)';
+   dcl O#TABL.Bits.Hardware.Scroll lit  '"1"'; /* Use hardware scrolling if set and table insert is done */
+   dcl O#TABL.Bits.Animate         lit  '"2"'; /* Enables animation of cell pos with mouse */
+   dcl O#TABL.Bits.Refresh.Dir     lit  '"4"'; /* 0=Top-Down  1=Bottom-Up */
+   dcl O#TABL.Bits.Wrap            lit '"10"'; /* Wrap within table at end of row */
+dcl O#TABL.Cell.Mem      lit  '(O#Suffix+ 5)'; /* Cell size */
+dcl O#TABL.Across        lit  '(O#Suffix+ 6)';
+dcl O#TABL.Down          lit  '(O#Suffix+ 7)';
+dcl O#TABL.Cur.Col       lit  '(O#Suffix+ 8)';
+dcl O#TABL.Cur.Row       lit  '(O#Suffix+ 9)';
+dcl O#TABL.Table         lit  '(O#Suffix+10)';
+dcl O#TABL.Size          lit  '10';            /* This suffix's extension */
+dcl O#TABL.Size.Graphics lit  '13';            /* Data offset if table of graphics objects */
+
+/*  A note on the use of O#TABL.Size:
+ *  When accessing each cell of a table, the "real data" for the first
+ *  element may be found by (for example, a fixed point value):
+ *     call Locate.Object(id);     \* Get pointer to whole table in Object.Ptr *\
+ *     call Read.Object(Object.Ptr + O#TABL.Size + O#FIXP.Value);  \* 1st element *\
+ *  O#TABL.Size.Graphics must be used instead if the data to be accessed is
+ *  a graphics object (ie it has no row, col, width at the start of the suffix).
+ */
+
+/* Also, for each table cell: */
+   dcl O#TABL.Cell.Status   lit  '0';   /* 0 = status word */
+   dcl O#TABL.Cell.Attr     lit  '1';   /* 1 = attr   word */
+   dcl O#TABL.Cell.Data     lit  '2';   /* 2 = item data   */
+
+   dcl O#TABL.Fill.Across   lit  '1';
+   dcl O#TABL.Fill.Down     lit  '0';
+
+/* Label (O$Label) */
+dcl O#LABL.Label         lit  '(O#Suffix+3)';  /* Label text */
+dcl O#LABL.Size          lit  '3';             /* This suffix's extension */
+
+/* Frame (O$Frame) */
+dcl O#FRAM.Depth         lit  '(O#Suffix+3)';
+dcl O#FRAM.Title         lit  '(O#Suffix+4)';  /* Title text */
+dcl O#FRAM.Size          lit  '4';             /* This suffix's extension */
+
+
+/****************************************/
+/*  Graphics Object Suffix Definitions  */
+/****************************************/
+
+/* Graphics Region (O$Graphics.Region) */
+/*  <has no suffix defined>            */
+
+/* Literals for graphics region expanded to button table */
+dcl O#GBTAB.Cols         lit  '(O#Suffix  )';  /* # of columns in graphics button table */
+dcl O#GBTAB.Rows         lit  '(O#Suffix+1)';  /* # of rows    in graphics button table */
+dcl O#GBTAB.Hpix         lit  '(O#Suffix+2)';  /* # of hor pix in graphics button table cell */
+dcl O#GBTAB.Vpix         lit  '(O#Suffix+3)';  /* # of ver pix in graphics button table cell */
+dcl O#GBTAB.Bits         lit  '(O#Suffix+4)';  /* control bits for graphics button table */
+   dcl O#GBTAB.Divide    lit  '1';             /* divide table into cells with hatches   */
+dcl O#GBTAB.Cell.Info    lit  '(O#Suffix+5)';  /* start of cell info                     */
+dcl O#GBTAB.Size         lit  '5';             /* This suffix's extension */
+
+/* Graphics String (O$Graphics.String) */
+dcl O#GSTR.Char.X        lit  '(O#Suffix)';    /* Upper left-most graphics coordinates */
+dcl O#GSTR.Char.Y        lit  '(O#Suffix+1)';
+dcl O#GSTR.Type          lit  '(O#Suffix+2)';
+   dcl O#GSTR.General    lit  '0';
+   dcl O#GSTR.Pitch      lit  '1';
+   dcl O#GSTR.Treename   lit  '2';
+   dcl O#GSTR.Filename   lit  '3';
+dcl O#GSTR.Char.Set      lit  '(O#Suffix+3)';  /* Reserved for future use */
+dcl O#GSTR.Char.Mag      lit  '(O#Suffix+4)';  /* Reserved for future use */
+dcl O#GSTR.Max.Chars     lit  '(O#Suffix+5)';  /* Max length of each string */
+dcl O#GSTR.String.Words  lit  '(O#Suffix+6)';  /* # words for each of 2 strings */
+dcl O#GSTR.String        lit  '(O#Suffix+7)';  /* 2 strings: current, then displayed at + String.Words */
+dcl O#GSTR.Size          lit  '7';             /* This suffix's extension */
+/* Graphics string drawing modes (used internally by the screen manager) */
+   dcl O#GSTR.Draw          lit  '0';
+   dcl O#GSTR.Erase         lit  '1';
+   dcl O#GSTR.Complement    lit  '2';
+
+/* Scroll Bar (O$Scroll.Bar) */
+dcl O#SBAR.Bits          lit  '(O#Suffix)';
+   dcl O#SBAR.Bits.Orient       lit   '1';     /* 0 = horizontal, 1 = vertical */
+   dcl O#SBAR.Bits.Just         lit   '2';     /* 0 = top/left,   1 = bottom/right */
+   dcl O#SBAR.Bits.State        lit   '4';     /* 0 = inactive,   1 = active */
+   dcl O#SBAR.Bits.Disp.State   lit   '8';     /* 0 = inactive,   1 = active */
+   dcl O#SBAR.Bits.Box.State    lit  '16';     /* 0 = still,      1 = animated */
+   dcl O#SBAR.Bits.Real.Time    lit  '32';     /* 0 = don't       1 = do return ALL motion to user */
+   dcl O#SBAR.Bits.GoThere      lit  '64';     /* 0 = don't       1 = go there instead of page */
+   dcl O#SBAR.Bits.Transparent  lit '128';     /* 0 = normal      1 = empty bar, waveform added under */
+   dcl O#SBAR.Bits.NoArrows     lit '256';     /* 0 = normal      1 = suppress arrows */
+   /* Other scroll bar literals, relating to O#SBAR.Bits */
+   dcl O#SBAR.Orient.Hor    lit  '0';
+   dcl O#SBAR.Orient.Ver    lit  '1';
+   dcl O#SBAR.Just.Left     lit  '0';
+   dcl O#SBAR.Just.Right    lit  '1';
+   dcl O#SBAR.Just.Top      lit  '0';
+   dcl O#SBAR.Just.Bottom   lit  '1';
+dcl O#SBAR.Pos           lit  '(O#Suffix+1)';  /* Current bar position */
+dcl O#SBAR.Disp.Pos      lit  '(O#Suffix+2)';  /* Last displayed positon */
+dcl O#SBAR.Fill.Pattern  lit  '(O#Suffix+3)';  /* How to fill bar area */
+dcl O#SBAR.Percent.Pos   lit  '(O#Suffix+4)';
+dcl O#SBAR.Percent.Time  lit  '(O#Suffix+5)';
+dcl O#SBAR.Size          lit  '5';             /* This suffix's extension */
+
+/* Graphics Box (O$Graphics.Box) */
+dcl O#GBOX.ULX           lit  '(O#Suffix)';    /* Upper left coordinates */
+dcl O#GBOX.ULY           lit  '(O#Suffix+1)';
+dcl O#GBOX.LRX           lit  '(O#Suffix+2)';  /* Lower right coordinates */
+dcl O#GBOX.LRY           lit  '(O#Suffix+3)';
+dcl O#GBOX.Type          lit  '(O#Suffix+4)';
+dcl O#GBOX.Size          lit  '4';             /* This suffix's extension */
+
+/* Graphics ICON (O$Graphics.Icon) */
+dcl O#ICON.X             lit '(O#Suffix)';
+dcl O#ICON.Y             lit '(O#Suffix+1)';
+dcl O#ICON.Length        lit '(O#Suffix+2)';
+dcl O#ICON.Region        lit '(O#Suffix+3)';
+dcl O#ICON.Icon          lit '(O#Suffix+4)';
+dcl O#ICON.Size          lit  '4';             /* This suffix's extension */
+/* Commands for the icon list */
+   dcl O#ICON.MoveTo        lit '0';
+   dcl O#ICON.Plot          lit '1';
+   dcl O#ICON.Connect       lit '2';
+   dcl O#ICON.AlphaString   lit '3';
+   dcl O#ICON.CharSize      lit '4';
+   dcl O#ICON.LineType      lit '5';
+   dcl O#ICON.DataLevel     lit '6';
+   dcl O#ICON.PolyFill      lit '7';
+   dcl O#ICON.InsertIcon    lit '8';
+   dcl O#ICON.StartPoly     lit '9';
+   dcl O#ICON.EndPoly       lit '10';
+   dcl O#ICON.BlockModeOn   lit '11';
+   dcl O#ICON.BlockModeOff  lit '12';
+   dcl O#ICON.AliasLinesOn  lit '13';
+   dcl O#ICON.AliasLinesOff lit '14';
+   dcl O#ICON.End          lit '"100000"';
+
+
+/************************/
+/*  Screen Event Codes  */
+/************************/
+
+dcl S#NulEvent           lit    '0';  /* Nothing happened */
+dcl S#ObjectTerminate    lit    '1';  /* Object is done with; go on to next object */
+dcl S#KeyActivate        lit    '2';  /* User activated object with keyboard */
+dcl S#MouseActivate      lit    '3';  /* User activated object with mouse */
+dcl S#MouseSelect        lit    '4';  /* User selected object with mouse */
+dcl S#ArrowSelect        lit    '5';  /* User selected object with arrow keys */
+dcl S#ArrowSelectAttempt lit    '6';  /* User attempted to select object with arrow but no link set */
+dcl S#ObjectEvent        lit    '7';  /* Special object event */
+dcl S#ProgramExit        lit    '8';
+dcl S#Deposit            lit    '9';   /* Deposit of value to object */
+
+/* Scroll Bar Events */
+dcl S#SBArrow            lit   '10';   /* Used internally; never returned */
+dcl S#SBArrowBack        lit   '10';   /* User clicked an up or left arrow */
+dcl S#SBArrowForward     lit   '11';   /* User clicked a down or right arrow */
+dcl S#SBPage             lit   '12';   /* Used internally; never returned */
+dcl S#SBPageBack         lit   '12';   /* User clicked above or to the left of box but not on arrow */
+dcl S#SBPageForward      lit   '13';   /* User clicked below or to the right of box but not on arrow */
+dcl S#SBBoxMove          lit   '14';   /* User moved the box */
+
+dcl S#ObjectDrag         lit   '15';   /* Object was dragged and dropped on another object */
+dcl S#ObjectDragAbort    lit   '16';   /* Object was dragged and dropped on nothing */
+dcl S#JogAttempt         lit   '17';   /* Attempt made to jog object value */
+dcl S#DelAttempt         lit   '18';   /* Attempt made to delete object */
+
+
+/******************/
+/*  Special ID's  */
+/******************/
+
+/* When passed to the DEFINE.XXXX routines in the ID field, the following */
+/* literal will cause an Id to be allocated automatically for you.        */
+dcl S#AutoAllocate    lit '(-1)';     /* Perform run-time allocation of ID codes */
+dcl S#AA              lit '(-1)';     /* Same as S#AutoAllocate */
+
+dcl ARR#Auto          lit '-2';       /* Send this as object ID to Set.Object.Arrow.Links instead */
+                                      /* of a real one for automatic searching for closest object */
+
+/****************************/
+/*  Miscellaneous literals  */
+/****************************/
+
+dcl Group.Max.Length  lit '256';      /* Allow one sector for groups */
+
+dcl G#Id              lit '0';        /* Literals for Group Blocks */
+dcl G#Low             lit '1';
+dcl G#High            lit '2';
+dcl G#Bits            lit '3';
+dcl G#BlkLen          lit '4';
+
+dcl S#Queue.Advance       lit '0';    /* Queue literals */
+dcl S#Queue.Event         lit '1';
+dcl S#Queue.Info          lit '2';
+dcl S#Queue.Id            lit '3';
+dcl S#Queue.TabCol        lit '4';
+dcl S#Queue.TabRow        lit '5';
+dcl S#Queue.Reserved1     lit '6';  /* For future use */
+dcl S#Queue.Reserved2     lit '7';  /* For future use */
+dcl Queue.Events          lit '32'; /* Must be power of two    */
+
+// For creating icons
+
+dcl mr13i  lit 'write("373")';   /* used for icons */

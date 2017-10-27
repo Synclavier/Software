@@ -1,0 +1,1585 @@
+/* $title Optical Disk Management Routines */
+
+/*
+ Optical Disk Management Routines
+
+ by Kip Olson, February 1987
+
+ Modification history:
+    04 Aug 00 - CWJ - Wait for overlapped SCSI I/O
+    24 Feb 96 - CWJ - Recombined files. Reworked init_optical_controller to interrogate drive for info
+    04 Mar 91 - LSS - several fixes for magneto, broke file into two pieces
+    04 Oct 90 - LSS - buffer check bug fix in TRANSFEROPTICAL
+    17 Jul 90 - LSS - support for 5-inch magneto optical devices
+    27 Feb 89 - CWJ - moved HeaderGapSize to optlits for Repair program
+                    - added error recovery to ReadHeader,  WriteHeader.
+                    - added SearchEmpty1024kBlocks
+    1  Aug 88 - KJO - Made TRANSFEROPTICAL global, added serial no. to header
+    8  Jun 88 - KJO - Added WRITEHEADER, support for multiple volume headers
+    8  Jul 87 - KJO - Added physical sector relignment, usage of directory pointer
+*/
+
+
+module optical;
+
+   configuration ModelC,MulDiv;
+   dcl swappable  lit 'recursive swap'; /* Set to RECURSIVE SWAP to swap routines */
+
+   dcl Quantum    lit '0'; /* controller types */
+   dcl LD1200     lit '1';
+
+   dcl MagicNumber   lit '"H8000"'; /* header revision number */
+   dcl FormatPattern lit '"H6363"'; /* format pattern written to magneto media */
+
+   insert ':-xpl:literals'; 	/* general literals */
+   insert ':-xpl:syslits';  	/* system literals */
+   insert ':-xpl:asciilit'; 	/* ASCII literals */
+   insert ':-xpl:catrout';  	/* catalog routines */
+   insert ':-xpl:scsirout'; 	/* SCSI device drivers */
+   insert ':-xpl:cmdrout';  	/* SCSI commands */
+   insert ':-xpl:optlits';  	/* Optical Disk literals */
+   insert ':-xpl:devutil';  	/* Device utilities */
+   insert ':-xpl:intrprtr';
+
+   dcl O$BufPtr   fixed public; /* buffer pointer */
+   dcl O$BufMed   fixed public; /* 0: internal memory, 1: external memory */
+   O$BufMed = -1; /* buffer not intialized yet */
+
+   dcl O$Volume_Name(H#Name_Max) fixed public; /* volume name */
+	dcl O$Volume_Time				   fixed public; /* volume time */
+
+   dcl O$MS_DirStart  fixed public; /* sector start of directory */
+   dcl O$LS_DirStart  fixed public;
+
+   dcl O$MS_DirLen    fixed public; /* sector length of directory */
+   dcl O$LS_DirLen    fixed public;
+
+   dcl O$MS_DataStart fixed public; /* sector start of data area */
+   dcl O$LS_DataStart fixed public;
+
+   dcl O$MS_DataLen   fixed public; /* sector length of data area */
+   dcl O$LS_DataLen   fixed public;
+
+   dcl O$EntryCount   fixed public; /* no. directory entries on optical disk */
+   O$EntryCount = -1; /* optical disk not mounted yet*/
+
+   dcl r4    lit '"304"'; /* register four */
+   dcl r5    lit '"305"'; /* register five */
+   dcl d60   lit  '"60"'; /* external memory sector address */
+   dcl d61   lit  '"61"'; /* external memory word address */
+   dcl d62   lit  '"62"'; /* external memory */
+   dcl d63   lit  '"63"'; /* external memory then increment */
+
+   /* This routine must be called before anything else to set up 
+      the correct controller type. */
+
+	/* lookup_controller_type: interrogates drive for controller type and capacity */
+	/* caches info for speedy access..															 */
+	
+	/* lookup_controller_block_size: reports the device blocksize that was cached	 */
+	/* by lookup_controller_type																	 */
+	
+	dcl	dev10set		boolean;
+	dcl	dev11set 	boolean;
+	dcl	dev10ctrlr	fixed;
+	dcl	dev11ctrlr	fixed;
+	dcl	dev10blksiz fixed;
+	dcl	dev11blksiz fixed;
+	
+   FindDevAdr: proc(level) returns (fixed) swappable;			/* Find device address for this drive */
+      dcl level fixed;													/* level to check */
+      dcl (i,j) fixed;
+
+      if (level = 10) or (level = 11) then do;					/* optical disk */
+         
+			i = find_device(level);										/* search in configuration for this device */
+         
+			if i <> 0 then do;											/* device found */
+            j = core(i + s#devadr);									/* look up device address */
+			
+				if (UnitAttentionOccured (ComputeSCSIIndex (j)) != 0)	/* if unit attention has occurred */
+				{																/* then re-poll for capacity */
+					dev10set = false;
+					dev11set = false;
+				}
+            
+				return (j);													/* return device address */
+         end;
+      end;
+      return (-1); /* device not found */
+   end FindDevAdr;
+
+	lookup_controller_type: proc(level) recursive;		/* look up controller type for this level */
+		dcl level      							fixed;
+		dcl inqbuf (INQ_BUF_SIZE_BYTES/2)	fixed;
+		dcl capbuf (8/2)							fixed;
+		dcl DevPtr    								fixed;
+		dcl DevAdr     							fixed;
+		dcl DevTyp     							fixed;
+		dcl controller 							fixed;
+		dcl blocksize								fixed;
+		
+		if ((level    == 10)                            /* look up controller type for D10			*/
+		&&  (dev10Set != 0 ))
+			return (dev10ctrlr);
+		
+		if ((level    == 11)                            /* look up controller type for D11			*/
+		&&  (dev11Set != 0 ))
+			return (dev11ctrlr);
+		
+		DevPtr = Find_Device (Level);							/* look for optical device						*/
+
+		if (DevPtr == 0)											/* return if not configured					*/
+			return (Quantum);
+			
+		DevAdr = FindDevAdr (Level);							/* find device address for this level		*/
+
+		if (DevAdr == (-1))										/* not configured...								*/
+			return (Quantum);
+				
+		if (Inquiry(DevAdr, INQ_BUF_SIZE_BYTES, inqbuf) != S$Good)			/* if can't inquire, doomed					*/
+		{
+			core(DevPtr + s#seccyl) = 144; 					/* provide simulated 1 gig quantum media	*/
+			core(DevPtr + s#totcyl) = 6815;
+         
+			return (Quantum);
+		}
+		
+		DevTyp = byte(inqbuf, 0) & 0x1F;						/* get type											*/
+		
+		if (DevTyp == 0)											/* direct access - find size					*/
+		{
+			core(DevPtr + s#devtyp) = core(DevPtr + s#devtyp) | shl(1,10);	/* allow formcopy to select this for format even if no media present */
+			
+			if (Find_Win_Size (DevAdr, DevPtr, inqbuf, capbuf) != S$Good)
+			{
+				core(DevPtr + s#seccyl) = 144; 				/* provide simulated 1 gig quantum media	*/
+				core(DevPtr + s#totcyl) = 6815;
+				
+				return (Quantum);
+			}
+			
+			controller = Quantum;								/* is quantum; size is set						*/
+			blocksize  = shl(byte(capbuf,6),8) or byte(capbuf,7);
+
+		}
+			
+		else if (DevTyp == 4)
+		{
+			core(DevPtr + s#devtyp) = core(DevPtr + s#devtyp) & (~(shl(1,10)));
+			
+			core(DevPtr + s#seccyl) = 1000;					/* set up the size								*/
+         core(DevPtr + s#totcyl) = 2048;					/* hard wire for LD1200 worm only			*/
+		
+			controller = LD1200;
+			blocksize  = 1024;
+			
+		}
+			
+		else
+		{
+			core(DevPtr + s#seccyl) = 144; 					/* provide simulated 1 gig quantum media	*/
+			core(DevPtr + s#totcyl) = 6815;
+			
+			return (Quantum);
+		}
+
+		UnitAttentionOccured (ComputeSCSIIndex (DevAdr) ) = false;
+		DeviceBlockSize      (ComputeSCSIIndex (DevAdr) ) = blocksize;
+				
+		if (level == 10)
+			{dev10Set = true; dev10ctrlr = controller; dev10blksiz = blocksize;}
+			
+		if (level == 11)
+			{dev11Set = true; dev11ctrlr = controller; dev11blksiz = blocksize;}
+			
+		return (controller);
+		
+	end lookup_controller_type;
+	
+	lookup_controller_block_size: proc(level) returns(fixed) recursive;
+		dcl level fixed;
+		
+		if ((level    == 10)										/* look up block size for D10					*/
+		&&  (dev10Set != 0 ))
+			return (dev10blksiz);
+		
+		if ((level    == 11)										/* look up block size for D11					*/
+		&&  (dev11Set != 0 ))
+			return (dev11blksiz);
+		
+		return (0);													/* not set !!!										*/
+	end lookup_controller_block_size;
+
+   init_optical_controller: proc public; 	/* set optical controller type based on system configuration */
+      dcl i fixed;
+
+		dev10set = false;							/* force re-polling in all cases if we are called */
+		dev11set = false;
+		
+		lookup_controller_type(10);			/* set both types if configured & running */
+		lookup_controller_type(11);
+   end init_optical_controller;
+
+   
+	/* $subtitle Device Drivers */
+
+   /*  The following two procedures are the XPL device drivers for SCSI WORM
+       drives used in a CALL to READDATA and WRITEDATA with a device number
+       of 10 or 11. */
+
+   dcl Dev10Type fixed public; Dev10Type = 4; /* WORM device number */
+
+   dev10read: proc(MSW, LSW, buffer, length) public recursive; /* read WORM device */
+      dcl MSW    fixed; /* device and MS bits of starting sector */
+      dcl LSW    fixed; /* LS bits of starting sector */
+      dcl buffer fixed array; /* buffer to read data into */
+      dcl length fixed; /* number of words to read */
+      dcl sector fixed; /* starting sector in poly/ext memory */
+      dcl word   fixed; /* starting word in poly/ext memory */
+
+      word   = read(r5); /* save starting word */
+      sector = read(r4); /* save starting sector */
+
+      call scsiio (MSW, LSW, addr(buffer (0)), length, sector, word, s$extendedread); /* read the data */
+
+   end dev10read;
+
+   dev10write: proc(MSW, LSW, buffer, length) public recursive; /* write WORM device */
+      dcl MSW fixed; /* device to write */
+      dcl LSW  fixed; /* starting track and file number */
+      dcl buffer fixed array; /* buffer to write data from */
+      dcl length fixed; /* number of words to write */
+      dcl sector fixed; /* starting sector in poly/ext memory */
+      dcl word   fixed; /* starting word in poly/ext memory */
+      dcl len    fixed; /* number of words to write this operation */
+      dcl words  fixed; /* number of words written in one operation */
+
+      word   = read(r5); /* save starting word */
+      sector = read(r4); /* save starting sector */
+
+      call scsiio (MSW, LSW, addr(buffer (0)), length, sector, word, s$extendedwrite); /* write the data */
+
+   end dev10write;
+
+   /* $subtitle Buffer Manipulation */
+
+   pbuf: proc(index,value) public; /* store a word in the buffer */
+      dcl index fixed; /* offset index into buffer */
+      dcl value fixed; /* value to store */
+
+      if O$BufMed = 0 then do; /* internal memory */
+         core(O$BufPtr + index) = value; /* store word */
+      end;
+      else do; /* external memory */
+         write(d60) = O$BufPtr + shr(index,8); /* sector in external memory */
+         write(d61) = (index and "377"); /* word in that sector */
+         write(d62) = value; /* store word */
+      end;
+   end pbuf;
+
+   gbuf: proc(index) returns (fixed) public; /* retrieve a word from the buffer */
+      dcl index fixed; /* offset index into buffer */
+
+      if O$BufMed = 0 then do; /* internal memory */
+         return (core(O$BufPtr + index)); /* retrieve word */
+      end;
+      else do; /* external memory */
+         write(d60) = O$BufPtr + shr(index,8); /* sector in external memory */
+         write(d61) = (index and "377"); /* word in that sector */
+         return (read(d62)); /* retrieve word */
+      end;
+   end gbuf;
+
+   Check_Buf: proc(seclen) returns (boolean); /* check through buffer for a blank check */
+      dcl seclen      fixed; /* sector length of data read into buffer */
+      dcl (count, i)  fixed;
+      dcl force_blank boolean; /* true if we found a sector full of the format pattern */
+
+      count = 0;
+      if O$BufMed = 0 then do; /* internal memory */
+         do while count ilt seclen;
+            if core(O$BufPtr + shl(count,8)) = FormatPattern then do; /* first word of sector is format pattern */
+               force_blank = true; /* assume this whole sector is blank check */
+               do i = 1 to 511; /* check the rest of the sector */
+                  if core(O$BufPtr + shl(count,8) + i) <> FormatPattern /* if not the format pattern */
+                  then force_blank = false; /* then don't force a blank check */
+               end;
+               if force_blank then return (false); /* found a blank check */
+            end;
+            count = count + 2; /* advance 512 words */
+         end;
+      end;
+      else do; /* external memory */
+         do while count ilt seclen; /* go through the buffer by sector */
+            write(d60) = O$BufPtr + count; /* sector in external memory */
+            write(d61) = 0; /* word in that sector */
+
+            if (read(d63) = FormatPattern) then do; /* first word is the format pattern */
+               force_blank = true; /* assume this whole sector is blank */
+               do i = 1 to 511; /* check the rest of the sector */
+                  if (read(d63) <> FormatPattern) /* if not the format pattern */
+                  then force_blank = false; /* then don't force a blank check */
+               end;
+               if force_blank then return (false); /* found a blank check */
+            end;
+            count = count + 2; /* advance 512 words */
+         end;
+      end;
+      return (true); /* buffer does not contain a blank check sector */
+   end Check_Buf;
+
+   Set_OptBuf: proc(BufPtr,Medium) public swappable; /* set buffer pointers */
+      dcl BufPtr fixed; /* pointer to optical disk buffer */
+      dcl Medium fixed; /* buffer medium (0 = internal memory, 1 = external memory */
+
+      O$BufPtr = BufPtr; /* set these variables */
+      O$BufMed = Medium;
+   end Set_OptBuf;
+
+   /* $subtitle Buffer I/O */
+
+   TransferOptical: proc(Cmd, MS_Sec, LS_Sec, SecLen, Level) returns (fixed) public swappable; /* read data into the buffer */
+      dcl Cmd             fixed; /* command to send */
+      dcl (MS_Sec,LS_Sec) fixed; /* sector to read */
+      dcl SecLen          fixed; /* no. sectors to read */
+      dcl Level           fixed; /* level to read */
+      dcl DevAdr          fixed; /* device address to check */
+      dcl Address         fixed; /* address of buffer */
+		dcl Controller      fixed;
+		dcl BlkSiz			  fixed;
+      dcl count           fixed;
+      dcl i               fixed;
+		dcl word				  fixed;
+
+      dcl rpt             lit '"10"'; /* repeat counter */
+      dcl repeat          lit 'write(rpt)='; /* repeat macro */
+
+      dcl rd1int          lit 'write(mr0i) = read(ScsiWord)'; /* read one word into internal memory */
+      dcl intread         lit 'repeat 255; rd1int'; /* read one sector into internal memory */
+
+      dcl rd1ext          lit 'write(d63) =  read(ScsiWord)'; /* read one word into external memory */
+      dcl extread         lit 'repeat 255; rd1ext'; /* read one sector into external memory */
+
+      dcl wt1int          lit 'write(ScsiWord) = read(mr0i)'; /* write one word from internal memory */
+      dcl intwrite        lit 'repeat 255; wt1int'; /* write one sector from internal memory */
+
+      dcl wt1ext          lit 'write(ScsiWord) =  read(d63)'; /* write one word from external memory */
+      dcl extwrite        lit 'repeat 255; wt1ext'; /* write one sector from external memory */
+
+      if O$BufMed = -1 then do;							/* no buffer allocated */
+         c#status = e#buffer;
+         return (S$IllegalRequest);
+      end;
+
+	   DevAdr = FindDevAdr(Level);						/* find device address for this level & check for media changed */
+      if DevAdr = -1 then return (S$BadDevice);		/* return error */
+
+		Controller = lookup_controller_type      (Level);
+		BlkSiz     = lookup_controller_block_size(Level);
+		
+		if (BlkSiz == 0)										/* if can't get block size, must be not ready */
+			return (S$NotReady);
+
+		if (O$BufMed != 0)									/* External Memory */
+			interp_set_xmem_addr(O$BufPtr, 0);
+		else												 		/* Int memory */
+			interp_set_imem_addr(O$BufPtr);
+
+      i = BusConnect(DevAdr);								/* connect to SCSI bus */
+      if i <> S$GoodConnect then return (i);			/* connection failed */
+
+      write(ScsiByte) = Cmd;               			/* Operation Code */
+      write(ScsiByte) = S$BusConnectLUN; 				/* Target LUN */
+		
+		if (BlkSiz == 512)									/* 512 media - do normally */
+		{
+      	write(ScsiWord) = MS_Sec;     				/* 512-byte Logical Block (MSW) */
+      	write(ScsiWord) = LS_Sec; 						/* 512-byte Logical Block (LSW) */
+      	write(ScsiByte) = 0;                 		/* Reserved */
+      	write(ScsiWord) = SecLen;     				/* No. 512-byte blocks to read */
+		}
+		else
+		{
+      	write(ScsiWord) = shr(MS_Sec,1);     		/* 1024-byte Logical Block (MSW) */
+      	write(ScsiWord) = shl(MS_Sec,15) or shr(LS_Sec,1); /* 1024-byte Logical Block (LSW) */
+      	write(ScsiByte) = 0;                 		/* Reserved */
+      	write(ScsiWord) = shr(SecLen,1);     		/* No. 1024-byte blocks to read */
+      }
+		
+		write(ScsiByte) = 0;                 			/* Control */
+
+		// Wait for possible overlapped SCSI I/O to complete
+		while (interp_check_scsi_io(0) != 0)
+			interp_run_host_non_timer();
+			
+      Address = O$BufPtr;									/* start at beginning of buffer */
+		
+		if (O$BufMed != 0)									/* set ext mem pointer */
+			write(d60) = Address;
+
+	   do while ((read(ScsiBus) and (S$REQ | S$ATN)) != S$REQ); end; /* Wait for prior atn to be released and new REQ to be asserted */
+
+      if Cmd = S$ExtendedRead then do; /* read optical disk */
+         do while ((read(ScsiBus) and S$SigMask) = S$DataIn); /* get data bytes */
+
+            if O$BufMed = 0 then do;	/* internal memory */
+               write(r0) = Address;		/* set up memory pointer */
+               intread;						/* read a 256 words into internal memory */
+               Address = read(r0);		/* Save address */
+            end;
+            else do;							/* external memory */
+               extread;						/* read 256 words into external memory */
+            	Address = Address + 1;
+				end;
+
+	  			do while ((read(ScsiBus) and (S$REQ | S$ATN)) != S$REQ); end; /* Wait for prior atn to be released and new REQ to be asserted */
+         end;
+      end;
+      else if Cmd = S$ExtendedWrite then do; /* write optical disk */
+         do while ((read(ScsiBus) and S$SigMask) = S$DataOut); /* get data bytes */
+            if O$BufMed = 0 then do;	/* internal memory */
+               write(r0) = Address;		/* set up memory pointer */
+               intwrite;
+					Address = read(r0); 		/* Save address */
+            end;
+            else do; 						/* external memory */
+            	extwrite;
+           		Address = Address + 1;
+            end;
+
+				// Wait for possible overlapped SCSI I/O to complete
+				while (interp_check_scsi_io(0) != 0)
+					interp_run_host_non_timer();
+					
+	  			do while ((read(ScsiBus) and (S$REQ | S$ATN)) != S$REQ); end;		/* Wait for prior atn to be released and new REQ to be asserted */
+         end;
+      end;
+      else return (S$IllegalRequest); /* unknown command */
+
+      i = GetStatus(DevAdr); /* get status of this command */
+      if i = S$RecoveredError then i = S$Good; /* recovered error is just as good */
+
+      if (Controller = Quantum) and (Cmd = S$ExtendedRead) and (i = S$Good) then do; /* using Winchester simulation (or magneto optical) */
+         if not check_buf(SecLen) /* look through buffer for format pattern */
+         then i = S$BlankCheck;   /* if format pattern is found, force a BlankCheck */
+      end;
+
+      return (i); /* return status */
+   end TransferOptical;
+
+   /* $subtitle Directory Entry I/O */
+
+   SecToEntry: proc(MSW,LSW) returns (fixed) public swappable; /* convert sector no. to directory entry no. */
+      dcl (MSW,LSW) fixed; /* 32-bit sector number */
+
+      MSW = MSW - O$MS_DirStart; /* subtract starting sector of directory */
+      if LSW ilt O$LS_DirStart then MSW = MSW - 1;
+      LSW = LSW - O$LS_DirStart;
+
+      return (shl(MSW,15) or shr(LSW,1)); /* divide by two to get entry no. */
+   end SecToEntry;
+
+   EntryToSec: proc(Entry) public swappable; /* convert entry no. to a sector no. */
+      dcl Entry fixed; /* entry no. to convert */
+
+      F#MS_Sector = shr(Entry,15); /* turn entry number into a sector offset */
+      F#LS_Sector = shl(Entry,1);
+
+      F#MS_Sector = O$MS_DirStart + F#MS_Sector; /* add sector offset to beginning of directory area */
+      F#LS_Sector = O$LS_DirStart + F#LS_Sector;
+      if F#LS_Sector ilt O$LS_DirStart then F#MS_Sector = F#MS_Sector + 1;
+   end EntryToSec;
+
+   ReadEntry: proc(Entry,Level) returns (fixed) public swappable; /* read a directory entry */
+      dcl Entry     fixed; /* entry to read */
+      dcl Level     fixed; /* level to read from */
+      dcl i         fixed;
+
+      call EntryToSec(Entry); /* convert entry no. to it's 32-bit sector number */
+
+      i = TransferOptical(S$ExtendedRead,F#MS_Sector,F#LS_Sector,2,Level); /* try to read this sector */
+      return (i); /* return status of read */
+   end ReadEntry;
+
+   WriteEntry: proc(Entry,Level) returns (fixed) public swappable; /* write a directory entry */
+      dcl Entry     fixed; /* entry to read */
+      dcl Level     fixed; /* level to read from */
+      dcl i         fixed;
+
+      call EntryToSec(Entry); /* convert entry no. to it's 32-bit sector number */
+
+      i = TransferOptical(S$ExtendedWrite,F#MS_Sector,F#LS_Sector,2,Level); /* try to write this sector */
+      return (i); /* return status of write */
+   end WriteEntry;
+
+   ReadEntries: proc(Entry,EntryCount,Level) returns (fixed) public swappable; /* read directory entries */
+      dcl Entry      fixed; /* first entry to read */
+      dcl EntryCount fixed; /* no. entries to read */
+      dcl Level      fixed; /* level to read from */
+      dcl i          fixed;
+
+      call EntryToSec(Entry); /* convert entry no. to it's 32-bit sector number */
+
+      i = TransferOptical(S$ExtendedRead,F#MS_Sector,F#LS_Sector,shl(EntryCount,1),Level); /* try to read these sectors */
+      return (i); /* return status of read */
+   end ReadEntries;
+
+   WriteEntries: proc(Entry,EntryCount,Level) returns (fixed) public swappable; /* write directory entries */
+      dcl Entry      fixed; /* first entry to write */
+      dcl EntryCount fixed; /* no. entries to write */
+      dcl Level      fixed; /* level to write to */
+      dcl i          fixed;
+
+      call EntryToSec(Entry); /* convert entry no. to it's 32-bit sector number */
+
+      i = TransferOptical(S$ExtendedWrite,F#MS_Sector,F#LS_Sector,shl(EntryCount,1),Level); /* try to write these sectors */
+      return (i); /* return status of write */
+   end WriteEntries;
+
+   /* $subtitle Operations on Directory Parameter */
+
+   CleanName: proc(OldName,NewName,Max) returns (fixed) swappable; /* make sure name checks out */
+      dcl OldName fixed array; /* name to check */
+      dcl NewName fixed array; /* space to put cleaned name */
+      dcl Max     fixed; /* max no. words in name */
+      dcl (i,ch)  fixed; /* word length of name */
+
+      do i = 0 to shl(Max,1) - 1; /* loop over name */
+         if i ilt OldName(0) then do; /* process character */
+            ch = byte(OldName,i); /* get character */
+            if (ch >= l.a) and (ch <= l.z) then ch = ch - "40"; /* make upper case */
+         end;
+         else ch = 0; /* pad with nulls */
+         call pbyte(loc(addr(NewName(0)) - 1),i,ch);
+      end;
+   end CleanName;
+
+   GetDateTime: proc(buf) returns (boolean) public swappable; /* get date and time from clock */
+      dcl buf         fixed array; /* array to return time information in */
+      dcl (date,time) fixed; /* date and time */
+      dcl i           fixed;
+
+      dcl clock        lit '"137"'; /* clock device */
+      dcl default_date lit '0'; /* no date */
+      dcl default_time lit '0'; /* no time */
+
+      buf(0) = default_date; /* assume defaults will be used */
+      buf(1) = default_time;
+      if (read("51") and "100000") <> 0 then do; /* extended ID bits set */
+         if (read("57") and "4") <> 0 then do; /* M64K present */
+            write(clock) = shl(1,8); /* reset RTC address */
+            i = read(clock); /* throw away 1/100 seconds */
+            i = read(clock);
+            time = (shl(i,15 - 7) and "100000"); /* Store AM/PM bit */
+            time = (time or shl(i and "17",11)); /* Store hours */
+            time = (time or shl(read(clock),5)); /* Store minutes */
+            time = (time or shr(read(clock),1)); /* Store seconds/2 */
+
+            date = (shl(read(clock),5)); /* Store month */
+            date = (date or read(clock)); /* Store day */
+            date = (date or shl(read(clock),9)); /* Store year */
+
+            buf(0) = date;
+            buf(1) = time;
+
+            return (true); /* got the date and time */
+         end;
+      end;
+      return (false); /* Time of day clock not found */
+   end GetDateTime;
+
+   /* $subtitle Search for Empty Blocks */
+
+   SearchEmpty1024kBlocks: proc(MS_Start,LS_Start,ScanLen,EmptyLen,Level) returns (boolean) public swappable; /* search for empty data blocks */
+      dcl (MS_Start,LS_Start) fixed; /* sector to start search at */
+      dcl ScanLen   				fixed; /* no. BLOCKS    to scan */
+      dcl EmptyLen  				fixed; /* no. empty BLOCKS to search for */
+      dcl Level     				fixed; /* level to read */
+      dcl DevAdr    				fixed; /* device address to check */
+      dcl SBuf(4)   				fixed; /* buffer for sense data */
+		dcl Controller      		fixed;
+
+      dcl S$SearchEmptyBlocks lit '"H0C"'; /* operation code */
+
+      S$SenseKey = S$Good;						/* assume no errors */
+
+      DevAdr = FindDevAdr(Level);			/* find device address for this level and check for unit attention */
+      if DevAdr = -1 then do;					/* bad device */
+         S$SenseKey = S$BadDevice;			/* bad device */
+         return (false);						/* die */
+      end;
+
+		Controller = lookup_controller_type(Level);
+
+      if Controller = Quantum then do; /* winchester simulation */
+         F#MS_Sector = MS_Start;
+         F#LS_Sector = LS_Start + 2;
+         if F#LS_Sector ilt 2 then F#MS_Sector = F#MS_Sector + 1;
+         return (true);
+      end;
+
+      S$SenseKey = BusConnect(DevAdr); /* connect to SCSI bus */
+      if S$SenseKey <> S$GoodConnect then return (false); /* connection failed */
+
+      write(ScsiByte) = S$SearchEmptyBlocks; /* Operation Code */
+      write(ScsiByte) = S$BusConnectLUN;   /* Target LUN */
+      write(ScsiWord) = 0;                 /* Reserved */
+      write(ScsiByte) = 0;                 /* Reserved */
+      write(ScsiByte) = 0;                 /* Control */
+
+      write(ScsiWord) = shr(MS_Start,1);   /* Starting 1024-byte block (MSW) */
+      write(ScsiWord) = (shl(MS_Start,15) or shr(LS_Start,1)); /* Starting 1024-byte block (LSW) */
+      write(ScsiWord) = 0;                 /* No. 1024-byte blocks to scan (MSW) */
+      write(ScsiWord) = ScanLen;           /* No. 1024-byte blocks to scan (LSW) */
+      write(ScsiWord) = EmptyLen;          /* No. 1024-byte empty blocks to scan for (LSW) */
+
+		// Wait for possible overlapped SCSI I/O to complete
+		while (interp_check_scsi_io(0) != 0)
+			interp_run_host_non_timer();
+			
+      S$SenseKey = shr(read(ScsiWord) and S$StatMask,8); /* get status byte */
+      
+      if S$SenseKey = S$ConditionMet then do; /* found empty blocks */
+         S$SenseKey = RequestSense(DevAdr,7,SBuf); /* request sense data */
+         if S$SenseKey = S$Good then do; /* got sense data */
+            F#MS_Sector = ( shl(byte(SBuf,3),8) or byte(SBuf,4) ); /* store in buffer */
+            F#LS_Sector = ( shl(byte(SBuf,5),8) or byte(SBuf,6) );
+            F#MS_Sector = ( shl(F#MS_Sector,1) or shr(F#LS_Sector,15) ); /* convert back to 512-byte sectors */
+            F#LS_Sector = ( shl(F#LS_Sector,1) );
+            return (true); /* success */
+         end;
+      end;
+      else if S$SenseKey = S$CheckCondition then do; /* something happened */
+         S$SenseKey = RequestSense(DevAdr,7,SBuf); /* request sense data */
+         if S$SenseKey = S$RecoveredError then S$SenseKey = S$Good; /* recovered is just as good */
+      end;
+
+      return (false); /* failure */
+   end SearchEmpty1024kBlocks;
+
+   SearchEmptyBlocks: proc(MS_Start,LS_Start,ScanLen,EmptyLen,Level) returns (boolean) public swappable; /* search for empty data blocks */
+      dcl (MS_Start,LS_Start) fixed; /* sector to start search at */
+      dcl ScanLen   fixed; /* no. sectors to scan */
+      dcl EmptyLen  fixed; /* no. empty sectors to search for */
+      dcl Level     fixed; /* level to read */
+
+      return SearchEmpty1024kBlocks(MS_Start, LS_Start,
+                                    shr(ScanLen,1),  shr(EmptyLen,1), Level);
+   end SearchEmptyBlocks;
+
+   /* $subtitle Find Next Unused Logical Block */
+
+   FindNextUnused: proc(MS_Start,LS_Start,MS_Len,LS_Len,Level) returns (boolean) public swappable; /* find next unused block in the given section */
+      dcl (MS_Start,LS_Start) fixed; /* starting sector of region to search */
+      dcl (MS_Len,LS_Len)     fixed; /* sector length of region to search */
+      dcl Level               fixed; /* level to search */
+      dcl (MS_First,LS_First) fixed; /* first sector of region to search */
+      dcl (MS_End,LS_End)     fixed; /* end of directory */
+      dcl (MSW,LSW)           fixed;
+      dcl i                   fixed;
+
+      S$SenseKey = S$Good; /* assume no errors will occur */
+
+      LS_Start = shl(MS_Start,15) or shr(LS_Start,1); /* convert to 1024-byte starting sector */
+      MS_Start = shr(MS_Start,1);
+
+      LS_Len = shl(MS_Len,15) or shr(LS_Len,1); /* convert to 1024-byte sector length */
+      MS_Len = shr(MS_Len,1);
+
+      MS_End = MS_Start + MS_Len; /* calculate the end of the area */
+      LS_End = LS_Start + LS_Len;
+      if LS_End ilt LS_Start then MS_End = MS_End + 1;
+
+      MS_First = MS_Start; /* Start at beginning of area */
+      LS_First = LS_Start;
+
+      do while not ( (MS_Len = 0) and (LS_Len = 0) ); /* Repeat until entire area has been searched */
+
+         MSW = MS_First + shr(MS_Len,1); /* get midpoint */
+         LSW = LS_First + (shl(MS_Len,15) or shr(LS_Len,1));
+         if LSW ilt LS_First then MSW = MSW + 1;
+
+         i = TransferOptical(S$ExtendedRead,shl(MSW,1) or shr(LSW,15),shl(LSW,1),2,Level); /* try to read this sector */
+
+         if i = S$Good then do; /* this sector has data in it */
+            MSW = MS_First + shr(MS_Len,1); /* skip half the region */
+            LSW = LS_First + (shl(MS_Len,15) or shr(LS_Len,1));
+            if LSW ilt LS_First then MSW = MSW + 1;
+
+            MS_First = MSW; /* add one to new starting sector */
+            LS_First = LSW + 1;
+            if LS_First ilt 1 then MS_First = MS_First + 1;
+
+            if LS_Len = 0 then MS_Len = MS_Len - 1; /* subtract one from length */
+            LS_Len = LS_Len - 1;
+         end;
+         else if (i = S$BlankCheck) or (i = S$MediumError) then do; /* could not read this sector */
+            /* search at a lower address */
+         end;
+         else do; /* die if some other error occurred */
+            S$SenseKey = i; /* store error status */
+            return (false);
+         end;
+
+          LS_Len = shl(MS_Len,15) or shr(LS_Len,1); /* divide no. sectors to search by 2 */
+          MS_Len = shr(MS_Len,1);
+       end;
+
+       F#MS_Sector = shl(MS_First,1) or shr(LS_First,15); /* convert back to 512-byte sectors */
+       F#LS_Sector = shl(LS_First,1);
+
+       if (  MS_First igt MS_End )
+       or ( (MS_First  =  MS_End) and (LS_First ige LS_End) ) then do; /* no unsed sector found */
+          return (false); /* no more room in directory */
+       end;
+
+       return (true); /* it's been found */
+   end FindNextUnused;
+
+   /* $subtitle Find No. Used Directory Entries */
+
+   FindEntryCount: proc(Level) returns (fixed) public swappable; /* find no. directory entries */
+      dcl Level fixed; /* level to look at */
+      dcl found boolean;
+
+      S$SenseKey = S$Good; /* assume no errors */
+      c#status = e#none;
+
+      if O$EntryCount = -1 then do; /* optical disk not mounted yet*/
+         found = FindNextUnused(O$MS_DirStart,O$LS_DirStart,O$MS_DirLen,O$LS_DirLen,Level); /* could not find free entry */
+
+         if (found) or ((not found) and (S$SenseKey = S$Good)) then do; /* directory area searched without any SCSI errors */
+            return (SecToEntry(F#MS_Sector,F#LS_Sector)); /* convert sector to directory entry and return */
+         end;
+      end;
+      else do; /* optical disk must already be mounted */
+        
+		  	S$SenseKey = ReadEntry(O$EntryCount,Level); /* try to read this entry */
+         
+			if (S$SenseKey = S$BlankCheck) or (S$SenseKey = S$MediumError) then do; /* could not read it, so continue */
+            if O$EntryCount = 0 /* there could not be an entry before this one */
+            then S$SenseKey = S$Good;
+            else S$SenseKey = ReadEntry(O$EntryCount - 1,Level); /* try to read entry before this */
+
+            if S$SenseKey = S$Good then do; /* entry could be read, so this must be the end of directory */
+               return (O$EntryCount); /* return no. directory entries */
+            end;
+            else if S$SenseKey = S$BlankCheck then do; /* could not read one before it */
+               S$SenseKey = S$Good; /* clear sense key */
+               c#status = e#volume_changed; /* volume must be mounted again */
+            end;
+         end;
+         else if S$SenseKey = S$Good then do; /* sector already written */
+            c#status = e#volume_changed; /* volume must be mounted again */
+         end;
+      end;
+
+      return (-1); /* signal error condition */
+   end FindEntryCount;
+
+   /* $subtitle Mode Select */
+
+   ModeSelectOptical: proc(level) returns (fixed) swappable; /* set up optical disk */
+      dcl level 				fixed; /* level to set up */
+      dcl DevAdr				fixed; /* SCSI device address of drive */
+      dcl buf(8)				fixed; /* mode select buffer */
+      dcl (i, j)				fixed;
+      dcl DefectMode lit '0'; /* auto-rewrite mode */
+		dcl Controller			fixed;
+
+      DevAdr = FindDevAdr(Level); /* find device address for this level and check for unit attention */
+      if DevAdr = -1 then return (S$BadDevice); /* bad device */
+
+		Controller = lookup_controller_type(Level);
+      
+		if Controller = LD1200 then do; /* optical disk */
+         i = S$UnitAttention;
+         do while i = S$UnitAttention; /* loop over unit attention */
+            i = ModeSense(DevAdr,0,16,buf); /* get sense bytes */
+         end;
+         if i <> S$Good then return (i); /* die */
+
+         if (shr(byte(buf,12),5) and "3") <> DefectMode then do; /* not in correct defect mode */
+            do i = 0 to 8; /* zero out buffer */
+               buf(i) = 0;
+            end;
+            buf(0) = 16; /* no. bytes in buffer */
+            call pbyte(buf,3,8); /* block descriptor length */
+            call pbyte(buf,10,"H4"); /* 1024-byte block size */
+            call pbyte(buf,11,"H00");
+            call pbyte(buf,12,shl(DefectMode,5)); /* use correct defect mode */
+            call pbyte(buf,13,0); /* use defaults */
+            call pbyte(buf,15,0); /* use default reselection delay */
+
+            i = ModeSelect(DevAdr,0,16,buf); /* select these parameters */
+            if i <> S$Good then return (i); /* die on error */
+         end;
+      end;
+      
+		else do; /* magneto optical */
+         i = S$UnitAttention; /* get into loop at least once */
+         do while i = S$UnitAttention; /* wait unit unit attention goes away */
+            i = TestUnitReady(DevAdr); /* see if device is ready */
+         end;
+         if i = S$Busy then do; /* try again, probably media just inserted */
+            do j = 0 to 2;
+               if read(3) /* if the clock has ticked */
+               then write(3) = 0; /* synchronize with the clock */
+               do i = 1 to 500; write(3) = 0; end; /* delay here to let drive happen */
+               i = TestUnitReady(DevAdr);
+            end;
+         end;
+         if i <> S$Good then return (i); /* die */
+      end;
+
+      return (S$Good); /* everything's cool */
+   end ModeSelectOptical;
+
+   /* $subtitle Read and Write Header */
+
+   ReadHeader: proc(Level) returns (boolean) public swappable; /* read volume header and set up globals for this disk */
+      dcl Level           fixed; /* level to read */
+      dcl DevAdr          fixed; /* SCSI device address of drive */
+      dcl buf(8)          fixed; /* mode select buffer */
+      dcl (MS_Sec,LS_Sec) fixed;
+      dcl (Hmsb, Hlsb)    fixed;
+		dcl Controller      fixed;
+		dcl Blocksize		  fixed;
+      dcl i               fixed;
+
+      c#status = e#none; /* assume no error */
+
+	   DevAdr = FindDevAdr(Level); /* find device address for this level and check for unit attention */
+		
+		if (DevAdr == (-1))
+		{
+      	c#status = e#no_config;
+			return (false);
+		}
+			
+		Controller = lookup_controller_type      (Level);
+		Blocksize  = lookup_controller_block_size(Level);
+     
+      if Controller = Quantum then do;
+         S$SenseKey = ModeSelectOptical(Level); /* make sure drive is set up correctly */
+         if S$SenseKey <> S$Good then return (false);
+      end;
+
+		MS_Sec = 0; /* start at first sector on disk */
+		LS_Sec = 0;
+
+      Hmsb = (-1); Hlsb = (-1);   /* assume no header found */
+
+      S$SenseKey = TransferOptical(S$ExtendedRead,MS_Sec,LS_Sec,2,Level); /* try to read the first volume header */
+
+      if  (S$SenseKey <> S$Good       )
+      and (S$SenseKey <> S$MediumError)
+      then return (false); /* not formatted, or some other error */
+      
+      /* This next block will catch magneto media that has not been
+         formatted or not formatted slip sector. */
+
+      if (Controller = Quantum) then do; /* magneto optical drive */
+         if (S$SenseKey = S$MediumError) then do; /* never been formatted at all ? */
+            S$SenseKey = S$Good; /* what we really want is an optical catalog error, not bad SCSI status */
+            c#status = e#not_initialized; /* must format the media first with FORMCOPY */
+            return (false);
+         end;
+         else if (S$SenseKey = S$Good) then do; /* could read it, check format type */
+				if (Blocksize == 1024)			/* only look further if may be M/O (vs. hard disk) */
+				{										/* in other words, skip the LNR check for Jaz drives... */
+					i = ModeSense(DevAdr,"H2A",16,buf); /* get sense bytes */
+					if i = S$Good then do;              /* if tahiti 1...  E.G. T-4 failes the above mode sense */
+						if (shr(byte(buf,14),1) = 1) then do; /* LNR bit is set, not slip sector */
+							c#status = e#not_initialized; /* must format the media with FORMCOPY */
+							return (false);
+						end;
+					end;
+           	   else S$SenseKey = S$Good;           /* just set good sense for T-4 */
+				}
+         end;
+      end;
+
+      if S$SenseKey = S$Good then do;    /* save good sector #   */
+         Hmsb = MS_Sec; Hlsb = LS_Sec;
+      end;
+
+      i = 0;
+
+      do while ((i ilt (HeaderGapSize-1)   ))
+      and      ((S$SenseKey = S$Good       )
+      or        (S$SenseKey = S$MediumError));
+         LS_Sec = LS_Sec + 2;        /* try to read the next header */
+         if LS_Sec ilt 2 then MS_Sec = MS_Sec + 1; 
+         
+			i      = i + 1;
+         
+			S$SenseKey = TransferOptical(S$ExtendedRead,MS_Sec,LS_Sec,2,Level); /* try to read the next volume header */
+
+         if S$SenseKey = S$Good then do; /* we read something that was there */
+            Hmsb = MS_Sec; Hlsb = LS_Sec; /* save good sector number */
+         end;
+         else if (S$SenseKey <> S$BlankCheck )
+         and     (S$SenseKey <> S$MediumError) /* something weird happened */
+         then return (false);
+      end;
+
+      if Hmsb = (-1)         /* if we get nothing but medium errors,  */
+      then return (false);   /* then cannot read.                     */
+
+      S$SenseKey = TransferOptical(S$ExtendedRead,Hmsb,Hlsb,2,Level); /* read the good one again */
+
+      if S$SenseKey <> S$Good   /* could not read it a second time?   */
+      then return false;
+
+      if ((Controller = Quantum) /* optical type is M/O */
+      and (gbuf(H$Magic) <> MagicNumber) /* it doesn't have a header yet */
+      and (gbuf(H$Magic) <> FormatPattern)) then do; /* and can't find the format pattern either */
+         c#status = e#not_initialized; /* must format the media first with FORMCOPY */
+         return (false);
+      end;
+
+      if ((Controller = LD1200) /* optical type is LMS WORM */
+      and (gbuf(H$Magic) <> MagicNumber)) then do; /* header not in NED format */
+         c#status = e#bad_volume; /* volume in bad state */
+         return (false);
+      end;
+
+      O$LS_DirStart = gbuf(H$LS_DirStart); /* store sector start of directory */
+      O$MS_DirStart = gbuf(H$MS_DirStart);
+
+      O$LS_DirLen = gbuf(H$LS_DirLen); /* store sector length of directory */
+      O$MS_DirLen = gbuf(H$MS_DirLen);
+
+      O$LS_DataStart = gbuf(H$LS_DataStart); /* store sector start of data area */
+      O$MS_DataStart = gbuf(H$MS_DataStart);
+
+      O$LS_DataLen = gbuf(H$LS_DataLen); /* store sector length of data area */
+      O$MS_DataLen = gbuf(H$MS_DataLen);
+
+      return (true); /* header read correctly */
+   end ReadHeader;
+
+   WriteHeader: proc(Header,Level) returns (boolean) public swappable; /* write volume header */
+      dcl Header          fixed array; /* header to write */
+      dcl Level           fixed; /* level to write */
+      dcl (MS_Sec,LS_Sec) fixed;
+      dcl i fixed;
+
+      c#status = e#none; /* assume no error */
+
+		MS_Sec = 0; /* start at first sector on disk */
+		LS_Sec = 0;
+
+      S$SenseKey = TransferOptical(S$ExtendedRead,MS_Sec,LS_Sec,2,Level); /* try to read the first volume header */
+
+      if  (S$SenseKey <> S$Good       )
+      and (S$SenseKey <> S$MediumError)
+      and (S$SenseKey <> S$BlankCheck )
+      then return (false); /* not formatted, or some other error */
+      
+      i = 0;
+
+      do while ((i          ilt (HeaderGapSize-2))  /* -2 for error recovery below */
+      and       (S$SenseKey <>  S$BlankCheck    )); /* read headers until a blank check is found */
+         i = i + 1;
+         LS_Sec = LS_Sec + 2; /* try to read the next header */
+         if LS_Sec ilt 2 then MS_Sec = MS_Sec + 1; 
+         S$SenseKey = TransferOptical(S$ExtendedRead,MS_Sec,LS_Sec,2,Level); /* try to read the next volume header */
+
+         if  (S$SenseKey <> S$Good       )
+         and (S$SenseKey <> S$MediumError)
+         and (S$SenseKey <> S$BlankCheck )
+         then return (false); /* not formatted, or some other error */
+      end;
+
+      if (S$SenseKey <> S$BlankCheck) then do; /* no more blank header entries */
+         c#status = e#dir_full; /* set catalog error status */
+         return (false);
+      end;
+
+      do i = 0 to H#Rec_Length - 1; /* copy header info into buffer */
+         call pbuf(i,Header(i));
+      end;
+
+      S$SenseKey = TransferOptical(S$ExtendedWrite,MS_Sec,LS_Sec,2,Level); /* try to write the new volume header */
+
+      /* Must use complicated error recovery since block is reported as */
+      /* blank,  but we cannot write ...  The one time I tried this,    */
+      /* I was able to read the sector back from either logical sector  */
+      /* number!!.                                                      */
+
+      if S$SenseKey = S$BlankCheck then do;
+         LS_Sec = LS_Sec + 2; /* try to read the next header */
+         if LS_Sec ilt 2 then MS_Sec = MS_Sec + 1; 
+         S$SenseKey = TransferOptical(S$ExtendedWrite,MS_Sec,LS_Sec,2,Level); /* try to write the new volume header */
+      end;
+
+      if S$SenseKey <> S$Good then return (false);
+
+      return (true); /* header saved successfully */
+   end WriteHeader;
+
+   /* $subtitle Get Disk Statistics */
+
+   Get_Statistics: proc(Level,buf) returns (boolean) public swappable; /* get disk statistics */
+      dcl Level               fixed; /* level to get statistics from */
+      dcl buf                 fixed array; /* buffer to return data in */
+      dcl (MS_Start,LS_Start) fixed; /* first physical sector of free data area */
+      dcl (MS_Used,LS_Used)   fixed; /* no. sectors used on this disk */
+      dcl (MS_Free,LS_Free)   fixed; /* no. sectors free on this disk */
+      dcl (MS_End,LS_End)     fixed; /* end of data area */
+      dcl FreeEntry           fixed; /* next free entry in directory */
+      dcl LastEntry           fixed; /* last directory entry in directory */
+      dcl found               boolean;
+      dcl i                   fixed;
+
+      FreeEntry = FindEntryCount(Level); /* find the no. entries in directory */
+      if FreeEntry = -1 then return (false); /* an error occurred */
+
+      LastEntry = FreeEntry; /* now search for the last directory entry */
+      found = false; /* have not found entry yet */
+      do while (LastEntry <> 0) and (not found); /* loop over directory entries */
+
+         LastEntry = LastEntry - 1; /* back up one entry */
+
+         S$SenseKey = ReadEntry(LastEntry,Level);
+         if S$SenseKey <> S$Good then return (false); /* error reading entry */
+
+         if gbuf(E$$Type) = E#Dir_Entry then found = true; /* this is a directory entry, so we've found what we're looking for */
+      end; /* looping over directory entries */
+
+      if found then do; /* directory entry was found */
+         MS_Start = gbuf(E$MS_SecStart) + gbuf(E$MS_SecLen); /* calculate start of file */
+         LS_Start = gbuf(E$LS_SecStart) + gbuf(E$LS_SecLen);
+         if LS_Start ilt gbuf(E$LS_SecStart) then MS_Start = MS_Start + 1;
+
+         if (LS_Start and "1") <> 0 then do; /* cannot have odd starting sectors */
+            LS_Start = LS_Start + 1; /* add one to get even starting sectors */
+            if LS_Start = 0 then MS_Start = MS_Start + 1;
+         end;
+
+         if LS_Start ilt 2 then MS_Start = MS_Start - 1; /* calculate last sector of previous file */
+         LS_Start = LS_Start - 2;
+
+         MS_End = O$MS_DataStart + O$MS_DataLen; /* compute end of data area */
+         LS_End = O$LS_DataStart + O$LS_DataLen;
+         if LS_End ilt O$LS_DataStart then MS_End = MS_End + 1;
+
+         if SearchEmptyBlocks(MS_Start,LS_Start,0,8,Level) then do; /* find next physical block */
+            if ((F#MS_Sector igt MS_End) /* empty blocks found beyond end of data area */
+            or ((F#MS_Sector  =  MS_End) and (F#LS_Sector ige LS_End))) then do;
+               MS_Start = MS_End; /* start at end of data area */
+               LS_Start = LS_End;
+            end;
+            else do;
+               MS_Start = F#MS_Sector; /* store physical starting sector */
+               LS_Start = F#LS_Sector;
+            end;
+         end;
+         else if S$SenseKey = S$Good then do; /* empty blocks not found */
+            MS_Start = MS_End; /* start at end of data area */
+            LS_Start = LS_End;
+         end;
+         else return (false); /* SCSI error occurred */
+      end;
+      else do; /* entry was not found, so start at beginning of data area */
+         MS_Start = O$MS_DataStart;
+         LS_Start = O$LS_DataStart;
+      end;
+
+      MS_Used = MS_Start - O$MS_DataStart; /* calculate the no. sectors used */
+      if LS_Start ilt O$LS_DataStart then MS_Used = MS_Used - 1;
+      LS_Used = LS_Start - O$LS_DataStart;
+
+      MS_Free = O$MS_DataLen - MS_Used; /* calculate no. free sectors */
+      if O$LS_DataLen ilt LS_Used then MS_Free = MS_Free - 1;
+      LS_Free = O$LS_DataLen - LS_Used;
+
+      write("5") = LS_Free; /* calculate the no. bad sectors */
+      write("4") = MS_Free;
+      write("7") = 1000; /* assume .1% of these free sectors will be bad */
+      i = read("5");
+
+      if LS_Free ilt i then MS_Free = MS_Free - 1; /* subtract the no. bad sectors */
+      LS_Free = LS_Free - i; /* this is the true no. sectors free */
+
+      /* store these values */
+
+      buf(Stat$Dir_Used) = FreeEntry; /* no. entries used */
+      buf(Stat$Dir_Free) = (shl(O$MS_DirLen,15) or shr(O$LS_DirLen,1)) - FreeEntry;
+      buf(Stat$Dir_Start) = FreeEntry; /* first free entry */
+
+      buf(Stat$MS_Used) = MS_Used; /* no. data sectors used */
+      buf(Stat$LS_Used) = LS_Used;
+      buf(Stat$MS_Free) = MS_Free; /* no. data sectors free */
+      buf(Stat$LS_Free) = LS_Free;
+      buf(Stat$MS_Start) = MS_Start; /* first free sector in data area */
+      buf(Stat$LS_Start) = LS_Start;
+
+      return (true); /* got statistics */
+   end Get_Statistics;
+
+   /* $subtitle Format Disk */
+
+   Optical_Format: proc(Name,Caption,Date,Time,Serial,Level) returns (boolean) public swappable; /* format a new disk */
+      dcl Name        fixed array; /* volume name */
+      dcl Caption     fixed array; /* volume caption */
+      dcl Date        fixed; /* date stamp for volume */
+      dcl Time        fixed; /* time stamp for volume */
+      dcl Serial      fixed; /* serial number for volume */
+      dcl Level       fixed; /* level to write volume on */
+      dcl DevAdr      fixed; /* SCSI device address */
+      dcl (MS_Total,LS_Total) fixed; /* total no. sectors on volume */
+      dcl Header_Size fixed; /* size of header */
+      dcl Header_Gap  fixed; /* size of header gap */
+      dcl Dir_Size    fixed; /* size of directory area */
+      dcl Dir_Gap     fixed; /* size of directory gap */
+      dcl (MS_Data,LS_Data) fixed; /* size of data area */
+      dcl Data_Gap    fixed; /* size of data gap */
+      dcl DataBuf(4)  fixed; /* general data buffer */
+      dcl HeaderName(H#Name_Max - 1) fixed; /* Header name */
+      dcl (MSW,LSW)   fixed;
+		dcl Controller  fixed;
+      dcl (i,j)       fixed;
+
+      c#status = e#none; /* assume no errors */
+      S$SenseKey = S$Good;
+
+      if not Valid_FileName(Name) then do; /* not a valid file name */
+         c#status = e#treename;
+         return (false); /* die if bad name */
+      end;
+
+      call CleanName(Name,HeaderName,H#Name_Max); /* clean and fill name */
+
+      DevAdr = FindDevAdr(Level); /* find device address for this level and check for unit attention */
+
+		Controller = lookup_controller_type(Level);
+      
+		if Controller = Quantum then do;
+         S$SenseKey = ModeSelectOptical(Level); /* make sure drive is set up correctly */
+         if S$SenseKey <> S$Good then return (false);
+      end;
+
+      S$SenseKey = TransferOptical(S$ExtendedRead,0,0,2,Level); /* try to read the first sector of the disk */
+
+      if S$SenseKey = S$Good then do; /* if it has already been written */
+         c#status = e#formatted; /* disk is already formatted */
+         return (false); /* die */
+      end;
+      else if S$SenseKey <> S$BlankCheck then return (false); /* some other error */
+
+      S$SenseKey = ReadCapacity(DevAdr,DataBuf); /* get capacity information */
+      if S$SenseKey <> S$Good then return (false); /* an error occurred */
+
+      i = (shl(byte(DataBuf,6),8) or byte(DataBuf,7)); /* get LSW of block size */
+      if (Controller == LD1200 && i != 1024) then do; /* block size must be 1024 bytes for WORMS */
+         S$SenseKey = S$BadDevice;
+         return (false); /* die */
+      end;
+
+		if (i != 512 && i != 1024)										/* must be 512-byte or 1024-byte media at this point		*/
+		{
+         S$SenseKey = S$BadDevice;
+         return (false); /* die */
+		}
+		
+      MS_Total = (shl(byte(DataBuf,0),8) or byte(DataBuf,1)); /* add one to last logical block to get total blocks */
+      LS_Total = (shl(byte(DataBuf,2),8) or byte(DataBuf,3)) + 1;
+      if LS_Total = 0 then MS_Total = MS_Total + 1;
+
+		if (i == 512)														/* if device is 512 media, compute number of 1024			*/
+		{																		/* byte blocks it maps to for the following size			*/
+			LS_Total = shr(LS_Total, 1) | shl(MS_Total, 15);	/* computations...													*/
+			MS_Total = shr(MS_Total, 1);
+		}
+		
+		/* Limit to 8-gigabytes for use with readdata, writedata: */
+		
+		if (MS_Total IGE 128)											/* note: limit is in 1024-byte sectors at this point!		*/
+		{
+			MS_Total = "h007F";
+			LS_Total = "hFFFF";
+		}
+
+      /* Allocate Header Area */
+      Header_Size = 1; /* header takes up 1 sector */
+      Header_Gap = 100; /* allow room for more headers */
+
+      /* Allocate Directory Area */
+      if  (MS_Total igt "H63")
+      or ((MS_Total  =  "H63") and (LS_Total igt "HFF38")) /* 1% of the disk would hold more than 65534 entries */
+      then Dir_Size = 65534; /* so limit to 65534 entries */
+      else do;
+         write("5") = LS_Total; /* calculate size of directory area */
+         write("4") = MS_Total;
+         write("7") = 100; /* directory size is 1% of the total space available */
+         Dir_Size = read("5"); /* size of directory in 1024-byte blocks */
+      end;
+
+      write("5") = Dir_Size; /* calculate size of directory gap */
+      write("7") = 500; /* assume 0.2% of the sectors in the directory area will be bad */
+      Dir_Gap = read("5"); /* size of directory gap in 1024-byte sectors */
+
+      /* Allocate Data Area */
+      MSW = 0;
+      LSW = Header_Size + Header_Gap + Dir_Gap; /* calculate size taken up by header and directory area */
+      LSW = LSW + Dir_Size;
+      if LSW ilt Dir_Size then MSW = MSW + 1;
+
+      MS_Data = MS_Total - MSW; /* calculate size of data area */
+      if LS_Total ilt LSW then MS_Data = MS_Data - 1;
+      LS_Data = LS_Total - LSW; /* subtract size of header and directory areas */
+
+      write("5") = LS_Data; /* calculate size of data area gap */
+      write("4") = MS_Data;
+      write("7") = 1000; /* assume .1% of the data sectors will be bad */
+      Data_Gap = read("5"); /* size of data area gap */
+
+      if LS_Data ilt Data_Gap then MS_Data = MS_Data - 1; /* subtract data gap from data area */
+      LS_Data = LS_Data - Data_Gap;
+
+      do i = 0 to H#Rec_Length - 1; /* clear the buffer */
+         call pbuf(i,0);
+      end;
+
+      /* Set up buffer with header information */
+
+      call pbuf(H$Magic, MagicNumber); /* magic number */
+
+      do i = 0 to H#Name_Max - 1; /* volume name */
+         call pbuf(H$Name + i,HeaderName(i)); /* store name characters */
+      end;
+
+      if (Date = 0) and (Time = 0) then do; /* no date and time specified */
+         call GetDateTime(DataBuf); /* get date and time from clock, if it's there */
+         Date = DataBuf(0); /* store date and time */
+         Time = DataBuf(1);
+      end;
+      call pbuf(H$Date,Date); /* store date */
+      call pbuf(H$Time,Time); /* store time */
+
+      MSW = 0; LSW = 0; /* start at beginning of disk */
+
+      LSW = LSW + (Header_Size + Header_Gap); /* calculate start of directory area */
+      call pbuf(H$LS_DirStart,shl(LSW,1)); /* 512-byte sector start of directory */
+      call pbuf(H$MS_DirStart,shr(LSW,15));
+
+      call pbuf(H$LS_DirLen,shl(Dir_Size,1)); /* 512-byte sector length of directory */
+      call pbuf(H$MS_DirLen,shr(Dir_Size,15));
+
+      LSW = LSW + Dir_Size; /* calculate start of data area */
+      if LSW ilt Dir_Size then MSW = MSW + 1; /* add on size of directory */
+      LSW = LSW + Dir_Gap;
+      if LSW ilt Dir_Gap then MSW = MSW + 1; /* add on size of directory gap */
+
+      call pbuf(H$LS_DataStart,shl(LSW,1)); /* 512-byte start of data area */
+      call pbuf(H$MS_DataStart,shl(MSW,1) or shr(LSW,15));
+
+      call pbuf(H$LS_DataLen,shl(LS_Data,1)); /* 512-byte length of data area */
+      call pbuf(H$MS_DataLen,shl(MS_Data,1) or shr(LS_Data,15)); /* the no. sectors left is the length of the data area */
+
+      call pbuf(H$Serial,Serial); /* store serial number */
+
+      j = Caption(0); /* get length of caption */
+      if j igt shl(H#Caption_Max,1) then j = shl(H#Caption_Max,1); /* limit size of caption */
+
+      call pbuf(H$Caption,j); /* store length of caption */
+      do i = 1 to shr(j + 1,1); /* volume caption */
+         call pbuf(H$Caption + i,Caption(i)); /* store caption characters */
+      end;
+
+      S$SenseKey = TransferOptical(S$ExtendedWrite,0,0,2,level); /* write out the buffer */
+      return (S$SenseKey = S$Good); /* format complete */
+   end Optical_Format;
+
+   /* $subtitle Replace File */
+
+   Optical_Replace: proc(Name,Type,MS_Len,LS_Len,WordLen,Header,Entry,Level) returns (boolean) public swappable; /* replace on optical */
+      dcl Name                  fixed array; /* name of file */
+      dcl Type                  fixed; /* type of file */
+      dcl (MS_Len,LS_Len)       fixed; /* size of file in sectors */
+      dcl WordLen               fixed; /* size of file in words (mod 64K) */
+      dcl Header                fixed array; /* sound file header */
+      dcl Entry                 fixed; /* previous directory entry */
+      dcl Level                 fixed; /* level to replace on */
+      dcl EntryName(E#Name_Max - 1) fixed; /* entry name */
+      dcl buf(Stat#Rec_Length - 1) fixed; /* statistics array */
+      dcl DataBuf(1)            fixed; /* buffer for data information */
+      dcl i                     fixed;
+
+      c#status = e#none; /* assume no error */
+      S$SenseKey = S$Good;
+
+      if not Valid_FileName(Name) then do; /* not a valid file name */
+         c#status = e#treename;
+         return (false); /* die if bad name */
+      end;
+      call CleanName(Name,EntryName,E#Name_Max); /* clean and fill name */
+
+      if not ReadHeader(Level) then return (false); /* header could not be read */
+
+      if Entry <> -1 then do; /* there is a previous entry */
+         S$SenseKey = ReadEntry(Entry,Level); /* get previous entry */
+         if S$SenseKey <> S$Good then return (false); /* an error occurred */
+
+         do i = 0 to E#Name_Max - 1; /* loop over words of name */
+            if EntryName(i) <> gbuf(E$$Name + i) then do; /* names do not match */
+               c#status = e#no_file; /* file to replace was not found */
+               return (false); /* die */
+            end;
+         end;
+      end;
+
+      if not Get_Statistics(Level,buf) then return (false); /* could not get statistics */
+
+      if buf(Stat$Dir_Free) = 0 then do; /* no more directory entries */
+         c#status = e#dir_full; /* no more room */
+         return (false); /* die */
+      end;
+
+      if  (MS_Len igt buf(Stat$MS_Free))
+      or ((MS_Len  =  buf(Stat$MS_Free)) and (LS_Len igt buf(Stat$LS_Free))) then do; /* not enough room */
+         c#status = e#storage; /* no more room */
+         return (false); /* die */
+      end;
+
+      do i = 0 to E#Rec_Length - 1; /* clear the buffer */
+         call pbuf(i,0);
+      end;
+
+      /* Set up buffer with entry information */
+
+      call pbuf(E$$Type,E#Dir_Entry); /* this is a directory entry */
+
+      do i = 0 to E#Name_Max - 1; /* entry name */
+         call pbuf(E$$Name + i,EntryName(i)); /* store name characters */
+      end;
+
+      call GetDateTime(DataBuf); /* get date and time from clock, if it's there */
+      call pbuf(E$Date,DataBuf(0)); /* store date */
+      call pbuf(E$Time,DataBuf(1)); /* store time */
+
+      call pbuf(E$LS_SecStart,buf(Stat$LS_Start));
+      call pbuf(E$MS_SecStart,buf(Stat$MS_Start)); /* store sector start */
+
+      call pbuf(E$LS_SecLen,LS_Len);
+      call pbuf(E$MS_SecLen,MS_Len); /* store sector length */
+
+      call pbuf(E$LS_WordLen,WordLen);
+      call pbuf(E$MS_WordLen,0); /* store word length */
+
+      call pbuf(E$File_Type,Type); /* store file type */
+
+      call pbuf(E$Prev_Entry,Entry); /* store previous entry */
+
+      do i = 0 to E#Header_Max - 1; /* store sound file header */
+         call pbuf(E$Header + i,Header(i));
+      end;
+
+      S$SenseKey = WriteEntry(buf(Stat$Dir_Start),Level); /* try to write this directory entry at first free entry */
+      if S$SenseKey <> S$Good then return (false);
+      
+      F#MS_Sector = shl(Level,8) or buf(Stat$MS_Start); /* set up file variables */
+      F#LS_Sector = buf(Stat$LS_Start);
+      F#MS_Length = MS_Len;
+      F#LS_Length = LS_Len;
+      F#Words = WordLen;
+      F#Type = Type;
+
+      if O$EntryCount <> -1 /* volume is mounted */
+      then O$EntryCount = O$EntryCount + 1; /* another directory entry inserted */
+
+      return (true); /* directory entry now in place */
+   end Optical_Replace;
+
+   /* $subtitle Delete File */
+
+   Optical_Delete: proc(Name,Entry,Level) returns (boolean) public swappable; /* delete file */
+      dcl Name      fixed array; /* name of file to delete */
+      dcl Entry     fixed; /* latest directory entry for this file */
+      dcl Level     fixed; /* level to delete file from */
+      dcl EntryName(E#Name_Max - 1) fixed; /* entry name */
+      dcl FreeEntry fixed; /* next free entry in directory */
+      dcl i         fixed;
+
+      c#status = e#none; /* assume no error */
+      S$SenseKey = S$Good;
+
+      if not ReadHeader(Level) then return (false); /* header could not be read */
+
+      S$SenseKey = ReadEntry(Entry,Level); /* get entry */
+      if S$SenseKey <> S$Good then return (false); /* an error occurred */
+
+      call CleanName(Name,EntryName,E#Name_Max); /* clean and fill name */
+      do i = 0 to E#Name_Max - 1; /* loop over words of name */
+         if EntryName(i) <> gbuf(E$$Name + i) then do; /* names do not match */
+            c#status = e#no_file; /* file to delete was not found */
+            return (false); /* die */
+         end;
+      end;
+
+      FreeEntry = FindEntryCount(Level); /* find no. entries in directory */
+      if FreeEntry = -1 then return (false); /* could not find free entry */
+      if FreeEntry ige (shl(O$MS_DirLen,15) or shr(O$LS_DirLen,1)) then do; /* all directory entries are used */
+         c#status = e#dir_full; /* signal error */
+         return (false); /* die */
+      end;
+
+      do i = 0 to E#Rec_Length - 1; /* clear the buffer */
+         call pbuf(i,0);
+      end;
+
+      /* Set up buffer with entry information */
+
+      call pbuf(E$$Type,E#Delete_Entry); /* this is a delete entry */
+
+      do i = 0 to E#Name_Max - 1; /* entry name */
+         call pbuf(E$OldName + i,EntryName(i)); /* store name characters in old name field */
+      end;
+
+      call pbuf(E$Prev_Entry,Entry); /* store previous entry */
+
+      S$SenseKey = WriteEntry(FreeEntry,Level); /* try to write this directory entry */
+      if S$SenseKey <> S$Good then return (false);
+
+      if O$EntryCount <> -1 /* volume is mounted */
+      then O$EntryCount = O$EntryCount + 1; /* another directory entry inserted */
+
+      return (true); /* directory entry now in place */
+   end Optical_Delete;
+
+   /* $subtitle Update File */
+
+   Optical_Update: proc(OldName,NewName,Header,Entry,Level) returns (boolean) public swappable; /* update file */
+      dcl OldName   fixed array; /* old name of file */
+      dcl NewName   fixed array; /* new name of file */
+      dcl Header    fixed array; /* new sound file header for file */
+      dcl Entry     fixed; /* latest directory entry for file to update */
+      dcl Level     fixed; /* level to update file on */
+      dcl EntryName(E#Name_Max - 1) fixed; /* entry name */
+      dcl FreeEntry fixed; /* next free entry in directory */
+      dcl (i,c)     fixed;
+
+      c#status = e#none; /* assume no error */
+      S$SenseKey = S$Good;
+
+      if not Valid_FileName(NewName) then do; /* not a valid file name */
+         c#status = e#treename;
+         return (false); /* die if bad name */
+      end;
+
+      if not ReadHeader(Level) then return (false); /* header could not be read */
+
+      FreeEntry = FindEntryCount(Level); /* find no. entries in directory */
+      if FreeEntry = -1 then return (false); /* could not find free entry */
+      if FreeEntry ige (shl(O$MS_DirLen,15) or shr(O$LS_DirLen,1)) then do; /* all directory entries are used */
+         c#status = e#dir_full; /* signal error */
+         return (false); /* die */
+      end;
+
+      S$SenseKey = ReadEntry(Entry,Level); /* get entry */
+      if S$SenseKey <> S$Good then return (false); /* an error occurred */
+
+      call CleanName(OldName,EntryName,E#Name_Max); /* clean and fill name */
+      do i = 0 to E#Name_Max - 1; /* loop over words of name */
+         if EntryName(i) <> gbuf(E$$Name + i) then do; /* names do not match */
+            c#status = e#no_file; /* file to update was not found */
+            return (false); /* die */
+         end;
+      end;
+
+      /* Set up buffer with entry information */
+
+      call pbuf(E$$Type,E#Rename_Entry); /* this is a rename entry */
+
+      call CleanName(NewName,EntryName,E#Name_Max); /* clean and fill name */
+      do i = 0 to E#Name_Max - 1; /* entry name */
+         c = gbuf(E$$Name + i); /* get word of current name */
+         call pbuf(E$OldName + i,c); /* store old name */
+         call pbuf(E$$Name + i,EntryName(i)); /* store new name */
+      end;
+
+      call pbuf(E$Prev_Entry,Entry); /* store previous entry */
+
+      do i = 0 to E#Header_Max - 1; /* store sound file header */
+         call pbuf(E$Header + i,Header(i));
+      end;
+
+      S$SenseKey = WriteEntry(FreeEntry,Level); /* try to write this directory entry */
+      if S$SenseKey <> S$Good then return (false);
+
+      if O$EntryCount <> -1 /* volume is mounted */
+      then O$EntryCount = O$EntryCount + 1; /* another directory entry inserted */
+
+      return (true); /* directory entry now in place */
+   end Optical_Update;
+
+   /* $subtitle Locate File */
+
+   Optical_Locate: proc(Name,Level) returns (boolean) public swappable; /* find file */
+      dcl Name       fixed array; /* name of file */
+      dcl Level      fixed; /* level to search on */
+      dcl Entry      fixed; /* directory entry */
+      dcl NumEntries fixed; /* total no. entries in directory */
+      dcl FileFound  boolean; /* TRUE if file found */
+      dcl FileEntry  fixed; /* file entry */
+      dcl EntryName(E#Name_Max - 1) fixed; /* entry name */
+      dcl i          fixed; /* word length of string */
+
+      c#status = e#none; /* assume no errors */
+      S$SenseKey = S$Good;
+
+      call CleanName(Name,EntryName,E#Name_Max); /* clean file name */
+
+      if not ReadHeader(Level) then return (false); /* try to read header */
+
+      NumEntries = shl(O$MS_DirLen,15) or shr(O$LS_DirLen,1); /* get total no. directory entries */
+
+      FileFound = false; /* assume file not found */
+      S$SenseKey = S$Good;
+      Entry = 0; /* start at first entry */
+      do while (Entry ilt NumEntries) and (S$SenseKey = S$Good); /* loop over entries until an error occurs */
+         S$SenseKey = ReadEntry(Entry,Level); /* get entry */
+
+         if S$SenseKey = S$Good then do; /* got an entry */
+            if gbuf(E$$Type) = E#Dir_Entry then do; /* this is a directory entry */
+
+               i = 0; /* start at first character */
+               do while (i < E#Name_Max) and (EntryName(i) = gbuf(E$$Name + i)); /* loop while words are the same */
+                  i = i + 1;
+               end;
+
+               if i = E#Name_Max then do;  /* same name */
+                  FileFound = true; /* file found */
+                  FileEntry = Entry; /* save entry */
+               end;
+            end; /* directory entry */
+         end; /* entry found */
+
+         Entry = Entry + 1; /* go to next entry */
+      end; /* looping over directory entries */
+
+      if (Entry ilt NumEntries) and (S$SenseKey <> S$BlankCheck) then return (false); /* error reading directory */
+
+      if FileFound then do; /* matching file name was found */
+         S$SenseKey = ReadEntry(FileEntry,Level); /* read in entry */
+         if S$SenseKey <> S$Good then return (false);
+
+         F#MS_Sector = shl(Level,8) or gbuf(E$MS_SecStart); /* set up globals */
+         F#LS_Sector = gbuf(E$LS_SecStart);
+         F#MS_Length = gbuf(E$MS_SecLen);
+         F#LS_Length = gbuf(E$LS_SecLen);
+         F#Words = gbuf(E$LS_WordLen);
+         F#Type = gbuf(E$File_Type);
+
+         return (true); /* file found */
+      end;
+
+      c#status = e#no_file;
+      return (false); /* file not found */
+   end Optical_Locate;
+
+end optical;

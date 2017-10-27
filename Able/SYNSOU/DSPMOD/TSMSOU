@@ -1,0 +1,1239 @@
+/* TSMSOU  $TITLE  Routines for Performing Time Scale Modification
+
+   Modified:
+   04/14/89 - SJS - changed speech to 'ONE' and music to 'TWO'
+   12/13/88 - cj  - changed 'smart' to 'speech'
+   10/27/88 - cj - fixed bug & add error message if not enough room
+                   for intermediate file
+   10/24/88 - cj - added error messages, timeout timer, break interrupt,
+                   percent done printout
+   09/02/88 - SJS - Added options to TSM
+   08/24/88 - MWH - Interrupt handling
+   08/18/88 - MWH - Load algorithms from .DSPEX-7 file
+   08/16/88 - MWH/SJS - Modify for new DSP70 board
+   07/22/88 - MWH - Add stereo to DSP interface
+   07/11/88 - MWH - Add edit list file
+
+*/
+
+
+dcl interrupt_mask lit '"10"';
+
+dcl TSMData_There fixed public; /* True if TSM data file found at boot time */
+dcl TSMData_MS    fixed public; /* MS_Sector address of .TSMDATA file */
+dcl TSMData_LS    fixed public; /* LS_Sector address of .TSMDATA file */
+dcl TSMData_Words fixed public; /* Words of data in .TSMDATA file     */
+
+dcl tsm.algorithm          fixed external;   /* current setting of switch */
+dcl tsm.ratio              fixed external;   /* value: * 100 */
+dcl tsm.period             fixed external;   /* fundamental pitch */
+dcl tsm.max.cut.samples    fixed external;   /* maximum cut allowed (samples) */
+dcl tsm.justification      fixed external;   /* 1-10 */
+
+dcl elist_file lit ''':USER:.TSMELST''';  /* Name of edit list file     */
+dcl TSM_Elist_There fixed;          /* True if TSM edit list file exists   */
+dcl TSM_Elist_MS    fixed;          /* MS_Sector address of edit list file */
+dcl TSM_Elist_LS    fixed;          /* LS_Sector address of edit list file */
+dcl TSM_Elist_Words fixed;          /* Words of data in edit list file     */
+
+dcl xfer.chunk      lit '256';  /* RPC block size (must be size of a sector) */
+
+Rescale.User.TSM.Ratio: proc (User.Ratio) public swapable;
+   dcl User.Ratio fixed; /* on scale from 0 to 20000 */
+
+   /* routine maps to scale 0 to 65536 */
+
+   load 0; uload User.Ratio; div 20000;
+
+   return res+(rem ige shr(20000,1));  /* round result */
+end Rescale.User.TSM.Ratio;
+
+/* $SUBTITLE */
+
+Compute.Compressed.Length: proc (InLen,OutLen,CRatio) public swapable;
+   dcl InLen     array; /* 32-bit sample count */
+   dcl OutLen    array; /* Length after compression   */
+   dcl CRatio    fixed; /* Compression factor 0-65535 */
+   dcl (I,T) (1) fixed;
+   dcl BitArray  lit 'loc(addr(BitMsb))';
+
+   /* Routine allows INLEN & OUTLEN to be the same */
+   /* and either or both can be (BITMSB,BITLSB)    */
+
+   call Copy32(InLen,I);    /* save copy of original input len */
+   call Copy32(I,BitArray); /* set up for ratio multiply */
+
+   if (CRatio&1)=0 then do; /* even ratio - simple algorithm is accurate */
+      call ratio_multiply(32768,32768+shr(CRatio,1));
+   end;
+   else do; /* odd ratio - use fancy algorithm to maintain precision */
+
+      /* Use linear interpolation to compute odd values */
+      /* compute lengths at both adjacent even CRATIOs  */
+      /* and then average results.                      */
+      /* Should be accurate to 32 bits.                 */
+
+      call ratio_multiply(32768,32768+shr(CRatio,1));
+      call Copy32(BitArray,T);         /* save 1st result */
+      call Copy32(I,BitArray);         /* set up for 2nd ratio multiply */
+
+      if CRatio<>65535
+      then call ratio_multiply(32768,32768+shr(CRatio,1)+1);
+      else call ratio_multiply(1,2);
+
+      call Add32(T,BitArray,BitArray); /* sum of both parts */
+      call Add16(1,BitArray);          /* to force round up */
+      call Shr32(BitArray,1);          /* average of the two values */
+   end;
+
+   call Copy32(BitArray,OutLen);       /* copy result to output array */
+
+end Compute.Compressed.Length;
+
+/* $SUBTITLE */
+
+Compute.Expanded.Length: proc (InLen,OutLen,CRatio) public swapable;
+   dcl InLen     array; /* 32-bit sample count */
+   dcl OutLen    array; /* Length after compression   */
+   dcl CRatio    fixed; /* Expansion factor 0-65535 */
+   dcl (I,T) (1) fixed;
+   dcl BitArray  lit 'loc(addr(BitMsb))';
+
+   /* Routine allows INLEN & OUTLEN to be the same */
+   /* and either or both can be (BITMSB,BITLSB)    */
+
+   call Copy32(InLen,I);    /* save copy of original input len */
+   call Copy32(I,BitArray); /* set up for ratio multiply */
+
+   if (CRatio&1)=0 then do; /* even ratio - simple algorithm is accurate */
+      call ratio_multiply(shr(CRatio,1),32768);
+   end;
+   else do; /* odd ratio - use fancy algorithm to maintain precision */
+
+      /* Use linear interpolation to compute odd values */
+      /* compute lengths at both adjacent even CRATIOs  */
+      /* and then average results.                      */
+      /* Should be accurate to 32 bits.                 */
+
+      call ratio_multiply(shr(CRatio,1),32768);
+      call Copy32(BitArray,T);         /* save 1st result */
+      call Copy32(I,BitArray);         /* set up for 2nd ratio multiply */
+
+      if CRatio<>65535
+      then call ratio_multiply(shr(CRatio,1)+1,32768);
+      else;                            /* otherwise factor is 1.0000 - so do nothing */
+
+      call Add32(T,BitArray,BitArray); /* sum of both parts */
+      call Add16(1,BitArray);          /* to force round up */
+      call Shr32(BitArray,1);          /* average of the two values */
+   end;
+
+   call Add32(I,BitArray,OutLen);      /* add in original length and copy result to output array */
+
+end Compute.Expanded.Length;
+
+/* $SUBTITLE */
+
+Compute.Ratio.For.Time.Fit: proc (InLen,OutLen,Info) fixed public swapable;
+   dcl InLen  array; /* Original file length (3 word SFM format) */
+   dcl OutLen array; /* Desired  file length (3 word SFM format) */
+
+   dcl Info   array; /* Output results: Info(0)=compress or expand, Info(1)=ratio */
+   dcl C.Or.E lit 'Info(0)';
+   dcl Ratio  lit 'Info(1)';
+
+   dcl Status        fixed;
+   /*  1             Ratio result is good
+      -1             input length too large
+      -2             input length too small
+      -3             ratio of 1
+   */
+
+   dcl (In,Out)  (1) fixed; /* 32-bit sample count versions of INLEN & OUTLEN */
+   dcl (Len,X,Y) (1) fixed;
+   dcl (Num,Den,I)   fixed;
+
+   call Convert.SF.Len.To.Samples(InLen ,In);
+   call Convert.SF.Len.To.Samples(OutLen,Out);
+
+   I=Com32(In,Out);       /* compare Input and Output file lengths */
+
+   if I = LW#IEQ then do; /* lengths are the same, nothing to do */
+      C.Or.E=0;           /* use compression */
+      Ratio =0;           /* identity ratio  */
+      Status=-3;       /* disallow ratios of zero */
+   end;
+
+   else if I = LW#IGT then do; /* original is longer -- need to compress */
+      C.Or.E=0;                /* want time compression algorithm */
+
+      call Compute.Compressed.Length(In,Len,65535); /* compute shortest possible length */
+
+      if Com32(Out,Len) = LW#ILT then do;  /* desired compress is impossible */
+         Ratio =0;         /* identity ratio */
+         Status=-2;     /* cannot perform desired compression */
+      end;
+      else do;             /* should be able to do this */
+         /* Algorithm:
+                         (Original Len - Desired Len)
+                 Ratio = ----------------------------   * 65536
+                                (Desired Len)
+         */
+
+         call Sub32(In,Out,Len);
+
+         Num=0;                     /* Scale LEN down to 16-bit value */
+         do while (Len(0)<>0);
+            Num=Num+1;
+            call Shr32(Len,1);
+         end;
+
+         call Copy32(Out,X);
+         Den=0;                     /* Scale copy of OUT down to 16-bit value */
+         do while (X(0)<>0);
+            Den=Den+1;
+            call Shr32(X,1);
+         end;
+
+         BitMsb=1; BitLsb=0;						/* set up 65536 constant */
+
+         call ratio_multiply(Len(1),X(1));	/* scale by ratio of lengths */
+
+         call Shr32(loc(addr(BitMsb)),Den-Num);	/* adjust ratio by previous scaling */
+
+         Ratio=BitLsb;                    /* first guess at compression ratio */
+
+         if Ratio<>65535 then do;         /* test next value so we can round */
+            call Compute.Compressed.Length(In,Len,Ratio);
+            if Com32(Out,Len) = LW#IGT    /* compute error with basic ratio */
+            then call Sub32(Out,Len,X);
+            else call Sub32(Len,Out,X);
+
+            call Compute.Compressed.Length(In,Len,Ratio+1);
+            if Com32(Out,Len) = LW#IGT    /* compute error with next ratio */
+            then call Sub32(Out,Len,Y);
+            else call Sub32(Len,Out,Y);
+
+            if Com32(X,Y) = LW#IGT then Ratio=Ratio+1; /* rounding will improve results */
+         end;
+         
+         Status=true;                    /* got a good ratio */
+      end;
+   end;                                  /* compute compression ratio */
+
+   else do;                /* original is shorter -- need to expand */
+      C.Or.E=1;            /* want time expansion algorithm */
+
+      call Compute.Expanded.Length(In,Len,65535); /* compute greatest possible length */
+
+      if Com32(Out,Len) = LW#IGT then do;  /* desired expansion is impossible */
+         Ratio =0;         /* identity ratio */
+         Status=-1;     /* cannot perform desired compression */
+      end;
+      else do;             /* should be able to do this */
+         /* Algorithm:
+                         (Desired Len - Original Len)
+                 Ratio = ----------------------------   * 65536
+                                (Original Len)
+         */
+
+         call Sub32(Out,In,Len);
+
+         Num=0;                     /* Scale LEN down to 16-bit value */
+         do while (Len(0)<>0);
+            Num=Num+1;
+            call Shr32(Len,1);
+         end;
+
+         call Copy32(In,X);
+         Den=0;                     /* Scale copy of OUT down to 16-bit value */
+         do while (X(0)<>0);
+            Den=Den+1;
+            call Shr32(X,1);
+         end;
+
+         BitMsb=1; BitLsb=0;						/* set up 65536 constant */
+
+         call ratio_multiply(Len(1),X(1));	/* scale by ratio of lengths */
+
+         call Shr32(loc(addr(BitMsb)),Den-Num);	/* adjust ratio by previous scaling */
+
+         Ratio=BitLsb;                    /* first guess at compression ratio */
+
+         if Ratio<>65535 then do;         /* test next value so we can round */
+            call Compute.Expanded.Length(In,Len,Ratio);
+            if Com32(Out,Len) = LW#IGT    /* compute error with basic ratio */
+            then call Sub32(Out,Len,X);
+            else call Sub32(Len,Out,X);
+
+            call Compute.Expanded.Length(In,Len,Ratio+1);
+            if Com32(Out,Len) = LW#IGT    /* compute error with next ratio */
+            then call Sub32(Out,Len,Y);
+            else call Sub32(Len,Out,Y);
+
+            if Com32(X,Y) = LW#IGT then Ratio=Ratio+1; /* rounding will improve results */
+         end;
+         
+         Status=true;                    /* got a good ratio */
+      end;
+   end;                                  /* of compute expansion ratio */
+
+   return Status;
+end Compute.Ratio.For.Time.Fit;
+
+/* $PAGE */
+
+/* NON-SWAP (for speed):  small read/write routines */
+
+dsp.read: proc(reg) fixed; /* Read a byte of data from a DSP register */
+   dcl reg  fixed;        /* Which register to read */
+   dcl data fixed;        /* Data read */
+
+   write(DSPCtl) = DSPRead|reg;   /* select register; enable read */
+   data = read(DSPData);          /* read a byte */
+
+   return( data & "377"); /* Return only low byte */
+
+end dsp.read;
+
+dsp.write: proc(reg,data); /* Write a byte of data to a DSP register */
+   dcl reg  fixed;        /* Which register to write */
+   dcl data fixed;        /* Data to write */
+
+   data = data & "377";   /* Use only low byte */
+
+   write(DSPCtl)   = DSPWrite|reg;       /* enable write to register */
+   write(DSPData) = data;               /* write data byte */
+
+   return;
+
+end dsp.write;
+
+/* $SUBTITLE */
+
+Select.DSP70: proc boolean public swapable;
+   dcl interrupts fixed;
+   dcl i          fixed;
+
+   if inc.dsp.code=0 then return false;
+
+   if (read("51") and "400") = 0
+   then return false;                         /* no D70s in system */
+
+   interrupts = read("1") & interrupt_mask;
+   disable;
+
+   write(DSPSel) = DSPEnable | DSP#;         /* try to select D70 for DSP70 */
+
+   i = ((read(DSPSel) & (DSPEnable|DSP#)) <> DSPEnable|DSP#);
+
+   if interrupts <> 0 then enable;
+
+   if i
+   then return false;                         /* DSP70 not found */
+   else return true;                          /* board is probably there */
+
+end Select.DSP70;
+
+Reset.DSP70: proc swapable; /* performs hardware reset on DSP70 */
+   dcl interrupts fixed;
+
+   if Select.DSP70 then do;
+
+      /* perform DSP70 reset here: */
+
+      interrupts = read("1") & interrupt_mask;
+      disable;
+
+         /*     1. assert RESET line        */
+         write (DSPCtl) = DSPReset;
+         write ("3") = 0;
+         write ("3") = 0;
+         write (DSPCtl) = 0;
+
+         /*     2. wait at least 10 msec    */
+         write ("3") = 0;
+         write ("3") = 0;
+         write ("3") = 0;
+
+      	if interrupts <> 0 then enable;
+
+      /*     4. ready to go              */
+
+   end;
+
+end Reset.DSP70;
+
+/* $PAGE */
+
+DownLoad.TSM.Data: proc fixed swapable;        /* tries to download data tables to 56000 */
+   dcl (MS,LS)     fixed;
+   dcl (Words,Len) fixed;
+
+   Send.24Bit.Words: proc (XMem.Ptr,LongWord_Cnt); /* download 24 bit words from external memory buffer */
+      dcl XMem.Ptr     fixed; /* sector ptr to data in xmem */
+      dcl LongWord_Cnt fixed; /* number of 24 bit words to download - 2 16 bit wds per 24 bit word */
+      dcl (i,j)        fixed;
+
+      write(mam)=XMem.Ptr;    /* set up ptr to data */
+
+      /* 24-bit words are packed into the lower 3 bytes of */
+      /* two consecutive 16-bit words of external memory:  */
+      /*       -----------------------------------         */
+      /*      |   0    |  HIGH  |  MID   |  LOW   |        */
+      /*       -----------------------------------         */
+
+      do i = 0 to shr((2*LongWord_Cnt)+255,8)-1;
+         call dsp.write(icr,"h92");           /* set hf1 to start xfer */
+         write(DSPCtl) = DSPWrite|DSP32SE;    /* set for write of 32 bit words */
+         do j = 0 to 255 by xfer.chunk;          /* send sector */
+
+            RPC xfer.chunk;
+            write(DSPData) = read(mdi);
+
+         end;
+         call dsp.write(icr,"h02");           /* clear hf1 to end xfer */
+      end;
+
+   end Send.24Bit.Words;
+
+
+   if TSMData_There then do;          /* data tables were found earlier */
+
+      MS    = TSMData_MS;
+      LS    = TSMData_LS;
+      Words = TSMData_Words;
+
+      do while Words<>0;
+         Len=Words;
+         if Len igt shl(ExtBuf.Len,8)    /* limit read len to buffer size */
+         then Len = shl(ExtBuf.Len,8);
+
+         call Ext.Readdata(MS,LS,ExtBuf.Ptr,0,0,Len); /* read data from disk into ext mem buffer */
+
+         call Select.DSP70;              /* assumes select will not fail */
+         call Send.24Bit.Words(ExtBuf.Ptr,shr(Len,1)); /* download 24 bit words from buffer */
+
+         LS = LS + shr(Len,8);           /* advance disk ptr */
+         if LS ilt shr(Len,8) then MS = MS + 1;
+
+         Words=Words-Len;                /* words left to download */
+      end;
+   end;
+
+   return TSMData_There;
+
+end DownLoad.TSM.Data;
+
+/* $PAGE */
+
+Read.Sector.From.DSP70: proc swapable;   /* Read sector into misc.buf */
+   dcl i fixed;
+
+   call dsp.write(icr,"h89");        /* set for init function, set hf0 */
+
+   write("313")  = addr(misc.buf(0)); /* Fast pointer */
+   write(DSPCtl) = DSPRead|DSP32SE;
+
+   RPC 256;
+   write("373") = read(DSPData);    /* Load up a sector in misc.buf */
+
+   call dsp.write(icr,"h81");       /* clear hf0 */
+
+end Read.Sector.From.DSP70;
+
+Write.Sector.To.DSP70: proc swapable;/* Write sector (24 bits) from misc.buf */
+   dcl i fixed;
+
+   call dsp.write(icr,"h92");        /* set for init function, set hf1 */
+
+   write("313")  = addr(misc.buf(0)); /* Fast pointer */
+   write(DSPCtl) = DSPWrite|DSP32SE;
+
+   RPC 256;
+   write(DSPData) = read("373");    /* Load up a sector in misc.buf */
+
+   call dsp.write(icr,"h82");        /* clear hf1 */
+
+end Write.Sector.To.DSP70;
+
+Write.Data.To.DSP70: proc(wds) swapable;/* Write data (24 bit) from misc.buf */
+   dcl wds fixed;
+
+   call dsp.write(icr,"h92");        /* set for init function, set hf1 */
+
+   write("313")  = addr(misc.buf(0)); /* Fast pointer */
+   write(DSPCtl) = DSPWrite|DSP32SE;
+
+   RPC wds;
+   write(DSPData) = read("373");     /* Load up "wds" in misc.buf */
+
+   call dsp.write(icr,"h82");        /* clear hf1 */
+
+end Write.Data.To.DSP70;
+
+/* $PAGE */
+
+create.edit.list.file: proc(len) swapable;
+   dcl len fixed;      /* Length in sectors to create */
+   dcl i   fixed;
+
+   TSM_Elist_There = false;           /* Until otherwise */
+
+   i = locate(elist_file,0);
+   if (i = FALSE)                     /* No edit list file exists */
+   OR (len IGT  F#LS_Length)          /* or it is too short       */
+   then do;
+      if replace(elist_file,T#Data,0,len,shl(len,8),0) = false
+      then return 0;                  /* Can't create file */
+      if locate(elist_file,0) = false
+      then return 0;                  /* Can't find file */
+   end;
+
+   /* When here, we have the file we want */
+   TSM_Elist_There = true;
+   TSM_Elist_MS    = F#MS_Sector;
+   TSM_Elist_LS    = F#LS_Sector;
+   TSM_Elist_Words = F#Words;
+
+   return 1;
+
+end create.edit.list.file;
+
+
+find.edit.list.file: proc swapable;
+
+   TSM_Elist_There = false;           /* Until otherwise */
+
+   if locate(elist_file,0) = FALSE    /* Try to find the file */
+   then return 0;                     /* Can't find file */
+
+   /* When here, we've found the file we want */
+   TSM_Elist_There = true;
+   TSM_Elist_MS    = F#MS_Sector;
+   TSM_Elist_LS    = F#LS_Sector;
+   TSM_Elist_Words = F#Words;
+
+   return 1;
+
+end find.edit.list.file;
+
+/* $SUBTITLE */
+
+Time.Scale.Modify.Samples: proc (in.base,xin.len,out.base,xout.len,c.or.e,cratio,stereo) fixed public swapable;
+   dcl in.base            fixed array; /* 32-bit ptr to start of sample data to process */
+   dcl xin.len            fixed array; /* 32-bit sample count for input file len */
+   dcl out.base           fixed array; /* 32-bit ptr to start of output file (begin writing data here) */
+   dcl xout.len           fixed array; /* 32-bit sample count for output file len (TOTAL size if stereo) */
+   dcl c.or.e             fixed;       /* 0=compress, 1=expand        */
+   dcl cratio             fixed;       /* compression/expansion ratio 0=no modification, 65535=comp./exp. by factor of 1.99998474 */
+   dcl stereo             fixed;       /* 0=mono, 1=stereo file */
+   dcl creating.edit.list fixed;       /* 1 after DSP has started sending edit list data */
+   dcl reading.edit.list  fixed;       /* 1 after DSP has started asking for edit list data */
+   dcl Elist.MS           fixed;       /* MS,LS IN ORDER: current location in elist file */
+   dcl Elist.LS           fixed;
+   dcl Elist.Len          fixed;       /* Current sector length of elist file as it's being written to */
+   dcl Elist.Max.Len      fixed;       /* Created (available) sector length of elist file */
+   dcl out.len        (1) fixed;       /* Local copy of xout.len; 1/2 of total length when stereo=1 */
+   dcl interrupts         fixed;       /* Save state of interrupts */
+   dcl in.len         (1) fixed static;
+   dcl (rptr,wptr)        fixed static;
+   dcl (rlimit,wlimit)    fixed static;
+   dcl (L.or.R)           fixed static;
+   dcl (status,done)      fixed;
+   dcl (i,j,k)            fixed;
+   dcl (LastDspTime)      fixed;
+   dcl (LastPercent)      fixed;
+   dcl (abort)            fixed;
+   dcl (timer)            fixed static;
+
+   dcl saved.run.syn   fixed;
+   dcl run.syn         fixed external;
+
+   dcl Points          lit '8192'; /* rotary buffer length on 56000 board */
+
+   timercheck: proc;             /* routine to keep local time base */
+      if read(3) <> 0 then do;   /* approximately up to date        */
+         write(3) = 0;
+         timer = timer + 5;
+      end;
+	  timeshare_with_host();
+   end timercheck;
+
+   Send.24Bit.Value: proc (high,low); /* sends 3 bytes to DSP70 (discards high byte of 32 bit) */
+      dcl high fixed;           /* high and low words to send */
+      dcl low  fixed;
+
+      write(DSPCtl) = DSPWrite|DSP32SE;
+      write(DSPData) = low;
+      write(DSPData) = high;
+
+   end Send.24Bit.Value;
+
+   Send.Options.to.DSP70: proc(the.algorithm);
+      dcl the.algorithm   fixed;
+
+      do case (the.algorithm);
+         do;/* Quick */
+            call Send.24bit.Value(0,tsm.period);
+         end;
+
+         do;/* ONE */
+            call Send.24bit.Value(0,tsm.max.cut.samples);
+            call Send.24bit.Value(0,tsm.justification);
+         end;
+
+         do;/* TWO */
+         end;
+      end;
+
+   end Send.Options.to.DSP70;
+
+   /* $PAGE */
+   Send.Next.Block.To.DSP70: proc(stereo);      /* transfers 256 samples to DSP70 */
+      dcl stereo  fixed;
+      dcl (i,j,k) fixed;
+
+      /* assumes that DSP70 is set up to receive data  */
+      /* and that poly memory read ptr has been set up */
+      /* Only sends every other word if stereo file */
+
+      call dsp.write(icr,"h92");        /* set hf1 */
+
+      write(DSPCtl) = DSPWrite|DSP16SE; /* set mods for xfer */
+
+      do k=0 to (stereo<>0);            /* loop once; twice if stereo file */
+
+         if rptr ilt (rlimit-1) then do;   /* up to but not last sector */
+            do i=0 to 255 by xfer.chunk;   /* send 1 sector, or 1/2 sector if stereo */
+               if use.poly then do;
+                  if stereo = 0 then do;   /* regular mono file: fastest */
+                     RPC xfer.chunk;       /* send whole sector */
+                     write(DSPData) = read(psd);  /* write data to DSP70 */
+                  end;
+                  /* Left side of stereo file: send ODD numbered words */
+                  else if L.or.R = 0 then do j = 1 to xfer.chunk by 16;
+                     write(DSPData)  = read(psd);  /* write odd data to DSP70 */
+                     write("324")    = read(psd);  /* skip even data */
+                     write(DSPData)  = read(psd);  /* write odd data to DSP70 */
+                     write("324")    = read(psd);  /* skip even data */
+                     write(DSPData)  = read(psd);  /* write odd data to DSP70 */
+                     write("324")    = read(psd);  /* skip even data */
+                     write(DSPData)  = read(psd);  /* write odd data to DSP70 */
+                     write("324")    = read(psd);  /* skip even data */
+                     write(DSPData)  = read(psd);  /* write odd data to DSP70 */
+                     write("324")    = read(psd);  /* skip even data */
+                     write(DSPData)  = read(psd);  /* write odd data to DSP70 */
+                     write("324")    = read(psd);  /* skip even data */
+                     write(DSPData)  = read(psd);  /* write odd data to DSP70 */
+                     write("324")    = read(psd);  /* skip even data */
+                     write(DSPData)  = read(psd);  /* write odd data to DSP70 */
+                     write("324")    = read(psd);  /* skip even data */
+                  end;
+                  /* Right side of stereo file: send EVEN numbered words */
+                  else do j = 1 to xfer.chunk by 16;
+                     write("324")    = read(psd);  /* skip odd data */
+                     write(DSPData)  = read(psd);  /* write even data to DSP70 */
+                     write("324")    = read(psd);  /* skip odd data */
+                     write(DSPData)  = read(psd);  /* write even data to DSP70 */
+                     write("324")    = read(psd);  /* skip odd data */
+                     write(DSPData)  = read(psd);  /* write even data to DSP70 */
+                     write("324")    = read(psd);  /* skip odd data */
+                     write(DSPData)  = read(psd);  /* write even data to DSP70 */
+                     write("324")    = read(psd);  /* skip odd data */
+                     write(DSPData)  = read(psd);  /* write even data to DSP70 */
+                     write("324")    = read(psd);  /* skip odd data */
+                     write(DSPData)  = read(psd);  /* write even data to DSP70 */
+                     write("324")    = read(psd);  /* skip odd data */
+                     write(DSPData)  = read(psd);  /* write even data to DSP70 */
+                     write("324")    = read(psd);  /* skip odd data */
+                     write(DSPData)  = read(psd);  /* write even data to DSP70 */
+                  end;
+               end;
+               else do;                    /* using external memory */
+                  if stereo = 0 then do;   /* regular mono file: fastest */
+                     RPC xfer.chunk;       /* send whole sector */
+                     write(DSPData) = read(mdi);     /* write data to DSP70 */
+                  end;
+                  /* Left side of stereo file: send ODD numbered words */
+                  else if L.or.R = 0 then do j = 1 to xfer.chunk by 2;
+                     write(DSPData) = read(mdi);  /* write odd data to DSP70 */
+                     write("300")    = read(mdi);  /* skip even data */
+                  end;
+                  /* Right side of stereo file: send EVEN numbered words */
+                  else do j = 1 to xfer.chunk by 2;
+                     write("300")    = read(mdi);  /* skip odd data */
+                     write(DSPData)  = read(mdi);  /* write even data to DSP70 */
+                  end;
+               end;       /* of external memory */
+            end;          /* of loop once for sector */
+            rptr=rptr+1;                    /* advance read ptr */
+         end;             /* of not up to last sector yet */
+
+         else if rptr=(rlimit-1) then do;   /* send last sector - partial */
+            i=0;                            /* i = word pointer in sector */
+            j=0;                            /* j = words written to 56000 */
+            do while i ilt (in.len(1) & "hff");  /* write last words in sector */
+               /* Doing right of stereo, skip over ODD word */
+               if (stereo <> 0) & (L.or.R = 1) then do;
+                  if use.poly
+                  then write("300") = read(psd);
+                  else write("300") = read(mdi);
+               end;
+
+               if use.poly
+               then write(DSPData) = read(psd); /* write data to 56K */
+               else write(DSPData) = read(mdi);
+
+               /* Doing left of stereo, skip over EVEN word */
+               if (stereo <> 0) & (L.or.R = 0) then do;
+                  if use.poly
+                  then write("300") = read(psd);
+                  else write("300") = read(mdi);
+               end;
+               i = i + 1 + (stereo <> 0);        /* we've processed 1 word; 2 if stereo */
+               j = j + 1;                        /* we've sent 1 word to the 56000 */
+            end;
+            do i=j to shr(255,(stereo<>0)); /* zero fill rest of sector (1/2 sector if stereo) */
+               write(DSPData) = 0;         /* write data to DSP70 */
+            end;
+            rptr=rptr+1;                    /* advance read ptr */
+         end;
+         else do;                           /* input file is shorter than 8 sectors - finish priming with zeroes */
+            do i=0 to 255 by xfer.chunk;    /* send 1 sector in chunks (1/2 sector if stereo) */
+               RPC shr(xfer.chunk,(stereo<>0));
+               write(DSPData) = 0;         /* write data to DSP70 */
+            end;
+         end;
+
+      end;                                  /* of loop: twice if stereo */
+
+      call dsp.write(icr,"h82");
+
+   end Send.Next.Block.To.DSP70;
+
+   /* $PAGE */
+
+   call copy32(xout.len,out.len);       /* make local copy of length */
+
+   if stereo <> 0
+   then call shr32(out.len,1);          /* divide by 2 if stereo */
+
+   if inc.dsp.code=0    then return 0;
+   if cratio      =0    then do;
+      call DRAW.MESSAGE('Cannot Perform Time Scale with ratio of 1.0000');
+      return 0;  /* no compression or expansion desired */
+   end;
+   if not TSMData_There then do;
+      call DRAW.MESSAGE('System Error - Time Scale data file is missing');
+      return 0;  /* could not find data tables for 56000 */
+   end;
+
+   call copy32(xin.len,in.len);          /* cannot reference automatic globals in proc */
+   if in.len (0) ige 256 then do;
+      call DRAW.MESSAGE('Sound File is too long for Time Scale Modification');
+      return 0;                          /* input  file too long (> 32 MB) */
+   end;
+   if xout.len(0) ige 256 then do;
+      call DRAW.MESSAGE('Sound File is too long for Time Scale Modification at this ratio');
+      return 0; /* output file too long (> 32 MB) */
+   end;
+
+   rlimit=shl(in.len(0),8)+shr(in.len(1),8);              /* original sector len */
+   if (in.len(1) & "hff") <> 0 then rlimit = rlimit +1;   /* round up */
+
+   wlimit=shl(xout.len(0),8)+shr(xout.len(1),8);          /* processed sector len */
+   if (xout.len(1) & "hff") <> 0 then wlimit = wlimit +1; /* round up */
+
+   saved.run.syn=run.syn;    /* save current value */
+   run.syn=0;                /* turn off real time loop for TSM processing */
+
+   /*
+      Process to perform Time Scale Modification on a set of samples:
+         1.  send wakeup command to DSP70 subsystem
+         1a. send option values to the DSP70 
+         2.  select compression or expansion algorithm
+         3.  send compression/expansion ratio
+         4.  send stereo flag
+         5.  send length of samples to be processed (48-bit quantity)
+         6.  Download Sine/Cosine and Hanning data tables to DSP70
+         7.  start process of transmitting subsequent samples and 
+             receiving processed samples as requested by DSP70
+   */
+
+   
+   /* 1. send wakeup command to 56000 subsystem */
+
+   /* Turn off interrupts while talking to the DSP70 */
+   interrupts = read("1") & interrupt_mask;
+   disable;
+
+   if not Select.DSP70 then do;
+      run.syn=saved.run.syn;                  /* restore to prior values */
+      if interrupts <> 0 then enable;
+      call DRAW.MESSAGE('Time Scale Modify hardware is not available');
+      return 0;   /* could not find DSP70 */
+   end;
+
+   call dsp.write(icr,"h82");                 /* set for init function    */
+   call dsp.write(cvr,"h92");                 /* host command exception $12 */
+
+   /* 1a send option values to the DSP70 */
+
+   call Send.Options.to.DSP70(tsm.algorithm);
+
+   /* 2. select compression or expansion algorithm */
+
+   call Send.24Bit.Value(0,(c.or.e <> 0));
+
+   /* 3. send compression/expansion ratio (CRATIO) */
+
+   call Send.24Bit.Value(shr(cratio,9),shl(cratio,7));
+
+   /* 4. send stereo flag (1 bit) */
+
+   call Send.24Bit.Value(0,(stereo<>0));
+
+   /* 5. send length of samples to be processed */
+   /*    note that this is (original_length / 2) when a stereo file */
+
+   call Send.24Bit.Value(shr(out.len(0),8),shl(out.len(0),8)|shr(out.len(1),8)); /* 24-bit sector length */
+   call Send.24Bit.Value(0,out.len(1) & "hff"); /*  8-bit word length */
+
+   /* 6. Download Sine/Cosine and Hanning data tables to DSP70 */
+
+   call DownLoad.TSM.Data;           
+
+   /* $PAGE */
+
+   /*  7. begin process of transmitting subsequent samples and */
+   /*     receiving processed samples as requested by DSP70    */
+
+   abort = 0;
+   LastDspTime = timer;
+   LastPercent = timer - 3000;
+
+	// Note: Loop is executed with interrupts off
+	
+   do L.or.R = 0 to (stereo <> 0);         /* loop once; twice if stereo file */
+
+      rptr = 0;                               /* init read  ptr */
+      wptr = 0;                               /* init write ptr */
+      done = false;                           /* init done flag */
+
+      do while (done  = false)                /* loop until 56000 says it's done */
+      and      (abort = 0);                   /* or we tell it to bug off        */
+
+         Status = dsp.read(isr);              /* poll DSP70 to see if data needs to be sent or received */
+
+         if (Status & "h18") = "h10" then do; /* Request to transmit next block of data */
+
+            /* send data to 56000 */
+            if use.poly
+            then do;
+               call timercheck;
+               call psmread(in.base,rptr,0); /* point to input file data */
+               disable;
+               call select.DSP70;
+            end;
+            else write(mam)=in.base(1)+rptr;
+
+            call Send.Next.Block.To.DSP70(stereo);  /* transmit next sector */
+
+            LastDspTime = timer;
+         end;    /* of request to transmit next block of data */
+
+         else if (Status & "h18") = "h8" then do;   /* Request to receive block of data from 56000 */
+            call dsp.write(icr,"h89");              /* set for init function, set hf0 */
+            write(DSPCtl) = DSPRead|DSP16SE;
+
+            /* read data from DSP70 */
+
+            do k=0 to (stereo<>0);            /* loop once; twice if stereo */
+
+               if wptr ilt wlimit then do;
+                  if use.poly
+                  then do;
+                     call timercheck;
+                     call psmwrite(out.base,wptr,0);
+                     disable;
+                     call select.DSP70;
+                  end;
+                  else write(mam)=out.base(1)+wptr;
+
+                  do i=0 to 255 by xfer.chunk;      /* receive 1 sector in chunks */
+                     if use.poly then do;
+                        if stereo = 0 then do;   /* regular mono file: fastest */
+                           RPC xfer.chunk;       /* read whole sector */
+                           write(psd) = read(DSPData); /* read samples from DSP70 */
+                        end;
+
+                       /* Left side of stereo file: get ODD numbered words */
+                        else if L.or.R = 0 then do j = 1 to xfer.chunk by 16;
+                           write(psd) = read(DSPData);  /* read odd sample from DSP70 */
+                           write(psd) = 0;               /* skip even data: done first, so we can write zeros for Right */
+                           write(psd) = read(DSPData);  /* read odd sample from DSP70 */
+                           write(psd) = 0;               /* skip even data: done first, so we can write zeros for Right */
+                           write(psd) = read(DSPData);  /* read odd sample from DSP70 */
+                           write(psd) = 0;               /* skip even data: done first, so we can write zeros for Right */
+                           write(psd) = read(DSPData);  /* read odd sample from DSP70 */
+                           write(psd) = 0;               /* skip even data: done first, so we can write zeros for Right */
+                           write(psd) = read(DSPData);  /* read odd sample from DSP70 */
+                           write(psd) = 0;               /* skip even data: done first, so we can write zeros for Right */
+                           write(psd) = read(DSPData);  /* read odd sample from DSP70 */
+                           write(psd) = 0;               /* skip even data: done first, so we can write zeros for Right */
+                           write(psd) = read(DSPData);  /* read odd sample from DSP70 */
+                           write(psd) = 0;               /* skip even data: done first, so we can write zeros for Right */
+                           write(psd) = read(DSPData);  /* read odd sample from DSP70 */
+                           write(psd) = 0;               /* skip even data: done first, so we can write zeros for Right */
+                        end;
+
+                       /* Right side of stereo file: get EVEN numbered words */
+                       /* This is done second, so we must merge in with the Left data (uses misc.buf) */
+                        else do;
+                           call timercheck;
+                           call psmread(out.base,wptr,i);   /* point at current sector */
+                           disable;
+                           call select.DSP70;
+                           write("313") = addr(misc.buf(0));/* point R13 at misc.buf */
+                           RPC xfer.chunk;
+                           write("373") = read(PSD);        /* get one sector quickly */
+                           write("313") = addr(misc.buf(1));
+                           do j = 1 to xfer.chunk by 16;
+                              write("373") = read(DSPData); /* read even sample from DSP70 */
+                              write("324") = read("333");   /* write(atnv) = read(r13i) */
+                              write("373") = read(DSPData); /* read even sample from DSP70 */
+                              write("324") = read("333");   /* write(atnv) = read(r13i) */
+                              write("373") = read(DSPData); /* read even sample from DSP70 */
+                              write("324") = read("333");   /* write(atnv) = read(r13i) */
+                              write("373") = read(DSPData); /* read even sample from DSP70 */
+                              write("324") = read("333");   /* write(atnv) = read(r13i) */
+                              write("373") = read(DSPData); /* read even sample from DSP70 */
+                              write("324") = read("333");   /* write(atnv) = read(r13i) */
+                              write("373") = read(DSPData); /* read even sample from DSP70 */
+                              write("324") = read("333");   /* write(atnv) = read(r13i) */
+                              write("373") = read(DSPData); /* read even sample from DSP70 */
+                              write("324") = read("333");   /* write(atnv) = read(r13i) */
+                              write("373") = read(DSPData); /* read even sample from DSP70 */
+                              write("324") = read("333");   /* write(atnv) = read(r13i) */
+                           end;
+                           call timercheck;
+                           call psmwrite(out.base,wptr,i);  /* point at current sector */
+                           disable;
+                           call select.DSP70;
+                           write("313") = addr(misc.buf(0));/* point R13 back at misc.buf */
+                           RPC xfer.chunk;
+                           write(PSD) = read("373");        /* write completed sector quickly */
+                        end;
+                     end;          /* of use.poly */
+
+                     else do;      /* using external memory */
+                        if stereo = 0 then do;   /* regular mono file: fastest */
+                           RPC xfer.chunk;       /* read whole sector */
+                           write(mdi) = read(DSPData); /* read samples from DSP70 */
+                        end;
+
+                       /* Left side of stereo file: get ODD numbered words */
+                        else if L.or.R = 0 then do j = 1 to xfer.chunk by 2;
+                           write(mdi) = read(DSPData);  /* read odd sample from DSP70 */
+                           write("300")    = read(mdi);  /* skip even data */
+                        end;
+
+                       /* Right side of stereo file: get EVEN numbered words */
+                        else do j = 1 to xfer.chunk by 2;
+                           write("300")    = read(mdi);  /* skip odd data */
+                           write(mdi) = read(DSPData);  /* read even sample from DSP70 */
+                        end;
+                     end;          /* of using external memory */
+                  end;
+                  wptr=wptr+1;
+               end;
+
+               else do; /* DSP70 is returning more data than expected - toss extra samples */
+                  do i=0 to 255 by xfer.chunk;      /* receive 1 sector in chunks */
+                     RPC shr(xfer.chunk,(stereo<>0));
+                     write(ATNV) = read(DSPData);  /* read samples from 56K */
+                  end;
+               end;
+
+            end;    /* of loop once; twice if stereo */
+
+            call dsp.write(icr,"h81");        /* clear hf0 */
+            LastDspTime = timer;
+         end;       /* of request to receive block from DSP70 */
+
+         else if (Status & "h18") = "h18" then do; /* DSP70 is requesting an extended operation */
+            call dsp.write(icr,"h9B");
+            i  = dsp.read(isr);                    /* Get sub-function code */
+
+            if (i & "h18") = "h18" then do;   /* All done */
+               call dsp.write(icr,"h03");     /* Clear all flags */
+               done = true;                   /* Algorithm is finished executing */
+            end;
+
+            else if (i & "h18") = "h8"        /* Read edit list data from DSP70 */
+            then do;
+               call dsp.write(icr,"h81");     /* ACK */
+               do j=1 to 2;                      /* Read 2 ABLE sectors */
+                  call Read.Sector.From.DSP70;   /* We have to do this in any case */
+                  if creating.edit.list = 0      /* First request: need to create file to store edit list data */
+                  then do;
+
+                     /* File nominaly needs 2 32-bit words of storage for */
+                     /* every 2048 words of data in file (one side).  For */
+                     /* now, reserve twice that much storage for debug    */
+                     /* to be stored.                                     */
+
+                     if stereo
+                     then Elist.Max.Len = shr(rlimit,9) + 1;
+                     else Elist.Max.Len = shr(rlimit,8) + 1;
+
+                     if create.edit.list.file(Elist.Max.Len) = 0
+                     then abort = 3;
+
+                     Elist.MS  = TSM_Elist_MS;
+                     Elist.LS  = TSM_Elist_LS;
+                     Elist.Len = 0;
+                     creating.edit.list = 1;
+                     reading.edit.list  = 0;
+                  end;
+                  if TSM_Elist_There <> 0 then do;  /* If edit list file exists to store the data */
+                     Elist.Len = Elist.Len + 1;     /* Try to write this sector */
+                     if Elist.Len ILE Elist.Max.Len /* Room to write sector */
+                     then do;
+                        call Writedata(Elist.MS,Elist.LS,misc.buf,256);
+                        call add16(1,loc(addr(Elist.MS)));
+                     end;
+                  end; /* of edit list file exists */
+               end;    /* of loop over 2 sectors */
+            end;       /* of "read edit list data from DSP70" */
+
+            else if (i & "h18") = "h10"  /* Write edit list data to 56000 */
+            then do;
+               call dsp.write(icr,"h82");     /* ACK */
+               do j=1 to 2;                   /* Send 2 ABLE sectors */
+                  if reading.edit.list = 0    /* First request: need to find edit list data file info */
+                  then do;
+                     if find.edit.list.file = 0
+                     then abort = 3;
+                     Elist.MS  = TSM_Elist_MS;
+                     Elist.LS  = TSM_Elist_LS;
+                     Elist.Len = shr(TSM_Elist_Words,8);
+                     creating.edit.list = 0;
+                     reading.edit.list  = 1;
+                  end;
+                  if TSM_Elist_There <> 0 then do;  /* If edit list file exists to store the data */
+                     call Readdata(Elist.MS,Elist.LS,misc.buf,256);
+                     call add16(1,loc(addr(Elist.MS)));
+                  end;
+                  call Write.Sector.To.DSP70;    /* We have to do this in any case */
+               end;    /* of loop over 2 sectors */
+            end;       /* of "write edit list data to DSP70 */
+
+            LastDspTime = timer;
+         end;         /* of DSP70 is requesting an extended operation */
+
+			// Else DSP is not requesting any service.  just chill.
+			else
+				interp_run_host_non_timer();
+			
+         /* Keep timer going (approximately) even through */
+         /* interrupts are off:                           */
+
+         call timercheck;
+
+         /* Check for timeout: */
+
+         if (timer - LastDspTime) IGT 2000
+         then abort = 1;                   /* board has smashed */
+
+         /* Check for break: */
+
+         if (Read("51")&2) <> 0 then do;   /* see if character typed */
+            if Read("50") = 0              /* break typed to us      */
+            then abort = 2;
+         end;
+
+         if  (num.of.d50.in.chars <> 0)    /* d50 char got in during PSMREAD */
+         and (next.d50.in.char = ASC.CALL.TERMINATE)
+         then do;
+            enable;
+            call get.next.d50.in.char;
+            disable;
+            call Select.DSP70;
+            abort = 2;
+         end;
+
+         /* print out percentage every 5 seconds: */
+
+         if (timer - LastPercent) IGT 5000
+         then do;
+            enable;
+            call DRAW.MESSAGE('Percent Completed: ');
+            if stereo then do;
+               if l.or.r = 0 then i = shr(wptr,1);
+               else               i = shr(wlimit,1) + shr(wptr,1);
+            end;
+            else i = wptr;
+            load 100; mul i; mwait; div wlimit;
+            call pnum(res,0); call ps('%');
+            call tty_wait;
+            disable;
+            call Select.DSP70;
+            LastPercent = timer;
+         end;
+      end;            /* of while not done */
+   end;               /* of loop once; twice if stereo file */
+
+   run.syn=saved.run.syn;                  /* restore to prior values */
+   if interrupts <> 0 then enable;
+
+   if abort = 0
+   then call ERASE.MESSAGE;                /* done with time scale    */
+
+   else if abort = 1
+   then call DRAW.MESSAGE('System Error (timeout) with Time Scale Modify - check sound file');
+
+   else if abort = 2
+   then call DRAW.MESSAGE('Time Scale Modification halted - check sound file');
+
+   else if abort = 3
+   then call DRAW.MESSAGE('Error - Out of room in ELIST file (:.system:tsmelst)');
+
+   return 1;                  /* finished time scale modification successfully */
+end Time.Scale.Modify.Samples;
+
+/* $SUBTITLE */
+
+Initialize.DSP70: proc swapable;
+
+   if inc.dsp.code=0 then return;
+
+   if Select.DSP70 then do;     /* DSP70 is probably in system */
+
+      call Reset.DSP70;         /* hardware reset */
+
+      if File.Search('.TSMDATA',3,-2,0,1)
+      then do;                        /* sine/cosine table and hanning window coefs */
+         TSMData_There = true;        /* data file found */
+         TSMData_MS    = F#MS_Sector;
+         TSMData_LS    = F#LS_Sector;
+         TSMData_Words = F#Words;
+         if TSMData_Words=0 then TSMData_Words=shl(F#LS_Length,8);
+      end;
+   end;
+
+end Initialize.DSP70;
+
+/* $SUBTITLE */
+
+Load.DSP70: proc(alg) public swapable;
+   dcl alg         array;       /* String: name of algorithm (in CAPS) */
+   dcl (m,l)       fixed;       /* File pointer */
+   dcl (s,w)       fixed;       /* Start sector, word length */
+   dcl wds         fixed;
+   dcl interrupts  fixed;       /* Save state of interrupts */
+   dcl (i,j)       fixed;
+
+   if locate(dspex_file,0) = FALSE
+   then do;
+      return 0;
+   end;
+
+   m = F#MS_Sector;
+   l = F#LS_Sector;
+
+   call readdata(m,l,misc.buf,256);     /* Get header into misc.buf */
+   if misc.buf(0) <> DSPEX_VERSION      /* Check compatibility */
+   then do;
+      return 0;
+   end;
+
+   do i=0 to 255 by 8;                                          /* Find boot code */
+      if misc.buf(i + dspex_rec_type) = dspex_type#boot then do;/* Found it */
+         s = misc.buf(i+ dspex_rec_sect);                       /* Start sector */
+         w = misc.buf(i+ dspex_rec_flen);                       /* Word length */
+         i = 256;                                               /* Break loop */
+      end;
+   end;
+
+   if s=0 and w=0                       /* Never found boot code */
+   then do;
+      return 0;
+   end;
+
+   l = l + s;                           /* Add offset to beginning of file */
+   if l ilt s                           /* Carry */
+   then m = m + 1;
+
+   interrupts = read("1") & interrupt_mask;
+   disable;
+
+   call Reset.DSP70;
+   call dsp.write(icr,"h82");           /* Enter handshaking mode */
+
+   /* Send boot file */
+   wds = 0;  i = 0;
+   do while i = 0;
+      call readdata(m,l,misc.buf,256);  /* Get next sector */
+      if w - wds >= 256
+      then do;                          /* Send whole sector */
+         call Write.Sector.To.DSP70;
+         wds = wds + 256;
+         l = l + 1;
+         if l = 0 then m = m + 1;
+      end;
+      else do;                          /* Send odd words at end */
+         call Write.Data.To.DSP70(w-wds);
+         i = 1;                         /* Flag that we're done */
+      end;
+   end;
+   call dsp.write(icr,"H8");            /* Tell DSP we're done loading bootstrap file */
+
+   m = F#MS_Sector;
+   l = F#LS_Sector;
+   call readdata(m,l,misc.buf,256);     /* Get header back into misc.buf */
+
+   /* Now find the algorithm in the dspex file */
+   s = 0;  w = 0;
+   do i=0 to 255 by 8;                  /* Find desired algorithm */
+      if misc.buf(i+ dspex_rec_type) = dspex_type#alg then do;     /* An algorithm file */
+         if alg(1) = misc.buf(i)        /* Say unique in 1st 2 chars OK */
+         then do;
+            s = misc.buf(i+ dspex_rec_sect);/* Start sector */
+            w = misc.buf(i+ dspex_rec_flen);/* Word length */
+            i = 256;                    /* Break loop */
+         end;
+      end;
+   end;
+
+   if s=0 and w=0                       /* Never found algorithm code */
+   then do;
+      if interrupts <> 0 then enable;
+      return 0;
+   end;
+
+   l = l + s;                           /* Add offset to beginning of file */
+   if l ilt s                           /* Carry */
+   then m = m + 1;
+
+   /* Send the algorithm code */
+   wds = 0;  i = 0;
+   do while i = 0;
+      call readdata(m,l,misc.buf,256);  /* Get next sector */
+      if w - wds >= 256
+      then do;                          /* Send whole sector */
+         call Write.Sector.To.DSP70;
+         wds = wds + 256;
+         l = l + 1;
+         if l = 0 then m = m + 1;
+      end;
+      else do;                          /* Send odd words at end */
+         call Write.Data.To.DSP70(w-wds);
+         i = 1;                         /* Flag that we're done */
+      end;
+   end;
+
+   if interrupts <> 0 then enable;
+   return 1;
+end Load.DSP70;

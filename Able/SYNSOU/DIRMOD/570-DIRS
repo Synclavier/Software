@@ -1,0 +1,220 @@
+/* 570-DIRS  $TITLE  Common Declarations for All the Directory Screens */
+
+/*
+   11/17/87 - cj - snarfed sort.name routine into :filemod. trashed items in compute.available.devices
+   1/16/87 - ts - fixed bug in CHANGE.OUR.DEV
+  10/06/86 - KJO - Updated for -7 catalog structure
+   8/18/86 - ts -  Fixed a drive select bug
+   8/11/86 - MPB - Fixed long time resident bug in LIST.AVAILABLE.DEVICES
+   5/19/86 - eg - made procedures and some variables public.
+   5/15/86 - "official" creation of release-M modules
+*/
+
+dcl entered.new.dev    fixed public; /* set to 1 if new dev entered recently */
+
+dcl dir.items          fixed ; /* total items in directory display       */
+dcl last.dir.items     fixed ; /* DIR.ITEMS from prev snap shot          */
+
+dcl device.ok          fixed ; /* 1 if floppy disk in drive, else 0      */
+dcl (#dev,#dsec,#len)  fixed ; /* temps for device and sector and length of directories */
+
+dcl devices            fixed ; /* number of available devices            */
+dcl device.list (8)    fixed ; /* list of device numbers of available devices */
+dcl device.len  (8)    fixed ; /* list of device name lengths */
+
+dcl items.per.sec lit '64'; /* max number of directory items in one sector */
+
+COMPUTE.AVAILABLE.DEVICES:  proc (file.type)  swapable;
+   dcl file.type fixed; /* the type of file to be accessed */
+   dcl (sys,cur) fixed;
+   dcl (i,j)     fixed;
+
+   ADD.DEVICE:  proc(dev);             /* puts specified device into device list */
+      dcl dev fixed;
+      device.list(devices)=dev;        /* push on list */
+      devices=devices+1;               /* increment stk ptr */
+   end ADD.DEVICE;
+
+   devices=0;                          /* no devices to start */
+
+   sys=find_device(0); cur=find_device(1);
+
+   // Put current catalog first
+   if (ucat<>0) or (sys<>cur) then do; /* current cat different from system cat */
+      if (inc.mono=0)                  /* not mono sampling */
+      or (file.type<>t#sound)          /* or not a sound file */
+      or ((core(cur)&"17")=1)          /* or current dev is a winch */
+      then call ADD.DEVICE(1);
+   end;
+
+   if (inc.mono=0)                     /* not mono sampling */
+   or (file.type<>t#sound)             /* or not a sound file */
+   or ((core(sys)&"17")=1)             /* or system dev is a winch */
+   then call ADD.DEVICE(shr(SDEV,8));  /* put system device into list (2<=Dev#<=7)*/
+
+   do i=2 to 7;
+      j=find_device(i);                /* get ptr to config info */
+      if j<>0 then do;                 /* valid device */
+         // Skip W0: since we added it above
+         if  (((core(j)&255)<>(core(cur)&255)) or (ucat<>0))
+         and  ((core(j)&255)<>(core(sys)&255))
+         then do;                      /* have a new device */
+
+            if (inc.mono=0)           /* not mono sampling */
+            or (file.type<>t#sound)   /* or not a sound file */
+            or ((core(j)&"17")=1)     /* or dev is a winch */
+            then call ADD.DEVICE(i);  /* put device into list */
+
+         end;
+      end;
+   end;
+
+   j=(-1);
+   if entered.new.dev<>0 /* we have recently entered a new subcat or device */
+   then do;              /* try to set DIR.DEVICE to this subcat or device */
+      entered.new.dev=0; /* reset flag */
+      i=0;
+      do while (i ILT devices) and (j<0);
+         if      device.list(i)=1           then j=1;
+         else if device.list(i)=shr(udev,8) then j=device.list(i);
+         i=i+1;
+      end;
+      dir.device=j;
+   end;
+
+   if j<0 then do;                          /* have not changed dir.device yet */
+      do i=0 to devices-1;
+         if dir.device=device.list(i) then j=1; /* dev is valid */
+      end;
+      if j<0 then dir.device=device.list(0); /* reset if dev was not valid */
+   end;
+
+end COMPUTE.AVAILABLE.DEVICES;
+
+/* $SUBTITLE  Routines to List Available Devices and Test for Accessability */
+// Use passed in name for W0:
+LIST.AVAILABLE.DEVICES: proc(w0Name) swapable;
+   dcl w0Name array;
+
+   dcl (i,j) fixed;
+
+   do i = 0 to 7;          /* clear length array */
+      device.len(i) = 0;
+   end;
+
+   do i=0 to devices-1;    /* loop over available devices */
+      if (device.list(i) == dir.device) then call REVERSE.VIDEO(1);
+
+      call pnum(i+1,0); call pc(sp);
+
+      if      inc.poly and (device.list(i)=sndcache.dev) then {call ps('COMPLETE'); device.len(i) = 8;}
+      else if inc.poly and (device.list(i)=polymem.dev ) then {call ps('POLYMEM' ); device.len(i) = 8;}
+      else do;
+         // Show mac path for W0
+         if ((w0Name(0) != 0) && (device.list(i) == 6)) {
+            call ps(w0Name);
+            device.len(i) = w0Name(0)+1;
+         }
+
+         // Else show device identifier
+         else {
+            j=core(find_device(device.list(i)))&255; /* get low byte of first config word */
+
+            do case j&"17";   /* look at lower nibble */
+               call pc(ASC.F); call pc(ASC.W); call pc(ASC.R);
+            end;
+            do case shr(j,4); /* look at upper nibble */
+               call pc(ASC.0); call pc(ASC.1);
+            end;
+            call pc(COLON);
+            
+            if device.list(i)=1 then do;
+               call ps(location(loc.ccnm));
+               device.len(i) = 4 + core(loc.ccnm);
+            end;
+            
+            else
+            device.len(i) = 4;
+         }
+      end;
+      if device.list(i)=dir.device then call REVERSE.VIDEO(0);
+
+      if i<>(devices-1) then do;
+         call ps('  ');
+         device.len(i) = device.len(i) + 3;
+      end;
+      else device.len(i) = device.len(i) + 1;
+   end;
+
+end LIST.AVAILABLE.DEVICES;
+
+CHECK.DIRECTORY.DEVICE:  proc (dev) fixed  swapable; /* sees if device is ok to access */
+   dcl dev fixed;                  /* device to test 0-7 */
+
+   if ((dev>1) and (dev<6))        /* on a floppy device */
+   or ((dev=0) and (systyp=0))
+   or ((dev=1) and (curtyp=0))
+   then do;                        /* check for floppy disk in drive */
+      if not disk_check(dev)
+      then return (0);             /* no floppy in drive */
+   end;
+   return 1;                       /* ok to access this device */
+end CHECK.DIRECTORY.DEVICE;
+
+CHANGE.OUR.DEV:  proc (old.dev,new.dev)  swapable; /* sets up new OUR.DEV, OUR.CAT, OUR.LEN values */
+   dcl old.dev          fixed;  /* current device     */
+   dcl new.dev          fixed;  /* desired new device */
+   dcl restore.level    fixed external; /* declared in 135-FILE */
+   dcl W1.State         fixed external; /* current state of eject w1: button; 1 == ejected 	*/
+
+   if inc.poly then do;
+      if (old.dev = sndcache.dev) or (old.dev = polymem.dev) /* map special devices to current catalog */
+      then old.dev = 1;
+
+      if (new.dev = sndcache.dev) or (new.dev = polymem.dev) /* map special devices to current catalog */
+      then new.dev = 1;
+   end;
+
+   if (drive.select.active<>0)   /* if user is holding drive select button */
+   then do;                      /* then give him priority                 */
+      restore.level=new.dev;
+      return; /* do nothing if DRIVE SELECT held */
+   end;
+
+   if ((new.dev == 7) && (W1.State == 1))
+      SET.ERROR(err.opt, 'Mount W1: before use.');
+
+   active.level = new.dev;
+   call compute.dsel.button;
+
+end CHANGE.OUR.DEV;
+
+SET.#DEV.#DSEC.#LEN: proc(dev)  swapable; /* sets globals #DEV,#DSEC, and #LEN for given device */
+   dcl dev fixed;
+
+   if dev=0 then do;               /* system device */
+      #dev=SDEV; #dsec=0; #len=SLEN;
+   end;
+   else if dev=1 then do;          /* current device */
+      #dev=UDEV; #dsec=UCAT; #len=ULEN;
+   end;
+   else do;                        /* top level of normal device */
+      #dev=shl(dev,8); #dsec=0;
+      if dev>5 then #len=1024;
+      else          #len= 256;
+   end;
+end SET.#DEV.#DSEC.#LEN;
+
+/* $SUBTITLE  General Sorting Routine for FCBs Stored in External Memory */
+
+SORT.NAMES:  proc (items)  swapable; /* sorts filenames into alphabetical order */
+   dcl items   fixed;                /* total number of items to sort */
+
+   /* NOTE: This routine assumes that each FCB contains 4 words of
+   filename only.  Therefore there should be exactly 64 FCBs per sector
+   of ext mem. WARNING:  Routine trashes COPY.BUF().  FCB #1 is stored
+   in COPY.BUF locations 0 to 4.  FCB #2 is stored in locations 5 to 9. */
+
+   call Sort.Cat.Buffer.By.Filename(trd.ptr, 4, items);
+
+end SORT.NAMES;

@@ -1,0 +1,476 @@
+/*	:SYNSOU:DIRMOD:577-SEQ  $TITLE  Routines to Run Sequence Recall Screen	*/
+
+/*
+Modified:
+2001/07/21 - TY  - In RECALL.OR.STORE.SEQUENCE() AEE.Sequence.Name no longer takes
+						 the name of the source sequence during selective track recalls
+1987/11/17 - cj  - stored seq name for use by aee
+1986/09/25 - KJO - updated for -7 catalog structure
+1986/09/16 - BSW - reposition cursor after current catalog refresh
+1986/09/02 - eeg - added loading sequence message
+1986/08/18 - tss - refreshes Current Cat after selecting new device
+1986/07/24 - eeg - fixed bug in fill.sequence.directory
+1986/05/22 - MPB - Input Command Structure Added
+1986/05/19 - eeg - made procedures and some variables public.
+1986/05/15 - "official" creation of release-M modules
+*/
+
+/*	NOTE:  #XPOS and #LXPOS represent the current and previous logical
+	positions on the Sequence Directory Screen, respectively.	*/
+
+dcl print.fn(8)		fixed;
+dcl (#xpos,#lxpos)	fixed;
+
+PRINT.SEQ.NAME: proc(p) swapable;
+	dcl (p,i,j)	fixed;
+
+	sqdata.name: proc(str) fixed;	/*	returns 1 if a .SQnDATA filename	*/
+		dcl str	fixed array;
+
+		if  (str(1)=(shl(ASC.S,8)\DOT))		/*	look for ".S"	*/
+		and ((str(2)&"377")=ASC.Q)				/*	look for  "Q"	*/
+		and (shr(str(2),8)>=ASC.0)				/*	look for digit between 0 and 7	*/
+		and (shr(str(2),8)<=ASC.7)
+		and (str(3)=(shl(ASC.A,8)\ASC.D))	/*	look for "DA"	*/
+		and (str(4)=(shl(ASC.A,8)\ASC.T))	/*	look for "TA"	*/
+		then return 1;	/*	had a match	*/
+		else return 0;	/*	no match		*/
+	end sqdata.name;
+
+	write(mam)=trd.ptr+p/64;
+	write(mal)=shl(p,2);	/*	compute index into table		*/
+	do i=0 to 3;			/*	loop over words in filename	*/
+		j=read(md)&"377";   if j<sp then j=sp;
+		call pbyte(print.fn,shl(i,1)  ,j);		/*	store lower byte	*/
+		j=shr(read(mdi),8); if j<sp then j=sp;
+		call pbyte(print.fn,shl(i,1)+1,j);		/*	store lower byte	*/
+	end;
+	print.fn(0)=8;
+	do while byte(print.fn,print.fn(0)-1)=sp;	/*	remove trailing spaces	*/
+		print.fn(0)=print.fn(0)-1;
+	end;
+	if sqdata.name(print.fn)<>0 then do;
+		call ps('<SEQ #');
+		call pc(shr(print.fn(2),8)+1);
+		call pc("76");
+		print.fn(0)=8;		/*	denote that we printed 8 chars	*/
+	end;
+	else call ps(print.fn);
+end PRINT.SEQ.NAME;
+
+POS.SEQUENCE.DIRECTORY.CURSOR:  proc swapable;	/*	put cursor at correct location	*/
+	dcl i	fixed;
+
+	if dir.items=0 then do;		/*	no sequences on screen	*/
+		call cpos(23,0); return;
+	end;
+
+	do i=0 to 1;
+		if (i=1) or (#xpos<>#lxpos) then do;
+
+			/*	compute correct positioning coords	*/
+			call cpos(6+shr(#lxpos,3),5+(#lxpos&7)*9);
+
+			if vt100<>0 then do;
+				call REVERSE.VIDEO(i);
+				call PRINT.SEQ.NAME(#lxpos);	/*	draw the name	*/
+			end;
+
+			#lxpos=#xpos;
+		end;
+	end;
+
+	if vt100<>0 then do;
+		call REVERSE.VIDEO(0);	/*	turn off reverse video	*/
+		call cpos(6+shr(#xpos,3),5+print.fn(0)+(#xpos&7)*9);	/*	reposition cursor	*/
+	end;
+end POS.SEQUENCE.DIRECTORY.CURSOR;
+
+/*	$SUBTITLE  Routine to Draw Sequence Recall Screen	*/
+
+PRINT.SEQUENCE.DIRECTORY.DEVICE.FIELD: proc swapable;
+   dcl w0_name(50) fixed;
+
+   call COMPUTE.AVAILABLE.DEVICES(t#sync);	/*	figure out which devices can be accessed	*/
+
+   // See if should use mac path for W0
+   write(mam) = SPACENAME.PTR;
+   if (read(mdi) != 0 && read(mdi) < 100)
+      import(SPACENAME.PTR,1,w0_name,51);    // Grab mac path name
+
+   call cpos(4,15);
+   call erase.to.end.of.line();
+
+   call LIST.AVAILABLE.DEVICES(w0_name);
+END PRINT.SEQUENCE.DIRECTORY.DEVICE.FIELD;
+
+SEQUENCE.DIRECTORY.FRAME:  proc swapable;	/*	draws frame for sequence directory	*/
+	dcl (i,j)       fixed;
+
+	call clear.term;
+	call PRINT.SCREEN.FRAME(21,'SEQUENCE DIRECTORY');
+
+   // Remove box to provide cyrillic room
+   call cpos(1,0); call erase.to.end.of.line();
+   call cpos(2,0); call erase.to.end.of.line();
+   call cpos(3,0); call erase.to.end.of.line();
+   call cpos(4,0); call erase.to.end.of.line();
+
+	call cpos(5,0);
+	if vt100<>0 then call DRAW.CORNER(c.u.l); else call pc("174");
+	call DRAW.HOR(78);
+	if vt100<>0 then do; call DRAW.CORNER(c.u.r); call CH.SET(norm); end;
+
+	if d44_present then call plot.mouse.hole(mouse.hole.lowerx,mouse.hole.lowery);
+
+	/*	now fill in directions area	*/
+	call cpos(1, 2);
+	call ps('1. Use arrows to move cursor. Press <RETURN> to recall sequence.');
+	call cpos(2, 2);
+	call ps('2. '); call PRINT.EXIT.SCREEN.PROMPT;
+	call cpos(3, 2);
+	call ps('3. Select devices with 1,2,3,....');
+	call cpos(4, 2);
+	call ps('4. Devices-->');
+
+   PRINT.SEQUENCE.DIRECTORY.DEVICE.FIELD();
+
+	call CHANGE.OUR.DEV(1,dir.device);			/*	switch from current cat to last selected device	*/
+
+	call PRINT.DIR.DEVICE.CATNAME;
+
+	call tty_wait;
+
+	last.dir.items=0;
+end SEQUENCE.DIRECTORY.FRAME;
+
+SEQUENCE.SNAP.SHOT:  proc swapable;	/*	create list of available seqs for cur device	*/
+	dcl (i,k)	fixed;
+
+	SQDATA.NAME: proc(str) fixed;		/*	returns 1 if a .SQnDATA filename	*/
+		dcl str	fixed array;
+
+		if  (str(0)=(shl(ASC.S,8)\DOT))		/*	look for ".S"	*/
+		and ((str(1)&"377")=ASC.Q)				/*	look for  "Q"	*/
+		and (shr(str(1),8)>=ASC.0)				/*	look for digit between 0 and 7	*/
+		and (shr(str(1),8)<=ASC.7)
+		and (str(2)=(shl(ASC.A,8)\ASC.D))	/*	look for "DA"	*/
+		and (str(3)=(shl(ASC.A,8)\ASC.T))	/*	look for "TA"	*/
+		then return 1;	/*	had a match	*/
+		else return 0;	/*	no match		*/
+	end SQDATA.NAME;
+
+	dir.items=0;
+	device.ok=CHECK.DIRECTORY.DEVICE(dir.device);	/*	see if we can read this device	*/
+
+	if device.ok<>0 then do;
+
+		if inc.mono<>0 then call stop.disk;			/*	stop output so we can read disk	*/
+		if read_catalog('',dir.device) then do;	/*	catalog read successfully	*/
+			do i = 0 to (c#dir_size / c#len - 1);	/*	loop over catalog entries	*/
+				call get_fcb(i,misc.buf);				/*	get fcb into misc.buf		*/
+
+            // SKIP .SEQDATA - hidden file on W0
+            if ((dir.device  == 6                  )     /* looking at w0: */
+            &&  (misc.buf(0) == (shl(ASC.S,8)\DOT  ))		/*	look for ".S"	*/
+            &&  (misc.buf(1) == (shl(ASC.Q,8)\ASC.E))		/*	look for "EQ"	*/
+            &&  (misc.buf(2) == (shl(ASC.A,8)\ASC.D)))	/*	look for "DA"	*/
+               ;                                         /* any match TA, 00, 01, etc */
+
+				else if   (misc.buf(f#nm)<>0)                /*	non-null name		*/
+				and       ((misc.buf(f#ty)=t#sync)           /*	file type is a compiled Synclavier seq	*/
+				or        (sqdata.name(misc.buf)<>0))        /*	or .SQnDATA file	*/
+				then do;
+					write(mam)=trd.ptr+shr(dir.items,6);      /*	set ext mem ptrs	*/
+					write(mal)=shl(dir.items,2);
+
+					do k=f#nm to (f#nm + f#name_len - 1);
+						write(mdi)=misc.buf(k);			/*	copy name to ext mem	*/
+					end;
+
+					dir.items=dir.items+1;	/*	advance count of sequences displayed	*/
+				end;	/*	file found	*/
+			end;	/*	looping over catalog entries	*/
+		end;	/*	catalog read	*/
+	end;	/*	of device is accessible	*/
+end SEQUENCE.SNAP.SHOT;
+
+FILL.SEQUENCE.DIRECTORY:  proc swapable;	/*	uses snapshot to list available seqs	*/
+	dcl (i,j)	fixed;
+
+	REMOVE.PREVIOUS.ITEMS:  proc;
+		dcl (i,j)	fixed;
+
+		if last.dir.items=0 then do;			/*	remove a one line message	*/
+			call cpos(8,4);
+			do i=8 to 78; call pc(sp); end;
+		end;
+		else do i=0 to last.dir.items-1;		/*	erase any other entries left on display	*/
+			call cpos(6+shr(i,3),5+(i&7)*9);
+			do j=1 to 9; call pc(sp); end;
+		end;
+	end REMOVE.PREVIOUS.ITEMS;
+
+   call tty_wait;
+
+	call SEQUENCE.SNAP.SHOT;			/*	compute list of available sequences	*/
+
+	if device.ok=0 then do;				/*	no floppy in drive	*/
+		call REMOVE.PREVIOUS.ITEMS;
+		call cpos(8,4);
+		call ps('There is no floppy diskette in your disk drive.   ');
+	end;
+	else if dir.items=0 then do;		/*	no sequences here	*/
+		call REMOVE.PREVIOUS.ITEMS;
+		call cpos(8,4);
+		call ps('There are no sequences available on this device.');
+	end;
+	else do;									/*	have some sequences	*/
+		call SORT.NAMES(dir.items);	/*	sort filenames into order	*/
+
+		if last.dir.items=0 then call REMOVE.PREVIOUS.ITEMS;
+
+		do i=0 to dir.items-1;			/*	loop over available sounds	*/
+
+			call cpos(6+shr(i,3),5+(i&7)*9);	/*	put cursor in correct field	*/
+			call PRINT.SEQ.NAME(i);
+			do j=print.fn(0)+1 to 8; call pc(sp); end;	/*	fill field with spaces	*/
+
+		end;
+
+		do i=dir.items to last.dir.items-1;	/*	erase any other entries left on display	*/
+			call cpos(6+shr(i,3),5+(i&7)*9);
+			do j=1 to 9; call pc(sp); end;
+		end;
+	end;
+
+	if #xpos>=dir.items then do; #xpos=0; #lxpos=0; end;	/*	limit pos to valid locs	*/
+	last.dir.items=dir.items;
+end FILL.SEQUENCE.DIRECTORY;
+
+REFRESH.SEQUENCE.DIRECTORY: proc swapable;
+   PRINT.SEQUENCE.DIRECTORY.DEVICE.FIELD();
+   FILL.SEQUENCE.DIRECTORY              ();
+   PRINT.DIR.DEVICE.CATNAME             ();
+   POS.SEQUENCE.DIRECTORY.CURSOR        ();
+END REFRESH.SEQUENCE.DIRECTORY;
+
+/*	$SUBTITLE  Routine to Store or Recall Up A Sequence	*/
+
+GET.SEQ.NAME: proc (index) swapable;	/*	copies name from name TRD.PTR area to TOKEN	*/
+	dcl (index,i)	fixed;	/*	INDEX is ptr to desired sequence	*/
+
+	if index<64	/*	set up ptr to desired name	*/
+	then write(mam)=trd.ptr;
+	else write(mam)=trd.ptr+1;
+	write(mal)=shl(index,2);	/*	compute index into table	*/
+
+	token(0)=0;
+	do index=0 to 3;				/*	loop over words in filename	*/
+		i=read(md)&"377";			/*	extract lower byte	*/
+		if i>sp then do;
+			call pbyte(token,token(0),i);
+			token(0)=token(0)+1;
+		end;
+		i=shr(read(mdi),8);		/*	extract upper byte	*/
+		if i>sp then do;
+			call pbyte(token,token(0),i);
+			token(0)=token(0)+1;
+		end;
+	end;
+end GET.SEQ.NAME;
+
+RECALL.OR.STORE.SEQUENCE:  PROC(INDEX,READ.FLAG) swapable;	/*	ROUTINE WHICH ACTIVATES SELECTED SEQUENCE	*/
+	DCL INDEX		FIXED;	/*	INDEX IS PTR TO DESIRED SEQUENCE	*/
+	DCL READ.FLAG	FIXED;	/*	SET TO 1 IF READ DESIRED, 0 IF STORE DESIRED	*/
+	DCL I				FIXED;
+	DCL (THE_NAME) (Cur.Seq.Path.Name.Wlen)	fixed;
+	dcl Get.Normalized.Device.Name proc (fixed,array) external;						/*	compute string for name	*/
+	dcl APPEND.TO.STR					 proc (array,array) returns(fixed) external;	/*	appends s2 to s1	*/
+
+	IF READ.FLAG=1
+	THEN CALL DRAW.MESSAGE('Loading Sequence...');
+
+	CALL GET.SEQ.NAME(INDEX);	/*	LOOK UP NAME OF SEQUENCE FROM SNAPSHOT AND PUT IT IN TOKEN		*/
+
+	CALL CLEAR.DISPLAY;			/*	CLEAR WINDOW FOR LATER MESSAGE	*/
+	CALL STOP.RECD.MOVE.PLAY.XPOS.CONT.ERAS;
+	CALL ABORT.BOUNCE.SMT.SKT;	/*	KILL FUNCTIONS	*/
+	CALL DISPLAY.SEQUENCER.RECALL.BUTTONS;
+	CALL PANEL.RESCAN;
+
+	IF INC.MONO<>0 THEN CALL STOP.DISK;
+
+	I = LOCATE(TOKEN,ACTIVE.LEVEL);	/*	SEARCH FOR FILE ON ACTIVE LEVEL	*/
+	IF I<>0 THEN DO;
+		Get.Normalized.Device.Name(ACTIVE.LEVEL, THE_NAME);		/*	get device name for this level	*/
+		Append.To.Str(THE_NAME, TOKEN);									/*	append file name						*/
+
+		IF READ.FLAG<>0
+		THEN DO;
+			SHOW.FILE.LOADING.MESSAGE = SHL(23,8);
+			IF (TRY.TO.READ.SEQ(F#MS_SECTOR,F#LS_SECTOR) == TRUE)	/*	READ SEQUENCE	*/
+			{																		/*	if could read sequence, then update	*/
+				if (NUM.OF.HELD.TRACK.BUTTONS == 0)						/*	global current seq path name if not	*/
+				{																	/*	selective track recall					*/
+					GID(Cur.Seq.Path.Name);									/*	update global seq path name on seq recall from button panel	*/
+					COPY.OUT(addr(THE_NAME(0)), Cur.Seq.Path.Name.Wlen);
+					GID(AEE.Sequence.Name);
+					COPY.OUT(addr(token(0)), AEE.Sequence.Name.Wlen);
+				}
+			}
+			SHOW.FILE.LOADING.MESSAGE= 0;
+		end;
+		else
+		{	GID(AEE.Sequence.Name);
+			COPY.OUT(addr(token(0)), AEE.Sequence.Name.Wlen);
+		}
+
+		new.prm.info = new.prm.info \ 256;	/*	update various seq name displays	*/
+		call ERASE.REST.OF.LINE(23,0);
+		call PRINT.DIR.DEVICE.CATNAME;
+		call POS.SEQUENCE.DIRECTORY.CURSOR;
+	END;
+	ELSE CALL DISPLAY.ERR(4);	/*	SEQUENCE NOT FOUND -- SYSTEM ERROR IF THIS HAPPENS	*/
+
+END RECALL.OR.STORE.SEQUENCE;
+
+/*	$SUBTITLE  Routine to Handle Chars for This Screen	*/
+
+RECALL.SEQUENCE.INPUT:  proc(in.cmd,in.arg) swapable;	/*	process input for the RECALL sequence state	*/
+	dcl (in.cmd,in.arg)	fixed;
+   dcl w0_name(50)      fixed;
+
+	do case in.cmd;
+
+		do;	/*	Character Input	*/
+			if (in.arg>=lower.a) and (in.arg<=lower.z) then in.arg=in.arg-"40";	/*	convert to uppercase	*/
+
+			if in.arg=asc.p then do;			/*	print hardcopy of screen	*/
+				if D40_PRESENT<>0					/*	if device available	*/
+				then call SCREEN_DUMP;
+				else call no.printer;
+				call POS.SEQUENCE.DIRECTORY.CURSOR;
+				return;
+			end;
+
+			if (in.arg<>esc) and (err.displayed<>0) then do;
+				call remove.err;
+				call PRINT.DIR.DEVICE.CATNAME;
+				call POS.SEQUENCE.DIRECTORY.CURSOR;
+			end;
+
+			if in.arg=esc	/*	<ESC>:  return to startup menu without changes	*/
+			then do;
+				call CHANGE.OUR.DEV(dir.device,1);	/*	switch back to using current cat device	*/
+				call RETURN.TO.PREV.STATE;
+			end;
+			else if in.arg=cret then do;				/*	<RETURN>:  recall sequence	*/
+				if dir.items<>0
+				then call RECALL.OR.STORE.SEQUENCE(#xpos,1);	/*	bring sequence to keyboard	*/
+				else do;
+					call CHANGE.OUR.DEV(dir.device,1);	/*	switch back to using current cat device	*/
+					call RETURN.TO.PREV.STATE;				/*	return to startup menu	*/
+				end;
+			end;
+			else if 0&(in.arg=tab) then do;			/*	<TAB>:  store sequence	*/
+				if dir.items<>0
+				then call RECALL.OR.STORE.SEQUENCE(#xpos,0);	/*	write sequence to disk	*/
+				else do;
+					call CHANGE.OUR.DEV(dir.device,1);	/*	switch back to using current cat device	*/
+					call RETURN.TO.PREV.STATE;				/*	return to startup menu	*/
+				end;
+			end;
+			else if in.arg=home then do;				/*	go to home position	*/
+				#xpos=0;
+				call POS.SEQUENCE.DIRECTORY.CURSOR;	/*	position cursor last spot used	*/
+			end;
+			else if in.arg=l.arr then do;				/*	move left	*/
+				if #xpos<>0 then #xpos=#xpos-1;
+				call POS.SEQUENCE.DIRECTORY.CURSOR;	/*	position cursor last spot used	*/
+			end;
+			else if in.arg=r.arr then do;				/*	move right	*/
+				if #xpos<(dir.items-1)
+				then #xpos=#xpos+1;
+				call POS.SEQUENCE.DIRECTORY.CURSOR;	/*	position cursor last spot used	*/
+			end;
+			else if in.arg=u.arr then do;				/*	move up on screen	*/
+				if shr(#xpos,3)<>0 then #xpos=#xpos-8;
+				call POS.SEQUENCE.DIRECTORY.CURSOR;	/*	position cursor last spot used	*/
+			end;
+			else if in.arg=d.arr then do;				/*	move down on screen	*/
+				if #xpos<(dir.items-8) then #xpos=#xpos+8;
+				call POS.SEQUENCE.DIRECTORY.CURSOR;	/*	position cursor last spot used	*/
+			end;
+			else if (in.arg>=asc.1) and in.arg<=(asc.0+devices) then do;	/*	select new device	*/
+
+				call CHANGE.OUR.DEV(dir.device,device.list(in.arg-asc.1));	/*	select new device	*/
+
+				dir.device=device.list(in.arg-asc.1);
+
+            REFRESH.SEQUENCE.DIRECTORY();
+			end;
+			else call POS.SEQUENCE.DIRECTORY.CURSOR;
+		end;
+
+		do;	/*	Absolute Select	*/
+			if (dir.items <> 0)
+			&  (in.arg < dir.items)
+			then do;
+				#xpos = in.arg;
+				call POS.SEQUENCE.DIRECTORY.CURSOR;
+				call RECALL.OR.STORE.SEQUENCE(in.arg,1);
+			end;
+			else do;
+				call CHANGE.OUR.DEV(dir.device,1);
+				call RETURN.TO.PREV.STATE;
+			end;
+		end;
+
+		;		/*	scroll down	*/
+		;		/*	scroll up	*/
+
+		DO;	/*	return to previous state	*/
+			call RETURN.TO.PREV.STATE;
+		END;
+	end;
+end RECALL.SEQUENCE.INPUT;
+
+/*	$Subtitle Sequence Directory Mouse Mapping 577-SEQ	*/
+
+RECALL.SEQUENCE.MOUSE.POS:  proc(x,y) public swapable;	/*	Sequence Directory Mouse positioner	*/
+	dcl (x,y)	fixed;	/*	mouse position in row/col coordinates	*/
+	dcl (i,j)	fixed;
+
+	if mouse.hole(x,y) then do;
+		call recall.sequence.input(in.rtps,0);
+		return;
+	end;
+
+	x = convert.mouse.x(x);
+	y = convert.mouse.y(y);
+
+	if (y = 4) then do;								/*	means device possibly selected	*/
+		i = 0;
+		j = 15;
+		do while (i < devices)&((x < j)\(x > (j+device.len(i)-1)));
+			j = j + device.len(i);
+			i = i + 1;
+		end;
+		if i = devices then return;
+		call recall.sequence.input(in.chin,asc.1 + i);	/*	to input routine	*/
+		return;											/*	since we are done, return	*/
+	end;
+
+	if (y > 5) & (y < 22)
+	&  (x > 5) & (x < 79)
+	then do;
+		write(5) = x-4; write(7) = 9;
+		if  (read(4) < 8)								/*	not on space	*/
+		and ((read(5)+shl((y-6),3))<dir.items)	/*	over valid item	*/
+		then do;
+			call RECALL.SEQUENCE.INPUT(in.abss,READ(5) + shl((Y-6),3));
+		end;
+	end;
+end RECALL.SEQUENCE.MOUSE.POS;
+

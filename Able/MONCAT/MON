@@ -1,0 +1,795 @@
+/* $TITLE  ABLE Series Monitor */
+
+/* Modification History: 
+   26 OCT 1983: -JSR-  MAJOR REWRITE
+   18 NOV 1983: -JSR-  FIXES TO DUAL WINCH CONFIGURATION
+   20 FEB 1984: -JSR-  ADDED PATCH COMMAND
+   03 APR 1984: -JSR-  MAJOR REWRITE OF COMMAND PARSING
+   25 APR 1984: -JSR-  ALTERED TO WORK WITH NEW OVERLAY PROCEDURE
+   04 SEP 1984: -JSR-  CHANGES FOR NEW KEYBOARD, EXT MEM
+   20 NOV 1984: -JSR-  ADDED CURRENT DEVICE
+   22 NOV 1984: -JSR-  ADDED 'SET' AND 'SHOW' COMMANDS, NEW HIGH CORE DEFS
+   01 JUN 1986: -KJO-  REVISED AND UPDATED FOR -7 CATALOG STRUCTURE
+   01 JAN 1987: -KJO-  ADDED SELF-CONFIGURATION FOR SCSI WINCHESTERS
+   17 MAR 1987: -KJC-  ADDED TRANSIENT COMMANDS AND COMMAND LINE ARGS; DO CURRENT FILE
+   26 JUN 1987: -KJC-  MINOR BUG FIXES/M512K SUPPORT
+   19 NOV 1987: -KJO-  ZERO OUT RSRVD EXT. MEMORY, SUPPORT FOR M64K CARD
+   04 MAY 1988: -KJC-  MACINTOSH SUPPORT; NESTED DO'S; ECHO OF DO'S; REMOVED 4-SECTOR DO LIMIT
+   01 MAR 1989: -MWH-  COMMAND LINE EDITING, HISTORY, MACROS, MODEL-D
+   12 JUL 1990: -LSS-  CONFIGURATION SUPPORT FOR 5-INCH OPTICAL DEVICES
+   09 OCT 1996: -CWJ-  ADDED COMMANDS (ALIAS, IMPORT, EXPORT) TO ASSIST WITH MPW COMPATIBILITY
+   21 NOV 1996: -CWJ-  ADDED MEGABYTE PRINTOUT
+   1  MAR 1997: -CWJ-  Checked for removable media in several places; also added CAT SE option
+*/
+
+CONFIGURATION MODELD,MEMORY 63*1024,HAS_BOOT;
+
+DCL REL.TITLE DATA ('Synclavier System Monitor - ');
+
+/* PDL DEFINITION: */
+
+DCL PDL.SIZE          LIT '256';  /* SIZE OF THE PUSH DOWN LIST */
+PDL PDL.SIZE;
+
+/* LITERALS: */
+
+DCL EMRSVD            LIT '32';   		/* NUMBER OF SECTORS RESERVED TO MONITOR */
+DCL WORK.IN.MEM.BASE  LIT '(48*1024)'; /* BASE OF WORK FILE WHEN IN CORE */
+DCL ABUFSZ            LIT '1024'; 		/* ALTER BUFFER SIZE */
+DCL INCLUDE.LINK      LIT '0'; 			/* SCRAP THE 'LINK' CODE TO SAVE SPACE */
+
+/* COMMANDS: */
+
+DCL COM1  DATA ('NEW OLD SAV UNS REP REN RUN CAT DIR LIN LEN NAM DDU DPA LIS RES EXT DEL ');
+DCL COM1A DATA ('        E   AVE LACEAME     ALOGECT K   GTH E   MP  TCH T   EQUERACTETE '); /* NEXT FOUR CHARS OF COM1 */
+DCL COM2  DATA ('DES SEQ LAS MOV APP JOI LOC CHA PRI IMP BOO PRO REC STO ENT CRE WRI PAU ');
+DCL COM2A DATA ('EQUEUENCT   E   END N   ATE NGE NT  ORT T   MPT ALL RE  ER  ATE TE  SE  '); /* NEXT FOUR CHARS OF COM2 */
+DCL COM3  DATA ('CLS HEL DO  DRE SET SHO COM SED DES PLA HFO LIS CON PLO ASM SFM SYN REV ');
+DCL COM3A DATA ('    P       NAME    W   PILE    KTOPY   RM  P   VERTT           THESERSE'); /* NEXT FOUR CHARS OF COM3 */
+DCL COM4  DATA ('BUI EXP EJE SLE SPI STO ');
+DCL COM4A DATA ('LD  ORT CT  EP  N   P   ');
+
+DCL SET.ARGS  DATA ('PRO TER RTP PAT TYP NAM CAT ECH LOG HIS MAC GRP '); /* ARGUMENTS TO THE 'SET' & SHOW COMMANDS */
+DCL EJE.ARGS  DATA ('W0  W0: W1  W1: ');
+
+/* DEFAULT FILE NAMES: */
+
+DCL PROFILE.CMD DATA('DO PROFILE');                   /* DEFAULT STARTUP 'DO' FILE */
+DCL USER.CMD    DATA('ENT :USER;DO PROFILE');         /* DEFAULT STARTUP 'DO' FILE */
+DCL LOGGER.CMD  DATA('OLD W0:DIAGBINS:LOGGER;RUN');   /* DEFAULT STARTUP 'DO' FILE */
+
+DCL INIT.RTPN   DATA('');                             /* DEFAULT RTP NAME */
+DCL LOADER.NAME DATA('.LD-7');                        /* DEFAULT LOADER NAME */
+DCL INIT.PATH   DATA('.SYSTEM');                      /* DEFAULT PATH NAME */
+DCL INIT.PRMT   DATA('Ready > ');                     /* DEFAULT COMMAND PROMPT */
+
+DCL (FBUFPTR,FBUFSZ) FIXED;                           /* PTR TO FBUF, FBUFSZ */
+DCL ALIASBUF(256) FIXED;                              /* FOR ALIAS PROCESSING */
+DCL LINEBUF (256) FIXED;                              /* FOR ALIAS LINE BUF   */
+
+/* INSERT FILES: */
+
+INSERT ':-XPL:RELDAT';					/* GET RELEASE DATE */
+INSERT ':-XPL:LITERALS';				/* LITERALS */
+INSERT ':-XPL:ASCIILIT';				/* ASCII LITERALS */
+INSERT ':-XPL:SCSI';						/* SCSI COMMANDS */
+INSERT ':-XPL:SCSICMDS';				/* SCSI COMMANDS */
+INSERT ':-XPL:CATRTNS';					/* CATALOG ROUTINES */
+INSERT ':-XPL:DEVUTIL';					/* DEVICE UTILITIES */
+INSERT ':-XPL:STRINGS';					/* STRING ROUTINES */
+INSERT ':-XPL:OPTICAL';					/* OPTICAL ROUTINES */
+INSERT ':-XPL:INTRPRTR';				/* INTERPRETER ROUTINES */
+
+INSERT ':MONCAT:01-DEFS';				/* GLOBAL VARIABLES */
+INSERT ':MONCAT:03-DISK';				/* DISK SUBROUTINES */
+INSERT ':MONCAT:04-IOMOD';				/* I/O ROUTINES MODULE */
+INSERT ':MONCAT:05-EDIT';				/* COMMAND LINE EDITING MODULE */
+
+WHEN BREAK THEN BREAK.RECEIVED = 1; /* SET BREAK SEMAPHORE */
+
+/* $SUBTITLE Initialization Routines */
+
+CHECK.MEM.SIZ: PROC RETURNS (BOOLEAN); /* MAKE SURE HARDWARE IS AVAILABLE FOR CONFIGURED MEMORY SIZE */
+   IF MEM.SIZ IGE (63*1024) THEN DO; /* CONFIGURED FOR 63K */
+
+      IF (READ("51") AND "100000") <> 0 THEN DO; /* THERE ARE EXTENDED BITS */
+         IF  ((READ("57") AND "4") <> 0) /* M64K BOARD IN SYSTEM */
+         AND ((READ("57") AND "2") <> 0) /* D40Q BOARD IN SYSTEM */
+         THEN RETURN (TRUE); /* HARDWARE IS AVAILABLE FOR 63K */
+      END;
+
+      MEM.SIZ = (60*1024); /* LIMIT MEMORY SIZE TO 60 K */
+      MEMORY_SECTORS = SHR(MEM.SIZ,8); /* SIZE IN SECTORS */
+      RETURN (FALSE); /* HARDWARE IS NOT AVAILABLE */
+   END;
+
+   RETURN (TRUE); /* HARDWARE IS AVAILABLE */
+END CHECK.MEM.SIZ;
+
+POLL:  PROC RETURNS (FIXED); /* DETERMINE THE AMOUNT OF M128K MEMORY AVAILABLE */
+   DCL AMOUNT FIXED;
+
+   IF (READ("51") and "1000") = 0 THEN RETURN (0); /* NO D60'S AT ALL */
+
+   WRITE("60") = 1; /* SELECT PAGE 1 */
+   IF READ("60") <> 1 THEN RETURN (0); /* FIRST BOARD NOT PRESENT */
+   WRITE("62") = 0; /* SELECT HALF */
+   IF READ("62") <> 0 THEN RETURN (0); /* FIRST HALF IS NOT STUFFED */
+
+   AMOUNT = 256; /* FIRST HALF IS PRESENT */
+   DO WHILE (AMOUNT <> 0); /* can have 65536 sectors */
+      WRITE("60") = AMOUNT; /* SELECT MEMORY PAGE */
+      IF READ("60") <> AMOUNT THEN DO; WRITE("60") = 0;RETURN (AMOUNT); END;
+
+      WRITE("62") = 0; /* STORE A ZERO THERE */
+      IF READ("62") <> 0 THEN DO; WRITE("60") = 0;RETURN (AMOUNT); END;
+
+      AMOUNT = AMOUNT + 256; /* ADVANCE TO NEXT HALF A CARD */
+   END;
+   WRITE("60") = 0; /* RESET D60 REGISTER TO VALID ADDR */
+   RETURN (-1); /* FULL 32 MBYTES */
+END POLL;
+
+SILENCE.POLY.SYNTH:  PROC;
+   DCL (I,J,K) FIXED;
+
+   DCL PSC       LIT   '"155"';  /* WRITE CHANNEL # */
+   DCL PSF       LIT   '"156"';  /* WRITE FUNCTION CODE */
+   DCL PSD       LIT   '"157"';  /* WRITE DATA HERE */
+
+   DCL PSWL      LIT   '   0 ';  /* FC  0 - MINUS WAVE TABLE LENGTH */
+   DCL PSNUMV    LIT   '  12 ';  /* FC 12 - READ APPROX # OF DA CARDS */
+   DCL PSEMOD    LIT   '  33 ';  /* FC 33 - ENVELOPE RATE MODULUS   */
+   DCL PSRCVOL   LIT   '  40 ';  /* FC 40 - RIGHT CUR  VOL          */
+
+   IF (READ("51") and "2000") <> 0 THEN DO; /* CHECK POLY SYNTH EXIST BIT */
+      DO I = 0 TO 192 BY 64; /* ZERO EACH OF 4 SUBSYSTEMS  */
+         WRITE(PSC) = I + 1; /* CHECK FOR SYSTEM EXISTS */
+         IF READ(PSC) = I + 1 THEN DO; /* SUBSYSTEM EXISTS */
+            WRITE(PSF) = 20; WRITE(PSD) = 0; /* RESET COMPUTER INTERFACE */
+            WRITE(PSF) = PSNUMV;
+            K = (READ(PSD) and "17")*4; /* NUMBER OF VOICES */
+            IF (READ(PSD) and "20") = 0 THEN K = 0; /* NO VOICES IF NO ENV #0  */
+            IF ((READ(PSD) and "40") = 0) and (K > 16) /* LIMIT TO 16 VOICES IF   */
+            THEN K = 16; /* NO SECOND ENV CARD */
+            DO J = 0 TO 63; /* ZERO OUT EACH CHANNEL - INCLUDING GHOST/REFRESH CHANNEL(S) */
+
+               WRITE(PSC) = I+J; WRITE(PSF) = PSWL;
+               WRITE(PSD) =  -1; WRITE(PSD) = 0; /* WAVE TABLE LENGTH OF 256 */
+               WRITE(PSD) =   0; WRITE(PSD) = 0; /* BASE ADDRESS OF 0        */
+               WRITE(PSD) =  -1; WRITE(PSD) = 0; /* LOOP LENGTH OF 256       */
+               WRITE(PSD) =   0; WRITE(PSD) = 1; /* PHASE INCR OF    1       */
+               WRITE(PSD) =   0;                 /* INCR OF 1                */
+               WRITE(PSD) = 255;                 /* MODULUS OF 1             */
+               WRITE(PSD) =   0;                 /* OFF NO LOOP              */
+
+               IF J < K THEN DO; /* ZERO ENV/VOL ITEMS FOR EXISTING DACS */
+                  WRITE(PSF) = PSEMOD; /* WRITE ENV INFO           */
+                  WRITE(PSD) = 4095; WRITE(PSD) = 4095;/* MODULUS 1, INCR 4096     */
+                  WRITE(PSD) = 1; WRITE(PSD) = 4095;/* DELTA, COUNT             */
+                  WRITE(PSD) = 4095;  /* ENV ACCUMULATOR          */
+                  WRITE(PSD) = 0; WRITE(PSD) = 0; /* LIMIT, CVAL              */
+
+                  WRITE(PSF) = PSRCVOL; /* WRITE VOL INFO           */
+                  WRITE(PSD) = 0; WRITE(PSD) = 0; /* R, L CVOL                */
+                  WRITE(PSD) = 0; WRITE(PSD) = 0; /* R, L DVOL                */
+               END;
+            END;        /* OF CHANNEL LOOP */
+         END;           /* OF SUBSYST EXISTS */
+      END;              /* OF LOOP OVER SUBSYSTEMS */
+      WRITE(PSC) = 0;   // Avoide problems with PSC shadow register by keeping a legit channel number in it
+   END;                 /* OF POLY SYST EXISTS     */
+END SILENCE.POLY.SYNTH;
+
+/* $PAGE */
+
+SILENCE.VOICES:  PROC; /* SILENCE VOICES */
+   DCL (I,J) FIXED;
+   DCL INIT.DATA  DATA (255,255,0,0,0,0,0,0,255,255,0,0);
+
+   IF D160_PRESENT THEN DO; /* D160 IS PRESENT */
+      DO I = 0 TO 255; /* ZERO OUT ALL POSSIBLE SYNTH CHANNELS */
+         DO J = 0 TO 11; /* ALL FUNCTIONS */
+            WRITE("160") = I;
+            WRITE("161") = J;
+            WRITE("162") = INIT.DATA(J);
+         END;
+      END;
+   END;
+END SILENCE.VOICES;
+
+CLEAR.KEYBOARD:  PROC;
+   DCL (I,J) FIXED;
+
+   IF D130_PRESENT THEN DO; /* D130 IS PRESENT */
+      WRITE("131") = "105"; /* CHECK KEYBOARD TYPE */
+      IF READ("130") = 1 THEN DO; /* OLD KEYBOARD */
+         DO I = 0 TO 15; /* CLEAR LIGHT PANEL */
+            WRITE("131") = I; WRITE("130") = 0;
+            WRITE("131") = I or "40"; WRITE("131") = I;
+         END;
+      END;
+      ELSE DO; /* VELOCITY/PRESSURE KEYBOARD */
+         WRITE("131") = 3; /* SET UP D130 TO INDICATE LIGHTS */
+         DO I = 0 TO 159; /* LOOP OVER LIGHTS */
+            WRITE("130") = SHL(I,8) or 0;
+            WRITE("131") = 3 or "40"; WRITE("131") = 3; /* PULSE EXW */
+         END;
+         WRITE("131") = 2; /* INDICATE ALPHA DISPLAY */
+         DO I = 0 TO 31; /* CLEAR CHARS */
+            WRITE("130") = SHL(I,8) or "40"; /* WRITE OUT A SPACE */
+            WRITE("131") = 2 or "40"; WRITE("131") = 2; /* PULSE EXW */
+         END;
+         DO I = 32 TO 52 BY 4; /* CLEAR DECIMAL POINTS */
+            WRITE("130") = SHL(I,8) or "0"; /* WRITE ZERO */
+            WRITE("131") = 2 or "40"; WRITE("131") = 2; /* PULSE EXW */
+         END;
+      END; /* OF V-P KEYBOARD */
+   END; /* OF D130 IS PRESENT */
+END CLEAR.KEYBOARD;
+
+/* $SUBTITLE Set Winchester Size */
+
+dcl SCSI_Error		boolean; /* TRUE if there is an error accessing the SCSI drives */
+dcl OPTICAL_Error	boolean;
+
+dcl is_removable(10) fixed;
+dcl inqbuf(INQ_BUF_SIZE_BYTES/2) fixed;
+dcl capbuf(4)                    fixed;
+dcl winpoll_needed					fixed;
+
+PrintSCSIAddress: proc(devadr); /* print SCSI device address */
+	dcl devadr fixed; /* device address to print out */
+
+	call pchar ((shr(devadr, 4) and "17") + a.0); call pchar (a.comma);
+	call pchar ((devadr and "17") + a.0); call pchar (a.comma);
+	call pchar ((shr(devadr, 8) and "17") + a.0);
+end PrintSCSIAddress;
+
+Set_Win_Size: proc(dev); /* set size of specified winchester(s) in config table */
+   dcl dev     fixed; 	 /* device to confirm */
+	dcl status	fixed;
+   
+   PrintHeader: proc;
+      call newline;
+      call pstringr ('** ERROR: Unable to access all SCSI disk drives. Please check');
+      call pstringr ('**        the configuration, power and cabling of the following:');
+      call newline;
+      SCSI_Error = TRUE; /* there is an error with the scsi drives */
+   end PrintHeader;
+			
+	is_removable(dev) = false;							/* assume device will not be removable */
+		
+	status = Set_Win_Chain_Size(dev);				/* interrogate the chain					*/
+	
+	if (status == S$Good)								/* if good status, check removable bit	*/
+	{
+		if ((dev == 6) && ((core(loc.monbits) & m#w0_ej) != 0))
+			is_removable(6) = true;			
+		
+		if ((dev == 7) && ((core(loc.monbits) & m#w1_ej) != 0))
+			is_removable(7) = true;
+
+		return;												/* done											*/
+	}
+
+	winpoll_needed = true;								/* try again before next command			*/
+
+	if (status == S$BadDevice)							/* bad device means IMI device...		*/
+	{
+		call pstringr ('** ERROR: IMI and SCSI drives cannot be configured on same device');
+		SCSI_Error = TRUE; /* error with SCSI drives */
+		return;
+	}
+
+	if not SCSI_Error then call PrintHeader;		/* print header if neccessary 			*/
+	
+	call pstr ('    SCSI Disk Drive at address ');
+	call PrintSCSIAddress(Chain_Prob_Adr); /* print address */
+	call pstr (': ');
+	
+	if status < 0 then do; /* connection failure */
+		if status = S$SelFailed then call pstringr ('Drive not found');
+		else if status = S$D24NotThere then call pstringr ('D24 board not found');
+		else do; call pstr ('Connection status = '); call pdec (0, status, 0); call newline; end;
+	end;
+	else do; /* bad sense key */
+		if      status = S$DeviceBusy     then call pstringr ('Drive is busy');
+		else if status = S$DeviceReserved then call pstringr ('Drive is being used by another computer');
+		else if status = S$NotReady       then call pstringr ('Drive not ready');
+		else do; call pstr ('Bad Sense Key = '); call pdec (0, status, 0); call newline; end;
+	end;
+			
+end Set_Win_Size;
+
+dcl	STOP_CODE	lit '0';
+dcl	START_CODE	lit '1';
+dcl	EJECT_CODE	lit '2';
+
+Eject_Disk: proc(dev, code);
+	dcl dev  		fixed;
+	dcl code 		fixed;
+	dcl ptr  		fixed;
+	dcl stat 		fixed;
+	dcl win_type	fixed;
+	dcl i          fixed;
+   
+	ptr = find_device(dev);											/* point to first device entry				*/
+	
+   if (ptr == 0) then do;
+      call pcn;
+		call pstringr ('Device is not configured');
+		return;
+	end;	
+	
+	if (code == EJECT_CODE && is_removable(dev) != true)
+	{
+	   SET_WIN_SIZE(dev);											/* re-poll in case was not ready			   */
+		
+		if (code == EJECT_CODE && is_removable(dev) != true)
+		{
+			call pcn;
+			call pstringr ('Device is not removable');
+			return;
+		}
+	}
+	
+	if (code == EJECT_CODE && interp_check_media_use(0, dev) != 0)
+	{
+		call pcn;
+		call pstringr ('Device is being used by InterChange and cannot be ejected now');
+		return;
+	}
+	
+	if (code == EJECT_CODE && dev == 7)							/* special checks for eject of w1			*/
+	{
+		if (shr(udev, 8) == 7)
+		{
+      	call pcn;
+			call pstringr ('ENTER W0: before ejecting W1.');
+			return;
+		}
+		
+		if (shr(pdev, 8) == 7)
+		{
+      	call pcn;
+			call pstringr ('set PATH to W0:.SYSTEM before ejecting W1.');
+			return;
+		}
+		
+		if (filmed == 0 && shr(fildev, 8) == 7)
+		{
+			FILNG = 0; FILNS = 0; BSTRT = 0; BLEN = 0; BALT = 0; FILTP = 0; FSTRT = 0;
+			STORED = 0; SAVED = 0; /* NEW FILES ARE NOT SAVED */
+			AFLNG = 0; /* NO ALTER LINES FOR NEW FILE */
+			CALL MOVE.NAME('',CNAM); /* GET NEW FILE NAME */
+			CALL STORE.NAME(CNAM); /* SAVE POSSIBLY NEW NAME IN UPPER MEMORY */
+		}
+		
+		winpoll_needed = true;										/* poll before next command					*/
+	}
+		
+   win_type = core(ptr + s#devtyp) & 0xFF;					/* get W0 vs W1 indication						*/
+	stat     = S$Good;												/* init to good status							*/
+	
+   while ((stat == S$Good)
+	&&     ((core(ptr + s#devtyp) & 0xFF) == win_type))	/* loop until device type changes (not W0 or W1 anymore) */
+	{
+		if (code == EJECT_CODE)										/* must allow media removal for eject		*/
+		{
+			if (PreventAllow(core(ptr + s#devadr), 0) != S$Good)
+				PreventAllow(core(ptr + s#devadr), 0);
+		}
+		
+		stat = StartStopUnit(core(ptr + s#devadr), code, 1);
+		
+		if ((stat == S$IllegalRequest)							/* Ez-drive requires media removal			*/
+		&&  (code == EJECT_CODE || code == STOP_CODE))		/* to be enabled to eject or sleep...		*/
+		{	
+			PreventAllow(core(ptr + s#devadr), 0);				/* allow spin-down (ugh!)						*/
+			do i = 0 to 100; write(3) = 0; end;					/* need delay as well (ugh!! ugh!!)			*/
+			stat = StartStopUnit(core(ptr + s#devadr), code, 1);
+		}
+
+		if (stat == S$DeviceBusy)
+		{
+      	call pcn;
+			call pstringr('Failed: device is busy');
+		}
+		
+		else if (stat != S$Good)
+		{
+			call pcn;
+			call pstr('Failed: Bad status: '); call pdec (0, stat, 0); call newline;
+		}
+	
+		ptr = ptr + s#blklen;
+	}
+	
+	if (stat != S$Good)												/* quit while we are ahead if bad status	*/
+		return;
+		
+	if ((code            == EJECT_CODE)							/* if ejecting 									*/
+	&&  (dev             == 6         )							/* w0													*/
+	&&  (is_removable(7) == true      ))						/* and w1 is removable...						*/
+	{																		/* then allow manual removal of w1			*/
+		ptr = find_device(7);										/* point to first W1 drive						*/
+		
+   	if (ptr != 0)
+		{
+   		win_type = core(ptr + s#devtyp) & 0xFF;			/* get W1 indication								*/
+			
+			while ((core(ptr + s#devtyp) & 0xFF) == win_type)
+			{
+				if (PreventAllow(core(ptr + s#devadr), 0) != S$Good)
+					PreventAllow(core(ptr + s#devadr), 0);
+				
+				ptr = ptr + s#blklen;
+			}
+		}
+	}
+	
+	if (dev == 6 && systyp != 0 && code == EJECT_CODE)
+	{
+      call pcn;
+      call pstringr ('W0 Ejected. System now halting...');
+		stop(0);
+	}
+	
+	if (EMSIZE != 0 && code == EJECT_CODE)						/* toss poly cache on eject of W0/W1 		*/
+	  	call extset(core(loc.emarea), em.polycache, 1, 0);
+	
+end Eject_Disk;
+
+Set_Optical_Type: proc(dev); /* poll for optical drive; allow media removal if so */
+   dcl dev	fixed;
+   dcl ptr	fixed;
+	dcl stat fixed;
+	dcl dtyp fixed;
+
+   PrintHeader: proc;
+      call newline;
+      call pstringr ('** ERROR: Unable to access all SCSI Optical drives. Please check');
+      call pstringr ('**        the configuration, power and cabling of the following:');
+      call newline;
+      OPTICAL_Error = TRUE; /* there is an error with the scsi drives */
+   end PrintHeader;
+
+   ptr = find_device(dev); /* get device */
+   if ptr = 0 then return; /* not configured */
+   
+   stat = Inquiry(core(ptr + s#devadr), INQ_BUF_SIZE_BYTES, inqbuf);	/* start with inquiry		*/
+	
+   if stat <> S$Good then do;
+   	if not OPTICAL_Error then call PrintHeader; /* print OPTICAL header if neccessary */
+		
+		call pstr ('    SCSI Optical Drive at address ');
+		call PrintSCSIAddress(core(ptr + s#devadr)); /* print address */
+		call pstr (': ');
+		if stat < 0 then do; /* connection failure */
+			if stat = S$SelFailed then call pstringr ('Drive not found');
+			else if stat = S$D24NotThere then call pstringr ('D24 board not found');
+			else do; call pstr ('Connection status = '); call pdec (0, stat, 0); call newline; end;
+		end;
+		else do; /* bad sense key */
+			if      stat = S$DeviceBusy     then call pstringr ('Drive is busy');
+			else if stat = S$DeviceReserved then call pstringr ('Drive is being used by another computer');
+			else if stat = S$NotReady       then call pstringr ('Drive not ready');
+			else do; call pstr ('Bad Sense Key = '); call pdec (0, stat, 0); call newline; end;
+		end;
+		
+		return;
+	end;
+	
+   dtyp = byte(inqbuf,0) & 0x1F; /* get specific type of optical device */
+
+   if ((dtyp != 0) && (dtyp != 4))
+	{
+   	if not OPTICAL_Error then call PrintHeader; /* print OPTICAL header if neccessary */
+		
+		call pstr ('    SCSI Optical Drive at address ');
+		call PrintSCSIAddress(core(ptr + s#devadr)); /* print address */
+		call pstr (': ');
+		call pstr ('Bad Peripheral Device Type = '); call pdec (0, dtyp, 0); call newline;
+		
+		return;
+	}
+
+	PreventAllow(core(ptr + s#devadr), 0);	/* allow removal of media from winch in case we just ran configur and changed it from w1 to O0 */
+
+end Set_Optical_Type;
+
+/* $SUBTITLE Cold Bootload */
+
+COLD.BOOT:  PROC(VALID.MEM.CONFIG); /* INITIALIZE FOR A COLD BOOT */
+  DCL VALID.MEM.CONFIG BOOLEAN; /* TRUE IF CONFIGURED MEMORY SIZE WAS VALID */
+  DCL FOUND            BOOLEAN; /* TRUE WHEN A FILE IS FOUND */
+  DCL (MS,LS)          FIXED;
+  DCL I                FIXED;
+
+  /*  PRINT RELEASE DATE.  COPY CONFIG TO HIGH CORE AREA.  SET COMMAND
+      PROMPT.  SET UP USER CATALOG INFO.  SET CURRENT FILE AS EMPTY.
+      SAVE LOCATION AND TYPE OF '.WORK'
+  */
+
+  CALL NEWLINE; CALL PSTR (REL.TITLE); CALL PSTRINGR (REL.DATE); /* PRINT THE RELEASE DATE */
+
+  IF TERMINAL.MODEL = T#MACINTOSH THEN DO; /* IF THIS IS A MAC */
+     CALL PCHAR (A.GS); /* ENTER VECTOR MODE */
+     CALL PCHAR (A.ESC); CALL PSTR ('!5M'); /* TURN OFF AUTO-MOUSE REPORTING */
+     CALL PCHAR (A.CAN); /* BACK TO TRANSPARENT MODE */
+  END;
+
+  DO I = -256 TO -1; CORE(MEM.SIZ + I) = 0; END; /* ZERO OUT UPPER MEMORY TO INITIALIZE */
+  CALL MOVE.NAME(INIT.PRMT,LOCATION(LOC.PRMT)); /* SET COMMAND PROMPT */
+  CALL MOVE.NAME(INIT.RTPN,LOCATION(LOC.SYNRTPN)); /* SET RTP NAME */
+
+  CORE(LOC.MAGIC) = 12345; /* SET MAGIC NUMBER */
+
+  IF NOT VALID.MEM.CONFIG THEN DO; /* CONFIGURED MEMORY SIZE WAS NOT VALID */
+     CALL NEWLINE;
+     CALL PSTRINGR ('WARNING: Hardware not available for configured memory size.');
+  END;
+
+  CORE(C#CONTAB + C#CURTRK) = LOC.HEADPOS; /* SET LOWCORE HEAD POSITION POINTER TO POINT TO HIGHCORE */
+  
+  IF FIND_DEVICE (2) <> 0 THEN DO; 	/* RESTORE F0 IF IT'S THERE */
+     CALL RESTORE.HEAD(SHL(2,8)); 	/* RESTORE F0 */
+  END;
+  IF FIND_DEVICE (3) <> 0 THEN DO; 	/* RESTORE F1 IF IT'S THERE */
+     CALL RESTORE.HEAD(SHL(3,8)); 	/* RESTORE F1 */
+  END;
+
+  IF FIND_DEVICE (4) <> 0 THEN DO; /* RESTORE R0 IF IT'S THERE */
+     WRITE("114") = 0; /* SELECT R0 */
+     WRITE("110") = "HD0"; /* ABORT R0 (JUST IN CASE SOMETHING IS PENDING) */
+     CALL RESTORE.HEAD(SHL(4,8)); /* RESTORE R0 */
+  END;
+  IF FIND_DEVICE (5) <> 0 THEN DO; /* RESTORE R1 IF IT'S THERE */
+     WRITE("114") = 1; /* SELECT R1 */
+     WRITE("110") = "HD0"; /* ABORT R1 (JUST IN CASE SOMETHING IS PENDING) */
+     CALL RESTORE.HEAD(SHL(5,8)); /* RESTORE R1 */
+  END;
+
+  SCSI_ERROR = FALSE; /* ASSUME NO ERRORS ACCESSING THE SCSI DRIVES */
+  CALL SET_WIN_SIZE(6); /* SET SIZE OF SCSI DRIVES ON W0: */
+  CALL SET_WIN_SIZE(7); /* SET SIZE OF SCSI DRIVES ON W1: */
+
+  CALL SET_OPTICAL_TYPE(10); /* see if O0 exists; allow media removal if so */
+  CALL SET_OPTICAL_TYPE(11); /* see if O1 exists; allow media removal if so */
+
+  IF SYSTYP = 0 THEN DO; /* FOR FLOPPY SYSTEM */
+    SDEV = SHL(2,8); /* SYSTEM CATALOG IS F0 */
+    UDEV = SHL(3,8); /* USER CATALOG IS F1 */
+    IF FIND_DEVICE(3) = 0 THEN UDEV = SDEV; /* NO F1 - USE F0 INSTEAD */
+  END;
+  ELSE DO; /* WINCHESTER SYSTEM */
+    SDEV = SHL(6,8); /* SYSTEM CATALOG IS W0 */
+    UDEV = SDEV; /* USER CATALOG IS SAME */
+  END;
+
+  IF READ_CATALOG('',SHR(SDEV,8)) THEN DO; /* TRY TO READ SYSTEM CATALOG */
+     SCAT = C#LS_SECTOR; SLEN = C#DIR_SIZE; /* SET SECTOR AND CATALOG SIZE */
+     SMAXMS = C#MS_LENGTH; SMAX = C#LS_LENGTH; /* SET CATALOG LENGTH */
+
+     IF SDEV = UDEV THEN DO; /* SET UP CURRENT CATALOG */
+        UCAT = SCAT; ULEN = SLEN; UMAXMS = SMAXMS; UMAX = SMAX; /* SET CURRENT SAME AS SYSTEM DEVICE */
+     END;
+     ELSE IF READ_CATALOG('',SHR(UDEV,8)) THEN DO; /* TRY TO READ CURRENT CATALOG */
+        UCAT = C#LS_SECTOR; ULEN = C#DIR_SIZE; /* SET SECTOR AND CATALOG SIZE */
+        UMAXMS = C#MS_LENGTH; UMAX = C#LS_LENGTH; /* SET CATALOG LENGTH */
+     END;
+     ELSE DO; /* COULDN'T READ CURRENT CATALOG */
+        UDEV = SDEV; UCAT = SCAT; ULEN = SLEN; UMAXMS = SMAXMS; UMAX = SMAX; /* SET USER SAME AS SYSTEM */
+        CALL NEWLINE;
+        CALL PSTR ('User catalog could not be read - user catalog is being set to ');
+        CALL PRINT.DEVICE (UDEV); CALL PSTRINGR (':');
+        CALL CAT.ERROR; /* PRINT CATALOG ERROR */
+     END;
+  END; /* OF TRY TO READ SYSTEM CAT */
+  ELSE DO; /* SYSTEM CATALOG CANNOT BE READ */
+     CALL NEWLINE;
+     CALL PSTRINGR ('System catalog could not be read:');
+     CALL CAT.ERROR;
+  END;
+
+  CALL SET_CURDEV(SHR(UDEV,8)); /* SET UP USER CURRENT DEVICE IN LOW CORE */
+
+  DO I = C#OFFSET TO C#CONLEN - 1; CORE(LOC.CTAB + I - C#OFFSET) = CORE(C#CONTAB + I); END; /* COPY CONFIG INFO INTO HIGH-CORE (DO IT NOW TO CATCH CURDEV) */
+
+  /* FIND OUT WHERE STANDARD SYSTEM FILES ARE */
+
+  PDEV = SDEV; PCAT = SCAT; PLEN = SLEN; /* PATH DEFAULT IS SYSTEM DEVICE */
+  IF ENTER_ALTERNATE(INIT.PATH,0) THEN DO; /* TRY TO OPEN DEFAULT PATH CATALOG ON SYSTEM DEVICE */
+     PDEV = C#MS_SECTOR; PCAT = C#LS_SECTOR; /* SET PATH DEVICE AND STARTING SECTOR */
+     PLEN = C#DIR_SIZE;  /* SET PATH CATALOG SIZE */
+     CALL MOVE.NAME(INIT.PATH,LOCATION(LOC.PCNM)); /* SET PATH NAME */
+  END;
+  ELSE IF C#STATUS <> E#NO_PATH THEN CALL CAT.ERROR; /* DISPLAY CATALOG ERROR */
+  PMAXMS = 0; PMAX = SHR(PLEN,8); /* SET PATH LENGTH */
+
+  I = 0; FOUND = FALSE;
+  DO WHILE (I < 2) AND (NOT FOUND); /* SEARCH FOR LOADER ON VARIOUS CATALOGS */
+     IF I = 0 
+     THEN FOUND = LOCATE(LOADER.NAME,-2); /* SEARCH PATH CATALOG */
+     ELSE FOUND = LOCATE(LOADER.NAME, 0); /* SEARCH SYSTEM CATALOG */
+     I = I + 1;
+  END;
+
+  IF FOUND THEN DO; /* FILE FOUND, SO GET LOADER CODE */
+     IF SYSTYP = 0 THEN I = 0; /* FLOPPY SYSTEM */
+     ELSE DO; /* WINCHESTER SYSTEM */
+        IF (SHR(CORE(FIND_DEVICE(0)),8) AND "3") = 1 THEN I = 2; /* SCSI WINCHESTER */
+        ELSE I = 1; /* IMI WINCHESTER */
+     END;
+     MS = F#MS_SECTOR; /* DETERMINE SECTOR OF PROPER LOADER */
+     LS = F#LS_SECTOR + SHL(I,1) + I;
+     IF LS ILT F#LS_SECTOR THEN MS = MS + 1;
+     CALL READDATA(MS,LS,LOCATION(LOC.LOAD),768); /* READ IN LOADER */
+     NO_OVERLAY = 0;
+  END;
+  ELSE DO; /* FILE NOT FOUND, SO PRINT ERROR */
+     CALL NEWLINE;
+     IF C#STATUS <> E#NO_FILE THEN CALL CAT.ERROR; /* DISPLAY CATALOG ERROR */
+     CALL PSTR ('System Error:  '); CALL PSTR (LOADER.NAME);
+     CALL PSTRINGR (' file missing.  You will not be able to RUN any programs.');
+     NO_OVERLAY = 1; /* DISALLOW OVERLAYS */
+  END;
+
+  IF TERMINAL.TYPE > T#HARDCOPY THEN SCREEN = 24; /* SET UP TERM DEFAULT AS 24 LINES */
+ 
+  IF LOCATE('.WORK',0) THEN DO; /* SEARCH FOR .WORK FILE IN SYSTEM CATALOG */
+     WORKDEV = F#MS_SECTOR; /* DEVICE AND MS STARTING SECTOR */
+     WORKSEC = F#LS_SECTOR; /* LS STARTING SECTOR */
+     WORKNS  = F#LS_LENGTH; /* LENGTH IN SECTORS */
+     WORKLEN = F#WORDS;     /* LENGTH IN WORDS MOD 64K */
+  END; /* WORK FILE FOUND */
+  ELSE WORKMED = 1; /* NO .WORK FILE - HAS TO BE IN CORE - PTRS SET UP BELOW */
+
+  EMSIZE = POLL; /* DETERMINE EXTERNAL MEM SIZE AVAIL IN SECTORS */
+  IF EMSIZE <> 0 THEN DO; /* IF WE HAVE EXTERNAL MEMORY */
+     IF EMSIZE = -1 /* IF ALL OF MEMORY */
+     THEN EMSIZE = -EMRSVD; /* SUBTRACT FROM 0 */
+     ELSE EMSIZE = EMSIZE - EMRSVD; /* SUBTRACT OFF RESERVED SECTORS */
+
+     CALL EXTSET(CORE(LOC.EMAREA),0,SHL(EMRSVD,8),0); /* ZERO OUT RESERVED AREA */
+
+     /** For TESTING - include the next line so that cold boot does not wipe out poly cache **/
+     /* call extset(core(loc.emarea), em.polycache, 1, 1); */
+     /** SPECIAL for TESTING **/
+
+  END; /* OF WE HAVE EXTERNAL MEMORY */
+
+  // If not booting to monitor, check for logger and check where profile file might be
+  if ((interp_real_time_prefs(0) & SYNCLAVIER_PREF_BOOT_MONITOR) == 0) {
+     if ((interp_real_time_prefs(0) & SYNCLAVIER_PREF_BOOT_LOGGER) != 0) {
+        CALL MOVE.NAME(LOGGER.CMD,LOCATION(LOC.TYB));          /* PUT LOGGER COMMAND INTO BUFFER */
+        CALL PBYTE(LOC(LOC.TYB), LOGGER.CMD (0), a.CR);        /* ADD ENDING CR */
+        interp_clear_boot_args(SYNCLAVIER_PREF_BOOT_LOGGER);   // Boot to logger just once
+     }
+     else if (interp_w0_write_protected(0) == 0) {
+        CALL MOVE.NAME(PROFILE.CMD,LOCATION(LOC.TYB));   /* PUT 'DO PROFILE' COMMAND INTO BUFFER */
+        CALL PBYTE(LOC(LOC.TYB), PROFILE.CMD (0), a.CR); /* ADD ENDING CR */
+     }
+     else {
+        CALL MOVE.NAME(USER.CMD,LOCATION(LOC.TYB));      /* PUT 'ENT USER; DO PROFILE' COMMAND INTO BUFFER */
+        CALL PBYTE(LOC(LOC.TYB), USER.CMD (0), a.CR);    /* ADD ENDING CR */
+     }
+     INCH = BYTE(LOCATION(LOC.TYB),0); /* GET FIRST CHARACTER */
+     TYBP = 1; /* INIT TYB POINTER */
+     CORE(LOC.TYB) = -1; /* FUDGE LENGTH WORD TO SUPPRESS ERROR MSG IN DO */
+     BREAK.RECEIVED = 0; /* IGNORE ANY BREAKS DURING INIT */
+  }
+
+  else {
+     TYBP = 0;
+     inch = a.cr;
+  }
+
+  IF SCSI_ERROR /* ERROR OCCURRED ACCESSING SCSI DRIVES - ABORT PROFILE */
+  THEN CORE(LOC.RST) = -1; /* ABORT COMMAND LINE */
+  ELSE CORE(LOC.RST) = 0; /* FAKE RETURN CODE INDICATING SUCCESS (2 IS ALSO OKAY) */
+END COLD.BOOT;
+
+/* $SUBTITLE Warm Bootload */
+
+WARM.BOOT:  PROC; /* INITIALIZE FOR A WARM BOOT */
+   DCL I FIXED;
+   DCL FOUND BOOLEAN; /* TRUE WHEN A FILE IS FOUND */
+
+   REDIRECTION_WORD = NO_REDIRECTION;  /* DON'T REDIRECT ANY INPUT OR OUTPUT */
+   CORE(LOC.CTAB + C#REDRCT - C#OFFSET) = NO_REDIRECTION;
+
+   IF CORE(C#CONTAB + C#CURTRK) <> LOC.HEADPOS THEN DO; /* IF LOWCORE POS DOESN'T POINT TO HICORE, LOAD WAS PRESSED AND WE OVERLAYED FROM ROM */
+      CORE(C#CONTAB + C#CURTRK) = LOC.HEADPOS; /* SET LOWCORE HEAD POSITION POINTER TO POINT TO HIGHCORE */
+      CORE(LOC.HEADPOS) = 0; /* THE ROM PERFORMED A RESTORE OF F0 - RESET IT'S HEAD POSITION */
+
+      DO I = 0 TO (C#CONLEN - C#OFFSET - 1); /* COPY THE HIGHCORE CONFIGURATION TO LOWCORE SINCE THE ROM DOESN'T DO THIS */
+         CORE(C#CONTAB + C#OFFSET + I) = CORE(LOC.CTAB + I);
+      END;
+
+      CORE(LOC.RST) = -1; /* OBVIOUSLY A BAD RETURN STATUS (PROGRAM NEVER COMPLETED) */
+   END; /* OVERLAYED TO FROM ROM */
+
+	CALL SET_WIN_SIZE(6); /* poll winchesters in case new media has different size... */
+	CALL SET_WIN_SIZE(7);
+
+	CALL SET_OPTICAL_TYPE(10); /* see if O0 exists; allow media removal if so */
+	CALL SET_OPTICAL_TYPE(11); /* see if O1 exists; allow media removal if so */
+
+   /* SEARCH FOR DUMMY FILE AND DELETE IT */
+   IF (SHR(FILDEV,8) = SHR(SDEV,8)) THEN FOUND = DELETE(SYS_DUMMY,0); /* TRY TO DELETE DUMMY FILE FROM SYSTEM CATALOG  */
+END WARM.BOOT;
+
+/* $SUBTITLE  Main Program */
+
+MON:  PROC(FBUF,FBUFSZ); /* MAIN MONITOR ROUTINE */
+   DCL FBUF   ARRAY; /* FILE BUFFER */
+   DCL FBUFSZ FIXED; /* BUFFER SIZE */
+
+   CALL SILENCE.POLY.SYNTH; /* SILENCE THE POLYPHONIC SAMPLING UNIT */
+   CALL SILENCE.VOICES; /* SILENCE ANY VOICES */
+   CALL CLEAR.KEYBOARD; /* CLEAR THE KEYBOARD */
+
+   INSERT ':MONCAT:06-BUFFR';    /* TEXT BUFFERING AND EDITING ROUTINES */
+   INSERT ':MONCAT:07-CATRT';    /* CATALOG PROCESSING SUBROUTINES */
+   INSERT ':MONCAT:08-CATLG';    /* THE CATALOG COMMAND */
+   INSERT ':MONCAT:09-MISC';     /* MISCELLANEOUS SUBROUTINES */
+   INSERT ':MONCAT:10-RUN';      /* SUBROUTINES FOR RUN & OVERLAY FUNCTIONS */
+   INSERT ':MONCAT:11-MAIN';     /* COMMAND PARSER AND MAIN ROUTINES */
+END MON;
+
+/***** MAIN PROGRAM CODE *****/
+
+interp_set_quit_menu('');
+
+WRITE("300") = 12345; 				/* CHECK FOR MODEL B PROCESSOR */
+WRITE("260") = 0; 					/* IM(0) to BSOR0 */
+
+IF READ("300") <> ROT(12345, 8)	/* MODEL A DOESN'T HAVE A BSOR INSTRUCTION */
+THEN DO; 								/* this must be a model A */
+   CALL PSTRINGR ('This version of the MONITOR does not support the model A processor.');
+   STOP(0); /* HALT */
+END;
+
+DCL VALID.MEM.CONFIG BOOLEAN;
+
+VALID.MEM.CONFIG = CHECK.MEM.SIZ; /* MAKE SURE CONFIGURED MEMORY SIZE IS VALID */
+
+interp_set_config();					/* if running on interpreter, set up config area */
+
+CALL SET_CATBUF (ADDR(CBUF (0)), 0);  /* SET THE CATALOG BUFFER */
+CACHE.NUM = CACHE(C#BUFPTR,C#BUFMED); /* CACHE NEXT CATALOG */
+
+IF (CORE(LOC.MAGIC) <> 12345) OR (SYSTYP <> CORE(LOC.PSYS)) /* INITIAL PROGRAM LOAD */
+THEN CALL COLD.BOOT(VALID.MEM.CONFIG); /* DO A COLD BOOT */
+ELSE CALL WARM.BOOT; /* DO A WARM BOOT */
+
+/* PARSE OUT MEMORY FOR THE .WORK FILE AND BUFFER:
+  (BUF=FILE BUFFER, .WORK=THE FILE, TOP=TOP OF MEMORY, BOT=BOTTOM OF AVAIL MEM)
+  
+   DISK   .WORK FILE:    BOT < BUF < BOT+32K
+   MEMORY .WORK FILE:    BOT < BUF < WORK.IN.MEMBASE, WORK.IN.MEM.BASE < .WORK < TOP
+*/
+ 
+DCL (TOP,BOT) FIXED;
+
+BOT = CORE(C#CONTAB) + CORE(C#CONTAB + 1) + PDL.SIZE; /* PTR TO START OF AVAILABLE MEMORY */
+TOP = LOC.LOAD; /* PTR TO END OF AVAILABLE MEMORY */
+
+FBUFPTR = BOT; /* BUFFER ALWAYS STARTS HERE */
+IF WORKMED = 0 THEN DO; /* .WORK ON DISK */
+   FBUFSZ = (TOP - FBUFPTR) and "177400"; /* TRUNCATE TO SECTOR LENGTHS */
+   IF FBUFSZ IGT 32768 THEN FBUFSZ = 32768; /* LIMIT TO 32K FOR CHANGE COMMAND */
+END;
+ELSE DO; /* .WORK IN MEMORY */
+   FBUFSZ = (WORK.IN.MEM.BASE - FBUFPTR) and "177400"; /* BUFFER ENDS AT WORK.IN.MEM.BASE */
+   WORKSEC = WORK.IN.MEM.BASE; /* WORK FILE ABOVE WORK.IN.MEM.BASE */
+   WORKLEN = (TOP - WORKSEC) and "177400"; /* LENGTH IN WORDS */
+   WORKNS = SHR(WORKLEN,8); /* LENGTH IN SECTORS */
+END;
+
+CORE(LOC.PSYS) = -1; /* SET TO GARBAGE IN CASE LOAD PRESSED TWICE */
+
+CNAM(0) = 0; /* NO DEFAULT FILE NAME */
+CALL MON(LOCATION(FBUFPTR),FBUFSZ); /* CALL THE MAIN MONITOR CODE */

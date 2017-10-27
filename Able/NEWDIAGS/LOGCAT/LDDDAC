@@ -1,0 +1,451 @@
+/*
+
+Title           : DDDAC test module  - inserted in LOGGER
+Project Engineer: William Leathers
+Project Start   : Feb 1986
+New England Digital Corporation
+
+Modification History:
+
+   02/16/89   WSL  Cleanup and optimization
+
+*/
+
+/***************************************************************************/
+/************     Required for stand - alone compilation    ****************/
+/*
+insert ':-xpl:asciidef';
+insert ':-xpl:termutil';
+insert ':-xpl:intrprtr';
+insert ':NEWDIAGS:sysinit';
+
+dcl status_line1 lit '18,10';  dcl status_line2 lit '19,10'; 
+dcl status_line3 lit '20,10';  dcl status_line4 lit '21,10'; 
+
+dcl erase_status_lines lit 'call clr_status';
+clr_status: proc;
+  pos(status_line4); erase_line;  pos(status_line3); erase_line;
+  pos(status_line2); erase_line;  pos(status_line1); erase_line;
+end clr_status;
+*/
+/***************************************************************************/
+/***************************************************************************/
+
+
+dcl wave_bus_errors(psmaxbins)        fixed;
+dcl envelope_bus_errors(psmaxbins)    fixed;
+dcl oscillator_swap_errors(psmaxbins) fixed;
+
+/***************************************************************************/
+dcl test_dddac lit 'call dddac_test';
+dddac_test: proc(bin#);
+  dcl bin# fixed;
+  dcl bin_base fixed;
+  dcl ps lit 'pstringr';
+  dcl (i,j,k,chr) fixed;
+  dcl (chan,pan,vol,wave) fixed;
+  dcl (log_peak,left_peak_i,right_peak_i,left_peak_j,right_peak_j) fixed;
+  dcl (increment,modulus) fixed;
+  dcl peak_sum fixed;
+  dcl error boolean;
+  dcl envelope fixed;
+  dcl max_chan fixed;
+
+  dcl log_data data(0,8,16,24,32,40,48,56,64,72,80,88,96);
+
+  dcl max_vol   lit '4095';
+  dcl pan_left  lit '0';
+  dcl pan_right lit '4095';
+
+  dcl mute   lit 'write(psf) = "100";  write("154") = 1';
+  dcl unmute lit 'write(psf) = "100";  write("154") = 0';
+
+  /***************************************************************************/
+  vu_peak: proc(bin#,chan) returns (fixed);
+    dcl (bin#,chan) fixed;
+    dcl (i,j,k,peak,bin_base) fixed;
+    dcl x fixed;
+
+    bin_base = bin# * 64;
+  
+    do i = 1 to 100; end;
+  
+    interp_usleep(200);
+
+    write(psc) = bin_base + chan;
+    write(psf) = "102";
+    peak = read(psd);
+
+    return peak;
+
+  end vu_peak;
+  /***************************************************************************/
+  poly_turn_off: proc(bin#,chan);
+    dcl (bin#,chan) fixed;
+    dcl bin_base fixed;
+
+    bin_base = bin# * 64;
+    write(psc) = bin_base + chan;
+    write(psf) = pselim;
+    write(psd) = 0;        write(psd) = 0;   /* Zero envelope */
+    write(psf) = psrcvol;
+    write(psd) = 0;        write(psd) = 0;   /* Zero volume */
+    write(psd) = 0;        write(psd) = 0;
+    write(psf) = pson;                       /* on/off function */
+    write(psd) = 0;                          /* off */
+
+  end poly_turn_off;
+
+  /***************************************************************************/
+  poly_turn_on: proc(bin#,chan,pan,vol,env);
+      dcl (bin#,chan,pan,vol,env) fixed;
+      dcl (l_vol,r_vol,bin_base) fixed;
+
+      bin_base = bin# * 64;
+      l_vol = 0; r_vol = 0;
+
+      if pan = 0 then l_vol = vol;
+      else            r_vol = vol;
+
+      if pan = -1 then l_vol = vol;
+
+      write(psc) = bin_base + chan;  
+      write(psf) = pselim;
+      write(psd) = env;    write(psd) = env;
+
+      write(psf) = psrcvol;
+      write(psd) = r_vol;  write(psd) = l_vol;
+      write(psd) = r_vol;  write(psd) = l_vol;
+      write(psf) = 10;     write(psd) = 3;           
+
+  end poly_turn_on;
+
+  /***************************************************************************/
+  dcl dc_wave_on_low lit 'call on_low';
+  on_low: proc(bin#,chan);
+    dcl (bin#,chan) fixed;
+    dcl (i,j,k,bin_base) fixed;
+
+    bin_base = bin# * 64;
+    j = chan;
+    WRITE(PSC) =   bin_base + J; 
+    WRITE(PSF) =   PSWL;
+    WRITE(PSD) =  -1; WRITE(PSD)=0;   /* wave table length of 256 */
+    WRITE(PSD) =   0; WRITE(PSD)=0;   /* base address of 0        */
+    WRITE(PSD) =  -1; WRITE(PSD)=0;   /* loop length of 256       */
+    WRITE(PSD) =   0; WRITE(PSD)=0;   /* phase incr of 0          */
+    WRITE(PSD) =   0;                 /* incr of 1                */
+    WRITE(PSD) = 255;                 /* modulus of 1             */
+    WRITE(PSD) =   0;                 /* off and no looping       */
+
+    call pbmwrite(bin#,0,0);    write(psd) = 256;
+    call poly_turn_on(bin#,chan,-1,4095,4095);
+
+  end on_low;
+
+  /***************************************************************************/
+  dcl dc_wave_on_hi lit 'call on_hi';
+  on_hi: proc(bin#,chan);
+    dcl (bin#,chan) fixed;
+    dcl (i,j,k,bin_base) fixed;
+
+    bin_base = bin# * 64;
+    j = chan;
+    WRITE(PSC) =   bin_base + J; 
+    WRITE(PSF) = PSWL;
+    WRITE(PSD) =  -1; WRITE(PSD)=0;   /* wave table length of 256 */
+    WRITE(PSD) =   1; WRITE(PSD)=0;   /* base address of 0        */
+    WRITE(PSD) =  -1; WRITE(PSD)=0;   /* loop length of 256       */
+    WRITE(PSD) =   0; WRITE(PSD)=0;   /* phase incr of 0          */
+    WRITE(PSD) =   0;                 /* incr of 1                */
+    WRITE(PSD) = 255;                 /* modulus of 1             */
+    WRITE(PSD) =   0;                 /* off and no looping       */
+
+    call pbmwrite(bin#,1,0);    write(psd) = 32767;
+    call poly_turn_on(bin#,chan,-1,4095,4095);
+
+
+  end on_hi;
+  /***************************************************************************/
+  dcl swap lit 'call da_swap';
+  da_swap: proc(bin#,chan1,chan2);
+    dcl (bin#,chan1,chan2) fixed;
+    dcl bin_base fixed;
+
+    bin_base = bin# * 64;
+    write(psc)   = bin_base + chan1;
+    write(psf)   = "101";
+    write("154") = chan2;
+
+    write(psc)   = bin_base + chan2;
+    write(psf)   = "101";
+    write("154") = chan1;
+
+  end da_swap;
+
+  /***************************************************************************/
+  dcl reset_channels lit 'call reset_c';
+  reset_c: proc(bin#);
+    dcl bin# fixed;
+    dcl (i,j,k,bin_base) fixed;
+
+    bin_base = bin# * 64;
+    do i = 0 to 31;
+      write(psc)   = bin_base + i;
+      write(psf)   = "101";
+      write("154") = i;
+    end;
+
+  end reset_c;
+  /***************************************************************************/
+  dcl clear_peaks lit 'call clr_peaks';
+  clr_peaks: proc(bin#);
+    dcl bin# fixed;
+    dcl (i,j,bin_base) fixed;
+
+    bin_base = bin# * 64;
+    do i = 0 to 63;
+      write(psc) = bin_base + i;
+      write(psf) = "102";
+      j = read(psd);
+    end;
+
+  end clr_peaks;
+  /*************************************************************************/
+  /***************         Main Program     ********************************/
+  /*************************************************************************/
+  bin_base = bin# * 64;
+
+  if not dddac_exists(bin#) then return;
+  if not psac1_exists(bin#) then  return;
+  max_chan = 31;
+  if psac2_exists(bin#) then max_chan = 63;
+
+  increment = 1;
+  modulus = 1;
+
+  pos(status_line1);  pstring('Mapping channels'); flush_term; Really.Run.Host();
+  reset_channels(bin#);
+
+  pos(status_line1);  pstring('Clearing peak registers'); flush_term; Really.Run.Host();
+  clear_peaks(bin#);
+
+  pos(status_line1);  pstring('Unmuting'); flush_term; Really.Run.Host();
+  unmute;
+
+  flush_term;
+  Really.Run.Host();
+
+  /*@ necessary? */
+  DO J=0 TO 63;                /* zero out each channel- including refresh channel */
+     WRITE(PSC) =   bin_base + j; 
+     WRITE(PSF) =   PSWL;
+     WRITE(PSD) =  -1; WRITE(PSD)=0;   /* wave table length of 256 */
+     WRITE(PSD) =   0; WRITE(PSD)=0;   /* base address of 0        */
+     WRITE(PSD) =  -1; WRITE(PSD)=0;   /* loop length of 256       */
+     WRITE(PSD) =   0; WRITE(PSD)=0;   /* phase incr of 0          */
+     WRITE(PSD) =   0;                 /* incr of 1                */
+     WRITE(PSD) = 255;                 /* modulus of 1             */
+     WRITE(PSD) =   0;                 /* off and no looping       */
+  END;                                 /* of channel loop         */
+
+  erase_status_lines;
+  pstring('Testing Wave bus in bin '); pnum(bin#+1,1); pstring('...');
+  flush_term;
+  Really.Run.Host();
+
+do i = 0 to max_chan;        /* do for each channel L & R */
+    Really.Run.Host();
+    if Really.Peek() >= 0 then return;
+    chan = shr(i,1);  /* chan 0 - 15 */
+    pos(status_line2);    pnum(chan,3);
+    if (i & 1) = 0  then pstring('R:');
+    else pstring('L:');
+    flush_term;
+    Really.Run.Host();
+
+    wave = 8;
+    error = false;
+    do j = 0 to 12;
+      call pbmwrite(bin#,0,0);    write(psd) = wave;
+      if (i & 1) = 0 then call poly_turn_on(bin#,chan,4095,4095,0);  
+      else call poly_turn_on(bin#,chan,0,4095,0);
+      log_peak = vu_peak(bin#,i);    /* make sure peak was cleared */
+      log_peak = vu_peak(bin#,i);    pnum(log_peak,4);
+      if log_peak <> log_data(j) then error = true;
+      wave = shl(wave,1);
+    end;
+    call poly_turn_off(bin#,chan);
+    if error then do;
+      pos(status_line4); erase_line;
+      pstring('  - Error: Incorrect wave bus value read. ');
+      flush_term;
+      Really.Run.Host();
+      if wave_bus_errors(bin#) <> "HFFFF" then
+         wave_bus_errors(bin#) = wave_bus_errors(bin#) + 1;
+    end;
+    log_peak = vu_peak(bin#,i);       /* clear peak register */
+  end;
+
+  erase_status_lines;
+  pstring('Testing envelope bus in bin '); pnum(bin#+1,1); pstring('...');
+  flush_term;
+  Really.Run.Host();
+  do i = 0 to max_chan;        /* do for each channel L & R */
+    Really.Run.Host();
+    if Really.Peek() >= 0 then return;
+    chan = shr(i,1);  /* chan 0 - 15 */
+    pos(status_line2); pnum(chan,3);
+    if (i & 1) = 0  then pstring('R:');
+    else pstring('L:');
+    flush_term;
+    Really.Run.Host();
+    wave = 0;
+    call pbmwrite(bin#,0,0);
+    write(psd) = wave;
+    envelope = 1;
+    error = false;
+    do j = 0 to 11;
+      if (i & 1) = 0 then call poly_turn_on(bin#,chan,4095,4095,envelope);  //(bin#,chan,pan,vol,env);
+                     else call poly_turn_on(bin#,chan,   0,4095,envelope);  //(bin#,chan,pan,vol,env);
+      log_peak = vu_peak(bin#,i);    /* make sure peak cleared */
+      log_peak = vu_peak(bin#,i);
+      pnum(log_peak,4);
+
+      if log_peak <> log_data(j) dbug 'dddac_test error', i, j, envelope, log_peak, log_data(j), j;
+
+      if log_peak <> log_data(j) then error = true;
+      envelope = shl(envelope,1);
+    end;
+    call poly_turn_off(bin#,chan);
+    if error then do;
+      pos(status_line4); erase_line;
+      pstring('  - Error: Incorrect envelope bus value read.');
+      if envelope_bus_errors(bin#) <> "HFFFF" then 
+         envelope_bus_errors(bin#) = envelope_bus_errors(bin#) + 1;
+    end;
+    log_peak = vu_peak(bin#,i);
+   end;
+
+  erase_status_lines;
+  pstring('Testing oscillator swaps in bin '); pnum(bin#+1,1); pstring('...');
+
+  do i = 0 to 15;
+    Really.Run.Host();
+    if Really.Peek() >= 0 then return;
+    do j = (i+1) to 15;
+      Really.Run.Host();
+      error = false;
+      dc_wave_on_low(bin#,i);
+      dc_wave_on_hi (bin#,j);
+
+      pos(status_line2);
+      right_peak_i = vu_peak(bin#,2*i);    left_peak_i = vu_peak(bin#,(2*i) + 1);
+      right_peak_j = vu_peak(bin#,2*j);    left_peak_j = vu_peak(bin#,(2*j) + 1);
+      pnum(i,3);  pstring('L,R:');    pnum(left_peak_i,5); pnum(right_peak_i,5); 
+      pnum(j,10); pstring('L,R:');    pnum(left_peak_j,5); pnum(right_peak_j,5);
+
+      if (left_peak_i <> 136) or (right_peak_i <> 136) or
+         (left_peak_j <> 192) or (right_peak_j <> 192) then error = true;
+
+      pos(status_line3);
+      swap(bin#,i,j); 
+      right_peak_i = vu_peak(bin#,2*i);    left_peak_i = vu_peak(bin#,(2*i) + 1);
+      right_peak_j = vu_peak(bin#,2*j);    left_peak_j = vu_peak(bin#,(2*j) + 1);
+
+
+      right_peak_i = vu_peak(bin#,2*i);    left_peak_i = vu_peak(bin#,(2*i) + 1);
+      right_peak_j = vu_peak(bin#,2*j);    left_peak_j = vu_peak(bin#,(2*j) + 1);
+      pnum(i,3); pstring('L,R:');     pnum(left_peak_i,5); pnum(right_peak_i,5); 
+      pnum(j,10); pstring('L,R:');    pnum(left_peak_j,5); pnum(right_peak_j,5);
+
+      if (left_peak_i <> 192) or (right_peak_i <> 192) or
+         (left_peak_j <> 136) or (right_peak_j <> 136) then error = true;
+
+      call poly_turn_off(bin#,i);
+      call poly_turn_off(bin#,j);  
+      right_peak_i = vu_peak(bin#,2*i);    left_peak_i = vu_peak(bin#,(2*i) + 1);
+      right_peak_j = vu_peak(bin#,2*j);    left_peak_j = vu_peak(bin#,(2*j) + 1);
+      
+      reset_channels(bin#);
+
+      if error then do;
+        erase_status_lines;
+        pstring('Error in oscillator swap'); 
+        flush_term;
+        Really.Run.Host();
+        if oscillator_swap_errors(bin#) <> "HFFFF" then
+           oscillator_swap_errors(bin#) = oscillator_swap_errors(bin#) + 1;
+        error = false;
+      end;
+
+    end;
+
+  end;
+
+  /*****/
+  if psac2_exists(bin#) then do;
+    do i = 16 to 31;
+      if Really.Peek() >= 0 then return;
+      do j = (i+1) to 31;
+        Really.Run.Host();
+        error = false;
+        dc_wave_on_low(bin#,i);
+        dc_wave_on_hi (bin#,j);
+
+        pos(status_line2);
+        right_peak_i = vu_peak(bin#,2*i);    left_peak_i = vu_peak(bin#,2*i + 1);
+        right_peak_j = vu_peak(bin#,2*j);    left_peak_j = vu_peak(bin#,2*j + 1);
+        pnum(i,3);  pstring('L,R:');    pnum(left_peak_i,5); pnum(right_peak_i,5); 
+        pnum(j,10); pstring('L,R:');    pnum(left_peak_j,5); pnum(right_peak_j,5);
+
+        if (left_peak_i <> 136) or (right_peak_i <> 136) or
+           (left_peak_j <> 192) or (right_peak_j <> 192) then error = true;
+
+        pos(status_line3);
+        swap(bin#,i,j); 
+        right_peak_i = vu_peak(bin#,2*i);    left_peak_i = vu_peak(bin#,2*i + 1);
+        right_peak_j = vu_peak(bin#,2*j);    left_peak_j = vu_peak(bin#,2*j + 1);
+
+        right_peak_i = vu_peak(bin#,2*i);    left_peak_i = vu_peak(bin#,2*i + 1);
+        right_peak_j = vu_peak(bin#,2*j);    left_peak_j = vu_peak(bin#,2*j + 1);
+        pnum(i,3); pstring('L,R:');     pnum(left_peak_i,5); pnum(right_peak_i,5); 
+        pnum(j,10); pstring('L,R:');    pnum(left_peak_j,5); pnum(right_peak_j,5);
+
+        if (left_peak_i <> 192) or (right_peak_i <> 192) or
+           (left_peak_j <> 136) or (right_peak_j <> 136) then error = true;
+
+        call poly_turn_off(bin#,i);
+        call poly_turn_off(bin#,j);
+        right_peak_i = vu_peak(bin#,2*i);    left_peak_i = vu_peak(bin#,2*i + 1);
+        right_peak_j = vu_peak(bin#,2*j);    left_peak_j = vu_peak(bin#,2*j + 1);
+        reset_channels(bin#);
+
+        if error then do;
+          erase_status_lines;
+          pstring('Error in oscillator swap'); 
+          if oscillator_swap_errors(bin#) <> "HFFFF" then
+             oscillator_swap_errors(bin#) = oscillator_swap_errors(bin#) + 1;
+          error = false;
+        end;
+      end;
+    end;
+  end;
+  /*****/
+
+end dddac_test;
+/***************************************************************************/
+/*
+begin;
+   dcl i fixed;
+
+   clear_screen;
+   do i = 0 to #_poly_bins - 1;
+      test_dddac(i);
+      crlf; pnum(wave_bus_errors(i),6);
+            pnum(envelope_bus_errors(i),6);
+            pnum(oscillator_swap_errors(i),6);
+    end;
+    flush_term;
+end;
+*/

@@ -1,0 +1,1452 @@
+/* Pictures */
+
+dcl STEM_OFFS data (
+/*     Do  Re  Mi  Fa  Sol  La  Ti  FaI                         */
+       -3 , 3 , 0 , 3 , 1 , 0 , 1 ,-3 ,  /* Stem up   (DIR = 0) */
+       -3 , 3 , 0 , 3 ,-1 , 0 , 1 ,-3 ,  /* Stem down (DIR = 1) */
+/*      L   R   B       L   R   B                               */
+        3 ,-3 , 3 , 0 ,-3 ,-3 ,-3 , 0 ); /* Stem up/dn          */
+
+SET_FONT:procedure (FONT) public swap4; /* Set PS font if necessary */
+
+  dcl FONT fixed;
+
+  if FONT = F_EXTENDED# then FONT = F_MUSIC#;
+  if CURRENT_FONT = FONT then return;
+
+  if ENGRAVING then do;
+  do case FONT;
+    hstring('SF');
+    hstring('IF');
+    hstring('BF');
+    hstring('BIF');
+    hstring('MF');                          /* F_MUSIC# */
+    ;                                       /* F_USER#  */
+    ;  /* hstring('MF');                    \* F_EXTENDED# */
+    hstring('AF');
+    hstring('/NEDTimes-Bold FF 100 CF');
+    hstring('/NEDTimes-Roman FF 50 CF');
+    hstring('/Symbol FF 50 CF');
+    hstring('SMF');
+    hstring('DF');
+    hstring('/NEDTimes-Bold FF 40 CF'); /* LittleFont */
+  end;
+  hstringr (' F');
+  end;
+  else if MACII | MG600 then do case FONT;
+    do; /* Standard */
+      wchar(esc); wchar(asc.7);
+      if MACII then do;
+        wchar(esc); wchar(asc.lt);
+        wchar(esc); wchar(asc.gt);
+      end;
+    end;
+    do; /* Italic */
+      wchar(esc); wchar(asc.6);
+      if MACII then do;
+        wchar(esc); wchar(asc.lt);
+        wchar(esc); wchar(asc.gt);
+      end;
+    end;
+    do; /* Bold */
+      wchar(esc); wchar(asc.7);
+      if MACII then do;
+        wchar(esc); wchar(asc.lt);
+        wchar(esc); wchar(asc.equ);
+      end;
+    end;
+    do; /* Bold Italic */
+      wchar(esc); wchar(asc.6);
+      if MACII then do;
+        wchar(esc); wchar(asc.lt);
+        wchar(esc); wchar(asc.equ);
+      end;
+    end;
+    ;;;
+    do; /* Typewriter */
+      wchar(esc); wchar(asc.7);
+      if MACII then do;
+        wchar(esc); wchar(colon);
+        wchar(esc); wchar(asc.gt);
+      end;
+    end;
+    ;;;;;
+    do; /* Standard */
+      wchar(esc); wchar(asc.7);
+      if MACII then do;
+        wchar(esc); wchar(asc.lt);
+        wchar(esc); wchar(asc.gt);
+      end;
+    end;
+  end;
+
+  CURRENT_FONT = FONT;
+
+end SET_FONT;
+
+SETUP_FONTS:procedure (FONT,EXTENDED,LIBRARY,MODE) public;
+
+  dcl FONT     fixed,
+      EXTENDED boolean,
+      LIBRARY  boolean,
+      MODE     boolean; /* CHAR#, STRING#, CHOOSE# */
+
+  if EXTENDED then do;
+    if FONT = F_ALPHA# | MODE = CHOOSE# then do;
+      if MODE = STRING# then do;
+        if LIBRARY then do;
+          UPPER_FONT = F_MUSIC#;
+          LOWER_FONT = F_EXTENDED#;
+        end;
+        else do;
+          UPPER_FONT = FONT;
+          LOWER_FONT = FONT;
+        end;
+      end;
+      else do; /* CHAR# | CHOOSE# */
+        if LIBRARY then do;
+          UPPER_FONT = FONT;
+          LOWER_FONT = F_EXTENDED#;
+        end;
+        else do;
+          UPPER_FONT = F_MUSIC#;
+          LOWER_FONT = FONT;
+        end;
+      end;
+    end;
+    else do;
+      UPPER_FONT = FONT;
+      LOWER_FONT = FONT;
+    end;
+  end;
+  else do;
+    UPPER_FONT = F_MUSIC# + LIBRARY;
+    LOWER_FONT = FONT;
+  end;
+
+end SETUP_FONTS;
+/*
+SET_LEVEL:procedure (LEVEL) public;
+
+  dcl LEVEL fixed;
+
+  if LEVEL ~= CURRENT_LEVEL then do;
+    data_level(LEVEL);
+    CURRENT_LEVEL = LEVEL;
+  end;
+
+end SET_LEVEL;
+*/
+IN_WINDOW:procedure (X,Y) returns (boolean) swap5; /* Determines if the X,Y coordinate is in the window */
+
+  dcl (X,Y) fixed;
+
+  if X < WINDOW_XL \ WINDOW_XH < X then return (false);
+  if Y < WINDOW_YL \ WINDOW_YH < Y then return (false);
+  return (true);
+
+end IN_WINDOW;
+
+CHAR:procedure (X,Y,C,SIZE) swap5;  /* Plots a character of the given size at the X,Y location */
+
+  dcl (X,Y,C,SIZE) fixed; /* X,Y location, character, character size */
+/*
+transparent_mode;pos(23,0);erase_line;
+pstring('Char: ');onum(C,0);crlf;vector_mode;flush_term;stop(1);
+*/
+  if C <= sp \ C = del then return;
+
+  imove_to (X,Y); alpha_mode;
+
+  if SIZE = 2 then do;
+    if GO250 then do;
+      wchar(esc); wchar(asc.8);
+    end;
+    else char_size(1);
+  end;
+  if MACII & IN_WINDOW (X,Y) then wchar(C);
+  else if char_bound (X,Y,8*(SIZE+1),10*(SIZE+1)) & IN_WINDOW (X,Y) then wchar(C);
+  if SIZE = 2 then do;
+    if GO250 then do;
+      wchar(esc); wchar(colon);
+    end;
+    else char_size(0);
+  end;
+
+end CHAR;
+
+NUMBER:procedure (X,Y,N,SIZE,FONT) returns (fixed) public swap5; /* Plots a number of a given size at the designated location */
+
+  dcl (X,Y,N,SIZE)  fixed,   /* X,Y location, number, size */
+      FONT          fixed,
+      (LEN,J,D)     fixed,
+      STR(3)        fixed;
+
+  J = N/10; LEN = 1; D = 1;
+  do while J > 0; LEN = LEN + 1; J = J/10; D = D*10; end;
+  STR(0) = LEN;
+
+  UPPER_FONT = FONT;
+  LOWER_FONT = FONT;
+  call SET_FONT (FONT);
+
+  do J = 1 to LEN;
+    if ENGRAVING then call pbyte (STR,J-1,N/D+asc.0);
+    else do;
+      call CHAR (X-3,Y,N/D+asc.0,SIZE);
+      X = X + 8*SIZE;
+    end;
+    N = N - (N/D)*D; D = D/10;
+  end;
+  if ENGRAVING then return PLOT_STRING (STR,X,Y,LEN,SIZE);
+               else return (X);
+
+end NUMBER;
+
+PIC_NUMBER:procedure (X,Y,N,CODE) swap4; /* Plots a number from an slib number set */
+
+  dcl (X,Y,N,CODE) fixed, /* X,Y, number, code for "0" */
+      (LEN,J,D)    fixed,
+      STR(3)       fixed;
+
+  LEN = 1;
+  J   = N/10;
+  D   = 1;
+  do while J > 0;
+    LEN = LEN + 1;
+    J   = J / 10;
+    D   = D * 10;
+  end;
+  do J = 1 to LEN;
+    call pbyte(STR,J-1,CODE+N/D);
+    N = N - (N / D) * D;
+    D = D / 10;
+  end;
+  UPPER_FONT = F_MUSIC#;
+  LOWER_FONT = F_STANDARD#;
+  call PLOT_STRING (STR,X,Y,LEN,1);
+
+end PIC_NUMBER;
+
+TEXT_BOX:procedure (SX,SY,EX,SIZE) public swap4;
+
+  dcl (SX,SY,EX) fixed;
+  dcl SIZE       fixed;
+
+  if ENGRAVING then do;
+    if SIZE = 2 then hstringr('4 W');
+    hpnum((SX-7)*4); hpnum((SY- 4*SIZE)*4); hstringr(' M');
+    hpnum((EX+1)*4); hpnum((SY- 4*SIZE)*4); hstringr(' L');
+    hpnum((EX+1)*4); hpnum((SY+13*SIZE)*4); hstringr(' L');
+    hpnum((SX-7)*4); hpnum((SY+13*SIZE)*4); hstringr(' L');
+    hstringr('CP K');
+    if SIZE = 2 then hstringr('2 W');
+  end;
+  else do;
+    imove_to (SX-7,SY- 4*SIZE); iplot (EX+1,SY- 4*SIZE);
+    iplot    (EX+1,SY+13*SIZE); iplot (SX-7,SY+13*SIZE);
+    iplot    (SX-7,SY- 4*SIZE);
+  end;
+
+end TEXT_BOX;
+
+OPEN_WINDOW:procedure (TOP,Y,BOT) public swap4; /* Defines and scales a display area for plotting */
+
+  dcl (TOP,Y,BOT) fixed;
+
+  WINDOW_XL = 0;
+  WINDOW_YL = 90 - (Y - BOT);
+  WINDOW_YH = 90 + (TOP - Y);
+  viewport (0,SCREEN_WIDTH#,BOT,TOP);
+  WINDOW_XH = WINDOW_XL + SCREEN_WIDTH#;
+  iwindow  (WINDOW_XL,WINDOW_XH,WINDOW_YL,WINDOW_YH);
+
+end OPEN_WINDOW;
+
+STAFF_LINES:procedure (X1,X2,SINGLE) public swap4; /* Draw staff lines from X1 to X2 */
+
+  dcl (X1,X2,Y) fixed,    /* Starting and ending X positions, Y position */
+      SINGLE    boolean;  /* Plot only L3 */
+
+  if ENGRAVING then do;
+    if SINGLE then call LINE (X1,L3,X2,L3,0,1);
+    else do;
+      hpnum(X1*4); hpnum(X2*4); hstringr(' ST');
+    end;
+    return;
+  end;
+
+  if SINGLE then do;                  /* If a single staff line */
+    imove_to (X1,L3); iplot (X2,L3);  /* Draw a line */
+  end;
+  else do Y = L1 to L5 by 6;          /* Otherwise, draw a staff */
+    imove_to (X1,Y); iplot (X2,Y);
+  end;
+
+end STAFF_LINES;
+
+TAB_LINES:procedure (X1,X2,LINES) public swap4; /* Draw tablature staff lines from X1 to X2 */
+
+  dcl (X1,X2) fixed,    /* Starting and ending X positions, Y position */
+      LINES   boolean,  /* Number to draw (4 or 6) */
+      (Y,I)   fixed;
+
+  Y = L1;
+  do I = 1 to LINES;
+    call LINE (X1,Y,X2,Y,0,1);
+    Y = Y + 9;
+  end;
+
+end TAB_LINES;
+
+LEDGER:procedure (X,Y0,LEN) public swap4; /* Draw ledger lines */
+
+  dcl (X,Y0,LEN,Y) fixed;
+
+  do Y = L6 to Y0 by 6;
+    if ENGRAVING then do;
+      hpnum((X-LEN)*4); hpnum(Y*4); hstring(' M');
+      hpnum((X+LEN)*4); hpnum(Y*4); hstringr(' L K');
+    end;
+    else do;
+      imove_to (X-LEN,Y); iplot (X+LEN,Y);
+    end;
+  end;
+  do Y = Y0+(Y0 mod 6) to L0 by 6; /* This works because (Y0 mod 6) = (0 or 3) only */
+    if ENGRAVING then do;
+      hpnum((X-LEN)*4); hpnum(Y*4); hstring(' M');
+      hpnum((X+LEN)*4); hpnum(Y*4); hstringr(' L K');
+    end;
+    else do;
+      imove_to (X-LEN,Y); iplot (X+LEN,Y);
+    end;
+  end;
+
+end LEDGER;
+
+PLOTCLEF:procedure (CLEF,X,SMALL) public swap4; /* Plots clef at X */
+
+  dcl (CLEF,X) fixed,   /* Clef and X position */
+      FONT     fixed,
+      SMALL    boolean; /* True if a clef change - use smaller font */
+
+  X = X + 12;
+  if ENGRAVING & SMALL then do;
+    UPPER_FONT = F_SMALL#;
+    X = X + 4;
+  end;
+  else UPPER_FONT = F_MUSIC#;
+
+  do case CLEF;
+    call PLOT_CHARACTER ("201",X,L2,UP#); /* 0 : G -> Treble */
+    call PLOT_CHARACTER ("202",X,L3,UP#); /* 1 : A -> Alto */
+    call PLOT_CHARACTER ("202",X,L4,UP#); /* 2 : T -> Tenor */
+    call PLOT_CHARACTER ("205",X,L4,UP#); /* 3 : F -> Bass */
+    call PLOT_CHARACTER ("206",X,L3,UP#); /* 4 : P -> Percussion */
+    call PLOT_CHARACTER ("206",X,L3,UP#); /* 5 : S -> Percussion with single staff line */
+    do;                                   /* 6 : B -> Tablature */
+      if ENGRAVING then LOWER_FONT = F_TABLATURE#;
+                   else LOWER_FONT = F_STANDARD#;
+      call PLOT_CHARACTER (asc.t,X-3,S5+1,UP#);
+      call PLOT_CHARACTER (asc.a,X-3,L4+1,UP#);
+      call PLOT_CHARACTER (asc.b,X-3,S2+1,UP#);
+    end;
+  end;
+
+end PLOTCLEF;
+
+NOTE:procedure (TYPE,X,Y) public swap4; /* Draw the specified note at the given location */
+
+  dcl (TYPE,X,Y) fixed;
+
+  if      TYPE = WHOLE# then PLOT_SYMBOL ("350",X,Y,UP#); /* Whole note */
+  else if TYPE = HALF#  then PLOT_SYMBOL ("351",X,Y,UP#); /* Half note */
+  else                       PLOT_SYMBOL ("352",X,Y,UP#); /* Quarter note */
+
+end NOTE;
+
+GNOTE:procedure (TYPE,X,Y) public swap4; /* WORK!!! */
+
+  dcl (TYPE,X,Y) fixed;
+
+  if ENGRAVING then do;
+    UPPER_FONT = F_SMALL#;
+    if      TYPE = WHOLE# then call PLOT_CHARACTER ("350",X,Y,UP#); /* Whole note */
+    else if TYPE = HALF#  then call PLOT_CHARACTER ("351",X,Y,UP#); /* Half note */
+    else                       call PLOT_CHARACTER ("352",X,Y,UP#); /* Quarter note */
+  end;
+  else do;
+    if      TYPE = WHOLE# then PLOT_SYMBOL ("370",X,Y,UP#); /* Whole note */
+    else if TYPE = HALF#  then PLOT_SYMBOL ("371",X,Y,UP#); /* Half note */
+    else                       PLOT_SYMBOL ("372",X,Y,UP#); /* Quarter note */
+  end;
+
+end GNOTE;
+
+SNOTE:procedure (TYPE,X,Y,DIR,FOUR) returns (fixed) public swap4;
+
+  dcl (TYPE)    fixed,
+      (X,Y)     fixed,
+      DIR       boolean,
+      FOUR      boolean,
+      (SHAPE,I) fixed;
+
+  dcl TONICS    data (0,4,1,5,2,6,3,0,4,1,5,2,6,3,0);
+
+  I        = Y + 210 - CLEF_TABLE(CLEF&MASK6) - L0; /* Offset and adjust for clef */
+  I        = I / 3;                      /* Reduce */
+  I        = I - TONICS(KEY+7);          /* Normalize to C scale */
+  write(5) = I;                          /* Find scale tone (mod 7) */
+  write(7) = 7;
+  I        = read(4);
+
+  if FOUR then do; /* 4 shape */
+    if I < 3 then I = I + 3;
+    if I = 6 then I = 2;
+  end;
+  if I = 3 & DIR then I = 7; /* Use reverse Fa shape if stem down */
+
+  if TYPE <= HALF# then PLOT_SYMBOL ("40"+I,X,Y,UP#);
+                   else PLOT_SYMBOL ("50"+I,X,Y,UP#);
+
+  /* X = STEM_OFFS(shl(DIR,3)\I) & LBYTE; */
+  /* if I ~= 4 then X = X \ "100000"; * Set to indicate no arc join on stem */
+  /* return (X);  */
+  return (STEM_OFFS(shl(DIR,3)\I));
+
+end SNOTE;
+
+RNOTE:procedure (TYPE,X,Y,DIR,HEAD) returns (fixed) public swap4;
+
+  dcl TYPE  fixed,
+      (X,Y) fixed,
+      DIR   boolean,
+      HEAD  fixed,
+      I     fixed;
+
+  if HEAD < "20" then do;
+    I = HEAD & 7;
+    if I = 3 & DIR then I = 7;
+    if TYPE <= HALF# then PLOT_SYMBOL ("40"+I,X,Y,UP#);
+                     else PLOT_SYMBOL ("50"+I,X,Y,UP#);
+    X = STEM_OFFS(shl(DIR,3)\I);
+/*    X = STEM_OFFS(shl(DIR,3)\I) & LBYTE; */
+/*    if I ~= 4 then X = X \ "100000";     */
+  end;
+  else do;
+    I = HEAD & 3;
+    if TYPE <= HALF# then PLOT_SYMBOL ("60"+I,X,Y,UP#);
+                     else PLOT_SYMBOL ("64"+I,X,Y,UP#);
+    X = STEM_OFFS("20"+shl(DIR,2)\I);
+/*    X = (STEM_OFFS("20"+shl(DIR,2)\I) & LBYTE) \ "100000"; */
+  end;
+
+  return (X);
+
+end RNOTE;
+
+STEM_FLAG:procedure (X,Y,FIRST,DIR); /* Plot flags pointing upwards */
+
+  dcl (X,Y) fixed,
+      FIRST boolean,
+      DIR   boolean;
+
+  DIR = CONV(DIR);
+  X   = X + 1;
+  Y   = Y - 6*DIR;
+
+  imove_to (X,Y);   iplot (X,  Y+4*DIR);
+  imove_to (X,Y);   iplot (X+3,Y);
+  imove_to (X,Y+2*DIR); iplot (X+5,Y-3*DIR);
+  imove_to (X,Y+3*DIR); iplot (X+5,Y-2*DIR);
+
+  if FIRST then do;
+    imove_to (X+6,Y- 4*DIR); iplot (X+6,Y-11*DIR);
+    imove_to (X+5,Y-12*DIR); iplot (X+5,Y-13*DIR);
+  end;
+  else do;
+    imove_to (X+6,Y-4*DIR);  iplot (X+6,Y-7*DIR);
+  end;
+
+end STEM_FLAG;
+
+STEM:procedure (X,Y,LEN,TAILS) public swap4; /* Draw a stem with flags */
+
+  dcl (X,Y,LEN,TAILS) fixed, /* X,Y position, length of stem, # of flags on stem*/
+      (S,I)           fixed;
+
+  if ENGRAVING then do;
+    hpnum(X*4); hpnum(Y*4); hstring(' M');
+    hpnum(X*4); hpnum((Y+LEN)*4); hstringr(' L K');
+  end;
+  else do;
+    imove_to (X,Y);
+    iplot (X,Y+LEN);
+  end;
+  Y = Y + LEN;
+  if LEN > 0 then do; I =  6; S = "353"; end;
+             else do; I = -6; S = "355"; end;
+  do while TAILS > 0;
+    if TAILS = 1 then PLOT_SYMBOL (S,X,Y,UP#);
+                 else PLOT_SYMBOL (S+1,X,Y,UP#);
+    Y     = Y     - I;
+    TAILS = TAILS - 1;
+  end;
+
+end STEM;
+
+GRACE_FLAG:procedure (X,Y,DIR); /* Plot grace flags */
+
+  dcl (X,Y) fixed,
+      DIR   boolean;
+
+  DIR = CONV(DIR);
+  X   = X + 1;
+  Y   = Y - 5*DIR;
+
+  imove_to (X,Y);       iplot (X,  Y+3*DIR);
+  imove_to (X,Y+2*DIR); iplot (X+3,Y-1*DIR);
+  imove_to (X,Y+1*DIR); iplot (X+4,Y-3*DIR);
+  iplot  (X+4,Y-8*DIR); iplot (X+3,Y-9*DIR);
+
+end GRACE_FLAG;
+
+GSTEM:procedure (X,Y,LEN,TAILS,CUE) public swap4;
+
+  dcl (X,Y,LEN,TAILS,T,EY,I,S) fixed,
+      CUE                      boolean;
+
+  EY = Y + LEN;
+
+  if ENGRAVING then do;
+    hstringr('1 W');
+    I = CONV(LEN<0);
+    hpnum(X*4); hpnum(Y*4+3*I); hstring(' M');
+    hpnum(X*4); hpnum((Y+LEN)*4); hstringr(' L K');
+    Y = Y + LEN;
+    if LEN > 0 then do; I =  6; S = "353"; end;
+               else do; I = -6; S = "355"; end;
+    T = TAILS;
+    UPPER_FONT = F_SMALL#;
+    do while T > 0;
+      if T = 1 then call PLOT_CHARACTER (S,  X,Y,UP#);
+               else call PLOT_CHARACTER (S+1,X,Y,UP#);
+      Y = Y - I;
+      T = T - 1;
+    end;
+  end;
+
+  if TAILS > 0 & ~CUE then do;
+    if LEN < 0 then call LINE (X-5,EY+9,X+8,EY+2,0,1);
+               else call LINE (X-5,EY-9,X+8,EY-2,0,1);
+  end;
+
+  if ENGRAVING then do;
+    hstringr('2 W');
+    return;
+  end;
+
+  if LEN > 0 then do; I =  6; imove_to (X,Y+1); T = UP#; end;
+             else do; I = -6; imove_to (X,Y-1); T = DN#; end;
+  iplot (X,EY);
+  do while TAILS > 0;
+    PLOT_SYMBOL ("367",X,EY,T);
+    EY    = EY    - I;
+    TAILS = TAILS - 1;
+  end;
+
+end GSTEM;
+
+C_CLEF:procedure (X,Y) swap4; /* Draw a C Clef (Alto and Tenor) at the specified location */
+
+  dcl (X,Y) fixed;
+
+  imove_to (X-8,Y-12); iplot (X-8,Y+12);
+  iplot (X-7,Y+12); iplot (X-7,Y-12);
+  iplot (X-6,Y-12); iplot (X-6,Y+12);
+  imove_to (X-3,Y+12); iplot (X-3,Y-12);
+  PLOT_SYMBOL ("202",X,Y,UP#);
+
+end C_CLEF;
+
+P_CLEF:procedure (X,Y) swap4;  /* Plot percussion clef at the specified location */
+
+  dcl (X,Y) fixed;
+
+  imove_to (X-2,Y-6); iplot (X-2,Y+6);
+  imove_to (X+2,Y-6); iplot (X+2,Y+6);
+
+end P_CLEF;
+
+SHARP:procedure (X,Y) swap4; /* Plot a sharp at the specified location */
+ 
+  dcl (X,Y) fixed;
+
+  PLOT_SYMBOL ("211",X,Y-3,UP#);
+  PLOT_SYMBOL ("211",X,Y+3,UP#);
+  imove_to (X-2,Y-9); iplot (X-2,Y+8);
+  imove_to (X+2,Y-8); iplot (X+2,Y+9);
+
+end SHARP;
+
+NATURAL:procedure (X,Y) swap4;  /* Plot a natural at the specified location */
+
+  dcl (X,Y) fixed;
+
+  imove_to (X-2,Y+4); iplot (X+2,Y+4);
+  imove_to (X-2,Y+3); iplot (X+2,Y+3);
+  imove_to (X-2,Y-4); iplot (X+2,Y-4);
+  imove_to (X-2,Y-3); iplot (X+2,Y-3);
+  imove_to (X-2,Y-4); iplot (X-2,Y+9);
+  imove_to (X+2,Y-9); iplot (X+2,Y+4);
+
+end NATURAL;
+
+FLAT:procedure (X,Y) swap4; /* Draw a flat at the specified location */
+
+  dcl (X,Y) fixed;
+
+  PLOT_SYMBOL ("213",X,Y,UP#);
+  imove_to (X-2,Y-3); iplot (X-2,Y+10);
+
+end FLAT;
+
+DOUBLE_FLAT:procedure (X,Y) swap4; /* Plot a double flat at the specified location */
+
+  dcl (X,Y) fixed;
+  call FLAT (X,Y); call FLAT (X-7,Y);
+
+end DOUBLE_FLAT;
+
+EIGHTH_REST:procedure (X,Y,T,CUE) swap4; /* plot a rest of a specified value at the given location */
+
+  dcl (X,Y,T,I) fixed,
+      CUE       boolean;
+
+  do case T;
+    ;                               /* 8th */
+    do; X = X - 2; Y = Y - 6;  end; /* 16th */
+    do; X = X - 2; Y = Y - 6;  end; /* 32nd */
+    do; X = X - 4; Y = Y - 12; end; /* 64th */
+    do; X = X - 6; Y = Y - 18; end; /* 128th */
+  end;
+
+  if ENGRAVING & ~CUE then do;
+    PLOT_SYMBOL ("363",X,Y,UP#);     /* Draw a eighth stem */
+    do I = 1 to T;
+      X = X + 2; Y = Y + 6;
+      PLOT_SYMBOL ("362",X,Y,UP#);   /* Plot an eighth rest */
+    end;
+  end;
+  else do;
+    if CUE then do I = 0 to T;
+      PLOT_SYMBOL ("366",X,Y,UP#);   /* Plot an eighth rest */
+      X = X + 2; Y = Y + 6;
+    end;
+    else if MACII then do I = 0 to T;
+      PLOT_SYMBOL ("362",X,Y,UP#);   /* Plot an eighth rest */
+      X = X + 2; Y = Y + 6;
+    end;
+    else do I = 0 to T;
+      imove_to (X-3,Y+1); iplot (X-1,Y+1);
+      imove_to (X-3,Y  ); iplot (X-1,Y  );
+      imove_to (X-3,Y-1); iplot (X+3,Y-1);
+      imove_to (X+3,Y+1); iplot (X+3,Y-1);
+      imove_to (X+2,Y  ); iplot (X+2,Y-4);
+      imove_to (X+1,Y-5); iplot (X+1,Y-7);
+      imove_to (X  ,Y-8); iplot (X  ,Y-9);
+      X = X + 2; Y = Y + 6;
+    end;
+  end;
+
+end EIGHTH_REST;
+
+REST:procedure (TYPE,CNT,X,Y) public swap4; /* Plot a rest of a specified type, count for block rests and given location */
+
+  dcl TYPE  fixed, /* Type of rest */
+      CNT   fixed, /* Count for block rests */
+      (X,Y,I) fixed;
+
+  if TYPE = WHOLE# then do;   /* If whole rest */
+    if CNT > 1 then do; /* X = X1 ; Y = X2 */
+      I = (X+Y)/2;
+      if I - X > 50 then do; /* Keep rest bar <= 100 pix */
+        X = I - 50;
+        Y = I + 50;
+      end;
+      call LINE (X,L2,X,L4,0,1);
+      call LINE (Y,L2,Y,L4,0,1);
+      if ENGRAVING then do;
+        hstringr('20 W');
+        hpnum(X*4); hpnum(L3*4); hstring (' M');
+        hpnum(Y*4); hpnum(L3*4); hstringr(' L K');
+        hstringr('2  W');
+      end;
+      else call LINE (X,L3,Y,L3,0,5);
+    end;
+    else do;
+      Y = Y + 6 - (Y mod 6);
+      if Y < L1 \ Y > L5 then call LINE (X-8,Y,X+8,Y,0,1);
+      PLOT_SYMBOL ("360",X,Y,DN#); /* Draw a whole rest */
+      Y = X; /* Set Y to X2 for number positioning */
+    end;
+
+    /* Plot the block rest number */
+    if (((FORMAT & F_BRST) ~= 0 & CNT > 1) \
+        ((FORMAT & F_1RST) ~= 0 & CNT = 1)) &
+       (PBITS & P_BLKR) = 0
+    then do;
+      I = S5; /* WAS L6 */
+      if (PBITS & (P_OBRC \ P_CBRC)) = P_CBRC then I = L3 + STAFF_SPACE(PART) / 2 - 8;
+      if ENGRAVING then call NUMBER ((X+Y)/2 - (4+8*LOG10(CNT)),I,CNT,2,F_STANDARD#);
+/*
+      else if MG600 then do;    *  ((X+Y)/2 - (7+8*LOG10(CNT))    *
+        imove_to ((X+Y)/2 - (11+12*LOG10(CNT)),I);
+        alpha_mode; char_size(1);
+        pnum(CNT,0);
+      end;
+*/
+      else call NUMBER ((X+Y)/2 - (7+8*LOG10(CNT)),I,CNT,2,F_STANDARD#);
+    end;
+
+  end;
+  else if TYPE = HALF# then do;
+    Y = Y - (Y mod 6);
+    if Y < L1 \ Y > L5 then call LINE (X-8,Y,X+8,Y,0,1);
+    PLOT_SYMBOL ("360",X,Y,UP#); /* Draw a whole rest */
+  end;
+  else if TYPE = QUARTER# then PLOT_SYMBOL ("361",X,Y,UP#); /* Plot a quarter rest */
+  else call EIGHTH_REST (X,Y,TYPE-EIGHTH#,false); /* Plot an eighth rest */
+
+end REST;
+
+GREST:procedure (TYPE,CNT,X,Y) public swap4; /* Plot a grace (cue) rest */
+
+  dcl TYPE  fixed, /* Type of rest */
+      CNT   fixed, /* Count for block rests */
+      (X,Y,I) fixed;
+
+  if TYPE = WHOLE# then do;   /* If whole rest */
+    if CNT > 1 then call REST (TYPE,CNT,X,Y);
+    else do;
+      Y = Y + 6 - (Y mod 6);
+      if Y < L1 \ Y > L5 then call LINE (X-6,Y,X+6,Y,0,1);
+      PLOT_SYMBOL ("364",X,Y,DN#); /* Draw a whole rest */
+    end;
+  end;
+  else if TYPE = HALF# then do;
+    Y = Y - (Y mod 6);
+    if Y < L1 \ Y > L5 then call LINE (X-6,Y,X+6,Y,0,1);
+    PLOT_SYMBOL ("364",X,Y,UP#); /* Draw a whole grest */
+  end;
+  else if TYPE = QUARTER# then PLOT_SYMBOL ("365",X,Y,UP#); /* Plot a quarter rest */
+  else call EIGHTH_REST (X,Y,TYPE-EIGHTH#,true); /* Plot an eighth rest */
+
+end GREST;
+
+BAR:procedure (X,LEN) public swap4; /* Plot a bar at the specified location of the given staff space length. (If Len = 0, then default length)*/
+
+  dcl (X,LEN) fixed;
+
+  if ENGRAVING then do;
+    hpnum(X*4); hpnum(L1*4); hpnum((L1+LEN)*4); hstringr(' 4 A');
+    return;
+  end;
+  imove_to (X,L1); iplot (X,L1+LEN);
+
+end BAR;
+
+HEAVY_BAR:procedure (X,LEN) public swap4; /* Plots a heavy bar at the specified X positin of the given length*/
+
+  dcl (X,LEN) fixed; /* X position, Staff space length */
+
+  if ENGRAVING then do;
+    hpnum(X*4); hpnum(L1*4); hpnum((L1+LEN)*4); hstringr(' 10 A');
+    return;
+  end;
+  call BAR (X-1,LEN);
+  call BAR (X,  LEN);
+  call BAR (X+1,LEN);
+
+end HEAVY_BAR;
+
+BAR_LIP:procedure (X,DIR) public swap4; /* Plots a bar lip at the specified X positon in the given direction*/
+
+  dcl (X,DIR) fixed;
+
+  if DIR then PLOT_SYMBOL ("314",X,L1,UP#); /* Downwards bar lip */
+         else PLOT_SYMBOL ("310",X,L5,UP#); /* Upwards bar lip */
+
+end BAR_LIP;
+
+BRACKET:procedure (X,LEN) public swap4; /* Plots a bracket at the designated X position of the given length */
+
+  dcl (X,LEN) fixed;
+
+  call HEAVY_BAR (X,LEN);
+  PLOT_SYMBOL ("310",X,L1+LEN,UP#); /* Upwards bar lip */
+  PLOT_SYMBOL ("314",X,L1,UP#); /* Downwards bar lip */
+
+end BRACKET;
+
+BRACE:procedure (X,Y,LEN) public swap4; /* Plots a brace at the designated X position of the given length*/
+
+  dcl (X,Y,LEN,C) fixed;
+
+  if ENGRAVING then do; /* WAS LEN+24 */
+    hpnum(X*4); hpnum(Y*4); hpnum(LEN*4); hstringr(' BR');
+    return;
+  end;
+  C = Y + LEN/2;
+  if LEN > 0 then do;
+    do X = X-3 to X-2;
+      imove_to (X+2,Y); iplot (X,Y+2);
+      iplot (X,C-2); iplot (X-2,C); iplot (X,C+2);
+      iplot (X,Y-2+LEN); iplot (X+2,Y+LEN);
+    end;
+  end;
+  else do;
+    do X = X+2 to X+3;
+      imove_to (X-2,Y); iplot (X,Y-2);
+      iplot (X,C+2); iplot (X+2,C); iplot (X,C-2);
+      iplot (X,Y+2+LEN); iplot (X-2,Y+LEN);
+    end;
+  end;
+
+end BRACE;
+
+REPEAT:procedure (X,LEN,FLAG) public swap4;  /* Draws a repeat at the given X position and of the given length */
+
+  dcl (I,X,LEN,FLAG) fixed;
+
+  I = 1; if FLAG then I = -1;
+  call HEAVY_BAR (X+I,LEN);
+  call BAR (X+5*I,LEN);
+  PLOT_SYMBOL ("241",X+8*I,S2,UP#);   /* Plot two dots */
+  PLOT_SYMBOL ("241",X+8*I,S3,UP#);
+
+end REPEAT;
+
+CURSOR:procedure (X,Y) public swap4; /* Draw a cursor */
+
+  dcl (X,Y) fixed;
+
+  imove_to (X-24,Y); iplot (X+24,Y);
+  imove_to (X,Y-24); iplot (X,Y+24);
+
+end CURSOR;
+
+NOTE_MARK:procedure (X,Y) public swap4; /* Plot a mark on the note head */
+
+  dcl (X,Y) fixed;
+
+  imove_to (X-5,Y-1); iplot (X+5,Y-1);
+  imove_to (X-5,Y+1); iplot (X+5,Y+1);
+
+end NOTE_MARK;
+
+TIME_SIGN:procedure (X,N,D,FORMAT) public swap4;  /* Draw a time signature given the X position, beat per measure, and beat note */
+
+  dcl (X,N,D,FORMAT) fixed;  /* X position, Numerator, Denominator */
+  dcl (DIF1,DIF2) fixed;
+
+  if      (FORMAT & F_COMT) ~= 0 then PLOT_SYMBOL ("262",X,L3,UP#); /* Common time */
+  else if (FORMAT & F_CUTT) ~= 0 then do; /* Cut time */
+    PLOT_SYMBOL ("262",X,L3,UP#); /* Common time signature */
+    if ENGRAVING then do;
+      hstring('3 W');
+      hpnum(X*4+2); hpnum(S1*4); hstring(' M');
+      hpnum(X*4+2); hpnum(S4*4); hstring(' L K');
+      hstringr(' 2 W');
+    end;
+    else do;
+      imove_to(X,S1); iplot(X,S4);
+    end;
+  end;
+  else do; /* Plot timesig num/den centered */
+    call PIC_NUMBER (X-LOG10(N)*5,L4,N,"250");
+    call PIC_NUMBER (X-LOG10(D)*5,L2,D,"250");
+  end;
+
+end TIME_SIGN;
+
+BEAM:procedure (X1,Y1,X2,Y2,DIR,CUE) public swap4; /* Plot a beam */
+
+  dcl (X1,Y1,X2,Y2,I) fixed,
+      (DIR,CUE)       boolean;
+
+  if ENGRAVING then do;
+    if CUE then I = 4; else I = 6; /* 1/2 beam width in 300ths */
+    hpnum(X1*4); hpnum(Y1*4-DIR*I); hpnum(X2*4); hpnum(Y2*4-DIR*I);
+    hpnum(I); hstringr(' B');
+    return;
+  end;
+  imove_to (X1,Y1);       iplot (X2,Y2);
+  iplot    (X2,Y2-DIR);   iplot (X1,Y1-DIR);
+  if ~CUE then do;
+   iplot (X1,Y1-DIR*2); iplot (X2,Y2-DIR*2);
+  end;
+
+end BEAM;
+
+NSLUR:procedure (MAT,TYPE) public swap4;
+
+  dcl MAT         fixed array;
+  dcl TYPE        fixed;
+  dcl (ax,bx,cx)  floating;
+  dcl (ay,bby,cy) floating;
+  dcl (t,x,y)     floating;
+  dcl I           fixed;
+
+  if ENGRAVING then do;
+    hpnum(TYPE);
+    do I = 0 to 7;
+      hpnum(MAT(I)*4);
+    end;
+    hstringr(' S');
+    return;
+  end;
+
+  cx = (MAT(2) - MAT(0)) * 3;
+  bx = (MAT(4) - MAT(2)) * 3 - cx;
+  ax = MAT(6) - MAT(0) - cx - bx;
+  cy = (MAT(3) - MAT(1)) * 3;
+  bby = (MAT(5) - MAT(3)) * 3 - cy;
+  ay = MAT(7) - MAT(1) - cy - bby;
+
+  if TYPE then do;
+    vector_mode; line_type(3);
+  end;
+  imove_to (MAT(0),MAT(1));
+  do t = 0 to 1 by SLUR_GRAIN;
+     X = ax*t*t*t + bx*t*t + cx*t + MAT(0);
+     Y = ay*t*t*t + bby*t*t + cy*t + MAT(1);
+     iplot (int(X),int(Y));
+  end;
+  if TYPE then line_type(0);
+
+end NSLUR;
+
+CSLUR:procedure (X0,Y0,X1,Y1,X2,Y2);
+
+  dcl (X0, Y0, X1, Y1, X2, Y2)          fixed;
+  dcl (XP0,YP0,XP1,YP1,XP2,YP2)         floating; 
+  dcl (BX0,BY0,BX1,BY1,BX2,BY2,BX3,BY3) fixed;
+  dcl (FX0,FY0,FX1,FY1,FX2,FY2,FX3,FY3) floating;
+  dcl (RX1,RY1)                         fixed;
+  dcl (XM,YM)                           fixed; /* translations to center endpoints around the origin */
+  dcl THICKNESS                         fixed;
+  dcl (HYPO,COSA,SINA)                  floating;
+  dcl (A,B,C)                           floating; /* parabola coefficients */
+
+  if X0 = X2 then return; /* This ends up undefined */
+  XM = (X0+X2)/2; YM = (Y0+Y2)/2; /* translate the beginning and endpoints */
+  X0 = X0 - XM;   Y0 = Y0 - YM;   /* by centering them around the origin */
+  X2 = X2 - XM;   Y2 = Y2 - YM;
+
+  if X1 < 4 then do;              /* If a midpoint is not designated, find an optimal one */
+    RX1  = -Y2;
+    RY1  =  X2;
+    HYPO = sqr(Y2*Y2 + X2*X2);
+    SINA = Y2 / HYPO;
+    COSA = X2 / HYPO;
+    XP0 = X0*COSA + Y0*SINA; YP0 = -X0*SINA + Y0*COSA; /* Rotate the beginning and endpoints onto the axis by SineY and CosineX */
+    XP2 = X2*COSA + Y2*SINA; YP2 = -X2*SINA + Y2*COSA;
+    XP1 = 0; A = XP2-XP0;
+    do case X1; /* Select a mid point */
+      do;
+        if A < 100 then YP1 = A/8;
+        else YP1 = log(A*A) + A*.04;
+      end;
+      YP1 = log(A*A) + 4;       /* Tuplet bow (low deviation) */
+    end;
+    if Y1 then YP1 = -YP1;
+  end;
+  else do;                      /* User designated midpoint */
+    X1  = X1 - XM; RX1 = X1;
+    Y1  = Y1 - YM; RY1 = Y1;
+    HYPO = sqr(Y1*Y1 + X1*X1); /* Calculate SineX and CosineY to rotate the axis of the parabolic slur */
+    SINA = -X1 / HYPO;
+    COSA =  Y1 / HYPO;
+    if Y1 < 0                  /* Determine the direction */
+    then do;
+       SINA = -SINA;
+       COSA = -COSA;
+    end;
+    XP0 = X0*COSA + Y0*SINA; YP0 = -X0*SINA + Y0*COSA; /* Rotate the parabola axis so that the midpoint is on the axis */
+    XP1 = X1*COSA + Y1*SINA; YP1 = -X1*SINA + Y1*COSA;
+    XP2 = X2*COSA + Y2*SINA; YP2 = -X2*SINA + Y2*COSA;
+  end;
+
+  C   = YP1;
+  A   = ( (C-YP2)/XP2 + (YP0-C)/XP0 ) / (XP0-XP2);
+  B   = (YP0-C)/XP0 - A*XP0;
+
+  FX0 = XP0 * 4;                  
+  FX1 = (XP0 +     (XP2-XP0) / 3) * 4;  
+  FX2 = (XP0 + 2 * (XP2-XP0) / 3) * 4;  
+  FX3 = XP2 * 4;
+
+  FY0 = YP0 * 4;                  
+  FY1 = (YP0+(2*A*XP0+B)*(XP2-XP0)/3) * 4;  
+  FY2 = (YP2+(2*A*XP2+B)*(XP0-XP2)/3) * 4;
+  FY3 = YP2 * 4;
+
+  BX0 = INT(FX0+.5);  BX1 = INT(FX1+.5);  
+  BX2 = INT(FX2+.5);  BX3 = INT(FX3+.5);
+  BY0 = INT(FY0+.5);  BY1 = INT(FY1+.5);  
+  BY2 = INT(FY2+.5);  BY3 = INT(FY3+.5);
+
+  THICKNESS = 1 + LOG10(BX3-BX0); /* WAS 4 */
+
+/*if RY1 = 0 & RX1 = 0 then return;*/
+
+  hstring('GS');
+  hpnum(XM*4); hpnum(YM*4); hstringr(' T');
+  hpnum(RY1); hpnum(RX1);
+  if RY1 > 0 then hstring(' Atan 90 sub'); /* Quadrants 1 & 2 */
+             else hstring(' Atan 90 add'); /* Quadrants 3 & 4 */
+  hstringr(' R');
+
+  hpnum(BX0); hpnum(BY0);
+  hstringr(' M');
+  hpnum(BX1); hpnum(BY1+THICKNESS);
+  hpnum(BX2); hpnum(BY2+THICKNESS);
+  hpnum(BX3); hpnum(BY3);
+  hstringr(' curveto');
+  hpnum(BX2); hpnum(BY2-THICKNESS);
+  hpnum(BX1); hpnum(BY1-THICKNESS);
+  hpnum(BX0); hpnum(BY0);
+  hstringr(' curveto FL GR');
+
+end CSLUR;
+
+SLUR:procedure (X0,Y0,X1,Y1,X2,Y2) public swap4; /* Plots a parabolic slur given two or three points*/
+
+/* This procedure first finds the translation to shift the endpoints so that they are centered around the origin.
+.  If a midpoint is not specified (X1 = 0 and Direction = Y1), it calculates the best one. 
+.  Then, it rotates the axis so that the midpoint of the parabola intersects the Y- axis.
+.  It then finds the parabola coefficients, rotates, and translates the coordinates back. Finally, 
+.  it plots the slur. 
+*/
+
+  dcl (X0,Y0,X1,X2,Y1,Y2) fixed;          /* initial, mid and terminal points */
+  dcl (XP0,YP0,XP1,YP1,XP2,YP2) floating; /* Temporary locations for calculations */
+  dcl (XP,YP) floating;
+  dcl (XM,YM) fixed;             /* translations to center endpoints around the origin */
+  dcl (HYPO,COSA,SINA) floating; /* transformations */
+  dcl (A,B,C,DELTA) floating;    /* parabola coefficients */
+  dcl (X,Y,R,REPS) fixed;
+
+  if ENGRAVING then do;
+    call CSLUR (X0,Y0,X1,Y1,X2,Y2);
+    return;
+  end;
+
+  XM = (X0+X2)/2; YM = (Y0+Y2)/2; /* translate the beginning and endpoints */
+  X0 = X0 - XM;   Y0 = Y0 - YM;   /* by centering them around the origin */
+  X2 = X2 - XM;   Y2 = Y2 - YM;
+
+  if X1 < 4 then do;              /* If a midpoint is not designated, find an optimal one */
+    HYPO = sqr(Y2*Y2 + X2*X2);
+    SINA = Y2 / HYPO;
+    COSA = X2 / HYPO;
+    XP0 = X0*COSA + Y0*SINA; YP0 = -X0*SINA + Y0*COSA; /* Rotate the beginning and endpoints onto the axis by SineY and CosineX */
+    XP2 = X2*COSA + Y2*SINA; YP2 = -X2*SINA + Y2*COSA;
+    XP1 = 0; A = XP2-XP0;
+    do case X1; /* Select a mid point */
+      do;
+        if A < 100 then YP1 = A/8;
+        else YP1 = log(A*A) + A*.04;
+      end;
+      YP1 = log(A*A) + 4;       /* Tuplet bow (low deviation) */
+    end;
+    if Y1 then YP1 = -YP1;
+  end;
+  else do;                      /* User designated a slur midpoint */
+    X1 = X1 - XM; Y1 = Y1 - YM;
+    HYPO = sqr(Y1*Y1 + X1*X1); /* Calculate SineX and CosineY to rotate the axis of the parabolic slur*/
+    SINA = -X1 / HYPO;
+    COSA =  Y1 / HYPO;
+    if Y1 < 0                  /* Determine the direction */
+    then do;
+       SINA = -SINA;
+       COSA = -COSA;
+    end;
+    XP0 = X0*COSA + Y0*SINA; YP0 = -X0*SINA + Y0*COSA; /* Rotate the parabola axis so that the midpoint is on the axis */
+    XP1 = X1*COSA + Y1*SINA; YP1 = -X1*SINA + Y1*COSA;
+    XP2 = X2*COSA + Y2*SINA; YP2 = -X2*SINA + Y2*COSA;
+  end;
+
+  REPS = 0;
+  do R = 0 to REPS;  /* Fatten up the slur */
+
+    A   = YP1 + R;
+    C   = ( (A-YP2)/XP2 + (YP0-A)/XP0 ) / (XP0-XP2);
+    B   = (YP0-A)/XP0 - C*XP0;
+
+    if MAIN_MODE >= PRINT# then DELTA = 25; /* This value sets speed/coarseness of the slurs */
+                           else DELTA = 10; /* was 15 */
+
+    DELTA = (XP2 - XP0) / DELTA;
+    if DELTA < 1 then DELTA = 1;
+
+    imove_to (X0 + XM,Y0 + YM); /* Move to the beginning point */
+
+    do XP = XP0 to XP2 by DELTA;
+
+      YP = A + XP*(B + C*XP);
+
+      X = int(XP*COSA - YP*SINA + .5); /* Rotate back */
+      Y = int(XP*SINA + YP*COSA + .5);
+      X = X + XM; Y = Y + YM;          /* Translate Back */
+
+      iplot (X,Y);
+
+    end;
+
+    iplot (X2+XM,Y2+YM);
+
+  end;
+
+end SLUR;
+
+HAIR_PIN:procedure (X1,Y1,X2,Y2,DIR) public swap4; /* Plots a hairpin given the starting and ending points in the designated direction */
+
+  dcl (X1,Y1) fixed,  /* Beginning point */
+      (X2,Y2) fixed,  /* Ending point */
+      I       fixed,
+      DIR     boolean;
+
+  do I = 1 to 2;
+    if ENGRAVING then do;
+      hpnum(X1*4); hpnum(Y1*4); hstring(' M');
+      hpnum(X2*4); hpnum(Y2*4); hstringr(' L K');
+    end;
+    else do; imove_to (X1,Y1); iplot (X2,Y2); end;
+    if DIR then Y1 = Y2 - (Y1 - Y2);
+           else Y2 = Y1 - (Y2 - Y1);
+  end;
+
+end HAIR_PIN;
+
+TUPNUM:procedure (X,Y,NUM); /* Plot a shorn timesig num in loo of proper symbols */
+
+  dcl (X,Y,NUM) fixed;
+/*
+  if ENGRAVING then do;
+    call SET_FONT (F_MUSIC#); * This will ensure that the gsave won't fool us *
+    hstring('gsave'); hpnum(X*4); hpnum(Y*4); hstring(' translate');
+    hstringr(' .5 .7 scale SM concat');
+    call PIC_NUMBER (0,0,NUM,"250");
+    hstringr('grestore');
+  end;
+  else */ call PIC_NUMBER (X,Y,NUM,"264");
+
+end TUPNUM;
+
+TUPLET:procedure (X1,Y1,X2,Y2,NUM,DIR) public swap4; /* Plots a tuplet bar */
+
+  dcl (X1,X2,Y1,Y2)  fixed,
+      (XM,YM,MN,MD)  fixed,
+      (NUM,BTYP,DIR,D,B,CL,P,L) fixed;
+
+  D   = CONV(DIR);  /* Determine the direction */
+  MD  = X2 - X1;
+  MN  = Y2 - Y1;
+  B   = Y2 - (MN * X2) / MD;
+
+  BTYP = shr(NUM,8);
+  NUM  = NUM & LBYTE;
+
+  L  = LOG10(NUM);
+  P  = L * 4;
+  CL = (L+1) * 4 + 2;
+
+  if (NUM = 0 \ MD < CL*3) & BTYP < 2 then do;
+
+    if BTYP = 0 then do;
+      call LINE (X1,Y1-6*D,X1,Y1,0,1); /* BTYP = 1 */
+      call LINE (X2,Y2-6*D,X2,Y2,0,1); /* BTYP = 1 */
+    end;
+    call LINE (X1,Y1,X2,Y2,0,1); /* BTYP = 1 */
+
+    if NUM ~= 0 then do;
+      XM = (X1 + X2) / 2  - P;
+      YM = (MN * XM) / MD + B;
+      call TUPNUM (XM,YM+4,NUM); /* Draw the tuplet number */
+    end;
+
+  end;
+  else do;
+    if BTYP < 2 then do;
+      XM = (X1 + X2) / 2  - CL;
+      YM = (MN * XM) / MD + B;
+      if BTYP = 0 then call LINE (X1,Y1-6*D,X1,Y1,0,1);
+      call LINE (X1,Y1,XM,YM,0,1); /* BTYP = 1 */
+      XM = (X1 + X2) / 2  + CL;
+      YM = (MN * XM) / MD + B;
+      call LINE (XM,YM,X2,Y2,0,1); /* BTYP = 1 */
+      if BTYP = 0 then call LINE (X2,Y2-6*D,X2,Y2,0,1);
+    end;
+    else if BTYP = 3 then call SLUR (X1,Y1,1,DIR,X2,Y2);
+    XM = (X1 + X2) / 2  - P;
+    YM = (MN * XM) / MD + B;
+    if BTYP = 3 then YM = YM + 4*D;
+    call TUPNUM (XM,YM,NUM); /* Draw the tuplet number */
+  end;
+
+end TUPLET;
+
+WAVE:procedure (X1,Y1,X2,Y2) public swap4;
+
+  dcl (X1,Y1) fixed,
+      (X2,Y2) fixed;
+
+  if ENGRAVING then do;
+    hpnum(X1*4); hpnum(Y1*4);
+    hpnum(X2*4); hpnum(Y2*4); hstringr(' WV');
+  end;
+  else do;
+    vector_mode; line_type(1);
+    imove_to (X1,Y1); iplot (X2,Y2);
+    line_type(0);
+  end;
+
+end WAVE;
+
+LINE:procedure (X1,Y1,X2,Y2,TYPE,WIDTH) public swap4;
+
+  dcl (X1,Y1) fixed,
+      (X2,Y2) fixed,
+      TYPE    fixed,
+      WIDTH   fixed,
+      I       fixed,
+      VERT    boolean;
+
+  VERT = (abs(X2-X1) < abs(Y2-Y1)); /* Set if slope > 1 */
+
+  if ENGRAVING then do;
+    do case TYPE;
+      ;               /* Solid */
+      hstringr('l1'); /* Dotted */
+      hstringr('l2'); /* Dot-Dashed */
+      hstringr('l3'); /* Short dashed */
+      hstringr('l4'); /* Long dashed */
+    end;
+    if WIDTH = 1 then do;
+      hpnum(X1*4); hpnum((Y1)*4); hstring(' M');
+      hpnum(X2*4); hpnum((Y2)*4); hstringr(' L K');
+    end;
+    else do;
+      I = shr(WIDTH,1);
+      if VERT then do;
+        hstring('true');
+        hpnum((X1-I)*4);
+        hpnum(Y1*4);
+        hpnum((X2-I)*4);
+        hpnum(Y2*4);
+        hpnum((X1+I+(WIDTH & MASK1))*4);
+      end;
+      else do;
+        hstring('false');
+        hpnum(X1*4);
+        hpnum((Y1-I)*4);
+        hpnum(X2*4);
+        hpnum((Y2-I)*4);
+        hpnum((Y1+I+(WIDTH & MASK1))*4);
+      end;
+      hstringr(' WL');
+    end;  
+/*
+    else do;
+      I = shr(WIDTH,1);
+      hstringr('1 W');
+      hstring('/Y1'); hpnum((Y1-I)*4); hstringr(' def');
+      hstring('/Y2'); hpnum((Y2-I)*4); hstringr(' def {');
+      hpnum(X1*4); hstringr(' Y1 M');
+      hpnum(X2*4); hstringr(' Y2 L K');
+      hpnum((Y1+I+(WIDTH & MASK1))*4); hstringr(' Y1 eq {exit} if');
+      hstringr('/Y1 Y1 1 add def');
+      hstringr('/Y2 Y2 1 add def } loop');
+      hstringr('2 W');
+    end;
+*/
+    if TYPE > 0 then hstringr('l0');
+  end;
+  else do;
+    if TYPE ~= 0 then do;
+      vector_mode; line_type(TYPE);
+    end;
+    I = -WIDTH / 2;
+    do I = I to I + WIDTH - 1;
+      if VERT then do;
+        imove_to (X1+I,Y1); iplot (X2+I,Y2);
+      end;
+      else do;
+        imove_to (X1,Y1+I); iplot (X2,Y2+I);
+      end;
+    end;
+    if TYPE ~= 0 then line_type(0);
+  end;
+
+end LINE;
+
+CIRCLE:procedure (X,Y) swap4; /* Draw a quick circle */
+
+  dcl (X,Y) fixed;
+
+  imove_to (X-4,Y-2); iplot (X-4,Y+2); iplot (X-2,Y+4);
+     iplot (X+2,Y+4); iplot (X+4,Y+2); iplot (X+4,Y-2);
+     iplot (X+2,Y-4); iplot (X-2,Y-4); iplot (X-4,Y-2);
+
+end CIRCLE;
+
+REG_TRADE:procedure (X,Y) public swap4; /* Draw a registered trade mark in the specified location */
+
+  dcl (X,Y) fixed;
+
+  if MACII | GO250 then do;
+    PLOT_SYMBOL (X,Y,"311",UP#);
+    return;
+  end;
+  call CIRCLE (X,Y);
+  imove_to (X-1,Y-2); iplot (X-1,Y+2); iplot (X+1,Y+2); /* Draw a quick R */
+     iplot (X+1,Y);   iplot (X-1,Y);   iplot (X+1,Y-2);
+
+end REG_TRADE;
+
+INDEX_MARK:procedure (X) public swap4; /* Draw an alignment mark */
+
+  dcl X fixed;
+
+  imove_to (X,L3+10); iplot (X,L3-10);
+  imove_to (X-10,L3); iplot (X+10,L3);
+
+end INDEX_MARK;
+
+EDIT_MARK:procedure (X) public; /* Draw an edit mark (light vertical line ) on the appropriate edit block */
+
+  dcl X fixed; /* X position */
+
+  PLOT_SYMBOL ("203",X,L3,UP#);
+
+end EDIT_MARK;
+
+LSYM_EDIT_MARK:procedure (X,Y) public swap4; /* Small circle to mark end & mid points of long syms */
+
+  dcl (X,Y) fixed;
+
+  imove_to (X-2,Y-1);
+  iplot    (X-2,Y+1);
+  iplot    (X-1,Y+2);
+  iplot    (X+1,Y+2);
+  iplot    (X+2,Y+1);
+  iplot    (X+2,Y-1);
+  iplot    (X+1,Y-2);
+  iplot    (X-1,Y-2);
+
+end LSYM_EDIT_MARK;
+
+GUITAR_FRAME:procedure (NAME,X,Y,PLOTFRAME);
+
+  dcl NAME      fixed array;
+  dcl (X,Y)     fixed;
+  dcl PLOTFRAME boolean;
+  dcl FRAME(15) fixed;
+  dcl ROOT      fixed;
+  dcl SIZE      fixed;
+  dcl FRET      fixed;
+  dcl FING      fixed;
+  dcl TNAME(8)  fixed;
+  dcl (C,I,J)   fixed;
+
+  /* Fingers: + 1 2 3 4 T O X */
+  /* frame: C1 F1  C2 F2  C3 F3  C4 F4  C5 F5  C6 F6  Root Size X Y */
+
+  I = KEY_NUMBER(NAME,false);
+  if I ~= nullint & TRANSPOSE(0) ~= 0 then do;
+    call GET_PITCH (I+TRANSPOSE(0),TNAME);
+    J = 1; C = byte(NAME,J);
+    if C = asc.sharp | C = asc.dollr then J = 2;
+    do C = J to 11;
+      call pbyte(TNAME,TNAME(0),byte(NAME,C));
+      TNAME(0) = TNAME(0) + 1;
+    end;
+    do while TNAME(0) < 12;
+      call pbyte(TNAME,TNAME(0),0);
+      TNAME(0) = TNAME(0) + 1;
+    end;
+  end;
+  else do J = 0 to 6;
+    TNAME(J) = NAME(J);
+  end;
+
+  if PLOTFRAME then if LOOKUP_FRAME (TNAME,FRAME) then do;
+    ROOT = FRAME(6) & MASK6;
+    SIZE = shr(FRAME(6),6) & MASK4;
+    if ENGRAVING then do;
+      do I = 0 to 5;
+        FRET = FRAME(7+I) & MASK4;
+        FING = shr(FRAME(7+I),4) & MASK4;
+        if      FING <= 5  then hpnum("100");
+        else if FING ~= 15 then hpnum("100"+FING);
+                           else hstring(' 0');
+        hpnum(FRET);
+      end;
+      hpnum(ROOT); hpnum(SIZE);
+      hpnum(X*4);  hpnum(Y*4); hstringr(' FR');
+    end;
+    else do;
+      do I = X - 10 to X + 10 by 4;
+        imove_to (I,Y); iplot (I,Y+SIZE*6);
+      end;
+      do I = 0 to SIZE;
+        imove_to (X-10,Y+I*6);
+        iplot    (X+10,Y+I*6);
+      end;
+      do I = 0 to 5;
+        FRET = FRAME(7+I) & MASK4;
+        FING = shr(FRAME(7+I),4) & MASK4;
+        J = Y + (SIZE-FRET)*6 + 2;
+        if FRET = 0 then J = J + 2;
+        if FING <= 5 then PLOT_SYMBOL ("100",X-10+I*4,J,UP#);
+        else PLOT_SYMBOL ("100"+FING,X-10+I*4,J,UP#);
+      end;
+      if ROOT = 1 then do; /* Nut case */
+        imove_to (X-10,Y+SIZE*6+1);
+        iplot    (X+10,Y+SIZE*6+1);
+      end;
+      else do;
+        I = X - 14; if ROOT >= 10 then I = I - 3;
+        call NUMBER (I,Y+(SIZE-1)*6-2,ROOT,1,F_EXTENDED#);
+      end;
+    end;
+  end;
+  else do;
+    if ENGRAVING then do;
+      hpnum(X*4-40); hpnum(Y*4);
+      hstringr(' M');
+      hstringr('0 96 RL 80 0 RL 0 -96 RL CP K');
+    end;
+    else do;
+      imove_to(X-10,Y); iplot(X-10,Y+24);
+      iplot(X+10,Y+24); iplot(X+10,Y); iplot(X-10,Y);
+      imove_to(X-10,Y+25); iplot(X+10,Y+25);
+    end;
+    LOWER_FONT = F_STANDARD#;
+    call PLOT_CHARACTER (question,X,Y+8,UP#);
+    SIZE = 4;  
+  end;
+
+  UPPER_FONT = F_MUSIC#;
+  LOWER_FONT = F_STANDARD#;
+  do while byte(TNAME,TNAME(0)-1) = 0 & TNAME(0) > 0;
+    TNAME(0) = TNAME(0) - 1;
+  end;
+  X = X - STRING_LEN(TNAME,F_STANDARD#)/2 + 3;
+  if PLOTFRAME then Y = Y + SIZE*6 + 7;
+  call INSNAME_STR (TNAME);
+  call PLOT_STRING (TNAME,X,Y,TNAME(0),1);
+
+end GUITAR_FRAME;

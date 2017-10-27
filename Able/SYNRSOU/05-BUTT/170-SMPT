@@ -1,0 +1,476 @@
+/* 170-SMPT  $TITLE  Routine for Generating SMPTE */
+
+/*
+   10/19/88 - TSS - changed inc.protocol to use.D50.protocol
+   10/17/88 - TSS - Added code to keep protocol going in SMPTE.GENERATOR
+   10/17/88 - TSS - Moved obsolete SMPTE.GEN here from 171-PRF1
+   06/15/88 - MWH - Split from 171-PRF1
+   06/15/88 - CJ  - modified Smpte Generator to show code on terminal
+*/
+
+SMPTE.GENERATOR:PROC (CODE) PUBLIC SWAPABLE;       /* GENERATE SMPTE TIME CODE */
+   DCL (CODE)         FIXED;   /* PASS CODE: 0 FOR VK DISPLAY       */
+   DCL (I,J)          FIXED;   /*            1 FOR TERMINAL DISPLAY */
+   DCL (DFBIT)        FIXED;
+   DCL (ONEM,ONEL)    FIXED STATIC;            /* FIRST  HALF OF 1-BIT */
+   DCL (TWOM,TWOL)    FIXED STATIC;            /* SECOND HALF OF 1 BIT */
+   DCL (ZERM,ZERL)    FIXED STATIC;            /* ZERO BIT WIDTH       */
+   DCL (ACCLSB)       FIXED STATIC;
+   DCL (TOGGLE)       FIXED;
+   DCL (TERMMSG) (32) FIXED;
+   DCL (TERMOUT) (32) FIXED;
+   DCL (TERMPTR)      FIXED;
+   DCL BASIC.STR      DATA ('SMPTE GENERATOR:  :  :  :  ');
+
+   DCL PKT.LEN        LIT '36';  /* TOTAL LEN OF PACKET DATA */
+   DCL HH             LIT '8';   /* PKT PTRS TO: HOURS  DATA */
+   DCL MM             LIT '11';  /* PTR      TO MINUTES DATA */
+   DCL SS             LIT '14';  /*          TO SECONDS DATA */
+   DCL C1.MSB         LIT '16';  /*          TO CHKSUM  DATA */
+   DCL FF             LIT '27';  /*          TO FRAME   DATA */
+   DCL C2.MSB         LIT '34';  /*          TO CHKSUM  DATA */
+
+   DCL BASIC.PKT      DATA (ESC,ASC.EXCLAM,ASC.Z,12,0,33,10,
+   /* BASIC DATA FOR   */   2,0,0,COLON,0,0,COLON,0,0,0,0,
+   /* PROTOCOL PACKETS */   ESC,ASC.EXCLAM,ASC.Z,12,0,33,10,
+                            3,COLON,0,0,SP,SP,SP,SP,SP,0,0);
+
+   DCL (C1,C2)            FIXED; /* KEEP CHECKSUMS HERE     */
+   DCL PKTPTR             FIXED;
+   DCL PKTMSG (PKT.LEN-1) FIXED; /* BUILD NEXT PACKET BYTES HERE */
+   DCL PKTOUT (PKT.LEN-1) FIXED; /* PACKET BYTES TO SEND         */
+
+
+   SEND.BYTE:PROC(B);                 /* PASS 8-BIT BYTE         */
+      DCL (I,J,B) FIXED;              /* BUT DO NO MULTIPLIES !! */
+                                      /* MUST PRESERVE D4567     */
+      DO I=0 TO 7;
+         IF (B&1)=0 THEN DO;    
+            ACCLSB=ACCLSB+ZERL;
+            J     =       ZERM;
+            IF ACCLSB ILT ZERL
+            THEN J=J+1;
+            WRITE(D17)=J-1;                 /* FINISH PREVIOUS WAIT; LOAD ZERO TIME */
+            IF INC.FM THEN WRITE("163")=1;  /* TOGGLE ONCE AT START OF BIT TIME */
+         END;
+         ELSE DO;
+            ACCLSB=ACCLSB+ONEL;
+            J     =       ONEM;
+            IF ACCLSB ILT ONEL
+            THEN J=J+1;
+            WRITE(D17)=J-1;                 /* FINISH PREVIOUS WAIT; LOAD FIRST HALF OF 1 BIT TIME */
+            IF INC.FM THEN WRITE("163")=1;  /* TOGGLE AT START OF SMPTE BIT */
+            ACCLSB=ACCLSB+TWOL;
+            J     =       TWOM;
+            IF ACCLSB ILT TWOL
+            THEN J=J+1;
+            WRITE(D17)=J-1;                  /* WAIT TO MID-BIT. LOAD TIMER FOR SECOND HALF OF BIT */
+            IF INC.FM THEN WRITE("163")=1;   /* TOGGLE MIDDLE OF SMPTE BIT   */
+         END;
+         B=SHR(B,1);
+      END;
+   END SEND.BYTE;
+
+   /* $PAGE - SMPTE GENERATOR (CONTIUED) */
+
+   /* CHECK FOR ERRORS  */
+   /* COMPUTE BIT TIMES */
+
+   IF (D16THERE == 0 || interp_is_running != 0)     /* NO D16, or running on interpreter */
+   {
+      CALL DISPLAY.ERR(32);
+      RETURN;
+   }
+   
+   IF D16TIM<80 THEN DO;              /* WRONG D16 RATE              */
+      CALL DISPLAY.ERR(33);
+      RETURN;
+   END;
+
+   CALL PUSH.GRAPHICS.ATTRIBUTES;     /* SAVE GRAPHICS STATE */
+   TRANSPARENT_MODE;                  /* GET OUT OF VECTOR MODE? */
+
+   IF NEW.PAN<>0 THEN DO;             /* HAD BETTER BE - CLEAR DISPLAY */
+      CALL CLEAR.DISPLAY;
+      CALL EMIT.STRING(0,'SMPTE GENERATOR:  :  :  :');
+   END;
+   ELSE DO;
+      CALL CLEAR.DISPLAY;
+   END;
+
+   /* SET UP INITIAL STRING FOR TERMINAL TIME DISPLAY */
+   /* SET UP WORKING COPY IN TERMMSG,  FROZEN COPY    */
+   /* SET UP PROTOCOL PACKETS IN PACKET               */
+   /* IN TERMOUT                                      */
+
+   CUR.HRS=SM.HRS; CUR.MIN=SM.MIN;    /* START SMPTE AT DIALED IN TIME */
+   CUR.SEC=SM.SEC; CUR.FRA=SM.FRA;
+   
+   C1 = 0; C2 = 0;                    /* INITIALIZE CHECKSUMS */
+   DO I = 0 TO SHR(PKT.LEN,1)-1; 
+      PKTMSG(I) = BASIC.PKT(I);       /* COPY BASIC INFO FOR 1ST PKT */
+      IF  (I > 2)
+      AND (I < (SHR(PKT.LEN,1) - 2))  /* DATA FOR 1ST PACKET      */
+      THEN C1 = C1 + PKTMSG(I);       /* COMPUTE INITIAL CHECKSUM */
+   END; 
+   DO I = 0 TO SHR(PKT.LEN,1)-1; 
+      J = I + SHR(PKT.LEN,1);
+      PKTMSG(J) = BASIC.PKT(J);       /* COPY BASIC INFO FOR 2ND PKT */
+      IF  (I > 2)
+      AND (I < (SHR(PKT.LEN,1) - 2))  /* DATA FOR 2ND PACKET      */
+      THEN C2 = C2 + PKTMSG(J);       /* COMPUTE INITIAL CHECKSUM */
+   END; 
+
+   DO I = 0 TO BASIC.STR(0)-1;        /* COPY BYTES INTO STRING */
+      TERMMSG(I) = BYTE(BASIC.STR,I); /* ONE CHAR PER WORD      */
+   END;
+   TERMMSG(BASIC.STR(0))=CRET;        /* PUT CARRIAGE RETURN AT END */
+
+   TERMPTR = 0; PKTPTR = 0;
+   LOAD CUR.FRA; DIV 10;
+   TERMMSG(26)   = REM + ASC.0;
+   TERMMSG(25)   = RES + ASC.0;
+   PKTMSG (FF)   = RES + ASC.0;
+   PKTMSG (FF+1) = REM + ASC.0;
+   C2 = C2 + RES + REM + (2*ASC.0);
+   LOAD CUR.SEC; DIV 10;
+   TERMMSG(23)   = REM + ASC.0;
+   TERMMSG(22)   = RES + ASC.0;
+   PKTMSG (SS)   = RES + ASC.0;
+   PKTMSG (SS+1) = REM + ASC.0;
+   C1 = C1 + RES + REM + (2*ASC.0);
+   LOAD CUR.MIN; DIV 10;
+   TERMMSG(20)   = REM + ASC.0;
+   TERMMSG(19)   = RES + ASC.0;
+   PKTMSG (MM)   = RES + ASC.0;
+   PKTMSG (MM+1) = REM + ASC.0;
+   C1 = C1 + RES + REM + (2*ASC.0);
+   LOAD CUR.HRS; DIV 10;
+   TERMMSG(17)   = REM + ASC.0;
+   TERMMSG(16)   = RES + ASC.0;
+   PKTMSG (HH)   = RES + ASC.0;
+   PKTMSG (HH+1) = REM + ASC.0;
+   C1 = C1 + RES + REM + (2*ASC.0);
+   PKTMSG(C1.MSB)   = SHR(C1,8);     /* COMPUTE ACTUAL CHECKSUM */
+   PKTMSG(C1.MSB+1) = C1 & 255;      /* BYTES TO BE SENT        */
+   PKTMSG(C2.MSB)   = SHR(C2,8);
+   PKTMSG(C2.MSB+1) = C2 & 255;
+
+   DO I = 0 TO 27;                /* COPY CHARACTERS TO 2ND BUFFER */
+      TERMOUT(I) = TERMMSG(I);
+   END;
+
+   IF CODE = 1 THEN DO;
+      DO I=0 TO 27; CALL PC(TERMOUT(I)); END; /* PRINT THE CHARS */
+      CALL TTY_WAIT;
+   END;
+
+   CALL STOP.RECD.MOVE.PLAY.XPOS.CONT.ERAS;     /* STOP SEQUENCER & TURN OFF ALL LIGHTS */
+   CALL DISPLAY.SEQUENCER.STATUS;               /* SET UP SEQUENCER DISPLAY */
+
+   IF USE.D50.PROTOCOL THEN DO;
+      DO I = 0 TO PKT.LEN-1;                  /* SEND OUT THIS FIRST SET OF PACKETS */
+         PKTOUT(I) = PKTMSG(I);               /* COPY TO OUTPUT BUFFER */
+         CALL PC(PKTOUT(I));                  /* ONE CHAR AT A TIME */
+      END;
+      CALL TTY_WAIT;
+
+      /* Force an immediate update to the VK display on remote devices */
+      /* to provide an immediate update of the VK window display while */
+      /* we are generating smpte:                                      */
+
+      call Flush.VK.Display.To.Termulators;
+   END;
+
+   /* WAIT FOR 200 MSEC HERE TO MAKE SURE ALL PENDING CHARS */
+   /* HAVE HAD A CHANCE TO COME IN AND GET HANDLED          */
+
+   I=REAL.MILLISECONDS;
+   DO WHILE (REAL.MILLISECONDS-I) ILT 400;
+      interp_run_host_non_timer();
+   END;
+
+   I=D16TIM;                         /* GET D16 INCREMENTS PER MSEC */
+   IF I=99   THEN I=100;             /* ROUND THESE VALUES IN CASE  */
+   IF I=101  THEN I=100;             /* OFF BY 1                    */
+   IF I=999  THEN I=1000;
+   IF I=1001 THEN I=1000;
+
+   BITMSB=I; BITLSB=0;                /* GET D16 TIMER INCREMENTS PER SMPTE BIT */
+   CALL MULTIPLY(0,MSECS.PER.BIT.B(SM.MODE),MSECS.PER.BIT.C(SM.MODE),MSECS.PER.BIT.D(SM.MODE));
+
+   ZERM=BITMSB; ZERL=BITLSB;          /* GET SMPTE BIT WIDTHS FOR EACH MODE */
+   ONEM=SHR(BITMSB,1); ONEL=SHR(BITLSB,1)\SHL(BITMSB,15);
+   TWOM=BITMSB-ONEM;   TWOL=BITLSB-ONEL;
+   IF BITLSB ILT ONEL THEN TWOM=TWOM-1;
+
+   IF SM.MODE=0 THEN DFBIT=4;           /* SET DF BIT             */
+   ELSE              DFBIT=0;           /* NOT DROP FRAME         */
+   ACCLSB=0;                            /* INIT LSB ACCUMULATOR   */
+   
+   /* SMPTE GENERATOR LOOP: */
+
+   DISABLE;                           /* MUST STAY IN THIS LOOP */
+
+   IF INC.CREG THEN DO;
+      IF (NEW.ORK == 0) THEN DO;
+         WRITE(CREG)=2;               /* SET UP CREG FOR ALPHA DISPL    */
+      END;
+      ELSE DO;
+         WRITE(CREG)="20";            /* FIRST STOP THE WRITE IN PROGRESS */
+      END;
+   END;
+
+   WRITE(D16)=100;                    /* SEND FIRST TOGGLE IN 100 TICKS */
+   DO I=0 TO 15;                      /* GET RID OF DC OFFSET FIRST     */
+      CALL SEND.BYTE("252");          /* 10101010 */
+   END;
+
+   I=0;                               /* SET UP FOR LOOP        */
+   J=FRAMES.PER.SECOND(SM.MODE);      /* FOR LIMIT CHECK        */
+
+   DO WHILE I=0;                      /* WAIT FOR 'STOP' BUTTON */
+
+      /* SEND    CURRENT FRAME # */
+      /* DISPLAY CURRENT FRAME # */
+      /* COMPUTE NEXT    FRAME # */
+
+      LOAD CUR.FRA; DIV 10;
+      CALL SEND.BYTE(READ(4));        /* SEND INFO, WITH ZERO USER BITS */
+      TERMMSG(26) = REM + ASC.0;
+      C2 = C2 - PKTMSG(FF+1);
+      PKTMSG(FF+1) = REM + ASC.0;
+      C2 = C2 + PKTMSG(FF+1);
+      IF INC.CREG AND (NEW.ORK == 0) THEN DO;
+         WRITE(DREG)=(SHL(26,8)\"60")+READ(4);
+         WRITE(CREG)=2\"40";
+         WRITE(CREG)=2; 
+         WRITE(DREG)=(SHL(25,8)\"60")+READ(5);    /* WRITE OUT OLD FRAME # */
+         WRITE(CREG)=2\"40";
+         WRITE(CREG)=2; 
+      END;
+      CALL SEND.BYTE(READ(5)\DFBIT);  /* SEND TENS (WITH DF BIT IF SO)  */
+      TERMMSG(25) = RES + ASC.0;
+      C2 = C2 - PKTMSG(FF);
+      PKTMSG(FF) = RES + ASC.0;
+      C2 = C2 + PKTMSG(FF);
+
+      CUR.FRA=CUR.FRA+1;              /* ALWAYS INCREMENT FRAME #       */
+
+      /* $PAGE - SMPTE GENERATOR (CONTINUED) */
+
+      /* SEND    CURRENT SECONDS */
+      /* DISPLAY CURRENT SECONDS */
+      /* COMPUTE NEXT    SECONDS */
+
+      LOAD CUR.SEC; DIV 10;
+      CALL SEND.BYTE(READ(4));        /* SEND INFO, WITH ZERO USER BITS */
+      TERMMSG(23) = REM + ASC.0;
+      C1 = C1 - PKTMSG(SS+1);
+      PKTMSG(SS+1) = REM + ASC.0;
+      C1 = C1 + PKTMSG(SS+1);
+      IF INC.CREG AND (NEW.ORK == 0) THEN DO;
+         WRITE(DREG)=(SHL(23,8)\"60")+READ(4);
+         WRITE(CREG)=2\"40";
+         WRITE(CREG)=2; 
+         WRITE(DREG)=(SHL(22,8)\"60")+READ(5);    /* WRITE OUT OLD FRAME # */
+         WRITE(CREG)=2\"40";
+         WRITE(CREG)=2; 
+      END;
+      ELSE IF INC.CREG THEN DO;
+         WINDOW.BITS(0)=DIGITS(READ(4))\SHL(DIGITS(READ(5))\"200",8);
+         WRITE(CREG)=0;    /* SET UP ADDRESS */
+         WRITE(DREG)=WINDOW.BITS(0); /* AND NUMBER TO DISPAY IN LEDS */
+         WRITE(CREG)="40"; WRITE(CREG)=0; /* PULSE EXW FOR LATCH STROBE */
+      END;
+      CALL SEND.BYTE(READ(5));
+      TERMMSG(22) = RES + ASC.0;
+      C1 = C1 - PKTMSG(SS);
+      PKTMSG(SS) = RES + ASC.0;
+      C1 = C1 + PKTMSG(SS);
+
+      IF CUR.FRA>=J THEN DO;          /* CHECK FRAME LIMIT              */
+         CUR.FRA=0;                   /* BUT CHECK FOR DROP FRAME TOO   */
+         CUR.SEC=CUR.SEC+1;
+      END;
+
+      IF (CODE = 1) AND (TOGGLE = 0) THEN DO;
+         IF TERMPTR<27 THEN DO;
+            WRITE("50") = TERMOUT(TERMPTR);
+            TERMPTR = TERMPTR + 1;
+         END;
+      END;
+      ELSE IF USE.D50.PROTOCOL THEN DO;
+         IF (PKTPTR<(SHR(PKT.LEN,1)-1))
+         OR ((PKTPTR>(SHR(PKT.LEN,1)-1)) & (PKTPTR<(PKT.LEN-1)) )
+         THEN DO;
+            WRITE("50") = PKTOUT(PKTPTR);
+            PKTPTR = PKTPTR + 1;
+         END;
+      END;
+
+      /* SEND    CURRENT MINUTES */
+      /* DISPLAY CURRENT MINUTES */
+      /* COMPUTE NEXT    MINUTES */
+
+      LOAD CUR.MIN; DIV 10;
+      CALL SEND.BYTE(READ(4));        /* SEND INFO, WITH ZERO USER BITS */
+      TERMMSG(20) = REM + ASC.0;
+      C1 = C1 - PKTMSG(MM+1);
+      PKTMSG(MM+1) = REM + ASC.0;
+      C1 = C1 + PKTMSG(MM+1);
+      IF INC.CREG AND (NEW.ORK == 0) THEN DO;
+         WRITE(DREG)=(SHL(20,8)\"60")+READ(4);
+         WRITE(CREG)=2\"40";
+         WRITE(CREG)=2; 
+         WRITE(DREG)=(SHL(19,8)\"60")+READ(5);    /* WRITE OUT OLD FRAME # */
+         WRITE(CREG)=2\"40";
+         WRITE(CREG)=2; 
+      END;
+      ELSE IF INC.CREG THEN DO;
+         WINDOW.BITS(1)=DIGITS(READ(4))\SHL(DIGITS(READ(5)),8);
+         WRITE(CREG)=1;                     /* SET UP ADDRESS */
+         WRITE(DREG)=WINDOW.BITS(1);        /* AND NUMBER TO DISPAY IN LEDS */
+         WRITE(CREG)=1+"40"; WRITE(CREG)=1; /* PULSE EXW FOR LATCH STROBE */
+      END;
+      CALL SEND.BYTE(READ(5));
+      TERMMSG(19) = RES + ASC.0;
+      C1 = C1 - PKTMSG(MM);
+      PKTMSG(MM) = RES + ASC.0;
+      C1 = C1 + PKTMSG(MM);
+
+      IF CUR.SEC>=60 THEN DO;         /* CHECK SECOND LIMIT             */
+         CUR.SEC=0; CUR.MIN=CUR.MIN+1;
+         LOAD CUR.MIN; DIV 10;        /* MUST CHECK FOR DF              */
+         IF  (DFBIT<>0)               /* DROP FRAME CODE ACTIVE         */
+         AND (READ(4)<>0)             /* NOT MINUTE 0,10,20,30,40,50    */
+         THEN CUR.FRA=2;              /* SKIP TO NEXT FRAME             */
+      END;
+
+      /* SEND    CURRENT HOURS */
+      /* DISPLAY CURRENT HOURS */
+      /* COMPUTE NEXT    HOURS */
+
+      LOAD CUR.HRS; DIV 10;
+      CALL SEND.BYTE(READ(4));        /* SEND INFO, WITH ZERO USER BITS */
+      TERMMSG(17) = REM + ASC.0;
+      C1 = C1 - PKTMSG(HH+1);
+      PKTMSG(HH+1) = REM + ASC.0;
+      C1 = C1 + PKTMSG(HH+1);
+      IF INC.CREG AND (NEW.ORK == 0) THEN DO;
+         WRITE(DREG)=(SHL(17,8)\"60")+READ(4);
+         WRITE(CREG)=2\"40";
+         WRITE(CREG)=2; 
+         WRITE(DREG)=(SHL(16,8)\"60")+READ(5);    /* WRITE OUT OLD FRAME # */
+         WRITE(CREG)=2\"40";
+         WRITE(CREG)=2; 
+      END;
+      CALL SEND.BYTE(READ(5));
+      TERMMSG(16) = RES + ASC.0;
+      C1 = C1 - PKTMSG(HH);
+      PKTMSG(HH) = RES + ASC.0;
+      C1 = C1 + PKTMSG(HH);
+
+      IF CUR.MIN>=60 THEN DO;
+         CUR.MIN=0; CUR.HRS=CUR.HRS+1;
+         IF CUR.HRS>=24 THEN CUR.HRS=0;
+      END;
+
+      /* $PAGE - SMPTE GENERATOR, CONTINUED */
+
+      /* SEND SYNC BYTES   */
+      /* CHECK STOP BUTTON */
+
+      CALL SEND.BYTE("374");          /* SYNC */
+
+      IF INC.CREG AND (NEW.ORK == 0) THEN DO;
+         WRITE(CREG)=1;               /* TURN OFF READ                   */
+         WRITE(DREG)="600"\8;         /* REQUEST DATA FOR RECORDER PANEL */
+         PULSE_EXWR;
+         I=READ(DREG)&2;              /* READ NEW DATA             */
+         WRITE(CREG)=1;               /* REMOVE READ               */
+         WRITE(CREG)=2;               /* SET UP CREG FOR ALPHA DISPL    */
+      END;
+      ELSE IF INC.CREG THEN DO;       /* CHECK STOP BUTTON          */
+         WRITE(CREG)=2\"010";         /* SET UP ADDRESS       */
+         WRITE(CREG)=2\"110";         /* NOW READ THEM FIRST  */
+         I=READ(DREG)&2;              /* NONZERO IF STOP HELD */
+         WRITE(CREG)=2\"010";         /* AND OFF WITH READ    */
+      END;
+
+      IF (READ("51")&2)<>0 THEN DO;   /* PRETEND 'STOP' ON TERMINAL CH  */
+         I=2;                         /* READ AND TOSS CHARACTER        */
+         WRITE("300")=READ("50");
+      END;
+
+      IF (CODE = 1) AND (TOGGLE = 0) THEN DO;
+         WRITE("50") = TERMOUT(TERMPTR);
+         TERMPTR = TERMPTR + 1;
+         IF TERMPTR = 28 THEN DO;             /* COPY TEMP WORKING STRING */
+            TERMPTR = 0;                      /* TO OUTPUT STRING SO      */
+            WRITE("313") = ADDR(TERMMSG(16)); /* DISPLAY IS MORE OR LESS  */
+            WRITE("300") = ADDR(TERMOUT(16)); /* CORRECT                  */
+            RPC 12;
+            WRITE("360") = READ("373");
+            IF USE.D50.PROTOCOL
+            THEN TOGGLE = TOGGLE XOR 1;       /* GIVE PROTOCOL A CHANCE */
+         END;
+      END;
+      ELSE IF USE.D50.PROTOCOL THEN DO;
+         WRITE("50") = PKTOUT(PKTPTR);
+         PKTPTR = PKTPTR + 1;
+         IF PKTPTR = SHR(PKT.LEN,1)          /* DONE WITH 1ST PACKET   */
+         THEN DO;                            /* COPY NEW INFO OVER OLD */
+            WRITE("313") = ADDR(PKTMSG(8));
+            WRITE("300") = ADDR(PKTOUT(8));
+            RPC 8;                           /* 8 CHARS OF DATA */
+            WRITE("360") = READ("373");
+            PKTOUT(C1.MSB)   = SHR(C1,8);    /* CONSTRUCT ACTUAL */
+            PKTOUT(C1.MSB+1) = C1 & 255;     /* CHECKSUM BYTES   */
+         END;
+         ELSE IF PKTPTR = PKT.LEN            /* DONE WITH 2ND PACKET   */
+         THEN DO;                            /* COPY NEW INFO OVER OLD */
+            PKTPTR = 0;
+            WRITE("313") = ADDR(PKTMSG(27));
+            WRITE("300") = ADDR(PKTOUT(27));
+            WRITE("360") = READ("373");      /* JUST 2 CHARS OF NEW DATA */
+            WRITE("360") = READ("373");
+            PKTOUT(C2.MSB)   = SHR(C2,8);    /* CONSTRUCT ACTUAL */
+            PKTOUT(C2.MSB+1) = C2 & 255;     /* CHECKSUM BYTES   */
+            TOGGLE = TOGGLE XOR 1;           /* IF TERMINAL PRINTING, GIVE IT A CHANCE TOO */
+         END;
+      END;
+
+      CALL SEND.BYTE("277");          /* SYNC */
+
+   END;
+
+   DO I=0 TO 15;                      /* PROVIDE TRAILER */
+      CALL SEND.BYTE("252");          /* 10101010        */
+   END;
+
+   IF USE.D50.PROTOCOL THEN DO;           /* FINISH LAST PACKET */
+      WRITE(3)=0;
+      DO WHILE (PKTPTR<>PKT.LEN) & (PKTPTR<>0);
+         WRITE(3)=0;                  /* KEEP THINGS SLOW */
+         WRITE("50") = PKTOUT(PKTPTR);
+         PKTPTR = PKTPTR + 1;
+      END;
+      WRITE(3)=0;
+   END;
+
+   IF INC.CREG AND (NEW.ORK == 0) THEN DO;
+      WRITE(CREG)="20";           /* SET UP EXTERNAL WRITE AGAIN */
+      WRITE(CREG)="260";          /* START CONVERSION, SET UP EXTERNAL WRITE */
+   END;
+
+   ENABLE;
+
+   CALL CLEAR.DISPLAY;
+
+   IF CODE = 1                    /* POSITION CURSOR BACK AT COL 0 */
+   THEN WRITE("50") = CRET;       /* SO CPOS WORKS                 */
+
+   CALL POP.GRAPHICS.ATTRIBUTES;  /* RESTORE GRAPHICS STATE */
+
+END SMPTE.GENERATOR;

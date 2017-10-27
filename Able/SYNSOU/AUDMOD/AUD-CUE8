@@ -1,0 +1,1312 @@
+/* AUD-CUE8   $TITLE  Handle shuttle project switch
+
+   Modified:
+   03/20/89 - MWH - Unselect clipboard reel when finished editing
+   03/16/89 - MWH - Make Alternate.Dialog.Mode public for Rbox editing
+   11/23/88 - MWH - Make editing functions useable from the Remote Box
+   07/29/88 - cj  - fixed coarse bar/fine bar mixup in zoom button code
+                    Removed unnecessary invalidate.wave.display calls
+   07/14/88 - SGS - Added preview edit function
+   06/23/88 - cj  - handle string in handle.shuttle.project.switch
+   04/04/88 - MWH - Erase wave and redraw when it becomes invalid
+   
+*/
+
+/* $page - Routines to draw flags */
+
+/* Plot flag is used to plot the flags used in the flag region */
+/* 6 flag types are available - cue in, cue out, edit in, edit */
+/* out, an edit flag, and an edit line                         */
+
+/* note: local optimized plotting routines are used to speed   */
+/* up drawing to get scroll bar response quick                 */
+
+
+Plot.Flag: proc(x,y,code,shadow,orgx) swapable;
+   dcl x      fixed;
+   dcl y      fixed;
+   dcl code   fixed;    /* 0 = cue in flag        */
+                        /* 1 = cue out flag       */
+                        /* 2 = edit in flag       */
+                        /* 3 = edit out flag      */
+                        /* 4 = E flag             */
+                        /* 5 = Edit Line          */
+                        /* 6 = Animated Edit line */
+                        /* 7 = drag entire cue from cue in     */
+                        /* 8 = drag entire cue from cue out    */
+                        /* 9 = drag entire edit from edit in   */
+                        /* 10 = drag entire edit from edit out */
+                        /* 11 = magnifier left                 */
+                        /* 12 = magnifier right                */
+                        /* 13 = drag entire sbar from left     */
+                        /* 14 = drag entire sbar from right    */
+                        /* 15 = drag box below flag in coarse  */
+
+   dcl shadow  fixed;   /* 1 to add shadow to it only     */
+   dcl orgx    fixed;   /* pass original disp for compare */
+
+   Transmit: proc (x,y);              /* xmit coordinate pair         */
+      dcl (x,y) fixed;
+      if x<0    then x = 0;           /* keep edit line on the screen */
+      if x>1023 then x = 1023;
+      call pc(SP        + shr(y,5));  /* hi y */
+      call pc(ASC.GRAVE + (y&31));    /* lo y */
+      call pc(SP        + shr(x,5));  /* hi x */
+      call pc(ASC.AT    + (x&31));    /* lo x */
+   end Transmit;
+
+   Plot.Circle: proc(x,y,radius);     /* plot circle at center x,y    */
+      dcl x      fixed;
+      dcl y      fixed;
+      dcl radius fixed;
+
+      call pc(GS);            /* lift/vector mode */
+      call Transmit(x,y);
+
+      call pc(ESC);
+      call ps('\O');
+      call pc(SP + shr(radius,5));
+      call pc(ASC.AT + (radius&31));
+   end Plot.Circle;
+
+   Connect: proc(x1,y1,x2,y2);        /* connect points  */
+      dcl x1      fixed;
+      dcl y1      fixed;
+      dcl x2      fixed;
+      dcl y2      fixed;
+
+      call pc(GS);        /* lift/vector mode */
+      call Transmit(x1,y1);
+      call Transmit(x2,y2);
+
+   end Connect;
+
+   Draw.Edit.Line: proc (x,y);        /* draw edit line between flags */
+      dcl (x,y) fixed;
+
+      call connect(x - Edit.Line.Radius, y+15,
+                   x + Edit.Line.Radius, y+15);
+      call connect(x-3, y+16, x-3, y+20);
+      call connect(x-3, y+21, x+3, y+21);
+      call connect(x+3, y+16, x+3, y+20);
+   end Draw.Edit.Line;
+
+   Draw.In.Out.Triangle:proc (x,y);      /* draw triangle and box part */
+      dcl (x,y) fixed;                   /* of cue in/out flag         */
+
+      call connect(x-3, y+1, x-3, y+6 );
+      call connect(x+3, y+1, x+3, y+6 );
+      call connect(x-2, y+6, x+2, y+6 );
+      call connect(x  , y+7, x  , y+12);
+
+      call connect(x+4, y+7 , x+9, y+18);
+      call connect(x-4, y+7 , x-9, y+18);
+      call connect(x-8, y+18, x+8, y+18);
+
+   end Draw.In.Out.Triangle;
+
+   Draw.Cue.In: proc (x,y);              /* draw complete cue in flag */
+      dcl (x,y) fixed;
+   
+      call Draw.In.Out.Triangle(x,y);
+      call connect(x-6, y+17, x+6, y+17);
+      call connect(x-4, y+16, x+4, y+16);
+      call connect(x-2, y+15, x+2, y+15);
+      call connect(x  , y+14, x  , y+14);
+      call pc(GS);                      /* lift   */
+   end Draw.Cue.In;
+
+   Draw.Cue.Out: proc(x,y);             /* complete cue out flag */
+      dcl (x,y) fixed;
+
+      call Draw.In.Out.Triangle(x,y);
+      call connect(x-6, y+19, x+6, y+19);
+      call connect(x-4, y+20, x+4, y+20);
+      call connect(x-2, y+21, x+2, y+21);
+      call connect(x  , y+22, x  , y+22);
+      call pc(GS);                      /* lift   */
+   end Draw.Cue.Out;
+
+   Draw.Edit.Flag.Box: proc(x,y);       /* draw small drag box below */
+      dcl (x,y) fixed;                  /* scisors axis              */
+
+      call connect(x, y+7, x, y+12);
+      call connect(x-3, y+1, x-3, y+6);
+      call connect(x+3, y+1, x+3, y+6);
+      call connect(x-2, y+6, x+2, y+6);
+   end Draw.Edit.Flag.Box;
+
+   Draw.Edit.In: proc(x,y);             /* draw edit in flag */
+      dcl (x,y) fixed;
+
+      call Plot.Circle(x-10, y+8 , 4);
+      call Plot.Circle(x-10, y+23, 4);
+
+      call connect(x-8, y+13, x+18, y+21);
+      call connect(x-8, y+18, x+18, y+10);
+
+      call Draw.Edit.Flag.Box(x,y);
+   end Draw.Edit.In;
+
+   Draw.Edit.Out: proc(x,y);            /* draw edit out flag */
+      dcl (x,y) fixed;
+
+      call Plot.Circle(x+10, y+8 , 4);
+      call Plot.Circle(x+10, y+23, 4);
+
+      call connect(x+8, y+13, x-18, y+21);
+      call connect(x+8, y+18, x-18, y+10);
+
+      call Draw.Edit.Flag.Box(x,y);
+   end Draw.Edit.Out;
+
+   /* Note: a left extension extends from the left to the right  */
+   /*       a right extension extends from the right to the left */
+
+   Draw.Left.Extension: proc(x,y,offset,height,len);   /* draw extension to drag whole region */
+      dcl (x,y)   fixed;      /* x,y of center of box   */
+      dcl offset  fixed;      /* x offset to icon edge  */
+      dcl height  fixed;      /* height of line above y */
+      dcl len     fixed;      /* center to center len   */
+
+      call connect(x+offset, y+height, x+len, y+height);
+      call connect(x+len, y+1 , x+len, y+height-1);
+   end Draw.Left.Extension;
+
+   Draw.Right.Extension: proc(x,y,offset,height,len);   /* draw extension to drag whole region */
+      dcl (x,y)   fixed;      /* x,y of center of box   */
+      dcl offset  fixed;      /* x offset to icon edge  */
+      dcl height  fixed;      /* height of line above y */
+      dcl len     fixed;      /* center to center len   */
+
+      call connect(x-offset, y+height, x-len, y+height);
+      call connect(x-len, y+1 , x-len, y+height-1);
+   end Draw.Right.Extension;
+
+   Draw.Cue.In.Extension: proc(x,y);   /* draw extension to drag whole cue */
+      dcl (x,y) fixed;
+
+      call Draw.Left.Extension(x, y, 7, 14,
+      Coarse.Bar.Out.Flag - Coarse.Bar.In.Flag);
+
+   end Draw.Cue.In.Extension;
+
+   Draw.Cue.Out.Extension: proc(x,y);   /* draw extension to drag whole cue */
+      dcl (x,y) fixed;
+
+      call Draw.Right.Extension(x, y, 7, 14,
+      Coarse.Bar.Out.Flag - Coarse.Bar.In.Flag);
+
+   end Draw.Cue.Out.Extension;
+
+   Draw.Edit.In.Extension: proc(x,y);   /* draw extension to drag whole cue */
+      dcl (x,y) fixed;
+
+      call Draw.Left.Extension(x, y, 4, 16,
+      Coarse.Bar.EOut.Flag - Coarse.Bar.EIn.Flag);
+
+   end Draw.Edit.In.Extension;
+
+   Draw.Edit.Out.Extension: proc(x,y);   /* draw extension to drag whole cue */
+      dcl (x,y) fixed;
+
+      call Draw.Right.Extension(x, y, 4, 16,
+      Coarse.Bar.EOut.Flag - Coarse.Bar.EIn.Flag);
+
+   end Draw.Edit.Out.Extension;
+
+   Draw.Magnifier.Left: proc(x,y);
+      dcl (x,y) fixed;
+
+      call Plot.Circle(x, y+21, 6);
+
+      call connect(x-13, y+7, x-4, y+16);
+      call connect(x-12, y+7, x-7, y+12);
+      call connect(x-13, y+8, x-8, y+13);
+
+      call Draw.Edit.Flag.Box(x,y);       /* draw small drag box below */
+   end Draw.Magnifier.Left;
+
+   Draw.Magnifier.Right: proc(x,y);
+      dcl (x,y) fixed;
+
+      call Plot.Circle(x, y+21, 6);
+
+      call connect(x+13, y+7, x+4, y+16);
+      call connect(x+12, y+7, x+7, y+12);
+      call connect(x+13, y+8, x+8, y+13);
+
+      call Draw.Edit.Flag.Box(x,y);       /* draw small drag box below */
+   end Draw.Magnifier.Right;
+
+   Draw.Sbar.Box:proc (x,y);              /* draw scroll bar anim box  */
+      dcl x fixed;                        /* pixel of box center       */
+      dcl y fixed;                        /* TOP of scroll bar         */
+      dcl i fixed;
+
+      i = shr(SB.Hwidth,1) - 1;           /* get 1/2 width - 1 handy   */
+
+      call connect(x-i, y-1,  x+i, y-1);
+      call connect(x-i, y-29, x+i, y-29);
+      call connect(x-i, y-2,  x-i, y-28);
+      call connect(x,   y-2,  x,   y-28);
+      call connect(x+i, y-2,  x+i, y-28);
+   end Draw.Sbar.Box;
+
+   /* $page - add shadow to icon */
+
+   /* When the user first clicks on the drag item, a shadow */
+   /* is added.   The shadow is dragged along with the item */
+   /* The items itself is not drawn if the current display  */
+   /* position is the original position                     */
+
+   /* this yields:  shadow added when mouse clicked         */
+   /*               shadow + icon are dragged, but original */
+   /*               icon copy stays where it was            */
+
+   /* add shadow to existing flag */
+
+   if  (Shadow <> 0   )    /* if user is requesting a shadow box  */
+   or  (X      =  Orgx)    /* or this is original position        */
+   then do;                /* then draw shadow only               */
+
+      call alias.lines.off();
+
+      do case (code);
+
+         do;                                  /* cue in */
+         end;
+
+         do;                                  /* cue out */
+         end;
+
+         do;                                  /* edit in */
+         end;
+
+         do;                                  /* edit out */
+         end;
+
+         do;                                  /* edit flag */
+         end;
+
+         do;                                  /* edit line */
+         end;
+
+         do;                                  /* animated edit line */
+         end;
+
+         do;                                  /* cue in cue drag   */
+            call Draw.Cue.In.Extension  (x,y);
+         end;
+
+         do;                                  /* cue out cue drag  */
+            call Draw.Cue.Out.Extension (x,y);
+         end;
+
+         do;                                  /* edit in edit drag */
+            call Draw.Edit.In.Extension (x,y);
+         end;
+
+         do;                                  /* edit out edit drag */
+            call Draw.Edit.Out.Extension(x,y);
+         end;
+
+         do;                                  /* magnifier left     */
+         end;
+
+         do;                                  /* magnifier right    */
+         end;
+
+         do;                                  /* left scroll bar drag */
+            call Draw.Left.Extension(x, y, 7, 19, Magnifier.Shadow.Len);
+         end;
+
+         do;                                  /* right sbar drag      */
+            call Draw.Right.Extension(x, y, 7, 19, Magnifier.Shadow.Len);
+         end;
+
+         do;                                  /* coarse bar box       */
+            call Draw.Sbar.Box(x,y);          /* anim box used as     */
+         end;                                 /* shadow               */
+      end;
+
+      call alias.lines.on();
+
+      return;
+
+   end;
+
+   /* $page - plot flag region animate flag */
+
+   /* plot apropriate flag, quickly */
+
+   call alias.lines.off();
+
+   do case (code);
+
+      do;  /* 63 chars */                  /* cue in */
+         call Draw.Cue.In(x,y);
+      end;
+
+      do;  /* 63 chars */                  /* cue out */
+         call Draw.Cue.Out(x,y);
+      end;
+
+      do;  /* 74 chars */                  /* edit in */
+         call Draw.Edit.In(x,y);
+      end;
+
+      do; /* 74 chars */                   /* edit out */
+         call Draw.Edit.Out(x,y);
+      end;
+
+      do;  /* 17 chars */                  /* edit flag */
+         call connect(x  ,y+1 ,x  ,y+15);
+         call connect(x-3,y+16,x+3,y+16);
+         call connect(x-3,y+17,x+3,y+17);
+         call pc(GS);                      /* lift   */
+      end;
+
+      do;  /* 36 chars */                  /* edit line */
+         call Draw.Edit.Line(x,y);
+      end;
+
+      do;  /* 36 chars */                  /* edit line shadow  */
+         call Draw.Edit.Line(x,y+1);       /* raise 1 pixel to  */
+      end;                                 /* solve compl progs */
+
+      do;                                  /* cue in cue drag   */
+         call Draw.Cue.In(x,y);
+         call Draw.Cue.In.Extension  (x,y);
+      end;
+
+      do;                                  /* cue out cue drag  */
+         call Draw.Cue.Out(x,y);
+         call Draw.Cue.Out.Extension (x,y);
+      end;
+
+      do;                                  /* edit in edit drag */
+         call Draw.Edit.In(x,y);
+         call Draw.Edit.In.Extension (x,y);
+      end;
+
+      do;                                  /* edit out edit drag */
+         call Draw.Edit.Out(x,y);
+         call Draw.Edit.Out.Extension(x,y);
+      end;
+
+      do;                                  /* magnifier left */
+         call Draw.Magnifier.Left(x,y);
+      end;
+
+      do;                                  /* magnifier right */
+         call Draw.Magnifier.Right(x,y);
+      end;
+
+      do;                                  /* left scroll bar drag */
+         call Draw.Magnifier.Left(x,y);
+         call Draw.Left.Extension(x, y, 7, 19, Magnifier.Shadow.Len);
+      end;
+
+      do;                                  /* right sbar drag      */
+         call Draw.Magnifier.Right(x,y);
+         call Draw.Right.Extension(x, y, 7, 19, Magnifier.Shadow.Len);
+      end;
+
+      do;                                  /* coarse bar box       */
+         call Draw.Sbar.Box(x,y);          /* anim box used as     */
+      end;                                 /* shadow               */
+   end;
+
+   call alias.lines.on();
+
+   VECTOR_MODE;    /* re-enter vector mode to set enter.vector = 1 */
+
+end Plot.Flag;
+
+
+/* $page - routine to draw edit line */
+
+
+Restore.Edit.Line.If.Possible: proc(mins,maxs,y) swapable;
+   dcl mins    fixed;
+   dcl maxs    fixed;
+   dcl y       fixed;
+   dcl (i,j,k) fixed;
+   dcl center  fixed;
+   dcl radius  fixed;
+
+
+   /* if the following conditions are met,  we would like */
+   /* and edit line.   move or draw an edit line if       */
+   /* conditions are met:                                 */
+
+   if  (Coarse.Bar.EIn.Flag  <> 0   )                /* in scisor drawn  */
+   and (Coarse.Bar.Ein.Flag  >= Coarse.Bar.In.Flag)  /* and not parked   */
+   and (Coarse.Bar.EOut.Flag <> 0   )                /* out scisor drawn */
+   and (Coarse.Bar.EOut.Flag <= Coarse.Bar.Out.Flag) /* not parked       */
+   and (Coarse.Bar.EOut.Flag >= Coarse.Bar.EIn.Flag) /* and in order     */
+   then do;                                          /* then line needed */
+
+      /* compute left and right end points for */
+      /* edit line                             */
+
+      i = Coarse.Bar.EIn.Flag  + (Edit.In.Out.Max.X-3);
+      j = Coarse.Bar.EOut.Flag - (Edit.In.Out.Max.X-3);
+
+      /* but these may be out of order if the  */
+      /* scisors are on top of one another     */
+
+      if i > j then do;
+         k = i; i = j; j = k;
+      end;
+      Center = shr(i + j,1);     /* compute center and radius */
+      Radius = shr(j - i,1);     /* of new edit line          */
+   end;
+   
+   /* else we do not want an edit line */
+   /* at all                           */
+
+   else do;
+      Center = 0;
+      Radius = 0;
+   end;
+
+
+   /* position/erase/draw/move edit line to new */
+   /* position:                                 */
+
+   if  (Edit.Line.Center.Pix <> Center)     /* edit line is not drawn    */
+   or  (Edit.Line.Radius     <> Radius)     /* or is in wron position    */
+   then do;
+
+      /* erase prior one */
+
+      if Edit.Line.Center.Pix <> 0
+      then do;
+         call Plot.Flag(Edit.Line.Center.Pix,y,5,0,0);
+      end;
+
+      Edit.Line.Center.Pix = Center;
+      Edit.Line.Radius     = Radius;
+
+      if Edit.Line.Center.Pix <> 0
+      then do;
+         if Edit.Line.Radius < 6 then Edit.Line.Radius = 6;
+         call Plot.Flag(Edit.Line.Center.Pix,y,5,0,0);
+      end;
+   end;
+
+end Restore.Edit.Line.If.Possible;
+
+/* $page - handle zoom buttons */
+
+
+/* Zoom in zooms in by a factor of 2 on the shuttle anchor point */
+
+Handle.Zoom.In.Button :proc swapable;
+   dcl tmp  (1) fixed;
+
+   /* get current shuttle length */
+
+   call SUB32(AEE.Shuttle.Out.Time, AEE.Shuttle.In.Time, tmp);
+   call SHR32(tmp,2);  /* get 1/4 of that */
+
+   if COM32(AEE.Shuttle.Anchor.Time, tmp) = lw#ilt
+   then call STR32(0,0,AEE.Shuttle.In.Time);
+   else call SUB32(AEE.Shuttle.Anchor.Time, tmp, AEE.Shuttle.In.Time);
+   if COM16(zero.time,AEE.Shuttle.In.Time) = lw#igt
+   then AEE.Shuttle.In.Time(1) = zero.time;
+
+   call ADD32(AEE.Shuttle.In.Time,  tmp, AEE.Shuttle.Out.Time);
+   call ADD32(AEE.Shuttle.Out.Time, tmp, AEE.Shuttle.Out.Time);
+
+   call Set.DTD.Fine.Scrub.Bar(AEE.Shuttle.Anchor.Time, 0);
+
+   /* Create a system event when the region of audio covered by the */
+   /* coarse scroll bar changes:                                    */
+
+   new.dtd.info = new.dtd.info \ 2048;
+
+end Handle.Zoom.In.Button;
+
+
+Handle.Zoom.Back.Button :proc swapable;
+   dcl tmp  (1) fixed;
+   dcl xyz  (1) fixed;
+
+   call SUB32(AEE.Shuttle.Out.Time, AEE.Shuttle.In.Time, tmp);
+   if COM16(0, tmp) = lw#ieq then tmp(1) = samp.speed;
+   if COM16(0, tmp) = lw#ieq then tmp(1) = 1000;
+
+   call COPY32(tmp,xyz);
+   call SHR32(xyz,1);
+   call SHL32(tmp,1);
+
+   if COM32(AEE.Shuttle.In.Time, xyz) = lw#ilt
+   then call STR32(0,0,AEE.Shuttle.In.Time);
+   else call SUB32(AEE.Shuttle.In.Time, xyz, AEE.Shuttle.In.Time);
+   if COM16(zero.time,AEE.Shuttle.In.Time) = lw#igt
+   then AEE.Shuttle.In.Time(1) = zero.time;
+
+   call ADD32(AEE.Shuttle.In.Time, tmp, AEE.Shuttle.Out.Time);
+
+   call Set.DTD.Fine.Scrub.Bar(AEE.Shuttle.Anchor.Time, 0);
+
+   /* Create a system event when the region of audio covered by the */
+   /* coarse scroll bar changes:                                    */
+
+   new.dtd.info = new.dtd.info \ 2048;
+
+end Handle.Zoom.Back.Button;
+
+/* $page - edit reel table/edit commands, etc */
+
+dcl Alternate.Dialog.Mode   fixed public;
+
+HANDLE.EDIT.ERROR.STATUS: proc swapable;
+
+   if E$Status=E#Good then do;
+     call Display.Notice(NT#EditComplete,ATTR#Normal,nulstr,0,0,0);
+   end;
+   else if E$Status=E#TooLong then do;
+     call Display.Notice(NT#NoRoomForEdit,ATTR#Reverse,nulstr,0,0,0);
+   end;
+   else if E$Status=E#FillTooShort then do;
+     call Display.Notice(NT#CueTooShort,ATTR#Reverse,nulstr,0,0,0);
+   end;
+   else if E$Status=E#CutNotAllowed then do;
+      call Display.Notice(NT#CutNotAllowed,ATTR#Reverse,nulstr,0,0,0);
+   end;
+   else if E$Status=E#NoRegionSelected then do;
+     call Display.Notice(NT#NoEditRegionSelected,ATTR#Reverse,nulstr,0,0,0);
+   end;
+   else if E$Status=E#SysErr then do;
+     call Display.Notice(NT#EditTimeError,ATTR#Reverse,nulstr,0,0,0);
+   end;
+   else if E$Status=E#BadSlideIn then do;
+     call Display.Notice(NT#BadSlideIn,ATTR#Reverse,nulstr,0,0,0);
+   end;
+   else if E$Status=E#BadSlideOut then do;
+     call Display.Notice(NT#BadSlideOut,ATTR#Reverse,nulstr,0,0,0);
+   end;
+   else do; /* some other errror?? */
+      call CPOS(23,0);
+      call PS('Edit Error:'); call PNUM(E$Status,0);call ps('          ');
+   end;
+
+end HANDLE.EDIT.ERROR.STATUS;
+
+CLIPBOARD.NEEDED.FOR.EDIT: proc (edit.code) fixed swapable;
+   dcl edit.code fixed;
+   dcl need.clip.for.edit.bits lit '(1|2|16|32|64|256|512|1024)';
+
+   if (bits(edit.code) & need.clip.for.edit.bits)<>0
+   then return true;
+   else return false;
+
+end CLIPBOARD.NEEDED.FOR.EDIT;
+
+UNSELECT.CLIPBOARD.REEL: proc swapable; /* turn off any highlighted clipboard reel */
+   if Cue.Clip.Reel<12 then do;
+      /* turn off all cells except for current selected reel */
+      call Highlight.Graphics.Button.Table(Shuttle.Reel.Table,bits(Current.Cue.Reel), 2, 0);
+      call Highlight.Graphics.Button.Table(Shuttle.Reel.Table, 0, Clip.Reel.Indent.Pixels, 1); /* turn off previously boxed cells */
+   end;
+   else if Cue.Clip.Reel = 12 then do;
+      /* turn off leader reel button */
+      call Highlight.Graphics.Button.Table(Shuttle.Leader.Reel, 0, 2, 0);
+      call Highlight.Graphics.Button.Table(Shuttle.Leader.Reel, 0, Clip.Reel.Indent.Pixels, 1); /* turn off previously boxed cells */
+   end;
+   else if (Cue.Clip.Reel=13) and (Shuttle.Displaced.Audio.Reel<>-1) then do;
+      /* turn off displaced audio reel button */
+      call Highlight.Graphics.Button.Table(Shuttle.Displaced.Audio.Reel, 0, 2, 0);
+      call Highlight.Graphics.Button.Table(Shuttle.Displaced.Audio.Reel, 0, Clip.Reel.Indent.Pixels, 1); /* turn off previously boxed cells */
+   end;
+end UNSELECT.CLIPBOARD.REEL;
+
+CLOSE.EDIT.COMMAND.DIALOG: proc public swapable;
+   dcl str1(8)             fixed;
+   dcl str2(8)             fixed;
+
+   /* Erases and undefines the dialog bar and DISPLACD AUDIO button */
+
+   if not GID(Edit.Dialog.Is.Open) then return; /* dialog is not open */
+
+   call Unselect.Clipboard.Reel; /* turn off any highlighted clipboard reel */
+
+   call Highlight.Graphics.Button.Table(Shuttle.Edit.Table, 0, 2, 0); /* turn off any lit edit command button */
+
+   call Erase.Object(GID(Edit.Dlg.Label)); /* will erase entire dialog bar line */
+   call Undefine.Object.Range(GID(Edit.Dlg.Label),GID(Edit.Dlg.Cancel));
+
+   if Shuttle.Displaced.Audio.Reel<>-1 then do;
+      /* erase graphics region (kinda kludgy) */
+      call Copy.String('DISPLACD',str1);
+      call Copy.String('AUDIO',str2);
+      call Deposit.Graphics.Button.Table.Label
+         (Shuttle.Displaced.Audio.Reel, 0, 0, Reel.Table.Csize, str1, str2);
+
+      call Undefine.Object(Shuttle.Displaced.Audio.Reel);
+      Shuttle.Displaced.Audio.Reel = -1;
+   end;
+
+   call PID(Edit.Dialog.Is.Open,false); /* turn off dialog status flag */
+
+   if Current.Cue.Ptr=Preview.Cue.Ptr then do;
+      Previewing.Edit = 0;
+      /* turn off edit audition button */
+      call Highlight.Graphics.Button.Table (Shuttle.Preview.Edit.Button, 0, 2, 0);
+      Current.Cue.Ptr  = Saved.Cur.Cue.Ptr;
+      Current.Cue.Reel = 0;
+   end;
+
+   /* stop cue if playing */
+   call Stop.DTD.Playback;
+
+end CLOSE.EDIT.COMMAND.DIALOG;
+
+OPEN.EDIT.COMMAND.DIALOG: proc (button) swapable;
+   dcl button    fixed;
+   dcl clip.cell fixed;
+   dcl row       fixed;
+   dcl id        fixed;
+   dcl str1(8)   fixed;
+   dcl str2(8)   fixed;
+
+   dcl i         fixed;
+
+   /* The dialog bar is reopened with this proc every time a new */
+   /* edit button or new clip/reel button is selected            */
+
+   /* NOTE: For the SLIDE dialog bar, a 1-button table is temporarily   */
+   /*       defined in the clip/reel area  called                       */
+   /*       the Shuttle.Displaced.Audio.Reel.                           */
+   /*       It is defined essentially as a part of the dialog group     */
+   /*       but handled like the Shuttle.Leader.Table                   */
+
+   if GID(Edit.Dialog.Is.Open) then do; /* does most of what CLOSE.EDIT.COMMAND.DIALOG does */
+      call Erase.Object(GID(Edit.Dlg.Label)); /* will erase entire line */
+      call Undefine.Object.Range(GID(Edit.Dlg.Label),GID(Edit.Dlg.Cancel));
+
+      /* if not a SLIDE edit and Shuttle.Displaced.Audio.Reel exists, */
+      /* undefine it                                                  */
+      if (button <> but#slide) and (Shuttle.Displaced.Audio.Reel<>-1) then do;
+         /* erase graphics region (kinda kludgy) */
+         call Copy.String('DISPLACD',str1);
+         call Copy.String('AUDIO',str2);
+         call Deposit.Graphics.Button.Table.Label
+            (Shuttle.Displaced.Audio.Reel, 0, 0, Reel.Table.Csize, str1, str2);
+
+         call Undefine.Object(Shuttle.Displaced.Audio.Reel);
+         Shuttle.Displaced.Audio.Reel = -1;
+      end;
+
+      call PID(Edit.Dialog.Is.Open,false);    /* turn off dialog status flag */
+   end;
+
+   Alternate.Dialog.Mode=0; /* clear flag at start */
+
+   call Set.Auto.Allocation.Id(Shuttle.Alloc+500);
+
+   Row=Shuttle.Row+Shuttle.Size;    /* put dialog on this row */
+
+   call Copy.String('Click again to ',Misc.Buf);
+
+   do case button;
+      call append.to.str(misc.buf,'COPY');           /*  0=but#slide */
+      call append.to.str(misc.buf,'CUT');            /*  1=but#cut */
+      call append.to.str(misc.buf,'DELETE');         /*  2=but#delete */
+      call append.to.str(misc.buf,'RESET cue to current project'); /*  3=but#reset */
+      call append.to.str(misc.buf,'EXCHANGE');       /*  4=but#exchange */
+      call append.to.str(misc.buf,'CHAIN ');         /*  5=but#chain */
+      call append.to.str(misc.buf,'PASTE');          /*  6=but#paste */
+      call append.to.str(misc.buf,'EXTRACT');        /*  7=but#extract */
+      call append.to.str(misc.buf,'FILL');           /*  8=but#fill */
+      call append.to.str(misc.buf,'SLIDE');          /*  9=but#slide */
+/*    call append.to.str(misc.buf,'MIX '); */        /*  was 9 once... */
+      call append.to.str(misc.buf,'see DEBUG info'); /* 10=but#debug - unused for now */
+      call append.to.str(misc.buf,'UNDO last edit'); /* 11=but#undo */
+   end;
+
+   if (button=but#copy) or (button=but#cut)
+   or (button=but#delete) or (button=but#exchange) or (button=but#extract) then do;
+      call append.to.str(misc.buf,' selected region ');
+      if (button=but#copy) or (button=but#cut)
+      then call append.to.str(misc.buf,'to ');
+      if button=but#exchange then call append.to.str(misc.buf,' with ');
+   end;
+   else if (button=but#delete) or (button=but#exchange) or (button=but#extract) then do;
+      call append.to.str(misc.buf,' selected region');
+   end;
+   else if (button=but#paste) or (button=but#fill) then do;
+      call append.to.str(misc.buf,' from ');
+   end;
+   else if (button=but#slide) then do;
+      if Cue.Clip.Reel<13 then
+         call append.to.str(misc.buf,', and fill gap with '); /* CLIP/REEL */
+      else
+         call append.to.str(misc.buf,', and paste '); /* DISPLACED AUDIO */
+   end;
+
+   if  (button<>but#delete) and (button<>but#reset)
+   and (button<>but#extract) and (button<>but#undo)
+   and (button<>but#debug)
+   then do;                           /* compute name of Clipboard */
+      if Cue.Clip.Reel=0 
+      then call append.to.str(misc.buf,'CURRENT CUE');
+      else if Cue.Clip.Reel<4 then do;
+         call append.to.str(misc.buf,'CLIPBOARD ');
+         call appendc      (misc.buf,ASC.0+Cue.Clip.Reel);
+      end;
+      else if Cue.Clip.Reel<12 then do;
+         call append.to.str(misc.buf,'REEL ');
+         call appendc      (misc.buf,ASC.A+Cue.Clip.Reel-4);
+      end;
+      else if Cue.Clip.Reel=12 then do;
+         call append.to.str(misc.buf,'LEADER');
+      end;
+      else if Cue.Clip.Reel=13 then do;
+         call append.to.str(misc.buf,'DISPLACED AUDIO');
+      end;
+   end;
+
+   call Set.Default.Action(O#ACT.Middle.Press);
+   call Set.Default.Attr(0,ATTR#Normal\ATTR#Reverse);
+   call Set.Default.Attr(1,ATTR#Normal\ATTR#Reverse);
+
+   id = Define.Label(S#AA,Row,0,misc.buf(0),misc.buf);
+   call PID(Edit.Dlg.Label,id);
+
+   call Set.Object.Erase(id,O#ERAS.Whole.Line);
+
+   if (button=but#copy) or (button=but#reset)
+   or (button=but#paste) or (button=but#fill)
+   then do; 
+      if button=but#copy
+      then id = Define.Label(S#AA,Row,53,0,'[COPY ENTIRE CUE]');
+      else if button=but#reset
+      then id = Define.Label(S#AA,Row,52,0,'[EMPTY ENTIRE CUE]');
+      else if button=but#paste
+      then id = Define.Label(S#AA,Row,misc.buf(0)+3,0,'[LOOP PASTE]');
+      else if button=but#fill
+      then id = Define.Label(S#AA,Row,misc.buf(0)+3,0,'[LOOP FILL]');
+
+      call Set.Object.Action(id,O#ACT.Prev.Obj,true); /* return to previous object */
+      call PID(Edit.Dlg.Mode,id);
+
+      call Set.Object.Attr(id,0,ATTR#Normal);
+      call Set.Object.Attr(id,1,ATTR#Normal);
+   end;
+   else call PID(Edit.Dlg.Mode,0);
+
+   call Check.Next.Event;
+
+   id = Define.Label(S#AA,Row,72,0,'[CANCEL]');
+   call PID(Edit.Dlg.Cancel,id);
+
+   call PID(Edit.Dialog.Is.Open,true); /* denote dialog box now open */
+
+   call Activate.Object.Range(Shuttle.Alloc+500,id);
+
+   /* create DISPLACED AUDIO button for SLIDE, if not already there */
+   if (button = but#slide) and (Shuttle.Displaced.Audio.Reel = -1) then do;
+      call Set.Auto.Allocation.Id(GID(Edit.Dlg.Cancel)+1);
+
+      Id = Define.Graphics.Button.Table
+         (S#AA,2500,(Shuttle.Row+7)*100,3100,(Shuttle.Row+8)*100,1,1,0);
+      call Copy.String('DISPLACD',str1);
+      call Copy.String('AUDIO',str2);
+      call Deposit.Graphics.Button.Table.Label
+         (Id, 0, 0, Reel.Table.Csize, str1, str2);
+
+      call Set.Object.Attr(Id,0,ATTR#Normal\ATTR#AltIntensity);
+      call Set.Object.Attr(Id,1,ATTR#Normal\ATTR#Reverse\ATTR#AltIntensity);
+      call Set.Object.Action(Id,O#ACT.Prev.Obj,true);
+
+      Shuttle.Displaced.Audio.Reel = Id;
+      call Enable.Object(Shuttle.Displaced.Audio.Reel);
+   end;
+
+   call Set.Default.Attr(0,ATTR#Normal);
+   call Set.Default.Attr(1,ATTR#AltIntensity\ATTR#Reverse);
+
+   call Check.Next.Event;
+
+end OPEN.EDIT.COMMAND.DIALOG;
+
+SELECT.CLIPBOARD.REEL: proc (clip.cell) swapable;
+   dcl clip.cell  fixed;
+   dcl need.clip.for.edit.bits lit '(1|2|16|32|64|256|512|1024)';
+   dcl i          fixed;
+
+   if (pending.edit=0)             /* no edit active */
+   or (not Clipboard.Needed.For.Edit(pending.edit-1))
+   or (Current.Cue.Reel=Clip.Cell) /* don't allow to be the same for now */
+   then return;                    /* don't allow select of clipboard for this command */
+
+   /* NOTE: if CLIP.CELL=12, this means use LEADER */
+   /*       in place of normal clipboard.          */
+
+   /* NOTE: if CLIP.CELL=13, this means use DIS-   */
+   /*       PLACED AUDIO in place of normal        */
+   /*       clipboard.                             */
+
+   if  ((clip.cell=12)                  /* trying to select leader reel */
+   and  ((pending.edit-1)<>but#paste)   /* but not doing a PASTE        */
+   and  ((pending.edit-1)<>but#fill)    /* or a FILL                    */
+   and  ((pending.edit-1)<>but#slide))  /* or a SLIDE                   */
+   or  ((clip.cell=13)      /* OR trying to select DISPLACED AUDIO button */
+   and  ((pending.edit-1)<>but#slide))  /* but not doing a SLIDE        */
+   then do;
+      clip.cell = 1;        /* reselect an allowable reel and continue */
+   end;
+
+   call Unselect.Clipboard.Reel; /* turn off previously selected button */
+
+   Cue.Clip.Reel = clip.cell;
+   Cue.Clip.Ptr  = Cue.Build.Ptr + ((clip.cell+6)*(shr(Max.Cue.Record.Len+255,8)));
+
+   if Cue.Clip.Reel<12 then do;
+      call Highlight.Graphics.Button.Table(Shuttle.Reel.Table, bits(Cue.Clip.Reel)|bits(Current.Cue.Reel), 2, 0); /* turn on new cell */
+      call Highlight.Graphics.Button.Table(Shuttle.Reel.Table, bits(Cue.Clip.Reel), Clip.Reel.Indent.Pixels, 1); /* turn on new cell */
+   end;
+   else if Cue.Clip.Reel = 12 then do;
+      call Highlight.Graphics.Button.Table(Shuttle.Leader.Reel, 1, 2, 0); /* turn on new cell */
+      call Highlight.Graphics.Button.Table(Shuttle.Leader.Reel, 1, Clip.Reel.Indent.Pixels, 1); /* turn on new cell */
+   end;
+   else if (Cue.Clip.Reel=13) and (Shuttle.Displaced.Audio.Reel<>-1) then do;
+      call Highlight.Graphics.Button.Table(Shuttle.Displaced.Audio.Reel, 1, 2, 0); /* turn on new cell */
+      call Highlight.Graphics.Button.Table(Shuttle.Displaced.Audio.Reel, 1, Clip.Reel.Indent.Pixels, 1); /* turn on new cell */
+   end;
+
+   if Cue.Clip.Reel<>13 
+   then Previous.Clip.Reel = Cue.Clip.Reel;
+
+   if GID(Edit.Dialog.Is.Open)
+   then call Open.Edit.Command.Dialog(Pending.Edit-1); /* redraw dialog to reflect new clipboard selected */
+
+end SELECT.CLIPBOARD.REEL;
+
+/* $page - update audition cue after an edit time change */
+
+UPDATE.PREVIEW.EDIT.CUE: proc swapable;
+   dcl mode       fixed;
+   dcl Edit.In(1) fixed;
+
+   /* If in the middle of an edit, a copy of the original  */
+   /* current cue has already been saved.  This way, the   */
+   /* user can preview the edit on Current.Cue.            */
+
+   if Pending.Edit=10 then do;
+      call Read.Cue.Time(Current.Cue.Ptr,Cue.Edit.In.Msb,Edit.In);
+
+      if      (Cue.Clip.Reel=13) then mode =  1; /* use displaced audio */
+      else if (Cue.Clip.Reel=12) then mode = -1; /* use leader          */
+      else mode = 0;                             /* use clip/reel       */
+
+      /* create play audition cue */
+      E$Status = Slide.Edit.Region(Orig.In,Orig.Out,Edit.In,Saved.Cur.Cue.Ptr,Preview.Cue.Ptr,Cue.Clip.Ptr,mode);
+   end;
+
+   return E$Status;
+
+end UPDATE.PREVIEW.EDIT.CUE;
+
+HANDLE.PREVIEW.EDIT.BUTTON: proc swapable;
+
+   if Pending.Edit<>10 then return; /* only implemented for slide, for now */
+
+   call DISPLAY.NOTICE (NT#EraseNotice,ATTR#Normal,NulStr,0,0,0);
+   call REMOVE.ERR;
+
+   if Previewing.Edit <> 0 then do; /* turn off audition */
+      Previewing.Edit = 0;
+      /* turn off edit audition button */
+      call Highlight.Graphics.Button.Table (Shuttle.Preview.Edit.Button, 0, 2, 0);
+      Current.Cue.Ptr  = Saved.Cur.Cue.Ptr;
+      Current.Cue.Reel = 0;
+
+      /* stop audition cue if playing */
+      call Stop.DTD.Playback;
+   end;
+
+   else do;
+      /* do the edit */
+      E$Status = Update.Preview.Edit.Cue;
+      if E$Status <> E#Good then do;
+         call Handle.Edit.Error.Status;
+         E$Status=E#Good;     /* reset status variable */
+         return;
+      end;
+
+      /* turn on edit audition button */
+      Previewing.Edit = 1;
+      call Highlight.Graphics.Button.Table (Shuttle.Preview.Edit.Button, 1, 2, 0);
+      Current.Cue.Ptr  = Preview.Cue.Ptr;
+      Current.Cue.Reel = 14;
+   end;
+
+   call Deposit.A.New.Current.Cue(1);
+
+   call Display.Cue.And.Shuttle.Displays;
+
+   call UnSet.Cue.Modified;
+   call Select.New.Cur.Obj(Corner.Label,-1,-1);
+
+   call Load.DTD.Temp.Cue(Current.Cue.Ptr);
+
+   if Previewing.Edit=1 then
+      call PLAY.CURRENT.CUE(1,0,0,Shuttle.Drive.Bits,1);
+
+   call Set.Group.Get(Shuttle.Group,Get.Mouse.Button,true);
+
+end HANDLE.PREVIEW.EDIT.BUTTON;
+/* $page - prepare for a SLIDE edit */
+
+PREPARE.FOR.SLIDE.EDIT: proc swapable;
+   dcl smpte.time(14) fixed;
+   dcl tmp.str(15)    fixed;
+   dcl base(1) fixed;
+
+   /* save original In & Out times for SLIDE */
+   call Read.Cue.Time(Current.Cue.Ptr,Cue.Edit.In.Msb ,Orig.In);
+   call Read.Cue.Time(Current.Cue.Ptr,Cue.Edit.Out.Msb,Orig.Out);
+
+   /* set edit region label to "Out" - Len should remain constant throughout SLIDE */
+   call Deposit.Switch(Shuttle.Edit.Out.Switch,0);
+
+   /* save a copy of current.cue so user can audition the edit */
+   /* before actually changing current.cue  */
+   return ( Copy.Cue(Current.Cue.Ptr,Saved.Cur.Cue.Ptr,false) );
+
+end PREPARE.FOR.SLIDE.EDIT;
+
+CLEAN.UP.AFTER.SLIDE.EDIT: proc swapable;
+   dcl str1(8)             fixed;
+   dcl str2(8)             fixed;
+
+   /* turn off Preview Slide button, if it is on */
+   if Previewing.Edit<>0 then call Handle.Preview.Edit.Button;
+
+   /* undefine DISPLACED AUDIO button if defined */
+   if Shuttle.Displaced.Audio.Reel<>-1 then do;
+      /* erase graphics region (kinda kludgy) */
+      call Copy.String('DISPLACD',str1);
+      call Copy.String('AUDIO',str2);
+      call Deposit.Graphics.Button.Table.Label
+         (Shuttle.Displaced.Audio.Reel, 0, 0, Reel.Table.Csize, str1, str2);
+
+      if Cue.Clip.Reel = 13
+      then call Unselect.Clipboard.Reel;
+
+      call Undefine.Object(Shuttle.Displaced.Audio.Reel);
+      Shuttle.Displaced.Audio.Reel = -1;
+
+      if Cue.Clip.Reel = 13 then do;    /* button 13 doesn't exist anymore */
+         Cue.Clip.Reel = 1;
+         Cue.Clip.Ptr  = Cue.Build.Ptr + (6*(shr(Max.Cue.Record.Len+255,8)));
+      end;
+   end;
+
+end CLEAN.UP.AFTER.SLIDE.EDIT;
+
+PREPARE.FOR.EDIT: proc (button) swapable;
+   dcl button      fixed;
+
+   if Clipboard.Needed.For.Edit(button) then do;
+      /* set up for previously selected clipboard */
+      call Select.Clipboard.Reel(Previous.Clip.Reel);
+   end;
+   else call UnSelect.Clipboard.Reel;
+
+   if button=but#slide then do;
+      E$Status = Prepare.For.Slide.Edit;
+   end;
+
+end PREPARE.FOR.EDIT;
+
+PERFORM.THE.EDIT: proc (button) fixed swapable;
+   dcl button      fixed;
+   dcl reset.sbar  fixed;
+   dcl Edit.In(1)  fixed; /* for SLIDE */
+   dcl mode        fixed; /* for SLIDE */
+
+   Reset.SBar=false;             /* assume we don't want to redraw sbar to length of cue after edit */
+
+   do case button;               /* branch on edit type */
+      do; /* COPY (but#copy) */
+         if Alternate.Dialog.Mode=0
+         then call COPY.FROM.REEL(Current.Cue.Ptr,Cue.Clip.Ptr,false); /* extract selected region */
+         else E$Status=COPY.CUE  (Current.Cue.Ptr,Cue.Clip.Ptr,false); /* copy the whole cue */
+      end;
+
+      do;   /* CUT (but#cut) */
+         if Current.Cue.Ptr = Cue.Clip.Ptr
+         then do;
+            E$Status=E#CutNotAllowed;
+         end;
+         else do;
+            call CUT.FROM.REEL(Current.Cue.Ptr,Current.Cue.Ptr,Cue.Clip.Ptr,0,1);
+            if Coarse.Shuttle.Wave = 1              /* Wave display is up */
+            then call Invalidate.Wave.Display(1);   /* Redraw coarse (both) wave displays */
+         end;
+      end;
+
+      do;   /* DELETE (but#delete) */
+         call DELETE.FROM.REEL(Current.Cue.Ptr,Current.Cue.Ptr,false);
+         if Coarse.Shuttle.Wave = 1              /* Wave display is up */
+         then call Invalidate.Wave.Display(1);   /* Redraw coarse (both) wave displays */
+      end;
+
+      do;   /* CLEAR EDITS (but#reset) */
+         if Alternate.Dialog.Mode=0
+         then call CLEAR.EDITS.FROM.REEL(Current.Cue.Ptr,true);
+         else call EMPTY.REEL           (Current.Cue.Ptr);
+         Reset.SBar=true; /* rescale sbar for new cue */
+         if Coarse.Shuttle.Wave = 1              /* Wave display is up */
+         then call Invalidate.Wave.Display(1);   /* Redraw coarse (both) wave displays */
+      end;
+
+      do;   /* EXCHANGE (but#exchange) */
+         call EXCHANGE.REEL.WITH.EDIT.REGION(Current.Cue.Ptr,Cue.Clip.Ptr,Current.Cue.Ptr,false);
+         if Coarse.Shuttle.Wave = 1              /* Wave display is up */
+         then call Invalidate.Wave.Display(1);   /* Redraw coarse (both) wave displays */
+      end;
+
+      do;   /*  CHAIN (but#chain) */
+         call CHAIN.ONTO.REEL(Current.Cue.Ptr,Cue.Clip.Ptr,Current.Cue.Ptr,false);
+         if Coarse.Shuttle.Wave = 1              /* Wave display is up */
+         then call Invalidate.Wave.Display(1);   /* Redraw coarse (both) wave displays */
+      end;
+
+      do;   /* PASTE (but#paste) */
+         if Cue.Clip.Reel<12
+         then call PASTE.INTO.REEL      (Current.Cue.Ptr,Cue.Clip.Ptr,Current.Cue.Ptr,false,Alternate.Dialog.Mode<>0);
+         else call INSERT.LEADER.ON.REEL(Current.Cue.Ptr,Current.Cue.Ptr,false);
+         if Coarse.Shuttle.Wave = 1              /* Wave display is up */
+         then call Invalidate.Wave.Display(1);   /* Redraw coarse (both) wave displays */
+      end;
+
+      do;   /* EXTRACT (but#extract) */
+         call EXTRACT.FROM.REEL.WITH.EXTEND(Current.Cue.Ptr,Current.Cue.Ptr,false);
+         if Coarse.Shuttle.Wave = 1              /* Wave display is up */
+         then call Invalidate.Wave.Display(1);   /* Redraw coarse (both) wave displays */
+      end;
+
+      do;   /* FILL (but#fill) */
+         if Cue.Clip.Reel<12
+         then call FILL.REEL            (Current.Cue.Ptr,Cue.Clip.Ptr,Current.Cue.Ptr,false,Alternate.Dialog.Mode<>0);
+         else call FILL.REEL.WITH.LEADER(Current.Cue.Ptr,Current.Cue.Ptr,false);
+         if Coarse.Shuttle.Wave = 1              /* Wave display is up */
+         then call Invalidate.Wave.Display(1);   /* Redraw coarse (both) wave displays */
+      end;
+
+      do;   /* SLIDE (but#slide) */
+         /* call MIX.REELS(Current.Cue.Ptr,Cue.Clip.Ptr,Current.Cue.Ptr,false); */
+
+         call Read.Cue.Time(Saved.Cur.Cue.Ptr,Cue.Edit.In.Msb,Edit.In);
+         if      (Cue.Clip.Reel=13) then mode =  1; /* use displaced audio */
+         else if (Cue.Clip.Reel=12) then mode = -1; /* use leader          */
+         else mode = 0;                             /* use clip/reel       */
+         call SLIDE.EDIT.REGION(Orig.In,Orig.Out,Edit.In,Saved.Cur.Cue.Ptr,Saved.Cur.Cue.Ptr,Cue.Clip.Ptr,mode);
+
+         if Coarse.Shuttle.Wave = 1              /* Wave display is up */
+         then call Invalidate.Wave.Display(1);   /* Redraw coarse (both) wave displays */
+      end;
+
+      do;   /* ? UNUSED (but#debug) */
+         /******************************************/
+         call TIMS.CUE.DEBUG.ROUTINE(Current.Cue.Ptr);
+         /******************************************/
+      end;
+
+      do;   /* UNDO (but#undo) */
+         /* Routine not written yet */
+         call DISPLAY.NOTICE (NT#EraseNotice,ATTR#Normal,NulStr,0,0,0);
+         call REMOVE.ERR;
+      end;
+   end; /* of branch on edit type */
+
+   return(reset.sbar);
+
+end PERFORM.THE.EDIT;
+
+CLEAN.UP.AFTER.EDIT: proc (reset.sbar) swapable;
+   dcl reset.sbar fixed;
+   dcl i          fixed;
+
+   Pending.Edit=0; Alternate.Dialog.Mode=0;
+   call Handle.Edit.Error.Status;
+   E$Status=E#Good;                                   /* reset status variable */
+
+   /* assign to cue.trks to generate audio & correct display */
+   /* when pasting in a new track                            */
+
+   i = OR.ALL.REEL.TRACK.BITS(Current.Cue.Ptr);
+   write(mam) = Current.Cue.Ptr;
+   write(mal) = Cue.Trks;
+   write(md ) = i;
+
+   call Unselect.Clipboard.Reel;  /* turn off any highlighted clipboard reel */
+   call Deposit.A.New.Current.Cue(reset.sbar);
+
+   call Display.Cue.And.Shuttle.Displays;
+
+   call UnSet.Cue.Modified;
+end CLEAN.UP.AFTER.EDIT;
+
+PERFORM.SHUTTLE.EDIT.FUNCTIONS: proc (tmp) fixed swapable;
+   dcl tmp         array;
+
+   dcl button      fixed;
+   dcl state       fixed;
+   dcl reset.sbar  fixed;
+
+   /* Routine is called when user does S$MouseSelect */
+   /* on the Edit Button Table.                      */
+
+   call Map.Graphics.Button.Table.Mouse.Press(Shuttle.Edit.Table,tmp);
+
+   button = tmp(1)*4 + tmp(0);   /* get command # */
+
+   if /* (button=but#slide) or */ (button=but#undo) then do;
+      /* MIX and UNDO functions unavailable for now */
+   end;
+   else if button ige but#rename then do; /* RENAME, DELETE CUE, RECALL, or TRANSFER TO POLY button */
+      state=Fetch.Object.Info(Shuttle.Edit.Table,O#GBTAB.Cell.Info+button); /* current highlight state of button */
+
+      if ((state&1)=0)   /* button selected for 1st time */
+      then do;           /* set up dialog for command    */
+         call Highlight.Graphics.Button.Table(Shuttle.Edit.Table, bits(button), 2, 0);
+
+         do case button-but#rename;
+            call Rename.Current.Cue (Shuttle.Group); /* but#rename   rename */
+            call Delete.Current.Cue (Shuttle.Group); /* but#del_cue  delete cue */
+            call Recall.Current.Cue (Shuttle.Group); /* but#recall   recall */
+            call Handle.STM.Transfer(Shuttle.Group); /* but#stm_xfr  transfer to poly */
+         end;
+
+         call Highlight.Graphics.Button.Table(Shuttle.Edit.Table, 0, 2, 0);
+      end;
+   end;
+   else do;  /* handle S$MouseSelect of Edit Table Command */
+      state=Fetch.Object.Info(Shuttle.Edit.Table,O#GBTAB.Cell.Info+button); /* current highlight state of button */
+
+      if ((state&1)=0)   /* button selected for 1st time */
+      then do;           /* set up dialog for command    */
+
+         /* If we were in the midst of a SLIDE, cancel it    */
+         /* and make sure PREVIEW SLIDE is turned off before */
+         /* continuing  */
+         if Pending.Edit=10 then call Clean.Up.After.Slide.Edit;
+
+         Pending.Edit=button+1;                 /* save index # of command */
+
+         call Highlight.Graphics.Button.Table(Shuttle.Edit.Table, 0, 2, 0); /* turn off any other edit buttons */
+         call Highlight.Graphics.Button.Table(Shuttle.Edit.Table, bits(button), 2, 0); /* fill new edit button cell */
+
+         call Prepare.For.Edit(button);
+         call Open.Edit.Command.Dialog(button); /* open dialog box */
+         call Check.Next.Event;
+      end;
+
+      else do;
+         /* button was already filled, has been selected a second time */
+         /* go ahead and do the edit command */
+
+         call Close.Edit.Command.Dialog; /* get rid of dialog box */
+
+         reset.sbar = Perform.The.Edit(button);
+
+         call Clean.Up.After.Edit(reset.sbar); /* display status message, etc. */
+         call Highlight.Graphics.Button.Table(Shuttle.Edit.Table, 0, 2, 0); /* turn off cell */
+         call Check.Next.Event;
+
+      end; /* 2nd select of command -- do it */
+   end;    /* of handle S$MouseSelect of Edit Table Command */
+
+   call Select.New.Cur.Obj(Corner.Label,-1,-1);
+
+end PERFORM.SHUTTLE.EDIT.FUNCTIONS;
+
+RESTORE.ORIGINAL.EDIT.REGION:proc swapable;
+
+   /* Just restore the saved copy of the original cue */
+   call Write.Cue.Time(Saved.Cur.Cue.Ptr,Cue.Edit.In.Msb,Orig.In);
+   call Write.Cue.Time(Saved.Cur.Cue.Ptr,Cue.Edit.Out.Msb,Orig.Out);
+
+   Current.Cue.Ptr = Saved.Cur.Cue.Ptr;
+   Current.Cue.Reel= 0;
+
+/* E$Status = Copy.Cue(Saved.Cur.Cue.Ptr, Current.Cue.Ptr, false); */
+
+   call Deposit.A.New.Current.Cue(0);
+
+   call Display.Cue.And.Shuttle.Displays;
+
+/* return E$Status; */
+
+end RESTORE.ORIGINAL.EDIT.REGION;
+
+CANCEL.ANY.PENDING.EDIT:proc swapable;
+
+   if Pending.Edit=0 then return;
+
+   call Close.Edit.Command.Dialog;
+
+   if (Pending.Edit-1)=but#slide then do;  /* cancel of SLIDE */
+      if Cue.Clip.Reel = 13 then do;       /* button 13 doesn't exist anymore */
+         Cue.Clip.Reel = 1;
+         Cue.Clip.Ptr  = Cue.Build.Ptr + (6*(shr(Max.Cue.Record.Len+255,8)));
+      end;
+      call Restore.Original.Edit.Region;
+      call Update.Current.Cue.Record;      /* create a new audition cue */
+   end;
+
+   Pending.Edit=0; Alternate.Dialog.Mode=0;
+
+   call Highlight.Graphics.Button.Table(Shuttle.Edit.Table, 0, 2, 0); /* turn off cell */
+   call Select.New.Cur.Obj(Corner.Label,-1,-1);
+
+end CANCEL.ANY.PENDING.EDIT;
+
+HANDLE.EDIT.DIALOG.EVENT: proc swapable;
+   dcl id fixed;
+   dcl i  fixed;
+
+   if Pending.Edit=0 then return;
+
+   id=GID(Edit.Dlg.Mode);
+
+   i = Pending.Edit - 1;
+   if  (Screen.Event.Id = id)
+   and ((i=but#copy) or (i=but#reset)
+   or   (i=but#paste) or (i=but#fill))
+   then do;
+      if (Screen.Event.Info = S#MouseSelect)
+      or (Screen.Event.Info = S#MouseActivate) then do;
+         Alternate.Dialog.Mode=Alternate.Dialog.Mode xor 1;
+
+         if Alternate.Dialog.Mode=0 then do; /* unhighlight button */
+            call Set.Object.Attr(id,0,ATTR#Normal);
+            call Set.Object.Attr(id,1,ATTR#Normal);
+         end;
+         else do;
+            call Set.Object.Attr(id,0,ATTR#Normal|ATTR#Reverse);
+            call Set.Object.Attr(id,1,ATTR#Normal|ATTR#Reverse);
+         end;
+
+         call Update.Object(id); /* make response snappier */
+      end;
+   end;
+
+   else if Screen.Event.Id = GID(Edit.Dlg.Cancel)
+   then do;
+      if (Screen.Event.Info = S#MouseSelect)
+      or (Screen.Event.Info = S#MouseActivate) then do;
+         call Cancel.Any.Pending.Edit;
+      end;
+   end;
+
+end HANDLE.EDIT.DIALOG.EVENT;

@@ -1,0 +1,353 @@
+/*
+
+Title           : PSSRG test module  - inserted in LOGGER
+Project Engineer: William Leathers
+Project Start   : Feb 1986
+New England Digital Corporation
+
+Modification History:
+
+   02/15/89  WSL - Cleanup and optimization
+   05/24/89  WSL - Added routine pinit with PSPA2 unmoding
+*/
+
+/***************************************************************************/
+/************     Required for stand - alone compilation    ****************/
+/*
+insert ':-xpl:asciidef';
+insert ':-xpl:termutil';
+insert ':-xpl:intrprtr';
+insert ':NEWDIAGS:sysinit';
+
+dcl status_line1 lit '18,10';  dcl status_line2 lit '19,10'; 
+dcl status_line3 lit '20,10';  dcl status_line4 lit '21,10'; 
+
+dcl erase_status_lines lit 'call clr_status';
+clr_status: proc;
+  pos(status_line4); erase_line;  pos(status_line3); erase_line;
+  pos(status_line2); erase_line;  pos(status_line1); erase_line;
+end clr_status;
+
+dcl milliseconds fixed; when d03int then milliseconds = milliseconds + 5;
+dcl d16_int_count fixed;
+when d16int then 
+   d16_int_count = d16_int_count + 1;
+*/
+/***************************************************************************/
+
+dcl sample_rate_generator_errors(psmaxbins) fixed;
+
+/*******************************************************************/
+dcl test_sample_rate_generator lit 'call srg_test';
+srg_test:proc(bin#);
+   dcl bin# fixed;
+   dcl buf(512) fixed;
+   dcl (chan,mod,inc,buf_size,accum) fixed;
+   dcl (i,j,k,bin_base) fixed;
+
+   /*****************************************************************/
+   dcl log_srg_error lit 'call log_srg_err';
+   log_srg_err: proc(bin#, code, incrm, modul, carry);
+     dcl bin#  fixed;
+     dcl code  fixed;
+     dcl incrm fixed;
+     dcl modul fixed;
+     dcl carry fixed;
+
+     dbug 'log_srg_err', code, incrm, modul, carry;
+
+     if sample_rate_generator_errors(bin#) = 0 then do;
+       pos(status_line3); erase_line;
+
+       pstring('  - Error in sample rate generator (');
+	    pnum(code,1);
+	    pstring(')');
+     end;
+
+     if sample_rate_generator_errors(bin#) <> "HFFFF" then
+        sample_rate_generator_errors(bin#) = sample_rate_generator_errors(bin#) + 1;
+     flush_term;
+     Really.Run.Host();
+   end log_srg_err;
+
+   /************************************************************************/
+   fill_buf: proc(bin#,channel,modulus,incr);
+      dcl (bin#,channel,modulus,incr) fixed;
+      dcl bin_base fixed;
+      dcl need_retry   fixed;
+      dcl retry_counts fixed;
+      dcl x_micros fixed;
+      dcl x_msecs  fixed;
+      dcl y_micros fixed;
+      dcl y_msecs  fixed;
+
+      bin_base     = bin# * 64;
+      buf_size     = 2*(modulus * incr);       /* set up buffer for 2 iters */
+
+      // Hmmm... Seem to miss the first carry for very short measurements.
+      if (buf_size<20)
+         buf_size = 20;
+
+      retry_counts = 0;
+      
+      fill_buff_retry:;
+      
+      need_retry = 0;
+
+      call pbmwrite(bin#,0,0);     
+      do i = 0 to 255;     /* fill the first sector of memory with all 1's */
+         write(psd) = "HFFFF";
+      end;
+
+      disable; /* The whens (particularly the d16) cause interference to fill_buf */
+      write(psc) = bin_base + channel;  
+      write(psf) = pswl;
+      write(psd) = -1; write(psd) = -1;  /* wave length of 1 word    */
+      write(psd) =  0; write(psd) =  0;  /* base address of 0        */
+      write(psd) = -1; write(psd) = -1;  /* loop length of 1 word    */
+      write(psd) =  0; write(psd) =  0;  /* phase incr of 0          */
+      write(psd) = incr - 1;             /* increment                */
+      write(psd) = 256 - modulus;        /* modulus                  */
+
+      // Set up for read
+      // We have to get a result every 9.9 microseconds.
+      // We have to wait up for them, but our long term rate has to be fast enough.
+      write("313")=addr(buf(0));   /* reset R13 to start of BUF */
+      i = buf_size + 1;
+
+      x_msecs  = interp_fetch_real_msecs (0);
+      x_micros = interp_fetch_real_micros(0);
+
+      write(psd) =  3;                   /* on and looping           */
+
+      write(psf) = psrma;
+      write(psd) = 0;                   /* reset the fifo           */
+      write(psf) = pspat;               /* set up to read           */
+
+      // We get a measurement every 9.9 microseconds.
+      // But a good number of them are buffered up in the psd read data buffer
+      // Bail and restart the test if we miss 100 microseconds
+
+      while (i >= 10) {
+         rpc 10;
+         write("373")=read(psd);
+         i = i - 10;
+        
+         y_msecs  = interp_fetch_real_msecs (0);
+         y_micros = interp_fetch_real_micros(0);
+         
+         if (y_msecs-x_msecs > 1 || y_micros-x_micros > 200)
+         need_retry = 1;
+         
+         x_msecs  = interp_fetch_real_msecs (0);
+         x_micros = interp_fetch_real_micros(0);
+      }
+
+      while (i >= 1) {
+         write("373")=read(psd);
+         i = i - 1;
+         
+         y_msecs  = interp_fetch_real_msecs (0);
+         y_micros = interp_fetch_real_micros(0);
+         
+         if (y_msecs-x_msecs > 1 || y_micros-x_micros > 100)
+         need_retry = 1;
+         
+         x_msecs  = interp_fetch_real_msecs (0);
+         x_micros = interp_fetch_real_micros(0);
+      }
+
+      enable;
+
+      /*write(psc) = bin_base + channel;  */
+      write(psf) = pson; /* channel on/off function code  */
+      write(psd) = 0;    /* turn channel off with no loop */
+
+      if (need_retry != 0)
+      {
+        retry_counts = retry_counts + 1;
+        
+        dbug 'fill_buf retry';
+        
+        if (retry_counts < 50)
+      		goto fill_buff_retry;
+	  }
+   end fill_buf;
+
+   /*****************************************************************/
+   pinit: proc(bin#);
+      dcl bin# fixed;
+      dcl (bin_base) fixed;
+
+      bin_base = bin# * 64;
+      DO i = 0 TO 31;                /* zero out each channel- including refresh channel */
+         WRITE(PSC) = bin_base + i; 
+         WRITE(PSF) = PSWL;
+         WRITE(PSD) =  -1; WRITE(PSD)=0;   /* wave table length of 256 */
+         WRITE(PSD) =   0; WRITE(PSD)=0;   /* base address of 0        */
+         WRITE(PSD) =  -1; WRITE(PSD)=0;   /* loop length of 256       */
+         WRITE(PSD) =   0; WRITE(PSD)=1;   /* phase incr of 1          */
+         WRITE(PSD) =   0;                 /* incr of 1                */
+         WRITE(PSD) = 255;                 /* modulus of 1             */
+         WRITE(PSD) =   0;                 /* off and no looping       */
+      END;         /* of loop over subsystems */
+
+    end pinit;
+   /*****************************************************************/
+
+   call polyinit;
+   call pinit(bin#);
+
+   bin_base = bin# * 64;
+   erase_status_lines;
+   pstring('Testing sample rate generator in bin '); 
+   pnum(bin#+1,1); pstring('...'); 
+   flush_term;
+   Really.Run.Host();
+
+   /* Test #1 - model for the frequency generator                 */
+   /* Test for the SRG.  Check the freqs for all moduli           */
+
+   /* Make sure the phase accumulator is functional for this test */
+   call fill_buf(bin#,0,255,1);
+
+   if buf(2) <> 0 then do;
+      log_srg_error(bin#, 1000, 1, 255, 2);
+      pos(status_line4); erase_line;
+      pstring('  - Error in phase accumulator');
+      flush_term;
+      Really.Run.Host();
+   end;
+
+  /* These calls eliminates the 1 error per */
+  /* iteration of logger. it is related to whens (d16) and interrupts but */
+  /* the exact cause is yet unknown.  - WSL */
+   Really.Do.Delay(2);
+   call fill_buf(bin#,0,1,1);
+   Really.Do.Delay(2);
+   call fill_buf(bin#,0,1,1);
+   Really.Do.Delay(2);
+   call fill_buf(bin#,0,1,1);
+   Really.Do.Delay(2);
+
+   do chan = 0 to 31;
+      if Really.Peek() >= 0 then return;
+      pos(status_line2); erase_line;
+      pstring('  - Channel '); unum(chan,0);
+      pos(status_line3);  flush_term; 
+      Really.Run.Host();
+
+      inc = 1;                             /* no delays               */
+      do mod = 2 to 256;                   /* test all moduli         */
+         call fill_buf(bin#,chan,mod,inc); /* get data from SRG       */
+         accum = 256-mod;                  /* reset the accumulator   */
+         i = 0;
+         do while (buf(i) <> -1 && i < buf_size); /* find first carry        */
+            i = i + 1;
+         end; 
+         
+         if i = buf_size then do;           // No carry found...
+            log_srg_error(bin#, 2000, inc, mod, buf_size);
+         end;
+
+         else do;
+             dcl x fixed;
+             x = i;
+             do i = i + 1 to buf_size;
+                accum = accum + inc;
+                if accum < 256 then do;       /* no carry yet, should get address */
+                   if buf(i) <> 0 then log_srg_error(bin#, 3000, inc, mod, i -x);
+                end;
+                else do;                      /* carry happened          */
+                   accum = 256 - mod;         /* reset the accumulator   */
+                   if buf(i) <> -1 then log_srg_error(bin#, 4000, inc, mod, i - x);
+                   x = i;
+                end;
+             end;
+          end;
+          if ((mod&31)==31)
+             Really.Run.Host();
+      end;
+   end;
+         
+
+   /* Test the on/off loop/stop bits  */
+   pos(status_line2); erase_line;
+   pstring('  - Testing on/off and loop/stop bits ');
+   pos(status_line3);
+   flush_term;
+   Really.Run.Host();
+
+   do i = 0 to 31;
+      write(psc) = bin_base + i;
+      do J = 0 to 3;
+         write(psf) = pson;
+         write(psd) = J;
+         write(psf) = psron;
+         if (read(psd) & 3) <> J then log_srg_error(bin#, 5000, i, j, read(psd));
+      end;
+      write(psf) = pson;
+      write(psd) = 0;
+   end;
+
+   Really.Run.Host();
+
+   do i = 1 to 3 by 2;
+      write(psc) = bin_base; 
+      write(psf) = pswl;
+      write(psd) =  -1; write(psd) =-1;  /* wave table length of 1   */
+      write(psd) =   0; write(psd) = 0;  /* base address of 0        */
+      write(psd) =  -1; write(psd) =-1;  /* loop length of 1         */
+      write(psd) =   0; write(psd) = 1;  /* phase incr of 1          */
+      write(psd) =   0;                  /* incr of 1                */
+      write(psd) = 255;                  /* modulus of 1             */
+      write(psd) =   i;                  /* on or on/loop            */
+
+      Really.Do.Delay(2);
+
+      write(psf) = psron;
+      j = read(psd);
+
+      // was told to play and stop, should have stopped
+      if i = 1 then do;
+         #if (0)
+            if ((j & 3) <> 0) {
+               dcl x fixed;
+               dcl buf(100) fixed;
+               
+               do x = 0 to 99;
+                  buf(x) = read(psd);
+               end;
+               
+               dbug 'log_srg_error', j;
+               do x = 0 to 99;
+                  send buf(x);
+               end;
+            }
+         #endif
+         if (j & 3) <> 0 then log_srg_error(bin#, 6000, i, j, read(psd));
+      end;
+
+      // was told to loop should still be looping
+      else do;
+         if (j & 3) <> 3 then log_srg_error(bin#, 7000, i, j, read(psd));
+      end;
+      write(psf) = pson;
+      write(psd) = 0;
+  end;
+
+end srg_test;
+/*******************************************************************/
+/*
+begin;
+   dcl i fixed;
+   clear_screen;
+
+   do i = 0 to #_poly_bins - 1;
+    test_sample_rate_generator(i);
+    crlf;
+    unum(sample_rate_generator_errors(i),6);
+   end;
+   flush_term;
+end;
+*/

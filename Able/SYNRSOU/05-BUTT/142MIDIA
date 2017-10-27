@@ -1,0 +1,1456 @@
+/* 142MIDIA  $TITLE  MORE MIDI ROUTINES */
+
+/*
+   03/15/91 - PF  - mask off pressure bits to avoid crash
+   11/12/90 - PF  - Sustain feature clean up
+   11/06/90 - PF  - Add procs START.MIDI.SUSTAIN and STOP.MIDI.SUSTAIN
+   08/27/90 - PF  - Support all MIDI controllers
+   04/27/90 - PF  - Fixed Repeat/Arpeggiate with MIDInet bug
+   06/15/89 - PF  - Removed references to inc.new.midi
+   06/15/89 - PF  - Implemented sysex output for MIDInet
+   06/15/89 - PF  - Changed MIDI output routines to take advantage of T#MIDI_Bulk packets
+   05/17/89 - TSS - Changed MIDI.NOTE.OFF to not call Fast.Send.Protocol.Packet
+   05/16/89 - TSS - Changed MIDI.NOTE.ON to not call Fast.Send.Protocol.Packet
+   05/04/89 - PF -  Added MIDI.NOTE.OFF proc
+   05/02/89 - MWH - Support for multiple D115 boards & channels; timeouts
+   01/13/89 - PF -  Monster MIDI code
+   04/25/88 - PF -  split from 142-midi
+*/
+
+// MIDI Aftertouch Format
+
+// 1010nnnn    0kkkkkkk  0vvvvvvv  Polyphonic Key Pressure (Aftertouch).  This
+// message is most often sent by pressing down on the
+// key after it "bottoms out". (kkkkkkk) is the key
+// (note) number. (vvvvvvv) is the pressure value.
+
+// 1101nnnn    0vvvvvvv            Channel Pressure (After-touch). This message is
+// most often sent by pressing down on the key after
+// it "bottoms out". This message is different from
+// polyphonic after-touch. Use this message to send
+// the single greatest pressure value (of all the
+// current depressed keys). (vvvvvvv) is the pressure
+// value.
+
+/* QUICK PROCEDURE TO SEND MIDI CONTROL CHANGE COMMANDS */
+
+DCL (#MOUT,#MSTA) FIXED PUBLIC; /* TEMPS USED BELOW FOR ALL PROCS EXCEPT MIDI.NOTE.ON */
+
+/* PASS MAM,MAL POINTING TO THD.SYN.CROUT FOR ENTRY */
+
+MIDI.CONTROL.CHANGE:  PROC(CTYPE,VAL) PUBLIC; /* SENDS MIDI CONTROL CHANGE */
+   DCL CTYPE   FIXED;  /* 0 IF CONT VALUE IS 0 TO RTE.MAX, 1 IF -100 TO +100 */
+   DCL VAL     FIXED;  /* VALUE (0-255) IN LOW BYTE */
+   DCL CONT#   FIXED;  /* CONTROLLER #              */
+   DCL (R)     FIXED;
+
+   CONT# = READ(MD);                  /* SAVE PASSED CONTROLLER # */
+
+   write(mal) = thd.midi.path;        /* lookup MIDInet routing */
+   if read(md) <> 0
+   then do;
+      r = read(md);                   /* get routing info for midi box */
+
+      DISABLE;
+      if (midi.buf(0) + 4) >          /* if adding the length of this message to the midi buffer */
+      (Max_Packet_Length / 2)         /* would exceed the number of words allowed */
+      then do;
+         call Empty.MIDI.Buf;         /* send the contents of the buffer out */
+      end;
+
+      /* now write the event into the midi buffer */
+      write("313") = addr(midi.buf(midi.buf(0)));   /* get pointer to next location in buffer */
+      write("373") = shl(T#Control_Change,8) | 8;   /* event id in upper, byte length of data in lower */
+      write("373") = r;                             /* midi routing info */
+      write("373") = cont#;                         /* midi controller number */
+      write("373") = val;                           /* midi controller value */
+      midi.buf(0) = midi.buf(0) + 4;                /* update word size of midi buffer */
+      ENABLE;
+   end;
+
+   WRITE(MAL) = THD.MIDI;         							/* LOOKUP ORIGINAL MIDI ROUTING */
+   IF (READ(MD)&(THD.MIDI.OMS + THD.MIDI.ORIG))<>0    /* see if routed to original hardware or OMS */
+   THEN DO;
+      IF CTYPE=0 THEN DO;         				/* SCALE 0-RTE.MAX TO 0-127 */
+         LOAD VAL; ULOAD 18496; MUL 36992;   /* FRACTIONAL MULTIPLY */
+         VAL=READ(4);             				/* EQUIVALENT TO I*127/RTE.MAX (64K*127/225 ROUNDED UP) */
+      END;
+      ELSE DO;                    /* SCALE -100 TO +100 TO 0-127 */
+         IF (VAL&128)<>0
+         THEN VAL=VAL\"177400";   /* SIGN EXTEND THIS VALUE */
+         LOAD VAL+100;            /* FRACTIONAL MULTIPLY */
+         MUL 41582; VAL=READ(4);  /* EQUIVALENT TO (I+100)*128/200 (64K*126.9/200 ROUNDED DOWN) */
+         IF READ(5)<>0 THEN VAL=VAL+1; /* ROUND UP */
+
+         /* SIMULATE 14-BIT NUMBERS */
+         IF VAL>64 THEN R=SHL(VAL-64,1);
+         ELSE R=0;
+         VAL=SHL(VAL,7)\R;
+      END;
+
+      WRITE(MAL)=THD.MIDI;
+      R=READ(MD);
+
+		IF ((R & THD.MIDI.OMS) != 0)					// Write to OMS
+		{
+			IF ((R & THD.MIDI.OMS.VPORT) != 0)		// Write to OMS Virtual Port
+				interp_send_oms_controller	(R & THC.MIDI.OMS.VPALL, cont#, val);		// "HB0" + channel #
+			
+			else
+			{
+				write(mal) = THD.TRK;					// Get track number
+				
+				interp_send_oms_controller	(read(md), cont#, val);		// "HB0" + channel #
+			}
+		}
+		
+		ELSE IF ((R & THD.MIDI.ORIG) != 0)		// Write to original hardware
+		{
+			IF RUNNING.STATUS<>0 THEN DO;
+				#MOUT=SHL(R&7,2)+(SHR(R,5)&3);  /* COMPUTE LOGICAL OUTPUT NUMBER */
+				#MSTA="HB0"\(SHR(R,8)&"17");    /* AND COMMAND/STATUS BYTE */
+			END;
+	
+			DISABLE;                           /* NEED TO PROTECT FROM INTERRUPTS */
+			WRITE(SYSSEL)=R&"37";              /* SELECT MIDI SUBSYSTEM */
+	
+			IF RUNNING.STATUS<>0
+			THEN WRITE(MCHA)=#MOUT&3;          /* AND SELECT OUTPUT ON THAT SUBSYSTEM */
+			ELSE WRITE(MCHA)=SHR(R,5)&3;       /* AND SELECT OUTPUT ON THAT SUBSYSTEM */
+	
+			IF  (RUNNING.STATUS<>0)            /* USING RUNNING STATUS */
+			AND (LAST.MIDI.STATUS(#MOUT)<>#MSTA)/* STATUS BYTE DIFFERS FROM PREVIOUS */
+			THEN DO;
+				WRITE(MDAT)=#MSTA;              /* SEND NEW STATUS BYTE AND MIDI CHAN */
+				LAST.MIDI.STATUS(#MOUT)=#MSTA;  /* UPDATE */
+			END;
+			ELSE IF RUNNING.STATUS=0           /* NOT USING RUNNING STATUS */
+			THEN WRITE(MDAT)="HB0"\(SHR(R,8)&"17");/* AND COMMAND/STATUS BYTE */
+	
+			WRITE(MDAT)=CONT#;                 /* AND CONTROLLER NUMBER */
+			WRITE(MDAT)=VAL;                   /* AND CONTROLLER VALUE  */
+			ENABLE;
+		}
+
+   end;
+END MIDI.CONTROL.CHANGE;
+
+REAL.MIDI.CONTROL.CHANGE:  PROC(CONT#,VAL) PUBLIC; /* SENDS MIDI CONTROL CHANGE */
+   DCL CONT#   FIXED;  /* 0 -127 ACTUAL MIDI CONTROLLER NUMBER */
+   DCL VAL     FIXED;  /* MIDI VALUE 0-127 */
+   DCL (R)     FIXED;
+
+   write(mal) = thd.midi.path;        /* lookup MIDInet routing */
+   if read(md) <> 0
+   then do;
+      r = read(md);                   /* get routing info for midi box */
+
+      DISABLE;
+      if (midi.buf(0) + 4) >          /* if adding the length of this message to the midi buffer */
+      (Max_Packet_Length / 2)         /* would exceed the number of words allowed */
+      then do;
+         call Empty.MIDI.Buf;         /* send the contents of the buffer out */
+      end;
+
+      /* now write the event into the midi buffer */
+      write("313") = addr(midi.buf(midi.buf(0)));   /* get pointer to next location in buffer */
+      write("373") = shl(T#MIDI_Control_Change,8) | 8;   /* event id in upper, byte length of data in lower */
+      write("373") = r;                             /* midi routing info */
+      write("373") = cont#;                         /* midi controller number */
+      write("373") = val;                           /* midi controller value */
+      midi.buf(0) = midi.buf(0) + 4;                /* update word size of midi buffer */
+      ENABLE;
+   end;
+
+   WRITE(MAL) = THD.MIDI;         							/* LOOKUP ORIGINAL MIDI ROUTING */
+   IF (READ(MD)&(THD.MIDI.OMS + THD.MIDI.ORIG))<>0    /* see if routed to original hardware or OMS */
+   THEN DO;
+
+      R=READ(MD);
+
+		IF ((R & THD.MIDI.OMS) != 0)					// Write to OMS
+		{
+			IF ((R & THD.MIDI.OMS.VPORT) != 0)		// Write to OMS Virtual Port
+				interp_send_oms_controller	(R & THC.MIDI.OMS.VPALL, cont#, val);		// "HB0" + channel #
+			
+			else
+			{
+				write(mal) = THD.TRK;					// Get track number
+				
+				interp_send_oms_controller	(read(md), cont#, val);		// "HB0" + channel #
+			}
+		}
+		
+		ELSE IF ((R & THD.MIDI.ORIG) != 0)			// Write to original hardware
+		{
+			IF RUNNING.STATUS<>0 THEN DO;
+				#MOUT=SHL(R&7,2)+(SHR(R,5)&3);  /* COMPUTE LOGICAL OUTPUT NUMBER */
+				#MSTA="HB0"\(SHR(R,8)&"17");    /* AND COMMAND/STATUS BYTE */
+			END;
+	
+			DISABLE;                           /* NEED TO PROTECT FROM INTERRUPTS */
+			WRITE(SYSSEL)=R&"37";              /* SELECT MIDI SUBSYSTEM */
+	
+			IF RUNNING.STATUS<>0
+			THEN WRITE(MCHA)=#MOUT&3;          /* AND SELECT OUTPUT ON THAT SUBSYSTEM */
+			ELSE WRITE(MCHA)=SHR(R,5)&3;       /* AND SELECT OUTPUT ON THAT SUBSYSTEM */
+	
+			IF  (RUNNING.STATUS<>0)            /* USING RUNNING STATUS */
+			AND (LAST.MIDI.STATUS(#MOUT)<>#MSTA)/* STATUS BYTE DIFFERS FROM PREVIOUS */
+			THEN DO;
+				WRITE(MDAT)=#MSTA;              /* SEND NEW STATUS BYTE AND MIDI CHAN */
+				LAST.MIDI.STATUS(#MOUT)=#MSTA;  /* UPDATE */
+			END;
+			ELSE IF RUNNING.STATUS=0           /* NOT USING RUNNING STATUS */
+			THEN WRITE(MDAT)="HB0"\(SHR(R,8)&"17");/* AND COMMAND/STATUS BYTE */
+	
+			WRITE(MDAT)=CONT#;                 /* AND CONTROLLER NUMBER */
+			WRITE(MDAT)=VAL;                   /* AND CONTROLLER VALUE  */
+			ENABLE;
+		}
+   end;
+
+END REAL.MIDI.CONTROL.CHANGE;
+
+/* $SUBTITLE  QUICK PROCEDURE TO SEND MIDI PITCH WHEEL CHANGE COMMANDS */
+
+MIDI.PITCH.WHEEL:  PROC(VAL) PUBLIC; /* SENDS MIDI PITCH WHEEL UPDATE */
+   DCL VAL     FIXED;   /* NEW PITCH WHEEL POSITION VALUE */
+   DCL R       FIXED;
+
+   /* NOTE: THIS ASSUMES THAT PITCH VALUE GOES FROM -100 TO +100 */
+
+   write(mal) = thd.midi.path;        /* lookup MIDInet routing */
+   if read(md) <> 0
+   then do;
+      r = read(md);                   /* get routing info for midi box */
+
+      DISABLE;
+      if (midi.buf(0) + 3) >          /* if adding the length of this message to the midi buffer */
+      (Max_Packet_Length / 2)         /* would exceed the number of words allowed */
+      then do;
+         call Empty.MIDI.Buf;         /* send the contents of the buffer out */
+      end;
+
+      /* now write the event into the midi buffer */
+      write("313") = addr(midi.buf(midi.buf(0)));   /* get pointer to next location in buffer */
+      write("373") = shl(T#Pitch_Bend,8) | 6;       /* event id in upper, byte length of data in lower */
+      write("373") = r;                             /* midi routing info */
+      write("373") = val;                           /* pitch bend value msb only */
+      midi.buf(0) = midi.buf(0) + 3;                /* update word size of midi buffer */
+      ENABLE;
+   end;
+
+   WRITE(MAL) = THD.MIDI;         							/* LOOKUP ORIGINAL MIDI ROUTING */
+   IF (READ(MD)&(THD.MIDI.OMS + THD.MIDI.ORIG))<>0    /* see if routed to original hardware or OMS */
+   THEN DO;
+      R=READ(MD);                        /* GET OLD ROUTING INFO */
+
+      IF (VAL&128)<>0
+      THEN VAL=VAL\"177400";             /* SIGN EXTEND THIS VALUE */
+
+      LOAD VAL+100;                      /* FRACTIONAL MULTIPLY    */
+      MUL 41582; VAL=READ(4);            /* EQUIVALENT TO (I+100)*128/200 (64K*126.9/200 ROUNDED DOWN) */
+      IF READ(5)<>0 THEN VAL=VAL+1;      /* ROUND UP */
+
+		IF ((R & THD.MIDI.OMS) != 0)				// Write to OMS
+		{
+			IF ((R & THD.MIDI.OMS.VPORT) != 0)		// Write to OMS Virtual Port
+				interp_send_oms_pbend	(R & THC.MIDI.OMS.VPALL, 0, val);		// "HE0" + channel #
+			
+			else
+			{
+				write(mal) = THD.TRK;					// Get track number
+	
+				interp_send_oms_pbend (read(md), 0, val);		// "HE0" + channel #
+			}
+		}
+
+		ELSE IF ((R & THD.MIDI.ORIG) != 0)				// Write to original hardware
+		{
+			IF RUNNING.STATUS<>0 THEN DO;
+				#MOUT=SHL(R&7,2)+(SHR(R,5)&3);  /* COMPUTE LOGICAL OUTPUT NUMBER */
+				#MSTA="HE0"\(SHR(R,8)&"17");    /* AND COMMAND/STATUS BYTE */
+			END;
+	
+			DISABLE;                           /* NEED TO PROTECT FROM INTERRUPTS */
+			WRITE(SYSSEL)=R&"37";              /* SELECT MIDI SUBSYSTEM */
+	
+			IF RUNNING.STATUS<>0
+			THEN WRITE(MCHA)=#MOUT&3;          /* AND SELECT OUTPUT ON THAT SUBSYSTEM */
+			ELSE WRITE(MCHA)=SHR(R,5)&3;       /* AND SELECT OUTPUT ON THAT SUBSYSTEM */
+	
+			IF  (RUNNING.STATUS<>0)            /* USING RUNNING STATUS */
+			AND (LAST.MIDI.STATUS(#MOUT)<>#MSTA)/* STATUS BYTE DIFFERS FROM PREVIOUS */
+			THEN DO;
+				WRITE(MDAT)=#MSTA;              /* SEND NEW STATUS BYTE AND MIDI CHAN */
+				LAST.MIDI.STATUS(#MOUT)=#MSTA;  /* UPDATE */
+			END;
+			ELSE IF RUNNING.STATUS=0           /* NOT USING RUNNING STATUS */
+			THEN WRITE(MDAT)="HE0"\(SHR(R,8)&"17");/* AND COMMAND/STATUS BYTE */
+	
+			WRITE(MDAT)=0;                     /* LOWER 7 BITS OF PWHEEL POS */
+			WRITE(MDAT)=VAL;                   /* UPPER 7 BITS OF PWHEEL POS */
+			ENABLE;
+		}
+   end;
+
+END MIDI.PITCH.WHEEL;
+
+/* $SUBTITLE  QUICK PROCEDURE TO SEND MIDI PRESSURE (CHANNEL AND POLY) COMMANDS */
+
+MIDI.CHANNEL.PRESSURE:  PROC(VAL) PUBLIC; /* SENDS MIDI CHANNEL PRESSURE UPDATE */
+   DCL VAL FIXED; /* NEW PRESSURE VALUE */
+   DCL R   FIXED;
+
+   write(mal) = thd.midi.path;        /* lookup MIDInet routing */
+   if read(md) <> 0
+   then do;
+      r = read(md);                   /* get routing info for midi box */
+
+      DISABLE;
+      if (midi.buf(0) + 3) >          /* if adding the length of this message to the midi buffer */
+      (Max_Packet_Length / 2)         /* would exceed the number of words allowed */
+      then do;
+         call Empty.MIDI.Buf;         /* send the contents of the buffer out */
+      end;
+
+      /* now write the event into the midi buffer */
+      write("313") = addr(midi.buf(midi.buf(0)));   /* get pointer to next location in buffer */
+      write("373") = shl(T#Channel_Pressure,8) | 6; /* event id in upper, byte length of data in lower */
+      write("373") = r;                             /* midi routing info */
+      write("373") = val;                           /* midi channel pressure value */
+      midi.buf(0) = midi.buf(0) + 3;                /* update word size of midi buffer */
+      ENABLE;
+   end;
+
+   WRITE(MAL) = THD.MIDI;         							/* LOOKUP ORIGINAL MIDI ROUTING */
+   IF (READ(MD)&(THD.MIDI.OMS + THD.MIDI.ORIG))<>0    /* see if routed to original hardware or OMS */
+   THEN DO;
+      R=READ(MD);                        /* GET OLD ROUTING INFO */
+
+		LOAD VAL; ULOAD 18496; MUL 36992;  /* FRACTIONAL MULTIPLY */
+		VAL=READ(4);             			  /* EQUIVALENT TO I*127/RTE.MAX (64K*127/225 ROUNDED UP) */
+
+		IF ((R & THD.MIDI.OMS) != 0)					// Write to OMS
+		{
+			IF ((R & THD.MIDI.OMS.VPORT) != 0)		// Write to OMS Virtual Port
+				interp_send_oms_chanp	(R & THC.MIDI.OMS.VPALL, val);		// "HD0" + channel #
+			
+			else
+			{
+				write(mal) = THD.TRK;					// Get track number
+	
+				interp_send_oms_chanp (read(md), val);		// "HD0" + channel #
+			}
+		}
+
+		ELSE IF ((R & THD.MIDI.ORIG) != 0)				// Write to original hardware
+		{
+			IF RUNNING.STATUS<>0 THEN DO;
+				#MOUT=SHL(R&7,2)+(SHR(R,5)&3);  /* COMPUTE LOGICAL OUTPUT NUMBER */
+				#MSTA="HD0"\(SHR(R,8)&"17");    /* AND COMMAND/STATUS BYTE */
+			END;
+	
+			DISABLE;                           /* NEED TO PROTECT FROM INTERRUPTS */
+			WRITE(SYSSEL)=R&"37";              /* SELECT MIDI SUBSYSTEM */
+	
+			IF RUNNING.STATUS<>0
+			THEN WRITE(MCHA)=#MOUT&3;          /* AND SELECT OUTPUT ON THAT SUBSYSTEM */
+			ELSE WRITE(MCHA)=SHR(R,5)&3;       /* AND SELECT OUTPUT ON THAT SUBSYSTEM */
+	
+			IF  (RUNNING.STATUS<>0)            /* USING RUNNING STATUS */
+			AND (LAST.MIDI.STATUS(#MOUT)<>#MSTA)/* STATUS BYTE DIFFERS FROM PREVIOUS */
+			THEN DO;
+				WRITE(MDAT)=#MSTA;              /* SEND NEW STATUS BYTE AND MIDI CHAN */
+				LAST.MIDI.STATUS(#MOUT)=#MSTA;  /* UPDATE */
+			END;
+			ELSE IF RUNNING.STATUS=0           /* NOT USING RUNNING STATUS */
+			THEN WRITE(MDAT)="HD0"\(SHR(R,8)&"17");/* AND COMMAND/STATUS BYTE */
+	
+			WRITE(MDAT)=VAL;                   /* PRESSURE VALUE */
+			ENABLE;
+		}
+   end;
+END MIDI.CHANNEL.PRESSURE;
+
+// Maps key # from synclavier-land to MIDI-land
+MIDI.MAP.KEY:  PROC(KEY#) PUBLIC;         /* Maps key# for output transposition; also bounds checks */
+   DCL KEY#  FIXED;
+
+   key# = key# + (MIDI.MIDDLE.C-SYNC.MIDDLE.C);    // Add general offset
+
+   if ((interp_real_time_prefs(0) & SYNCLAVIER_PREF_XPOS_MIDI_MASK) != 0) {
+      if ((interp_real_time_prefs(0) & SYNCLAVIER_PREF_XPOS_MIDI_MASK) == SYNCLAVIER_PREF_XPOS_MIDI)           // 1 == -1 octave
+         key# = key# - 12;
+
+      else if ((interp_real_time_prefs(0) & SYNCLAVIER_PREF_XPOS_MIDI_MASK) == SYNCLAVIER_PREF_XPOS_MIDI*2)    // 2 == -2 octave
+         key# = key# - 24;
+      
+      else
+         key# = key# + 12;
+   }
+
+   if (key# <   0) return   0;
+   if (key# > 127) return 127;
+
+   return key#;
+END MIDI.MAP.KEY;
+
+MIDI.INDIVIDUAL.PRESSURE:  PROC(KEY#,VAL) PUBLIC; /* SENDS MIDI INDIVID. PRESSURE UPDATE */
+   DCL KEY#  FIXED; /* KEY NUMBER OF PRESSURE UPDATE */
+   DCL VAL   FIXED; /* NEW INDIVIDUAL PRESSURE VALUE */
+   DCL NOMAP FIXED; /* 1 = DO NOT MAP FOR XPOS       */
+   DCL R     FIXED;
+
+   write(mal) = thd.midi.path;        /* lookup MIDInet routing */
+   if read(md) <> 0
+   then do;
+      r = read(md);                   /* get routing info for midi box */
+
+      DISABLE;
+      if (midi.buf(0) + 4) >          /* if adding the length of this message to the midi buffer */
+      (Max_Packet_Length / 2)         /* would exceed the number of words allowed */
+      then do;
+         call Empty.MIDI.Buf;         /* send the contents of the buffer out */
+      end;
+
+      /* now write the event into the midi buffer */
+      write("313") = addr(midi.buf(midi.buf(0)));   /* get pointer to next location in buffer */
+      write("373") = shl(T#Poly_Pressure,8) | 8;    /* event id in upper, byte length of data in lower */
+      write("373") = r;                             /* midi routing info */
+      write("373") = key#;                          /* midi key number */
+      write("373") = val;                           /* midi pressure value */
+      midi.buf(0) = midi.buf(0) + 4;                /* update word size of midi buffer */
+      ENABLE;
+   end;
+
+   WRITE(MAL) = THD.MIDI;         							/* LOOKUP ORIGINAL MIDI ROUTING */
+   IF (READ(MD)&(THD.MIDI.OMS + THD.MIDI.ORIG))<>0    /* see if routed to original hardware or OMS */
+   THEN DO;
+      R=READ(MD);                        /* GET OLD ROUTING INFO */
+
+		LOAD VAL; ULOAD 18496; MUL 36992;  /* FRACTIONAL MULTIPLY */
+		VAL=READ(4);             			  /* EQUIVALENT TO I*127/RTE.MAX (64K*127/225 ROUNDED UP) */
+
+		IF ((R & THD.MIDI.OMS) != 0)					// Write to OMS
+		{
+			IF ((R & THD.MIDI.OMS.VPORT) != 0)		// Write to OMS Virtual Port
+				interp_send_oms_indivp	(R & THC.MIDI.OMS.VPALL, key#, val);		// "HA0" + channel #
+			
+			else
+			{
+				write(mal) = THD.TRK;					// Get track number
+	
+				interp_send_oms_indivp (read(md), key#, val);		// "HA0" + channel #
+			}
+		}
+		
+		ELSE IF ((R & THD.MIDI.ORIG) != 0)				// Write to original hardware
+		{
+			IF RUNNING.STATUS<>0 THEN DO;
+				#MOUT=SHL(R&7,2)+(SHR(R,5)&3);  /* COMPUTE LOGICAL OUTPUT NUMBER */
+				#MSTA="HA0"\(SHR(R,8)&"17");    /* AND COMMAND/STATUS BYTE */
+			END;
+	
+			DISABLE;                           /* NEED TO PROTECT FROM INTERRUPTS */
+			WRITE(SYSSEL)=R&"37";              /* SELECT MIDI SUBSYSTEM */
+	
+			IF RUNNING.STATUS<>0
+			THEN WRITE(MCHA)=#MOUT&3;          /* AND SELECT OUTPUT ON THAT SUBSYSTEM */
+			ELSE WRITE(MCHA)=SHR(R,5)&3;       /* AND SELECT OUTPUT ON THAT SUBSYSTEM */
+	
+			IF  (RUNNING.STATUS<>0)            /* USING RUNNING STATUS */
+			AND (LAST.MIDI.STATUS(#MOUT)<>#MSTA)/* STATUS BYTE DIFFERS FROM PREVIOUS */
+			THEN DO;
+				WRITE(MDAT)=#MSTA;              /* SEND NEW STATUS BYTE AND MIDI CHAN */
+				LAST.MIDI.STATUS(#MOUT)=#MSTA;  /* UPDATE */
+			END;
+			ELSE IF RUNNING.STATUS=0           /* NOT USING RUNNING STATUS */
+			THEN WRITE(MDAT)="HA0"\(SHR(R,8)&"17");/* AND COMMAND/STATUS BYTE */
+	
+			WRITE(MDAT)=key#;                  /* AND KEY NUMBER */
+			WRITE(MDAT)=VAL;                   /* PRESSURE VALUE */
+			ENABLE;
+		}
+   end;
+END MIDI.INDIVIDUAL.PRESSURE;
+
+/* $SUBTITLE  QUICK PROCEDURE TO SEND MIDI NOTE ON/OFF COMMANDS */
+
+// Note: KEY# is often from MIDIIFNO, so we extract the last 7 bits
+
+MIDI.NOTE.OFF:  PROC(RINFO, PATH, KEY#) PUBLIC; /* SENDS MIDI NOTE OFF EVENT */
+   DCL RINFO         FIXED; /* ROUTING INFORMATION PACKED AS FOR MIDI.ROUTE (SEE ABOVE) with tweaks */
+   DCL PATH          FIXED; /* MIDINET ROUTING INFORMATION (HIGH BYTE=MIDI CHANNEL; LOW BYTE=MIDINET PATH */
+   DCL KEY#          FIXED; /* SYNCLAVIER KEY NUMBER (0 TO (NUM.KEYS-1)) */
+   DCL SAVE.R13      FIXED; /* SAVE R13 HERE: THIS IS CALLED FROM 10-INT! */
+   DCL (#NOUT,#NSTA) FIXED; /* TEMPS USED BELOW */
+
+   /* NOTE:  THIS ROUTINE CAN BE CALLED BOTH FROM INSIDE AN INTERRUPT
+      AND FROM OUTSIDE.  THIS CODE IS NOT REENTRANT.  THEREFORE, YOU
+      MUST BE SURE TO DISABLE INTERRUPTS BEFORE CALLING THIS PROCEDURE.
+      FURTHERMORE, THE ENABLE AT THE BOTTOM OF THIS ROUTINE SHOULD BE KEPT
+      THERE.  MANY ROUTINES ASSUME THAT THIS ROUTINE ENABLES INTERRUPTS
+      WHEN DONE. */
+
+   KEY# = KEY# & 127;
+
+   if path <> 0                       /* valid MIDInet routing */
+   then do;
+
+      if (midi.buf(0) + 4) >          /* if adding the length of this event to the network midi buffer */
+      (Max_Packet_Length / 2)         /* would exceed the number of words allowed */
+      then do;                        
+         call Empty.MIDI.Buf;         /* send the buffer out */
+      end;
+
+      /* now write the event into the midi buffer */
+      save.r13     = read("313");                   /* save r13 */
+      write("313") = addr(midi.buf(midi.buf(0)));   /* get pointer to the next location in the buffer */
+      write("373") = shl(T#Note_Off,8) | 8;         /* event id in upper, byte length of event in lower */
+      write("373") = path;                          /* midi routing info */
+      write("373") = key#;                          /* midi key number */
+      write("373") = 0;                             /* midi velocity */
+      midi.buf(0)  = midi.buf(0) + 4;               /* update the buffer word size */
+      write("313") = save.r13;                      /* restore r13 */
+   end;
+
+   IF (RINFO&THD.MIDI.OMS)<>0     		  /* MASK OFF MIDINET BIT AND REP/ARP BIT!!! */
+   THEN DO;
+		IF ((RINFO & THD.MIDI.OMS.VPORT) != 0)		// Write to OMS Virtual Port
+			interp_send_oms_noteoff (RINFO & THC.MIDI.OMS.VPALL, KEY#, 0);		// "H80" + channel #
+		ELSE
+			interp_send_oms_noteoff (RINFO & 255, KEY#, 0);		// "H80" + channel #
+	END;
+
+   ELSE IF (RINFO&THD.MIDI.ORIG)<>0      /* MASK OFF MIDINET BIT AND REP/ARP BIT!!! */
+   THEN DO;
+
+      IF RUNNING.STATUS<>0 THEN DO;      /* UTILIZING RUNNING STATUS OPTIMIZATION */
+         #NOUT=SHL(RINFO&7,2)+(SHR(RINFO,5)&3); /* COMPUTE LOGICAL OUTPUT NUMBER */
+         #NSTA="H80"\(SHR(RINFO,8)&"17");/* AND COMMAND/STATUS BYTE */
+      END;
+
+      DISABLE;                           /* NEED TO PROTECT FROM INTERRUPTS */
+      WRITE(SYSSEL)=RINFO&"37";          /* SELECT MIDI SUBSYSTEM */
+
+      IF RUNNING.STATUS<>0
+      THEN WRITE(MCHA)=#NOUT&3;          /* AND SELECT OUTPUT ON THAT SUBSYSTEM */
+      ELSE WRITE(MCHA)=SHR(RINFO,5)&3;   /* AND SELECT OUTPUT ON THAT SUBSYSTEM */
+
+      IF  (RUNNING.STATUS<>0)            /* USING RUNNING STATUS */
+      AND (LAST.MIDI.STATUS(#NOUT)<>#NSTA)/* STATUS BYTE DIFFERS FROM PREVIOUS */
+      THEN DO;
+         WRITE(MDAT)=#NSTA;              /* SEND NEW STATUS BYTE AND MIDI CHAN */
+         LAST.MIDI.STATUS(#NOUT)=#NSTA;  /* UPDATE */
+      END;
+      ELSE IF RUNNING.STATUS=0           /* NOT USING RUNNING STATUS */
+      THEN WRITE(MDAT)="H80"\(SHR(RINFO,8)&"17");/* AND COMMAND/STATUS BYTE */
+
+      WRITE(MDAT)=key#;                  /* AND KEY NUMBER (CORRECTED FOR OFFSET BETWEEN SYNC KEY#S AND MIDI KEY#S) */
+      WRITE(MDAT)=0;                     /* AND KEY VELOCITY */
+   end;
+
+   ENABLE;  /***** LEAVE THIS LINE HERE -- MUST REENABLE INTERRUPTS *****/
+
+END MIDI.NOTE.OFF;
+
+// Note: KEY# is often from MIDIIFNO, so we extract the last 7 bits
+// Note: VEL  is often from MIDIIFNO, so we extract the last 7 bits
+
+MIDI.NOTE.ON:  PROC(RINFO,PATH,KEY#,VEL) PUBLIC; /* SENDS MIDI NOTE ON/OFF EVENT */
+   DCL RINFO         FIXED; /* ROUTING INFORMATION PACKED AS FOR MIDI.ROUTE (SEE ABOVE) */
+   DCL PATH          FIXED; /* MIDINET ROUTING INFORMATION */
+   DCL KEY#          FIXED; /* SYNCLAVIER KEY NUMBER (0 TO (NUM.KEYS-1)) */
+   DCL VEL           FIXED; /* KEY VELOCITY (0=NOTE.OFF, 1-RTE.MAX) */
+   DCL SAVE.R13      FIXED; /* SAVE R13 HERE: THIS IS CALLED FROM 10-INT! */
+   DCL (#NOUT,#NSTA) FIXED; /* TEMPS USED BELOW */
+
+   /* NOTE:  THIS ROUTINE CAN BE CALLED BOTH FROM INSIDE AN INTERRUPT
+      AND FROM OUTSIDE.  THIS CODE IS NOT REENTRANT.  THEREFORE, YOU
+      MUST BE SURE TO DISABLE INTERRUPTS BEFORE CALLING THIS PROCEDURE.
+      FURTHERMORE, THE ENABLE AT THE BOTTOM OF THIS ROUTINE SHOULD BE KEPT
+      THERE.  MANY ROUTINES ASSUME THAT THIS ROUTINE ENABLES INTERRUPTS
+      WHEN DONE. */
+
+   KEY# = KEY# & 127;
+   VEL  = VEL  & 255;
+
+   if path <> 0                       /* valid MIDInet routing */
+   then do;
+
+      if (midi.buf(0) + 4) >          /* if adding the length of this message to the midi buffer */
+      (Max_Packet_Length / 2)         /* would exceed the number of words allowed */
+      then do;
+         call Empty.MIDI.Buf;         /* send the contents of the buffer out */
+      end;
+
+      /* now write the event into the midi buffer */
+      save.r13     = read("313");                   /* save r13 */
+      write("313") = addr(midi.buf(midi.buf(0)));   /* get pointer to next location in buffer */
+      write("373") = shl(T#Note_On,8) | 8;          /* event id in upper, byte length of data in lower */
+      write("373") = path;                          /* midi routing info */
+      write("373") = key#;                          /* midi key number */
+      write("373") = vel;                           /* midi velocity */
+      midi.buf(0)  = midi.buf(0) + 4;               /* update word size of midi buffer */
+      write("313") = save.r13;                      /* restore r13 */
+   end;
+
+   if ((RINFO & (THD.MIDI.OMS | THD.MIDI.ORIG)) != 0)
+	{
+		IF VEL<>0 THEN DO;                 	/* NOT DOING A NOTE OFF COMMAND */
+			WRITE(MAM)=VMAP.PTR+1;          	/* LOOK UP VOLUME TO VELOCITY MAPPING */
+			WRITE(MAL)=VEL;
+			VEL=READ(MD);
+		END;
+	
+		IF (RINFO&THD.MIDI.OMS)<>0     		  			/* MASK OFF MIDINET BIT AND REP/ARP BIT!!! */
+		THEN DO;
+			IF ((RINFO & THD.MIDI.OMS.VPORT) != 0)		// Write to OMS Virtual Port
+				interp_send_oms_noteon (RINFO & THC.MIDI.OMS.VPALL, key#, vel);		// "H90" + channel #
+			ELSE
+				interp_send_oms_noteon (RINFO & 255, key#, vel);		// ""H90" + channel #
+		END;
+		
+		ELSE IF (RINFO&THD.MIDI.ORIG)<>0     /* MASK OFF MIDINET BIT AND REP/ARP BIT!!! */
+		THEN DO;
+	
+			IF RUNNING.STATUS<>0 THEN DO;      /* UTILIZING RUNNING STATUS OPTIMIZATION */
+				#NOUT=SHL(RINFO&7,2)+(SHR(RINFO,5)&3); /* COMPUTE LOGICAL OUTPUT NUMBER */
+				#NSTA="H90"\(SHR(RINFO,8)&"17");/* AND COMMAND/STATUS BYTE */
+			END;
+	
+			DISABLE;                           /* NEED TO PROTECT FROM INTERRUPTS */
+			WRITE(SYSSEL)=RINFO&"37";          /* SELECT MIDI SUBSYSTEM */
+	
+			IF RUNNING.STATUS<>0
+			THEN WRITE(MCHA)=#NOUT&3;          /* AND SELECT OUTPUT ON THAT SUBSYSTEM */
+			ELSE WRITE(MCHA)=SHR(RINFO,5)&3;   /* AND SELECT OUTPUT ON THAT SUBSYSTEM */
+	
+			IF  (RUNNING.STATUS<>0)            /* USING RUNNING STATUS */
+			AND (LAST.MIDI.STATUS(#NOUT)<>#NSTA)/* STATUS BYTE DIFFERS FROM PREVIOUS */
+			THEN DO;
+				WRITE(MDAT)=#NSTA;              /* SEND NEW STATUS BYTE AND MIDI CHAN */
+				LAST.MIDI.STATUS(#NOUT)=#NSTA;  /* UPDATE */
+			END;
+			ELSE IF RUNNING.STATUS=0           /* NOT USING RUNNING STATUS */
+			THEN WRITE(MDAT)="H90"\(SHR(RINFO,8)&"17");/* AND COMMAND/STATUS BYTE */
+	
+			WRITE(MDAT)=key#;                  /* AND KEY NUMBER (CORRECTED FOR OFFSET BETWEEN SYNC KEY#S AND MIDI KEY#S) */
+			WRITE(MDAT)=VEL;                   /* AND KEY VELOCITY */
+		END;
+	}
+	
+   ENABLE;  /***** LEAVE THIS LINE HERE -- MUST REENABLE INTERRUPTS *****/
+
+END MIDI.NOTE.ON;
+
+/* $SUBTITLE  ROUTINES TO SEND MIDI REAL-TIME SEQUENCER CONTROL MESSAGES */
+
+DCL MIDI.SEQ.STATUS FIXED PUBLIC; /* CURRENT STATE OF MIDI SEQUENCERS (0=STOPPED, 1=PLAYING) */
+
+/* ALL THREE OF THE FOLLOWING PROCEDURES RE-ENABLE INTERRUPTS WHEN THEY
+   ARE DONE.  IT IS IMPORTANT FOR THIS TO BE MAINTAINED. */
+
+SEND.MIDI.START:  PROC PUBLIC SWAPABLE;
+
+   IF MIDI.SEQ.STATUS<>0 THEN DO; /* ALREADY PLAYING */
+      ENABLE;
+      RETURN;
+   END;
+   MIDI.SEQ.STATUS=1;
+	
+	if (midi.sync.out < 0)									// Send to OMS
+		interp_send_oms_clk_byte("HFA");
+
+   if (midi.sync.out & 0x7F00) <> 0       /* midi sync wants to go to midinet */
+   then do;
+
+      DISABLE;
+      if (midi.buf(0) + 1) >          /* if adding the length of this message to the midi buffer */
+      (Max_Packet_Length / 2)         /* would exceed the number of words allowed */
+      then do;
+         call Empty.MIDI.Buf;         /* send the contents of the buffer out */
+      end;
+
+      /* now write the event into the midi buffer */
+      write("313") = addr(midi.buf(midi.buf(0)));   /* get pointer to next location in buffer */
+      write("373") = shl(T#MIDI_Start,8) | 2;       /* event id in upper, byte length of data in lower */
+      midi.buf(0) = midi.buf(0) + 1;                /* update word size of midi buffer */
+      ENABLE;
+   end;
+
+   if (midi.sync.out&"377")<> 0 then do;            /* send midi sync to old hardware */
+      DISABLE;
+      WRITE(SYSSEL)=MIDI.SUBSYS+SHR((MIDI.SYNC.OUT&"377")-1,2); /* SELECT MIDI SUBSYSTEM */
+      WRITE(MCHA  )=((MIDI.SYNC.OUT&"377")-1)&3; /* AND OUTPUT TO SEND SYNC INFO */
+      WRITE(MDAT  )="HFA";           /* SEND START BYTE */
+      ENABLE;
+   end;
+
+END SEND.MIDI.START;
+
+SEND.MIDI.CONTINUE:  PROC PUBLIC SWAPABLE;
+
+   IF MIDI.SEQ.STATUS<>0 THEN DO; /* ALREADY PLAYING */
+      ENABLE;
+      RETURN;
+   END;
+   MIDI.SEQ.STATUS=1;
+
+	if (midi.sync.out < 0)									// Send to OMS
+		interp_send_oms_clk_byte("HFB");
+
+   if (midi.sync.out & 0x7F00) <> 0       /* midi sync wants to go to midinet */
+   then do;
+
+      DISABLE;
+      if (midi.buf(0) + 1) >          /* if adding the length of this message to the midi buffer */
+      (Max_Packet_Length / 2)         /* would exceed the number of words allowed */
+      then do;
+         call Empty.MIDI.Buf;         /* send the contents of the buffer out */
+      end;
+
+      /* now write the event into the midi buffer */
+      write("313") = addr(midi.buf(midi.buf(0)));   /* get pointer to next location in buffer */
+      write("373") = shl(T#MIDI_Continue,8) | 2;    /* event id in upper, byte length of data in lower */
+      midi.buf(0) = midi.buf(0) + 1;                /* update word size of midi buffer */
+      ENABLE;
+   end;
+
+   if (midi.sync.out&"377")<> 0 then do;            /* send midi sync to old hardware */
+      DISABLE;
+      WRITE(SYSSEL)=MIDI.SUBSYS+SHR((MIDI.SYNC.OUT&"377")-1,2); /* SELECT MIDI SUBSYSTEM */
+      WRITE(MCHA  )=((MIDI.SYNC.OUT&"377")-1)&3; /* AND OUTPUT TO SEND SYNC INFO */
+      WRITE(MDAT  )="HFB";           /* SEND CONTINUE BYTE */
+      ENABLE;
+   end;
+
+END SEND.MIDI.CONTINUE;
+
+SEND.MIDI.STOP:  PROC PUBLIC SWAPABLE;
+
+   IF MIDI.SEQ.STATUS=0 THEN DO; /* ALREADY STOPPED */
+      ENABLE;
+      RETURN;
+   END;
+   MIDI.SEQ.STATUS=0; /* RESET */
+
+	if (midi.sync.out < 0)									// Send to OMS
+		interp_send_oms_clk_byte("HFC");
+
+   if (midi.sync.out & 0x7F00) <> 0       /* midi sync wants to go to midinet */
+   then do;
+
+      DISABLE;
+      if (midi.buf(0) + 1) >          /* if adding the length of this message to the midi buffer */
+      (Max_Packet_Length / 2)         /* would exceed the number of words allowed */
+      then do;
+         call Empty.MIDI.Buf;         /* send the contents of the buffer out */
+      end;
+
+      /* now write the event into the midi buffer */
+      write("313") = addr(midi.buf(midi.buf(0)));   /* get pointer to next location in buffer */
+      write("373") = shl(T#MIDI_Stop,8) | 2;        /* event id in upper, byte length of data in lower */
+      midi.buf(0) = midi.buf(0) + 1;                /* update word size of midi buffer */
+      ENABLE;
+   end;
+
+   if (midi.sync.out&"377")<> 0 then do;            /* send midi sync to old hardware */
+      DISABLE;
+      WRITE(SYSSEL)=MIDI.SUBSYS+SHR((MIDI.SYNC.OUT&"377")-1,2); /* SELECT MIDI SUBSYSTEM */
+      WRITE(MCHA  )=((MIDI.SYNC.OUT&"377")-1)&3; /* AND OUTPUT TO SEND SYNC INFO */
+      WRITE(MDAT  )="HFC";           /* SEND STOP BYTE */
+      ENABLE;
+   end;
+
+END SEND.MIDI.STOP;
+
+
+/* MIDI SONG POS PTR SENDS A SONG POSITION OUT MIDI. 	*/
+/* IF A LIVE CLICK TRACK IS BEING USED, THEN THE   	*/
+/* PASSED TIME HAS BEEN REMAPPED ALREADY (IE IT    	*/
+/* IS A BEAT TIME)                                  	*/
+
+/* NOTE THAT THE PASSED IN VALUE IS A SYNCLAV SEQ		*/
+/* TIME.  IT WAS COMPUTED BY COMPUTE.NEXT.MIDI.LIMIT  */
+/* AND WAS ROUNDED UP TO BE AFTER THE CURRENT SEQ		*/
+/* TIME.																*/
+
+/* SO: HERE, WE CAN ROUND...									*/
+
+MIDI.SONG.POS.PTR:  PROC(MSB,LSB) PUBLIC SWAPABLE; /* TELLS MIDI DEVICES TO GO TO DESIRED POS */
+   DCL (MSB,LSB) FIXED;    /* PASS RAW SYNCL TIME IF INTERNAL CLICK */
+   DCL (POS)     FIXED;    /* PASS REMAPPED TIME IF LIVE CLICK TRK  */
+
+   IF (MSB=0) AND (LSB ILT ZERO.TIME)		/* CHECK FOR TIME BEFORE 0 (HMMM...)	*/
+   THEN LSB = ZERO.TIME;
+
+   IF LSB ILT ZERO.TIME THEN MSB=MSB-1;  	/* REMOVE ZERO.TIME 							*/
+   LSB=LSB-ZERO.TIME;
+
+   LOAD  SHL(LSB,2);			  			  		/* MULTIPLY SEQ TIMES BY 4 AND DIVIDE	*/
+	ULOAD SHL(MSB,2) | SHR(LSB,14);	  		/* BY TICKS PER MQN.  YIELDS MIDI SPP	*/
+	DIV   DIVISIONS;						  		/* VALUE											*/
+	
+	POS = RES;
+	
+	IF (SHL(REM,1) >= DIVISIONS)				/* CORRECT FOR ROUND-OFF OF 				*/
+		POS = POS + 1;								/* NON-INTEGER DIVISIONS					*/
+
+	if (midi.sync.out < 0)									// Send to OMS
+		interp_send_oms_clk_bytes("HF2", POS&"177", SHR(POS,7)&"177");
+
+   if (midi.sync.out & 0x7F00) <> 0       /* midi sync wants to go to midinet */
+   then do;
+
+      DISABLE;
+      if (midi.buf(0) + 2) >          /* if adding the length of this message to the midi buffer */
+      (Max_Packet_Length / 2)         /* would exceed the number of words allowed */
+      then do;
+         call Empty.MIDI.Buf;         /* send the contents of the buffer out */
+      end;
+
+      /* now write the event into the midi buffer */
+      write("313") = addr(midi.buf(midi.buf(0)));   /* get pointer to next location in buffer */
+      write("373") = shl(T#MIDI_SPP,8) | 4;         /* event id in upper, byte length of data in lower */
+      write("373") = pos;                           /* position as per midi spec (14 bits) */
+      midi.buf(0) = midi.buf(0) + 2;                /* update word size of midi buffer */
+      ENABLE;
+   end;
+
+   if (midi.sync.out&"377")<> 0 then do;            /* send midi sync to old hardware */
+      DISABLE;
+      WRITE(SYSSEL)=MIDI.SUBSYS+SHR((MIDI.SYNC.OUT&"377")-1,2); /* SELECT MIDI SUBSYSTEM */
+      WRITE(MCHA  )=((MIDI.SYNC.OUT&"377")-1)&3; /* AND OUTPUT TO SEND SYNC INFO */
+      WRITE(MDAT  )="HF2";               /* SEND SONG POSITION PTR COMMAND BYTE */
+      WRITE(MDAT  )=POS&"177";          /* AND LOW  7-BITS OF POSITION */
+      WRITE(MDAT  )=SHR(POS,7)&"177";   /* AND HIGH 7-BITS OF POSITION */
+      ENABLE;
+   end;
+
+END MIDI.SONG.POS.PTR;
+
+/* MIDI FULL FRAME SENDS OUT A MTC FULL FRAME MESSAGE WITH THE */
+/* CORRESPONDING MTC TIME													*/
+
+DCL MIDI.FULL.MODE.CODE DATA  PUBLIC		/* maps sm.mode encoding to bit			*/
+	(0x40, 0x60, 0x20, 0x00, 0x60); 			/* encoding in mtc messages				*/
+
+// Send full frame message where needed
+SEND.MIDI.FULL.FRAME:  PROC(THE_TIME) SWAPABLE;
+   dcl THE_TIME array;
+
+	if (midi.sync.out < 0)									// Send to OMS
+		interp_send_oms_mtc_frame(MIDI.FULL.MODE.CODE(SM.MODE), THE_TIME);
+
+   if (midi.sync.out&"377")<> 0 then do;  /* send midi sync to old hardware 	   */
+      DISABLE;
+      WRITE(SYSSEL) = MIDI.SUBSYS+SHR((MIDI.SYNC.OUT&"377")-1,2); /* SELECT MIDI SUBSYSTEM */
+      WRITE(MCHA  ) = ((MIDI.SYNC.OUT&"377")-1)&3; /* AND OUTPUT TO SEND SYNC INFO */
+      WRITE(MDAT  ) = 0xF0;               /* start for sys ex							*/
+		WRITE(MDAT  ) = 0x7F;					/* start of sys ex							*/
+		WRITE(MDAT  ) = 0x7F;					/* universal device id						*/
+		WRITE(MDAT  ) = 0x01;					/* sub id 'midi time code'					*/
+		WRITE(MDAT  ) = 0x01;					/* sub id 'full time code message'		*/
+		WRITE(MDAT  ) = THE_TIME(0) + MIDI.FULL.MODE.CODE(SM.MODE);	 /* hours		*/
+		WRITE(MDAT  ) = THE_TIME(1);			/* mins											*/
+		WRITE(MDAT  ) = THE_TIME(2);			/* seconds										*/
+		WRITE(MDAT  ) = THE_TIME(3);			/* frames										*/
+		WRITE(MDAT  ) = 0xF7;					/* end of sysex								*/
+      ENABLE;
+   end;
+
+END SEND.MIDI.FULL.FRAME;
+
+MIDI.FULL.FRAME:  PROC(MSB,LSB) PUBLIC SWAPABLE;
+   DCL (MSB,LSB)   FIXED;   					/* SYNCL TIME OF FRAME START				*/
+	
+   CALL MSEC.TO.SMPTE(LOC(ADDR(MSB)), CF#TIME ,SAMP.SPEED, SM.MODE,
+                         LOC(ADDR(SM.HRS)), MIDI.TC.VAL);
+   
+	SEND.MIDI.FULL.FRAME(MIDI.TC.VAL);
+	
+	NEW.MTC.VAL = 1;
+
+END MIDI.FULL.FRAME;
+
+BROADCAST.MTC: PROC PUBLIC SWAPABLE;		/* BROADCAST CUR POSITION OVER MIDI */
+	IF ((MIDI.SYNC.OUT   != 0)
+	&&  (MIDI.SYNC.IS.TC != 0))
+		MIDI.FULL.FRAME(PLAY.TIME.MSB, PLAY.TIME.LSB);
+END BROADCAST.MTC;
+
+/* ROUTINE TO SET UP FOR MTC OUTPUT.  ROUTINE IS PASSED IN THE CURRENT SEQUENCER	*/
+/* TIME.  THE NEAREST FRAME IS COMPUTED.  THE FRAME IS ROUNDED UP TO BE AN			*/
+/* EVEN FRAME.  SEVERAL GLOBAL VARIABLES ARE SET UP THAT WILL BE USED TO CREATE	*/
+/* QUARTER FRAME MESSAGES DURING REAL TIME.													*/
+
+/* Note: this routine is normally called when not playing.  However, it is			*/
+/* called while playing after an overall loop is performed.  In that case,			*/
+/* we have to update the interrupt variables carefully									*/
+
+PREP.FOR.MTC.OUTPUT:  PROC(MSB,LSB,DO_DELAY) PUBLIC SWAPABLE;
+   DCL (MSB, LSB, DO_DELAY)   FIXED;   					/* SYNCL TIME OF FRAME START				*/
+	DCL THE_TIME(5)  FIXED;
+	DCL THE_MSB (1)  FIXED;
+	
+   dcl hrs  lit 'THE_TIME(0)';
+   dcl min  lit 'THE_TIME(1)';
+   dcl sec  lit 'THE_TIME(2)';
+   dcl fra  lit 'THE_TIME(3)';
+   dcl bit  lit 'THE_TIME(4)';
+
+   MSEC.TO.SMPTE(LOC(ADDR(MSB)),    CF#TIME, SAMP.SPEED, SM.MODE,
+                 LOC(ADDR(SM.HRS)), THE_TIME);
+								 
+	IF (BIT != 0)									/* ROUND UP INTO NEXT FRAME				*/
+		{BIT = 0; FRA = FRA + 1;}
+	
+	FRA = FRA + 2;									/* AHEAD BY 2 FRAMES FOR PRE-ROLL		*/
+	
+	// INSERT A SHORT DELAY BEFORE SENDING OUT TIME CODE IF WE ARE CURRENTLY PLAYING, OR WE ARE ABOUT TO PRESET.PLAY.TIME. THIS LETS EXTERNAL SEQUENCER (E.G. LOGIC) REALIZE WE HAVE STOPPED, SO THEY RESTART CLEANLY
+	IF ((TIME.BASE.MODE != 0) OR (DO_DELAY != 0))
+		FRA = FRA + 10;
+		
+	NORMALIZE.SMPTE(THE_TIME, SM.MODE);	/* NORMALIZE IT								*/
+
+	IF ((FRA & 1) != 0)							/* ROUND UP TO EVEN FRAME FOR GRINS	- required so drop frame check will occur on an even frame (e.g. 30)	*/
+		FRA = FRA + 1;
+
+	NORMALIZE.SMPTE(THE_TIME, SM.MODE);	/* NORMALIZE IT								*/
+
+	SMPTE.TO.MSEC (THE_TIME, CF#TIME, SAMP.SPEED, SM.MODE,
+	LOC(ADDR(SM.HRS)), THE_MSB);
+	
+	/* PREP VARIABLES FOR REAL TIME: */
+	DISABLE.MIDI.CLOCKS = 1;					// Suspend quarter-frame output until things have settled down (if we are playing)
+
+	SEND.MIDI.FULL.FRAME(THE_TIME);
+	
+	DISABLE;											/* in case updating after loop			*/
+	MIDI.TC.NEXT.CODE = 0;						/* next mqf is type 0						*/
+
+	REAL.TIME.OF.MIDI.LIMIT.MSB = THE_MSB [0];
+	REAL.TIME.OF.MIDI.LIMIT.LSB = THE_MSB [1];
+	
+	MIDI.TC.VAL[0] = THE_TIME[0];
+	MIDI.TC.VAL[1] = THE_TIME[1];
+	MIDI.TC.VAL[2] = THE_TIME[2];
+	MIDI.TC.VAL[3] = THE_TIME[3];
+
+	/* COMPUTATION OF MIDI TIME CODE RATIO: */
+	
+	/* START WITH SMPTE-BITS-PER-MILLISECOND CONSTANT 			*/
+	/* 1 OVER THAT WOULD BE MILLISECONDS PER SMPTE BIT			*/
+	/* ASSUMING 20 SMPTE BITS IN A QUARTER FRAME					*/
+	/* SINCE PLAY TIME ADVANCES BY SPEED FACTOR, WE				*/
+	/* MUST MULTIPLY THE MSECS PER QFRAME BY SPEED/1000		*/
+	/* TO GET THE AMOUNT OF PLAY TIME TO ADVANCE					*/
+	
+   MIDI.TC.NUM = BITS.PER.MSEC.DEN(SM.MODE)*20;	/* PRECISE MILLISECONDS PER MIDI QUARTER FRAME MSG */
+	MIDI.TC.DEN = BITS.PER.MSEC.NUM(SM.MODE);
+
+	MIDI.TC.NUM = MIDI.TC.NUM / 1000;				/* WE KNOW THE RESULT IS 25...							*/
+	
+	/* IF SPEED IS 1000, WE CAN DO AN EXTRA-ACCURATE JOB OF SYNCING THE MTC			*/
+	/* TO THE SEQUENCER TIME BASE.  PRESET OUR ACCUMULATOR SO THE MTC OUTPUT		*/
+	/* BYTES WILL AVERAGE PRECISELY AROUND THE DESIRED SYNCHRONIZATION				*/
+
+	IF (SAMP.SPEED == 1000)						/* SYNC TO EXTENDED PRECISION IF 1000	*/
+	{
+		LOAD MIDI.TC.DEN; MUL MUL.LLSB;		/* PERFORM UNSIGNED FRACT MULTIPLY		*/
+		REAL.TIME.OF.MIDI.LIMIT.ACU = URES;
+
+		IF (MUL.LLSB < 0)							/* IF WE HAD ROUNDED, PERFORM UNROUND	*/
+			SUB16(1, LOC(ADDR(REAL.TIME.OF.MIDI.LIMIT.MSB)));
+	}
+	
+	ELSE												/* ELSE PRETTY DARN CLOSE...				*/
+		REAL.TIME.OF.MIDI.LIMIT.ACU = 0;
+
+	DISABLE.MIDI.CLOCKS = 0;					// Allow quarter-frame output now (if we are playing)
+	
+	ENABLE;
+
+	NEW.MTC.VAL = 1;
+	
+END PREP.FOR.MTC.OUTPUT;
+
+MIDI.PROGRAM.CHANGE:  PROC(NUMB) PUBLIC SWAPABLE; /* TELLS MIDI DEVICES TO GOTO NEW TIMBRE */
+   DCL NUMB FIXED;     /* NEW PROGRAM NUMBER (0-127)        */
+   DCL R   FIXED;
+
+   write(mal) = thd.midi.path;        /* lookup MIDInet routing */
+   if read(md) <> 0
+   then do;
+      r = read(md);                   /* get track# (channel#) for midi box */
+
+      DISABLE;
+      if (midi.buf(0) + 3) >          /* if adding the length of this message to the midi buffer */
+      (Max_Packet_Length / 2)         /* would exceed the number of words allowed */
+      then do;
+         call Empty.MIDI.Buf;         /* send the contents of the buffer out */
+      end;
+
+      /* now write the event into the midi buffer */
+      write("313") = addr(midi.buf(midi.buf(0)));   /* get pointer to next location in buffer */
+      write("373") = shl(T#Program_Change,8) | 6;   /* event id in upper, byte length of data in lower */
+      write("373") = r;                             /* midi routing info */
+      write("373") = numb;                          /* midi program number */
+      midi.buf(0) = midi.buf(0) + 3;                /* update word size of midi buffer */
+      ENABLE;
+   end;
+
+   WRITE(MAL) = THD.MIDI;         							/* LOOKUP ORIGINAL MIDI ROUTING */
+   IF (READ(MD)&(THD.MIDI.OMS + THD.MIDI.ORIG))<>0    /* see if routed to original hardware or OMS */
+   THEN DO;
+      R=READ(MD);                        /* GET OLD ROUTING INFO */
+
+		IF ((R & THD.MIDI.OMS) != 0)								// Write to OMS
+		{
+			IF ((R & THD.MIDI.OMS.VPORT) != 0)					// Write to OMS Virtual Port
+				interp_send_oms_progchg	(R & THC.MIDI.OMS.VPALL, NUMB);		// "HC0" + channel #
+			
+			else
+			{
+				write(mal) = THD.TRK;								// Get track number
+	
+				interp_send_oms_progchg (read(md), NUMB);		// "HC0" + channel #
+			}
+		}
+		
+		ELSE IF ((R & THD.MIDI.ORIG) != 0)					// Write to original hardware
+		{
+			IF RUNNING.STATUS<>0 THEN DO;
+				#MOUT=SHL(R&7,2)+(SHR(R,5)&3);  /* COMPUTE LOGICAL OUTPUT NUMBER */
+				#MSTA="HC0"\(SHR(R,8)&"17");    /* AND COMMAND/STATUS BYTE */
+			END;
+	
+			DISABLE;                           /* NEED TO PROTECT FROM INTERRUPTS */
+			WRITE(SYSSEL)=R&"37";              /* SELECT MIDI SUBSYSTEM */
+	
+			IF RUNNING.STATUS<>0
+			THEN WRITE(MCHA)=#MOUT&3;          /* AND SELECT OUTPUT ON THAT SUBSYSTEM */
+			ELSE WRITE(MCHA)=SHR(R,5)&3;       /* AND SELECT OUTPUT ON THAT SUBSYSTEM */
+	
+			IF  (RUNNING.STATUS<>0)            /* USING RUNNING STATUS */
+			AND (LAST.MIDI.STATUS(#MOUT)<>#MSTA)/* STATUS BYTE DIFFERS FROM PREVIOUS */
+			THEN DO;
+				WRITE(MDAT)=#MSTA;              /* SEND NEW STATUS BYTE AND MIDI CHAN */
+				LAST.MIDI.STATUS(#MOUT)=#MSTA;  /* UPDATE */
+			END;
+			ELSE IF RUNNING.STATUS=0           /* NOT USING RUNNING STATUS */
+			THEN WRITE(MDAT)="HC0"\(SHR(R,8)&"17");/* AND COMMAND/STATUS BYTE */
+	
+			WRITE(MDAT)=NUMB;                  /* UPPER 7 BITS OF PWHEEL POS */
+			ENABLE;
+		}
+   end;
+
+END MIDI.PROGRAM.CHANGE;
+
+// Note: This is called from the low level real time loop
+
+SEND.SYSEX.PACKET:PROC PUBLIC;
+
+   DO WHILE NOT                          /* HANG HERE UNTIL */
+   SEND.PROTOCOL.PACKET(SYSEX.PACKET,1); /* THE PACKET CAN BE SENT */
+		interp_run_host_non_timer();        // chill; allow execution at deferred task level
+   END;
+
+   WRITE(MAM) = SYSEX.PACKET;            /* RESTORE MAM */
+   WRITE(MD)  = 8;                       /* RESET LENGTH TO 8 BYTES (SIZE OF HEADER STUFF) */
+   WRITE(MAL) = 3;                       /* POINT TO ROUTING WORD */
+   WRITE(MD)  = READ(MD) | "100000";     /* SET CONTINUATION BIT */
+
+END SEND.SYSEX.PACKET;
+
+SEND.EOX:PROC(R);                        /* SEND AN END OF EXCLUSIVE PACKET */
+   DCL R FIXED;                          /* ROUTING FOR THIS PACKET */
+
+   WRITE(MAM) = MISC.PTR;                /* USE MISC.PTR SECTOR */
+   
+   WRITE(MDI) = L#MIDI_EOX;              /* FILL IN LENGTH */
+   WRITE(MDI) = NN#MIDI;                 /* AND NODE */
+   WRITE(MDI) = T#MIDI_EOX;              /* AND SUB/SUPER TYPE */
+   WRITE(MDI) = R;                       /* ROUTING WORD */
+
+   DO WHILE NOT                          /* HANG HERE UNTIL PACKET IS SENT */
+   SEND.PROTOCOL.PACKET(MISC.PTR,1);
+		interp_run_host_non_timer();        // chill; allow execution at deferred task level
+   END;
+
+END SEND.EOX;
+
+SEND.SYSEX:PROC(MBYTE) PUBLIC;              /* SEND A BYTE OF SYSEX */
+   DCL MBYTE   FIXED;                       /* MIDI BYTE TO BE SENT */
+   DCL R       FIXED;                       /* WHERE TO SEND IT */
+   DCL LEN     FIXED;                       /* LOCAL COPY OF PACKET LENGTH FOR MIDINET */
+   DCL SAV.MAM FIXED;
+
+   sav.mam = read(mam);                     /* save mam pointing at track head */
+   write(mal) = thd.midi.path;              /* lookup MIDInet routing */
+   if read(md) <> 0
+   then do;
+      r = read(md);
+
+      write(mam) = sysex.packet;            /* point mam at packet reserved for sysex */
+      len = read(md);                       /* extract current packet length */
+      write(mal) = 3;                       /* point to routing word */
+      if ((read(md) & "077777") <> r)       /* current packet routed somewhere else */
+      or (len = max_packet_length)          /* packet is full */
+      or (mbyte = "HF0")                    /* this byte is the sysex status byte */
+      or (mbyte = "HF7")                    /* this byte is the eox status byte */
+      then do;
+         if len > 8                         /* some data bytes to send */
+         then call send.sysex.packet;       /* send the packet */
+
+         if mbyte = "HF7"                   /* end of exclusive byte */
+         then do;
+            call send.eox(r);               /* send eox packet */
+            return;                         /* do nothing else */
+         end;
+
+         write(mam) = sysex.packet;         /* restore mam */
+         len = read(md);                    /* get packet length again */
+         write(mal) = 3;                    /* restore mal */
+
+         if mbyte = "HF0"                   /* start of exclusvie message */
+         then do;
+            write(md) = read(md) & "077777";/* clear continuation bit */
+            return;                         /* bail out */
+         end;
+      end;
+
+      if len = 8                            /* no data bytes yet */
+      then write(md) = (read(md) & "100000") | r;   /* write routing info into packet(preserve continuation bit) */
+                                                                                     
+      write(mal) = shr(len,1);              /* point mal at next data word */
+      if (len & 1)                          /* this is an odd byte */
+      then write(md) = read(md) | mbyte;    /* write it to the lower byte */
+      else write(md) = shl(mbyte,8);        /* write it to the upper byte */
+      write(mal) = 0;                       /* point back to the channel/length word */
+      write(md) = read(md) + 1;             /* update the byte count */
+
+      write(mam) = sav.mam;                 /* restore mam */
+   end;
+
+   WRITE(MAL) = THD.MIDI;         							/* LOOKUP ORIGINAL MIDI ROUTING */
+   IF (READ(MD)&(THD.MIDI.OMS + THD.MIDI.ORIG))<>0    /* see if routed to original hardware or OMS */
+   THEN DO;
+      R=READ(MD);                     /* GET OLD ROUTING INFO */
+
+		IF ((R & THD.MIDI.OMS) != 0)					// Write to OMS
+		{
+			IF ((R & THD.MIDI.OMS.VPORT) != 0)		// Write to OMS Virtual Port
+				interp_send_oms_sysexb	(R & THC.MIDI.OMS.VPALL, mbyte);
+			
+			else
+			{
+				write(mal) = THD.TRK;					// Get track number
+	
+				interp_send_oms_sysexb (read(md), mbyte);
+			}
+		}
+		
+		ELSE IF ((R & THD.MIDI.ORIG) != 0)				// Write to original hardware
+		{
+			DISABLE;                        /* NEED TO PROTECT FROM INTERRUPTS */
+			WRITE(SYSSEL)=R&"37";           /* SELECT MIDI SUBSYSTEM */
+			WRITE(MCHA)  =SHR(R,5)&3;       /* AND SELECT OUTPUT ON THAT SUBSYSTEM */
+			WRITE(MDAT)  =MBYTE;            /* AND COMMAND/STATUS BYTE */
+			ENABLE;
+		}
+   end;
+
+END SEND.SYSEX;
+
+
+/* $PAGE - CHECK FOR UPDATED MIDI REAL TIME EFFECTS */
+
+/* CALL ONLY IF MIDI ROUTING IS <> 0 */
+/* CALL ONLY IF TIME.BASE.MODE  <> 0 */
+/* HAVE MAM POINTING TO THD          */
+
+CHECK.MIDI.EFFECTS:PROC PUBLIC;    /* MAKE SURE CORRECT     */
+   DCL (I,J,T) FIXED;
+
+   WRITE(MAL)=THD.ACTIVE;          /* ONLY CHECK FOR MIDI OUTPUT */
+   IF READ(MD)=0 THEN RETURN;      /* IF TRACK IS ACTIVE         */
+
+   DO I=0 TO 5;                    /* CHECK FOR DIFFERENCES */
+
+      WRITE(MAL)=THD.ACTIVE.MIDI.RTES;
+
+      IF (READ(MD)&BITS(I))<>0 THEN DO; /* THIS RTE HAS BEEN ENABLED */
+
+         WRITE(MAL)=THD.RTES+I;
+         J=READ(MD);
+
+         WRITE(MAL)=THD.MIDI.RTES+I;
+
+         IF (J<>0)                       /* TO FIX INIT BUG       */
+         AND (READ(MD)<>J) THEN DO;      /* UPDATE REQUIRED       */
+            WRITE(MD)=J;
+
+            WRITE(MAL)=THD.SYN.CROUT+I;  /* CHECK VALUE IF        */
+            IF  (READ(MD)<>0)            /* OUTPUT ROUTED         */
+            THEN DO;
+               IF I<R.PWHEEL THEN DO;
+                  CALL MIDI.CONTROL.CHANGE(0,J&255);
+               END;
+               ELSE IF I=R.PWHEEL THEN DO;
+                  CALL MIDI.PITCH.WHEEL(J&255);
+               END;
+               ELSE DO;
+                  CALL MIDI.CONTROL.CHANGE(1,J);
+               END;
+            END;
+         END;
+      END;
+   END;
+
+   WRITE(MAL)=THD.CPROGRAM;
+   J=READ(MD);
+
+   WRITE(MAL)=THD.MIDI.CPROGRAM;
+
+   IF READ(MD)<>J THEN DO;             /* DIFFERENT PROGRAM CHANGE */
+      WRITE(MD)=J;
+
+      IF J<>0 THEN DO;                 /* ONLY SEND IF NONZERO     */
+         CALL MIDI.PROGRAM.CHANGE(J&127);
+      END;
+   END;
+
+   WRITE(MAL)=THD.CG.VAL;
+   J=READ(MD);
+
+   WRITE(MAL)=THD.MIDI.CG.VAL;
+
+   IF READ(MD)<>J THEN DO;             /* DIFFERENT CG.VAL */
+      WRITE(MD)=J;
+      WRITE(MAL)=THD.SYN.SROUT+R.GLIDE.SW;
+      IF READ(MD)<>0 THEN DO;                 /* GLIDE SWITCH IS ROUTED SOMEWHERE */
+         IF J<>0 THEN CALL MIDI.CONTROL.CHANGE(0,RTE.MAX);   /* DO MIDI OUTPUT */
+         ELSE         CALL MIDI.CONTROL.CHANGE(0,0);
+      END;
+   END;
+
+END CHECK.MIDI.EFFECTS;
+
+CHECK.MIDI.RTES:PROC PUBLIC;
+   DCL (I,J) FIXED;
+   DCL T     FIXED;
+
+   WRITE(MAL)=THD.TRK;                                /* GET THIS TRACK NUMBER */
+   T=READ(MD);
+
+   WRITE(MAM)=MIDI.TRACK.RTES+T;                      /* POINT TO RTE ARRAY IN XMEM */
+   DO I=0 TO 127;                                     /* LOOP THRU ALL CONTROLLERS */
+      WRITE(MAL)=I;                                   
+      J=READ(MD);                                     /* GET CURRENT VALUE */
+      IF (J<>(-1)) THEN DO;                           /* A VALID ENTRY */
+         WRITE(MAM)=TRK.HEAD;                         /* SET UP POINTERS TO TRACK HEAD FOR CALL */
+         WRITE(MAL)=T;
+         WRITE(MAM)=READ(MD);
+         CALL REAL.MIDI.CONTROL.CHANGE(I,J & 127);
+         WRITE(MAM)=MIDI.TRACK.RTES+T;                /* RESTORE MAM FOR NEXT ITERATION */
+      END;
+   END;
+
+END CHECK.MIDI.RTES;
+
+/* CHECK ALL TRACKS: */
+
+CHECK.ALL.MIDI.TRACKS:PROC PUBLIC SWAPABLE;
+   DCL (THP,MROUT,I,J,K) FIXED;
+   DCL (KHP,KROUT,KRTES) FIXED;
+   DCL THE.BITS          FIXED;
+
+   WRITE(MAM)=TRK.HEAD;             /* LOOK UP AND SAVE ABS */
+   KHP=READ(MD);                    /* PTR TO KBD TRK HEADER */
+   WRITE(MAM)=KHP;
+   WRITE(MAL)=THD.MIDI;             /* SAVE KEYBOARD MIDI ROUTING */
+   KROUT=READ(MD)&THD.MIDI.ORIG;    /* MASK OFF MIDINET BIT */
+   WRITE(MAL)=THD.ACTIVE.MIDI.RTES; /* AND BITS FOR ACTIVE CONTROLLERS */
+   KRTES=READ(MD);
+
+   DO I=NUM.KBD.TRACKS TO MAX.TRACKS-1;
+
+      WRITE(MAM)=TRK.HEAD;
+      WRITE(MAL)=I;
+
+      IF READ(MD)<>0 THEN DO;
+
+         WRITE(MAM)=READ(MD);
+         WRITE(MAL)=THD.MIDI;
+
+         IF READ(MD)<>0 THEN DO; 				/* WE ARE ROUTED TO SOME MIDI OUTPUT */
+            MROUT=READ(MD)&THD.MIDI.ORIG;  	/* SAVE MIDI ROUTING INFO FOR TRK IN TEMP (NO MIDINET INFO) */
+            WRITE(MAL)=THD.ACTIVE;
+
+            IF READ(MD)<>0 THEN DO; 			/* AND TRACK IS ACTIVE */
+               THP=READ(MAM); 					/* SAVE ABS PTR TO TRK HEAD */
+
+               IF ((KROUT != 0) && (KROUT == MROUT)) THEN DO; 	/* KEYBOARD ROUTING IS SAME AS TRK ROUTING (NOTE! THIS COMPARISON CANNOT CATCH TRACKS ROUTED TO SAME MIDINET OUTPUT) */
+                  WRITE(MAL)=THD.ACTIVE.MIDI.RTES;
+                  THE.BITS=KRTES & READ(MD);  						/* GET RTE BITS WHICH MATCH FOR KBD & TRK */
+
+                  DO K=0 TO 5;                      				/* CHECK FOR DIFFERENCES */
+                     IF (THE.BITS&BITS(K))<>0 THEN DO; 			/* THIS RTE HAS BEEN ENABLED */
+                        WRITE(MAM)=THP;
+                        WRITE(MAL)=THD.RTES+K;
+                        J=READ(MD);
+
+                        WRITE(MAM)=KHP;
+                        WRITE(MAL)=THD.LIVE.RTES+K;
+
+                        IF READ(MD)<>J THEN DO;      		/* UPDATE REQUIRED       */
+                           WRITE(MAM)=THP;
+                           WRITE(MAL)=THD.SYN.CROUT+K;  	/* CHECK VALUE IF        */
+                           IF  (READ(MD)<>0)            	/* OUTPUT ROUTED         */
+                           THEN DO;
+                              WRITE(MAL)=THD.MIDI.RTES+K;
+                              WRITE(MD)=255; 				/* KLUDGE THD.MIDI.RTES TO FORCE A MIDI UPDATE IN CHECK.MIDI.EFFECTS */
+                           END;
+                        END;
+                     END;
+                  END;
+
+                  WRITE(MAL)=THD.CPROGRAM;
+                  J=READ(MD);
+
+                  WRITE(MAM)=KHP;
+                  WRITE(MAL)=THD.CPROGRAM;
+
+                  IF READ(MD)<>0 THEN DO;     /* KBD C.PROGRAM IS VALID */
+                     IF READ(MD)<>J THEN DO;  /* AND IS DIFFERENT FROM TRACK */
+                        WRITE(MAM)=THP;
+                        WRITE(MAL)=THD.MIDI.CPROGRAM;
+                        WRITE(MD)=0;          /* KLUDGE THD.MIDI.CPROGRAM TO FORCE UPDATE */
+                     END;
+                  END;
+
+                  WRITE(MAL)=THD.CG.VAL;
+                  J=READ(MD);
+
+                  WRITE(MAM)=KHP;
+                  WRITE(MAL)=THD.CG.VAL;
+
+                  IF READ(MD)<>J THEN DO;           /* DIFFERENT CG.VAL */
+                     WRITE(MAM)=THP;
+                     WRITE(MAL)=THD.SYN.SROUT+R.GLIDE.SW;
+                     IF READ(MD)<>0 THEN DO;        /* GLIDE SWITCH IS ROUTED SOMEWHERE */
+                        WRITE(MAL)=THD.MIDI.CG.VAL;
+                        WRITE(MD)=255;              /* KLUDGE THD.MIDI.CG.VAL TO FORCE UPDATE */
+                     END;
+                  END;
+               END;
+
+               WRITE(MAM)=THP;     /* RESTORE PTR TO TRK HEAD FOR CHECK.MIDI.EFFECTS */
+               CALL CHECK.MIDI.EFFECTS;
+            END;
+         END;
+      END;
+   END;
+END CHECK.ALL.MIDI.TRACKS;
+
+CHECK.ALL.MIDI.RTES: PROC PUBLIC SWAPABLE;
+   DCL I FIXED;
+
+   DO I=NUM.KBD.TRACKS TO MAX.TRACKS-1;
+
+      WRITE(MAM)=TRK.HEAD;
+      WRITE(MAL)=I;
+
+      IF READ(MD)<>0 THEN DO;
+
+         WRITE(MAM)=READ(MD);
+         WRITE(MAL)=THD.MIDI;
+
+         IF READ(MD)<>0 THEN DO; /* WE ARE ROUTED TO SOME MIDI OUTPUT */
+            WRITE(MAL)=THD.ACTIVE;
+
+            IF READ(MD)<>0
+            THEN CALL CHECK.MIDI.RTES;
+         END;
+      END;
+   END;
+
+END CHECK.ALL.MIDI.RTES;
+
+START.MIDI.SUSTAIN: PROC PUBLIC SWAPABLE;
+   DCL I FIXED;
+
+   DO I=NUM.KBD.TRACKS TO MAX.TRACKS-1;
+
+      WRITE(MAM)=TRK.HEAD;
+      WRITE(MAL)=I;
+
+      IF READ(MD)<>0 THEN DO;
+
+         WRITE(MAM)=READ(MD);
+         WRITE(MAL)=THD.MIDI;
+
+         IF READ(MD)<>0 THEN DO; /* WE ARE ROUTED TO SOME MIDI OUTPUT */
+            WRITE(MAL)=THD.ACTIVE;
+
+            IF READ(MD)<>0
+            THEN DO;
+               WRITE(MAL)=THD.SUSTAIN;
+               IF (READ(MD)&B.CURRENT.SUSTAIN)<>0
+               THEN CALL REAL.MIDI.CONTROL.CHANGE(64,127);
+            END;
+         END;
+      END;
+   END;
+
+END START.MIDI.SUSTAIN;
+
+STOP.MIDI.SUSTAIN: PROC PUBLIC SWAPABLE;
+   DCL I FIXED;
+
+   DO I=NUM.KBD.TRACKS TO MAX.TRACKS-1;
+
+      WRITE(MAM)=TRK.HEAD;
+      WRITE(MAL)=I;
+
+      IF READ(MD)<>0 THEN DO;
+
+         WRITE(MAM)=READ(MD);
+         WRITE(MAL)=THD.MIDI;
+
+         IF READ(MD)<>0 THEN DO; /* WE ARE ROUTED TO SOME MIDI OUTPUT */
+            WRITE(MAL)=THD.ACTIVE;
+
+            IF READ(MD)<>0
+            THEN DO;
+               WRITE(MAL)=THD.SUSTAIN;
+               IF (READ(MD)&B.CURRENT.SUSTAIN)<>0
+               THEN DO;
+                  WRITE(MD)=(READ(MD)&(NOT B.CURRENT.SUSTAIN));
+                  CALL REAL.MIDI.CONTROL.CHANGE(64,0);
+               END;
+            END;
+         END;
+      END;
+   END;
+
+END STOP.MIDI.SUSTAIN;
+
+/* Higher level routine to locate slave devices. */
+
+LOCATE.MIDI.SLAVES: PROC PUBLIC SWAPABLE;		/* LOCATE MIDI SLAVE DEVICES  */
+	IF (MIDI.SYNC.OUT == 0)							/* NO MIDI SYNC: DONE			*/
+		RETURN;			
+	
+	IF (MIDI.SYNC.IS.TC == 0)						/* MIDI CLOCKS: USE SPP			*/
+		MIDI.SONG.POS.PTR(MIDI.LIMIT.MSB, MIDI.LIMIT.LSB);
+	ELSE													/* ELSE MIT FULL FRAME			*/
+		MIDI.FULL.FRAME(REAL.TIME.OF.MIDI.LIMIT.MSB, REAL.TIME.OF.MIDI.LIMIT.LSB);
+
+END LOCATE.MIDI.SLAVES;
+

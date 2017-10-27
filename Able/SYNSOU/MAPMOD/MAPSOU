@@ -1,0 +1,1588 @@
+/* MAPSOU   $TITLE  PROGRAM TO BUILD PRESSURE & VELOCITY MAPS
+
+   Modified:
+   02/07/91 - MWH - Combine 3200, 6400 and 9600 RTP's
+            - TSS - Author
+*/
+
+MODULE MAPSMOD;
+
+DCL NEW.VEL.SENSITIVITY LIT '0'; /* 0=>Matches Rev 2.0 RTP, 1=>New Dyn Range Limiter Algorithm */
+
+INSERT ':-XPL:CATSWAP';
+
+INSERT ':SYNLITS:COMLITS';
+INSERT ':SYNLITS:GLOBLITS';
+INSERT ':SYNLITS:ASCIILIT';
+INSERT ':SYNLITS:LPNLITS';
+INSERT ':SYNLITS:SYNCLITS';
+INSERT ':SYNLITS:TIMLITS';
+INSERT ':SYNLITS:PRMLITS';
+
+INSERT ':SYNRDCLS:03-PDCLS';
+INSERT ':SYNRDCLS:04-SDCLS';
+INSERT ':SYNRDCLS:05-BDCLS';
+INSERT ':SYNRDCLS:11-TDCLS';
+
+INSERT ':SYNMODS:GLOBDCL';
+INSERT ':SYNMODS:XMEMDCL';
+INSERT ':SYNMODS:GETDCL';
+INSERT ':SYNMODS:GETVDCL';
+INSERT ':SYNMODS:MOUSEDCL';
+INSERT ':SYNMODS:MOUSRDCL';
+INSERT ':SYNMODS:TTYDCL';
+INSERT ':SYNMODS:PLOTDCL';
+INSERT ':SYNMODS:TFORMDCL';
+INSERT ':SYNMODS:TPRIMDCL';
+INSERT ':SYNMODS:ERRDCL';
+INSERT ':SYNMODS:GIDDCL';
+INSERT ':SYNMODS:SMGRDCL';
+
+dcl Events.Pending proc returns(fixed) external;
+dcl Map.There fixed external;
+dcl MapDev    fixed external;
+dcl MapSec    fixed external;
+
+dcl #Pressure.Map    lit '0';
+dcl #Num.TTime.Maps  lit '10';
+dcl #First.TTime.Map lit '1';
+dcl #Last.TTime.Map  lit '(#First.TTime.Map+#Num.TTime.Maps-1)';
+dcl #MIDI.Map        lit '11';
+dcl #Last.Map        lit '#MIDI.Map';
+
+DCL DISABLE.SCAN      FIXED;
+DCL KEY.STATUS (8*12) FIXED;
+DCL KEY.VEL    (8*12) FIXED;
+DCL PBUF       (8*12) FIXED;
+
+/* (X,Y) Coordinate literals for Plot region */
+
+DCL BASE.X     LIT '75';
+DCL BASE.Y     LIT '475';
+DCL MAX.X      LIT '(BASE.X+512)';
+DCL MAX.Y      LIT '(BASE.Y+256)';
+
+DCL TOPY        LIT '10'; /* top y-coord for pressure info table */
+
+dcl Last.Plot.Val fixed;
+dcl theMap        fixed; /* current map being modified */
+dcl theDMode      fixed; /* current display mode       */
+dcl theFilter     fixed; /* current filter setting     */
+dcl Curr.Raw      fixed;
+dcl Map     (256) fixed;
+dcl Our.V.S.Min   fixed;
+dcl Our.V.S.Mul   fixed;
+
+dcl Base#ControlId lit '1000'; /* base id literals for screen manager */
+dcl Base#PlotId    lit '2000'; /* objects defined below */
+dcl Grp#Control    lit '1';
+dcl Grp#Plot       lit '2';
+
+dcl Map.Id        fixed; /* screen manager object ids for Control group */
+dcl Raw.Label.Id  fixed;
+dcl Raw.Id        fixed;
+dcl Vol.Id        fixed;
+dcl DB.Id         fixed;
+dcl DMode.Id      fixed;
+dcl Filter.Id     fixed;
+dcl TTime.Min.Id  fixed;
+dcl Mouse.Id      fixed;
+dcl Store.Id      fixed; /* screen manager object ids for Control group buttons */
+dcl Recall.Id     fixed;
+dcl Reset.Id      fixed;
+dcl New.Reset.Id  fixed;
+dcl Copy.Id       fixed;
+dcl Paste.Id      fixed;
+
+dcl Plot.Id       fixed;  /* screen manager object id for Plot group */
+
+dcl Control.Group fixed; /* screen manager group ids */
+dcl Plot.Group    fixed;
+
+/* $SUBTITLE  Utility routines */
+
+DRAW.BOX.WITH.TICS: PROC(ULX,ULY,LRX,LRY,TICS.L,TICS.R,TICS.B) SWAPABLE;
+   DCL (ULX,ULY,LRX,LRY)      FIXED;
+   DCL (TICS.L,TICS.R,TICS.B) FIXED;
+   DCL (X,Y,I,J)              FIXED;
+
+   CALL MOVE_TO(ULX,LRY);  /* THE BOX TO PLOT IN */
+   CALL PLOT   (ULX,ULY);
+   CALL PLOT   (LRX,ULY);
+   CALL PLOT   (LRX,LRY);
+   CALL PLOT   (ULX,LRY);
+
+   J=ULY-LRY;
+   DO I=1 TO TICS.L;
+      Y=LRY+(I-1)*J/(TICS.L-1);
+      CALL MOVE_TO(ULX  ,Y);
+      CALL PLOT   (ULX+6,Y);
+   END;
+
+   DO I=1 TO TICS.R;
+      Y=LRY+(I-1)*J/(TICS.R-1);
+      CALL MOVE_TO(LRX-6,Y);
+      CALL PLOT   (LRX  ,Y);
+   END;
+
+   J=LRX-ULX;
+   DO I=1 TO TICS.B;
+      X=ULX+(I-1)*J/(TICS.B-1);
+      CALL MOVE_TO(X,LRY);
+      CALL PLOT   (X,LRY+6);
+   END;
+
+   TRANSPARENT_MODE;
+END DRAW.BOX.WITH.TICS;
+
+MAP.VOL.TO.RAW: PROC(I);
+   DCL I FIXED;
+   I=I*225/1000;
+   IF REM IGE SHR(1000,1) THEN I=I+1;
+   RETURN I;
+END MAP.VOL.TO.RAW;
+
+MAP.RAW.TO.VOL: PROC(T);
+   DCL T FIXED;
+   T=T*1000/225;
+   IF REM IGE SHR(225,1) THEN T=T+1;
+   RETURN T;
+END MAP.RAW.TO.VOL;
+
+MAP.RAW.TO.DB: PROC(T);
+   DCL T     FIXED;
+   DCL DB    FIXED;
+   DCL LOG10 LIT '2.30258509';
+
+   /* DB = INT(10*20*LOG(T/225)/LOG(10) + .5);  */
+
+   IF T=0 
+   THEN DB = -480;
+   ELSE DB = INT(86.8588964*LOG(T/225.0)+ .5);
+
+   RETURN DB;
+END MAP.RAW.TO.DB;
+
+MAP.DB.TO.RAW: PROC(DB);
+   DCL DB    FIXED; /* PASS DB*10 */
+   DCL RAW   FIXED;
+
+   /* RAW = INT(225 * EXP((DB*LOG(10)) / (20*10)) + .5); */
+
+   IF DB <=-480
+   THEN RAW = 0;
+   ELSE RAW = INT(225 * EXP(DB * .011512925) + .5);
+
+   RETURN RAW;
+END MAP.DB.TO.RAW;
+
+SCALE.LIN: PROC(I);
+   DCL I FIXED;
+   I=256*I/225;
+   IF REM IGE SHR(225,1) THEN I=I+1;
+   RETURN I;
+END SCALE.LIN;
+
+SCALE.LOG: PROC(I);
+   DCL I FIXED;
+   IF I=0 
+   THEN I = -480;
+   ELSE I = INT(86.8588964*LOG(I/225.0)+ .5);
+   I=-256*I/480;
+   IF REM IGE SHR(480,1) THEN I=I+1;
+   RETURN I;
+END SCALE.LOG;
+
+DRAW.DYNAMIC.ENV.LINES: proc swapable;
+   dcl (i,j) fixed;
+
+   IF #DATA.LEVEL<>#DOTS.ON THEN DO;
+      VECTOR_MODE;
+      CALL DATA_LEVEL(#DOTS.COMP);
+   END;
+
+   /* DENVLIM = (0,22,32,45,64,90,128,181,256) (3 DB POWER PER STEP) */
+
+   IF theDMode = 0 THEN DO;
+      DO I = 1 TO 8;
+         J = BASE.Y + SCALE.LIN(DENVLIM(I)*RTE.MAX/256);
+         CALL CONNECT(BASE.X,J,MAX.X,J);
+      END;
+   END;
+   ELSE IF theDMode = 1 THEN DO;
+      DO I = 1 TO 8;
+         J = MAX.Y - SCALE.LOG(DENVLIM(I)*RTE.MAX/256);
+         CALL CONNECT(BASE.X,J,MAX.X,J);
+      END;
+   END;
+
+   TRANSPARENT_MODE;
+end DRAW.DYNAMIC.ENV.LINES;
+
+UPDATE.REAL.TIME.MAPS: proc swapable;
+   dcl (i,vol) fixed;
+   if theMap = #Pressure.Map then do; /* Synclavier PRESSURE to VOL map */
+      write(mam) = PMap.Ptr + 2;
+      do i = 0 to 255; write(mdi) = Map(i); end;
+   end;
+   else if (theMap >= #First.TTime.Map)
+   and     (theMap <= #Last.TTime.Map)
+   then do;      /* Synclavier TTIME to VOL maps */
+      write(mam) = TTMap.Ptr;
+      do i = 0 to 255; write(mdi) = Map(i); end;
+   end;
+   else if (theMap = #MIDI.Map)
+   then do;                     /* MIDI VELOCITY to VOL maps */
+      write(mam) = VMap.Ptr;
+      do i = 0 to 255; write(mdi) = Map(i); end;
+      do i = 0 to 127; misc.buf(i) = map(i); end;
+
+      /* ALGORITHM FROM 142-MIDI: COMPUTE.MIDI.VELMAPS */
+      /* NOW COMPUTE THE INVERSE TABLE:  VOLUME TO MIDI VELOCITY */
+      WRITE(MAM)=VMAP.PTR+1; /* FIRST ZERO OUT THE TABLE */
+      DO I=0 TO RTE.MAX; WRITE(MDI)=0; END;
+
+      VOL=0;
+      DO I=1 TO 127;
+         IF VOL<>MISC.BUF(I) THEN DO;
+            VOL=MISC.BUF(I); /* LOOK UP MAP FROM MID VEL TO VOL */
+            WRITE(MAM)=VMAP.PTR+1+SHR(VOL,8);
+            WRITE(MAL)=VOL;
+            WRITE(MD )=I;
+         END;
+      END;
+
+      WRITE(MAM)=VMAP.PTR+1;
+      DO I=0 TO RTE.MAX; MISC.BUF(I)=READ(MDI); END;
+      MISC.BUF(0)=0;
+
+      I=RTE.MAX;
+      DO VOL=0 TO RTE.MAX-1;
+         IF   MISC.BUF(RTE.MAX-VOL)=0
+         THEN MISC.BUF(RTE.MAX-VOL)=I;
+         ELSE I=MISC.BUF(RTE.MAX-VOL);
+      END;
+
+      WRITE(MAM)=VMAP.PTR+1;
+      DO I=0 TO RTE.MAX; WRITE(MDI)=MISC.BUF(I); END;
+   end;
+end UPDATE.REAL.TIME.MAPS;
+
+PLOT.LAST.VALUE: proc (val) swapable;
+   dcl val fixed;
+
+   Plot.It: proc(x);
+      dcl x fixed;
+
+      x = base.x + x * 2;
+
+      call Move_To(x, Max.Y);
+      call Plot   (x, Base.Y);
+   end Plot.It;
+
+   IF #DATA.LEVEL<>#DOTS.COMP THEN DO;
+      VECTOR_MODE;
+      CALL DATA_LEVEL(#DOTS.COMP);
+   END;
+
+   if Last.Plot.Val<>(-1) then do;
+      call Plot.It(Last.Plot.Val);
+      call Check.Next.Event;
+   end;
+
+   if val < 0   then val = 0;
+   if val > 255 then val = 255;
+
+   Last.Plot.Val = val;
+
+   call Plot.It(Last.Plot.Val);
+   call Check.Next.Event;
+
+   TRANSPARENT_MODE;
+end PLOT.LAST.VALUE;
+
+PLOT.CURSOR: PROC SWAPABLE;
+   DCL (X,Y) FIXED;
+   IF #DATA.LEVEL<>#DOTS.COMP THEN DO;
+      VECTOR_MODE;
+      CALL DATA_LEVEL(#DOTS.COMP);
+   END;
+   X = BASE.X + CURR.RAW * 2;
+   IF THEDMODE=0
+   THEN Y=SCALE.LIN(MAP(CURR.RAW));
+   ELSE Y=(MAX.Y-BASE.Y)-SCALE.LOG(MAP(CURR.RAW));
+   CALL MOVE_TO(X  ,BASE.Y+Y-6);
+   CALL PLOT   (X  ,BASE.Y+Y+6);
+   CALL MOVE_TO(X-6,BASE.Y+Y);
+   CALL PLOT   (X+6,BASE.Y+Y);
+   TRANSPARENT_MODE;
+END PLOT.CURSOR;
+
+PLOT.MAP: PROC(START,FINISH) SWAPABLE;
+   DCL (START,FINISH,I,J,K) FIXED;
+
+   CALL CHECK.NEXT.EVENT;
+
+   IF START  <   0 THEN START  = 0;
+   IF START  > 255 THEN START  = 255;
+   IF FINISH <   0 THEN FINISH = 0;
+   IF FINISH > 255 THEN FINISH = 255;
+
+   IF START > FINISH THEN DO; /* OUT OF ORDER */
+      I      = START;         /* SWAP ARS     */
+      START  = FINISH;
+      FINISH = I;
+   END;
+
+   IF #DATA.LEVEL<>#DOTS.COMP THEN DO;
+      VECTOR_MODE;
+      CALL DATA_LEVEL(#DOTS.COMP);
+   END;
+
+   IF theDMode = 0 THEN DO;
+      CALL MOVE_TO(BASE.X+2*START,BASE.Y+SCALE.LIN(MAP(START)));
+      DO I=START+1 TO FINISH;
+         IF (I & 7) = 0 THEN CALL CHECK.NEXT.EVENT;
+         CALL PLOT(BASE.X+2*I,BASE.Y+SCALE.LIN(MAP(I)));
+      END;
+
+      /* NOW PLOT FUNCTION WITH VELOCITY SENSITIVITY FACTORED IN */
+
+      DO I=START TO FINISH;
+         IF (I & 7) = 0 THEN CALL CHECK.NEXT.EVENT;
+
+         IF NEW.VEL.SENSITIVITY=0 THEN DO;
+            J=I;
+            IF OUR.V.S.MIN<>100 THEN DO;
+               J=J-TTIME.MIN;
+               IF J<1 THEN J=1;
+               LOAD J; MUL OUR.V.S.MUL; J=URES+TTIME.MIN;
+            END;
+
+            CALL MOVE_TO(BASE.X+2*I,BASE.Y+SCALE.LIN(MAP(J)));
+            CALL PLOT   (BASE.X+2*I,BASE.Y+SCALE.LIN(MAP(J)));
+         END;
+         ELSE DO;
+            J=MAP(I);
+            IF OUR.V.S.MIN<>100 THEN DO;
+               LOAD RTE.MAX-J; MUL V.S.MUL;
+               J=RTE.MAX-URES;
+            END;
+            CALL MOVE_TO(BASE.X+2*I,BASE.Y+SCALE.LIN(J));
+            CALL PLOT   (BASE.X+2*I,BASE.Y+SCALE.LIN(J));
+         END;
+      END;
+   END;
+   ELSE IF theDMode = 1 THEN DO;
+      CALL MOVE_TO(BASE.X+2*START,MAX.Y-SCALE.LOG(MAP(START)));
+      DO I=START+1 TO FINISH;
+         IF (I & 7) = 0 THEN CALL CHECK.NEXT.EVENT;
+         CALL PLOT(BASE.X+2*I,MAX.Y-SCALE.LOG(MAP(I)));
+      END;
+      
+      /* NOW PLOT FUNCTION WITH VELOCITY SENSITIVITY FACTORED IN */
+
+      DO I=START TO FINISH;
+         IF (I & 7) = 0 THEN CALL CHECK.NEXT.EVENT;
+         IF NEW.VEL.SENSITIVITY=0 THEN DO;
+            J=I;
+            IF OUR.V.S.MIN<>100 THEN DO;
+               J=J-TTIME.MIN;
+               IF J<1 THEN J=1;
+               LOAD J; MUL OUR.V.S.MUL; J=URES+TTIME.MIN;
+            END;
+
+            CALL MOVE_TO(BASE.X+2*I,MAX.Y-SCALE.LOG(MAP(J)));
+            CALL PLOT   (BASE.X+2*I,MAX.Y-SCALE.LOG(MAP(J)));
+         END;
+         ELSE DO;
+            J=MAP(I);
+            IF OUR.V.S.MIN<>100 THEN DO;
+               LOAD RTE.MAX-J; MUL V.S.MUL;
+               J=RTE.MAX-URES;
+            END;
+            CALL MOVE_TO(BASE.X+2*I,MAX.Y-SCALE.LOG(J));
+            CALL PLOT   (BASE.X+2*I,MAX.Y-SCALE.LOG(J));
+         END;
+      END;
+   END;
+
+   TRANSPARENT_MODE;
+   CALL CHECK.NEXT.EVENT;
+END PLOT.MAP;
+
+UPDATE.NUMBERS: PROC SWAPABLE;
+   DISABLE.DEPOSITS=TRUE;
+      CALL DEPOSIT.FIXED.POINT(RAW.ID,CURR.RAW);
+      CALL DEPOSIT.FIXED.POINT(VOL.ID,MAP.RAW.TO.VOL(MAP(CURR.RAW)));
+      CALL DEPOSIT.FIXED.POINT(DB.ID ,MAP.RAW.TO.DB (MAP(CURR.RAW)));
+   DISABLE.DEPOSITS=FALSE;
+END UPDATE.NUMBERS;
+
+UPDATE.RAW.LABEL: proc swapable;
+   disable.deposits = TRUE;
+      if theMap = #Pressure.Map then do; /* Synclavier PRESSURE to VOL map */
+         call Deposit.Label(Raw.Label.Id,'PRESSURE:');
+      end;
+      else if (theMap >= #First.TTime.Map)
+      and     (theMap <= #Last.TTime.Map)
+      then do;      /* Synclavier TTIME to VOL maps */
+         call Deposit.Label(Raw.Label.Id,'TTIME:');
+      end;
+      else if (theMap = #MIDI.Map)
+      then do;                     /* MIDI VELOCITY to VOL maps */
+         call Deposit.Label(Raw.Label.Id,'MIDI VEL:');
+      end;
+   disable.deposits = FALSE;
+end UPDATE.RAW.LABEL;
+
+ADJUST.MAP: PROC(X,AMT) SWAPABLE;
+   DCL (X,AMT)        FIXED;
+   DCL (START,FINISH) FIXED;
+   DCL RANGE          FIXED;
+   DCL (A,B,C,DB)     FLOATING;
+   DCL (I,J,K)        FIXED;
+
+   IF AMT=0 THEN RETURN;
+
+   START=X-theFilter-1;
+   IF START < 0 THEN START=0;
+   FINISH = X+theFilter+1;
+   IF FINISH > 255 THEN FINISH = 255;
+
+   CALL PLOT.MAP(START-1,FINISH+1);  /* UNDRAW ORIGINAL SEGMENTS */
+
+   IF AMT > +225 THEN AMT = +225;
+   IF AMT < -225 THEN AMT = -225;
+
+   Map(X)=Map(X)+AMT;
+
+   IF Map(X)<  0 THEN Map(X)=  0;
+   IF Map(X)>225 THEN Map(X)=225;
+
+   IF theDMode=0 THEN DO; /* LINEAR INTERPOLATION ON A LINEAR SCALE */
+      AMT  =Map(X)-Map(START);
+      RANGE=     X -     START;
+
+      DO I=1 TO RANGE-1;
+         K=Map(START) + AMT * I / RANGE;
+         IF REM IGE SHR(RANGE,1) THEN K=K+1;
+         Map(START+I)=K;
+      END;
+         
+      AMT  =Map(FINISH)-Map(X);
+      RANGE=     FINISH -     X;
+
+      DO I=1 TO RANGE-1;
+         K=Map(X) + AMT * I / RANGE;
+         IF REM IGE SHR(RANGE,1) THEN K=K+1;
+         Map(X+I)=K;
+      END;
+   END;
+   ELSE DO; /* LINEAR INTERPOLATION ON A LOG SCALE */
+      /* DB = 20*LOG(Map(X)/Map(START))/LOG(10); */
+
+      IF Map(START) = 0
+      THEN DB = -48.0;
+      ELSE DB   = 8.68588964*LOG(Map(X)/Map(START));
+      IF DB<(-48.0) THEN DB=-48.0;
+      RANGE= X - START;
+
+      DO I=1 TO RANGE-1;
+         /* A = Map(START) * EXP(((DB*I/RANGE) * LOG(10))/20); */
+         A = Map(START) * EXP((DB*I/RANGE) * .11512925);
+         Map(START+I)=INT(A + .5);
+      END;
+         
+      IF Map(X) = 0
+      THEN DB = -48.0;
+      ELSE DB   = 8.68588964*LOG(Map(FINISH)/Map(X));
+      IF DB<(-48.0) THEN DB=-48.0;
+      RANGE= FINISH - X;
+
+      DO I=1 TO RANGE-1;
+         /* A = Map(X) * EXP(((DB*I/RANGE) * LOG(10))/20); */
+         A = Map(X) * EXP((DB*I/RANGE) * .11512925);
+         Map(X+I)=INT(A + .5);
+      END;
+   END;
+      
+   START=START-1;
+   IF START < 0 THEN START=0;
+   FINISH = FINISH+1;
+   IF FINISH > 255 THEN FINISH = 255;
+
+   call Update.Real.Time.Maps;     /* keep rtp up to date */
+
+   CALL PLOT.MAP(START,FINISH);        /* DRAW NEW SEGMENTS */
+
+END ADJUST.MAP;
+
+UPDATE.MAP: PROC(X,Y) SWAPABLE;
+   DCL (X,Y) FIXED;
+
+   CALL PLOT.CURSOR; /* UNDRAW CURRENT CURSOR */
+
+   CURR.RAW = X;
+
+   IF theDMode=0 THEN DO; /* MAP Y POS TO VOLUME NUMBER */
+      Y=(Y*225/255);
+      IF REM IGE SHR(255,1) THEN Y=Y+1;
+   END;
+   ELSE DO; /* MAP Y POS TO DB THEN TO VOLUME NUMBER */
+      Y=(-480)+(Y*480/255);
+      IF REM IGE SHR(255,1) THEN Y=Y+1;
+      Y=MAP.DB.TO.RAW(Y);
+   END;
+
+   CALL ADJUST.MAP(CURR.RAW,Y-MAP(CURR.RAW));
+
+   CALL UPDATE.NUMBERS;
+
+   CALL PLOT.CURSOR; /* DRAW CURSOR AT NEW POSITION */
+
+END UPDATE.MAP;
+
+PN: PROC(N) SWAPABLE;
+   DCL (N,I,J) FIXED;
+   DCL TENS    DATA (100,10,1);
+
+   DO J = 0 TO 2;
+      LOAD N; DIV TENS(J); I=RES;
+      CALL PC("60"+I);
+      N=N-I*TENS(J);
+   END;
+END PN;
+
+PRINT.PRESSURE: PROC (KEY#,NEW) SWAPABLE;
+   DCL (KEY#,NEW,X,Y) FIXED;
+
+   LOAD KEY#; DIV 12; Y=RES; X=REM;
+
+   CALL CPOS(TOPY + 2 + Y,13 + X * 5);
+
+   IF NEW=(-1)
+   THEN CALL PS('***');
+   ELSE CALL PN(NEW);
+END PRINT.PRESSURE;
+
+READ.RAW.PRESSURE: PROC (KEYN) FIXED SWAPABLE;
+   DCL (KEYN,I) FIXED;
+   DCL SUBTRACT.PRESSURE.OFFSETS LIT '1';
+
+   IF (KEYN<9) OR (KEYN>84) THEN RETURN -1;
+
+   if (NEW.ORK == 0) {
+      DISABLE;                        /* AVOID KEYBOARD SCAN RIGHT HERE */
+         WRITE(CREG)=1;               /* INDICATE KEYBOARD OPCODES */
+         WRITE(DREG)="200"\(KEYN-9);  /* REQUEST DATA FOR THIS KEY */
+         WRITE(CREG)="40"\1;
+         WRITE(CREG)=1;
+         WRITE(CREG)="100"\1;         /* PULSE_EXWR */
+         I=READ(DREG)&"377";          /* EXTRACT PRESSURE */
+         WRITE(CREG)=1;               /* REMOVE READ */
+      ENABLE;                         /* ALLOW KEYBOARD SCAN NOW */
+   }
+   else
+      I=0;
+
+   IF SUBTRACT.PRESSURE.OFFSETS<>0 THEN DO;
+      WRITE(MAM) = PMAP.PTR + 1;  /* POINT AT BASELINE PRESSURE TABLE */
+      WRITE(MAL) = KEYN;
+      I = I - READ(MD);            /* SUBTRACT OFF BASE LINE PRESSURE VALUE */
+      IF I < 0 THEN I = 0;         /* LIMIT TO ZERO */
+   END;
+
+   RETURN I;
+END READ.RAW.PRESSURE;
+
+DRAW.PRESSURE.INFO.TABLE: proc swapable;
+   DCL (I,KEY#) FIXED;
+
+   CALL CPOS(TOPY,3);
+   CALL PS('OCTAVE     C    C#   D    D#   E    F    F#   G    G#   A    A#   B   ');
+   CALL CPOS(TOPY+1,3);
+   CALL PS('------    ---  ---  ---  ---  ---  ---  ---  ---  ---  ---  ---  --- ');
+
+   DO I=0 TO 7;
+      CALL CPOS(TOPY+2+I,5);
+      CALL PNUM(I,0);
+   END;
+
+   DO KEY# = 0 TO (8*12-1);
+      PBUF(KEY#) = (-1);
+      CALL PRINT.PRESSURE(KEY#,-1);
+   END;
+
+end DRAW.PRESSURE.INFO.TABLE;
+
+/* $SUBTITLE  Routines to Read and Write Map Data */
+
+COMPUTE.TTIME.MIN: proc (buf) swapable;
+   dcl buf fixed array;
+   dcl i   fixed;
+
+   /* LOOK AT MAP DATA AND SET UP TTIME.MIN SO VELOCITY */
+   /* SENSITIVITY STUFF WORKS PROPERLY                  */
+   TTIME.MIN = (-1);
+   I=1;
+   DO WHILE (I ILT 256) & (TTIME.MIN<0);
+      IF BUF(I) ILT RTE.MAX THEN TTIME.MIN=I-1;
+      I=I+1;
+   END;
+   IF TTIME.MIN<0 THEN TTIME.MIN=0; /* WIERD CASE */
+
+   disable.deposits = TRUE;
+      call Deposit.Fixed.Point(TTime.Min.Id,TTime.Min);
+   disable.deposits = FALSE;
+end COMPUTE.TTIME.MIN;
+
+LOAD.DEFAULT.SYNC.TTIME.MAP:  PROC (VEL.MODE,BUF,OLD) SWAPABLE; /* COMPUTES A LOOKUP TABLE FOR TRANSIT TIME TO VOLUME */
+   DCL VEL.MODE FIXED;
+   DCL BUF      ARRAY;
+   DCL OLD      FIXED; /* 0 = NEW TTIMES, 1 = ORIGINAL TTIMES */
+   DCL (I,J)    FIXED;
+
+   DCL MAGIC#1    LIT '61770'; /* FRACTION USED TO GENERATE VOL TABLE (GIVES RANGE OF 110) */
+   DCL MAGIC#2    LIT '61200';
+   DCL ABS.MIN.TT LIT '5';     /* SMALLEST MINIMUM TRANSIT TIME */
+   DCL TT.STEP    LIT '5';     /* INCREMENT BETWEEN ADJACENT MIN TTIMES */
+   DCL MIN.VOL    LIT '3';     /* SMALLEST VOLUME GENERATED */
+
+   IF OLD<>0 THEN DO;
+      TTIME.MIN=ABS.MIN.TT+VEL.MODE*TT.STEP;
+   END;
+   ELSE DO;
+      TTIME.MIN=SHL(ABS.MIN.TT,1)+VEL.MODE*TT.STEP/2;
+   END;
+
+   WRITE(MAM)=EXTBUF.PTR; /* LOAD PTR TO SYNCLAVIER VELOCITY MAP TABLE */
+
+   /* FIRST START ARRAY WITH VOL.MAX */
+   /* CODE BELOW LOADS ONE EXTRA RTE.MAX VALUE INTO TABLE.  THIS
+      IS BECAUSE WE NEED TO SKIP OVER ELEMENT ZERO. */
+   WRITE("313")=RTE.MAX;       /* PUT IN R13 FOR SPEED */
+   IF INC.POLY OR (MODC<>0) THEN DO; /* OKAY TO USE REPEAT COUNTER */
+      RPC TTIME.MIN; WRITE(MDI)=READ("313");
+   END;
+   ELSE DO I=1 TO TTIME.MIN;
+      WRITE(MDI)=READ("313");
+   END;
+
+   /* NOW COMPUTE VOLUME CURVE FOR DECAYING REGION    */
+   IF OLD<>0 THEN DO;
+      J=MAGIC#1;                     /* START WITH MAGIC # */
+      WRITE("313")=SHL(RTE.MAX,8);   /* INIT R13 TO MAX VOLUME SHIFTED LEFT FOR ACCURACY */
+      I=TTIME.MIN;
+      DO WHILE (READ("313")IGT (SHL(MIN.VOL,8)-1)) AND (I<256);
+         WRITE(MDI)=SHR(READ("313"),8)+((READ("313")&128)<>0);
+         LOAD READ("313"); MUL J; WRITE("313")=READ(4);
+         I=I+1; 
+         LOAD -J; MUL -512; J=-READ(4);
+      END;
+   END;
+   ELSE DO;
+      J=MAGIC#2;                     /* START WITH MAGIC # */
+      WRITE("313")=SHL(RTE.MAX,8);   /* INIT R13 TO MAX VOLUME SHIFTED LEFT FOR ACCURACY */
+      I=TTIME.MIN;
+      DO WHILE (READ("313")IGT (SHL(MIN.VOL,8)-1)) AND (I<256);
+         WRITE(MDI)=SHR(READ("313"),8)+((READ("313")&128)<>0);
+         LOAD READ("313"); MUL J; WRITE("313")=READ(4);
+         I=I+1; 
+         LOAD -J; MUL -512; J=-READ(4);
+      END;
+   END;
+
+   /* AT THIS POINT I EQUALS THE NUMBER OF VALUES WHICH HAVE BEEN
+      STORED IN THE TABLE */
+
+   /* NOW FILL REST OF ARRAY WITH VOL.MIN */
+   I=256-I;            /* NUMBER OF PTS LEFT TO FILL IN MAP */
+   IF I>0 THEN DO;
+      IF INC.POLY OR (MODC<>0) THEN DO; /* OKAY TO USE REPEAT COUNTER */
+         RPC I; WRITE(MDI)=MIN.VOL;
+      END;
+      ELSE DO I=1 TO I; WRITE(MDI)=MIN.VOL; END;
+   END;
+
+   WRITE(MAM)=EXTBUF.PTR;
+   DO I = 0 TO 255;
+      BUF(I) = READ(MDI);
+   END;
+
+END LOAD.DEFAULT.SYNC.TTIME.MAP;
+
+LOAD.DEFAULT.MIDI.VELMAP: PROC (BUF) SWAPABLE; /* COMPUTES NEW VELOCITY TO VOLUME TABLE */
+   DCL BUF       ARRAY;
+   DCL (VOL,I,J) FIXED;
+
+   DCL MIDI.VEL.MIN LIT '1';     /* SMALLEST VELOCITY TO MAP */
+   DCL MIDI.VEL.MAX LIT '127';   /* LARGEST  VELOCITY TO MAP */
+   DCL MIDI.MAGIC#  LIT '63338'; /* MAGIC NUMBER USED TO ACHIEVE GREATEST DYNAMIC RANGE */
+
+   DO I=0 TO MIDI.VEL.MIN-2; MISC.BUF(I)=1; END;
+
+   VOL=SHL(RTE.MAX,8);            /* STARTING AT THE MAX VOLUME */
+   I=MIDI.VEL.MAX-MIDI.VEL.MIN+1;
+   DO WHILE I>0;                 /* LOOP OVER VALUES IN TABLE */
+      MISC.BUF(I)=SHR(VOL,8)+((VOL&128)<>0);  /* STORE NEXT VALUE */
+      LOAD VOL; MUL MIDI.MAGIC#;  /* FRACTIONAL MULTIPLY */
+      VOL=READ(4);
+      I=I-1;
+   END;
+
+   DO I=0 TO 127;   BUF(I)=MISC.BUF(I); END;
+   DO I=128 TO 255; BUF(I)=RTE.MAX;     END;
+
+END LOAD.DEFAULT.MIDI.VELMAP;
+
+Read.Map.Data: proc (WhichTable,Buf) swapable;
+   dcl WhichTable fixed;
+   dcl Buf        array;
+   dcl (m,l,i,j)  fixed;
+   dcl offset     fixed;
+
+   if Map.There <> 0 then do; /* our data file is out there */
+      if WhichTable = #Pressure.Map then do; /* Synclavier PRESSURE to VOL map */
+         offset = PRESSURE.MAP;
+      end;
+      else if (WhichTable >= #First.TTime.Map)
+      and     (WhichTable <= #Last.TTime.Map)
+      then do;      /* Synclavier TTIME to VOL maps */
+         offset = TTIME.MAPS + WhichTable - #First.TTime.Map;
+      end;
+      else if (WhichTable = #MIDI.Map)
+      then do;                     /* MIDI VELOCITY to VOL maps */
+         offset = MIDI.MAPS;
+      end;
+
+      m = MapDev; l = MapSec;
+      l = l + offset;
+      if l ilt offset then m = m + 1;
+
+      call Readdata(m,l,buf,256);
+
+      if  (WhichTable >= #First.TTime.Map)
+      and (WhichTable <= #Last.TTime.Map)
+      then do;      /* Synclavier TTIME to VOL maps */
+         call COMPUTE.TTIME.MIN(buf);
+      end;
+   end;
+   else do;
+      if WhichTable = #Pressure.Map then do; /* Synclavier PRESSURE to VOL map */
+         do j = 0 to 255;
+            i = j;
+
+            /* code extracted from 370-REAL */
+            IF I>RTE.MAX THEN I=RTE.MAX; /* LIMIT TO RTE.MAX */ 
+            LOAD I; MUL I; I=RES; DIV RTE.MAX; /* USE SQUARE FUNCTION ON PRESSURE */
+            I=RES;                       /* GET SQUARE FUNCTION, CURRENT VALUE */
+
+            buf(j) = i;
+         end;
+      end;
+      else if (WhichTable >= #First.TTime.Map)
+      and     (WhichTable <= #Last.TTime.Map)
+      then do;      /* Synclavier TTIME to VOL maps */
+         call Load.Default.Sync.TTime.Map(WhichTable-#First.TTime.Map,Buf,1);
+      end;
+      else if (WhichTable = #MIDI.Map)
+      then do;                     /* MIDI VELOCITY to VOL maps */
+         call Load.Default.Midi.Velmap(buf);
+      end;
+   end;
+
+   disable.deposits = TRUE;
+      call Deposit.Fixed.Point(TTime.Min.Id,TTime.Min);
+   disable.deposits = FALSE;
+
+   call Update.Real.Time.Maps;     /* keep rtp up to date */
+
+end Read.Map.Data;
+
+Write.Map.Data: proc (WhichTable,Buf) swapable;
+   dcl WhichTable fixed;
+   dcl Buf        array;
+   dcl (m,l)      fixed;
+   dcl offset     fixed;
+
+   if WhichTable igt #Last.Map then STOP (-2);
+
+   if Map.There <> 0 then do; /* our data file is out there */
+      if WhichTable = #Pressure.Map then do; /* Synclavier PRESSURE to VOL map */
+         offset = PRESSURE.MAP;
+      end;
+      else if (WhichTable >= #First.TTime.Map)
+      and     (WhichTable <= #Last.TTime.Map)
+      then do;      /* Synclavier TTIME to VOL maps */
+         offset = TTIME.MAPS + WhichTable - #First.TTime.Map;
+      end;
+      else if (WhichTable = #MIDI.Map)
+      then do;                     /* MIDI VELOCITY to VOL maps */
+         offset = MIDI.MAPS;
+      end;
+
+      m = MapDev; l = MapSec;
+      l = l + offset;
+      if l ilt offset then m = m + 1;
+
+      if ((MapDev|MapSec) <> 0)
+      then call Writedata(m,l,buf,256);
+      else STOP (-1);     /* system error */
+   end;
+
+end Write.Map.Data;
+
+RESET.CURRENT.MAP: proc (OLD) swapable;
+   DCL OLD  FIXED; /* 1=USE OLD MAP, 0=USE NEW MAP */
+   dcl (i,j) fixed;
+
+   call Plot.Cursor;     /* undraw current cursor */
+   call Plot.Map(0,255); /* undraw current map */
+
+   if theMap = #Pressure.Map then do; /* Synclavier PRESSURE to VOL map */
+      do j = 0 to 255;
+         i = j;
+
+         /* code extracted from 370-REAL */
+         IF I>RTE.MAX THEN I=RTE.MAX; /* LIMIT TO RTE.MAX */ 
+         LOAD I; MUL I; I=RES; DIV RTE.MAX; /* USE SQUARE FUNCTION ON PRESSURE */
+         I=RES;                       /* GET SQUARE FUNCTION, CURRENT VALUE */
+
+         Map(j) = i;
+      end;
+   end;
+   else if (theMap >= #First.TTime.Map)
+   and     (theMap <= #Last.TTime.Map)
+   then do;      /* Synclavier TTIME to VOL maps */
+      call Load.Default.Sync.TTime.Map(theMap,Map,OLD);
+   end;
+   else if (theMap = #MIDI.Map)
+   then do;                     /* MIDI VELOCITY to VOL maps */
+      call Load.Default.Midi.Velmap(Map);
+   end;
+
+   call Plot.Cursor;     /* draw new cursor */
+   call Plot.Map(0,255); /* draw new map */
+
+   disable.deposits = TRUE;
+      call Deposit.Fixed.Point(TTime.Min.Id,TTime.Min);
+   disable.deposits = FALSE;
+
+   call Update.Numbers;
+   call Update.Raw.Label;
+   call Update.Real.Time.Maps;     /* keep rtp up to date */
+
+end RESET.CURRENT.MAP;
+
+dcl Map.On.Clipboard fixed;
+
+COPY.MAP: proc swapable;
+   dcl i fixed;
+   write(mam) = TRD.PTR;
+   do i = 0 to 255;
+      write(mdi) = Map(i);
+   end;
+   Map.On.Clipboard = 1;
+end COPY.MAP;
+
+PASTE.MAP: proc swapable;
+   dcl (i,j) fixed;
+
+   if Map.On.Clipboard<>0 then do;
+      call Plot.Cursor;     /* undraw current cursor */
+      call Plot.Map(0,255); /* undraw current map */
+
+      write(mam) = TRD.PTR;
+      do i = 0 to 255;
+         Map(i) = read(mdi);
+      end;
+
+      call Plot.Cursor;     /* draw new cursor */
+      call Plot.Map(0,255); /* draw new map */
+
+      if  (theMap >= #First.TTime.Map)
+      and (theMap <= #Last.TTime.Map)
+      then do;      /* Synclavier TTIME to VOL maps */
+         call COMPUTE.TTIME.MIN(Map);
+      end;
+
+      call Update.Numbers;
+      call Update.Raw.Label;
+      call Update.Real.Time.Maps;     /* keep rtp up to date */
+   end;
+
+end PASTE.MAP;
+
+CHANGE.CURRENT.MAP: proc (new.map,new.dmode,force) swapable;
+   dcl new.map   fixed;
+   dcl new.dmode fixed;
+   dcl force     fixed;
+
+   if (new.map   <> theMap) 
+   or (new.dmode <> theDMode) 
+   or (Our.V.S.Min<>V.S.Min)
+   or (Our.V.S.Mul<>V.S.Mul)
+   or (force     <> 0) 
+   then do;
+      call Plot.Cursor;     /* undraw current cursor */
+      call Plot.Map(0,255); /* undraw current map */
+
+      if (theMap <> new.map) or (force <> 0) then do;
+         theMap = new.map;
+         call Read.Map.Data(theMap,Map);  /* get new info */
+      end;
+
+      if theDMode<>new.dmode then do;
+         call Plot.Cursor;            /* undraw current cursor */
+         call Draw.Dynamic.Env.Lines; /* undraw current lines */
+
+         theDMode = new.dmode;
+
+         call Draw.Dynamic.Env.Lines; /* draw new lines */
+         call Plot.Cursor;            /* draw new cursor */
+      end;
+
+      if (Our.V.S.Min<>V.S.Min)
+      or (Our.V.S.Mul<>V.S.Mul)
+      then do;
+         Our.V.S.Min = V.S.Min;
+         Our.V.S.Mul = V.S.Mul;
+      end;
+
+      call Plot.Cursor;     /* draw new cursor */
+      call Plot.Map(0,255); /* draw new map */
+
+      disable.deposits = TRUE;
+         call Deposit.Fixed.Point(TTime.Min.Id,TTime.Min);
+      disable.deposits = FALSE;
+
+      call Update.Numbers;
+      call Update.Raw.Label;
+   end;
+
+   call Update.Real.Time.Maps;     /* keep rtp up to date */
+
+end CHANGE.CURRENT.MAP;
+
+/* $SUBTITLE  Screen Object Definition Routines */
+
+DEFINE.PLOT.GROUP: proc swapable;
+
+   call Set.Auto.Allocation.Id(Base#PlotId); /* reset id # */
+
+   Plot.Id = Define.Graphics.Region(s#aa,BASE.X,MAX.Y,MAX.X,BASE.Y);
+
+   Plot.Group = Group.Objects(Grp#Plot,Plot.Id,Plot.Id,Get#Screen.Event);
+
+   call Activate.Group.Objects(Plot.Group);
+   call Update.Group.Objects  (Plot.Group);
+
+end DEFINE.PLOT.GROUP;
+
+DEFINE.CONTROL.GROUP: proc swapable;
+   dcl (FirstId,LastId,i) fixed;
+   dcl LX  lit '48';
+   dcl TY  lit '1';
+
+   call Set.Auto.Allocation.Id(Base#ControlId); /* reset id # */
+
+   FirstId = Define.Frame(s#aa,0,0,22,80,'KEYBOARD MAPPING DISPLAY');
+
+   call     Define.Label    (s#aa,TY  ,LX, 4,'MAP:');
+   Raw.Label.Id=Define.Label(s#aa,TY+2,LX,12,'TTIME:');
+   call     Define.Label    (s#aa,TY+3,LX,12,'VOLUME:');
+   call     Define.Label    (s#aa,TY+4,LX,12,'DECIBELS:');
+   call     Define.Label    (s#aa,TY+5,LX,12,'DISP MODE:');
+   call     Define.Label    (s#aa,TY+6,LX,12,'SMOOTH:');
+   TTime.Min.Id = Define.Fixed.Point(s#aa,TY+8,LX+13,3,0,cf#unsigned|cf#right);
+   LastId = Define.Label    (s#aa,TY+8,LX,12,'TTIME MIN:');
+
+   do i = FirstId to LastId;
+      call Set.Object.Arrow.Links (i,0,0,0,0);
+      call Set.Object.Mouse.Access(i,0);
+   end;
+
+   Store.Id     = Define.Button.Icon(s#aa,(LX+14)*100,(TY+0)*100-40,0,'STORE' ,0);
+   Recall.Id    = Define.Button.Icon(s#aa,(LX+14)*100,(TY+1)*100-40,0,'RECALL',0);
+   New.Reset.Id = Define.Button.Icon(s#aa,(LX+23)*100,(TY+0)*100-40,0,'TRIPP!',0);
+   Reset.Id     = Define.Button.Icon(s#aa,(LX+23)*100,(TY+1)*100-40,0,'RESET' ,0);
+   Copy.Id      = Define.Button.Icon(s#aa,(LX+23)*100,(TY+2)*100-40,0,'COPY'  ,0);
+   Paste.Id     = Define.Button.Icon(s#aa,(LX+23)*100,(TY+3)*100-40,0,'PASTE' ,0);
+
+   /* MAKE SURE MAP.ID SWITCHES ARE IN ORDER DEFINED AT TOP OF FILE */
+   Map.Id    = Define.Switch     (s#aa,TY  ,LX+ 5,4,0,'PRES|VK 0|VK 1|VK 2|VK 3|VK 4|VK 5|VK 6|VK 7|VK 8|VK 9|MIDI');
+   Raw.Id    = Define.Fixed.Point(s#aa,TY+2,LX+13,3,0,cf#unsigned|cf#right);
+   Vol.Id    = Define.Fixed.Point(s#aa,TY+3,LX+13,5,1,cf#unsigned|cf#right);
+   DB.Id     = Define.Fixed.Point(s#aa,TY+4,LX+13,5,1,cf#signed  |cf#right);
+   DMode.Id  = Define.Switch     (s#aa,TY+5,LX+13,6,0,'LINEAR|LOG   ');
+   Filter.Id = Define.Fixed.Point(s#aa,TY+6,LX+13,3,0,cf#unsigned|cf#right);
+
+   Mouse.Id  =Define.Mouse.Hole.Icon(s#aa,8100,5); /* exit screen icon */
+
+   LastId    = Mouse.Id;
+
+   do i = Map.Id to Filter.Id;
+      call Set.Object.Arrow.Links (i,arr#auto,arr#auto,0,0);
+      call Set.Object.Action      (i,o#act.update.on.dep,TRUE);
+      call Set.Object.Mouse.Access(i,o#act.left.press|o#act.middle.press|o#act.right.press);
+      call Set.Object.Jog         (i,TRUE);
+   end;
+
+   disable.deposits = TRUE;
+      call Deposit.Switch     (Map.Id   ,theMap);
+      call Deposit.Switch     (DMode.Id ,theDMode);
+      call Deposit.Fixed.Point(Filter.Id,theFilter);
+      call Deposit.Fixed.Point(TTime.Min.Id,TTime.Min);
+   disable.deposits = FALSE;
+
+   call Update.Raw.Label;
+
+   Control.Group = Group.Objects(Grp#Control,FirstId,LastId,Get#Screen.Event);
+
+   call Activate.Group.Objects(Control.Group);
+   call Update.Group.Objects  (Control.Group);
+
+   if Map.There = 0 then do;  /* no mapping file */
+      call REVERSE.VIDEO(1);
+      call cpos(TY+7,LX);
+      call ps('File ".SMAP-7" not found');
+      call REVERSE.VIDEO(0);
+   end;
+
+   call Select.New.Cur.Obj(Raw.Id,-1,-1);
+
+end DEFINE.CONTROL.GROUP;
+
+DEFINE.KEYBOARD.MAPPING.SCREEN: proc swapable;
+
+   Last.Plot.Val   = (-1);
+
+   call Define.Plot.Group;      /* set up all the screen manager */
+   call Define.Control.Group;   /* objects for this page         */
+
+   call Draw.Box.With.Tics(BASE.X-1,MAX.Y+1,MAX.X+1,BASE.Y-1,0,0,17);
+   call Draw.Dynamic.Env.Lines;
+
+   call Read.Map.Data(theMap,Map);   /* load data into buffer */
+
+   call Plot.Map(0,255);
+   call Plot.Cursor;
+
+   call Draw.Pressure.Info.Table;
+
+   call PRINT.CURRENT.TIMBRE.NAME;   /* put up current timbre name */
+   call PRINT.CCAT;                  /* current catalog too        */
+
+   call Select.New.Cur.Obj(Cur.Obj.Id,-1,-1);
+
+end DEFINE.KEYBOARD.MAPPING.SCREEN;
+
+/* $SUBTITLE  Screen Event Handling Routines */
+
+GET.NEXT.MAP.EVENT: proc fixed swapable;
+   dcl (i,j,key#)         fixed;
+   dcl reselect         fixed;
+   dcl Upd.Time         fixed STATIC;
+   dcl (LKey,LVel,LTyp) fixed STATIC;
+
+   if Exit.My.Screen <> 0 then do;           /* user wants to quit    */
+      Screen.Event.Group = Control.Group;    /* make up null event to */
+      Screen.Event.Code  = Get.Screen.Event; /* enable graceful exit  */
+      Screen.Event.Info  = S#NulEvent;
+      Screen.Event.Id    = Mouse.Id;
+      return;
+   end;
+
+   do while 1;
+      call GET_ENABLE(Get.In.Char);       /* enable explicity  */
+      call GET_ENABLE(Get.Mouse.Button);  /* for these items   */
+      if Disable.Scan<>0                  /* we are animating plot */
+      then call GET_ENABLE(Get.Mouse.Movement);
+
+      if Screen.Changed <> 0 then do;
+         call Update.Screen;
+      end;
+
+		chill.out.and.run.syn();			    // since we are using check.next.event instead of get.next.event, we just chill for a bit...
+		
+      i = Check.Next.Event;
+
+      call GET_DISABLE(Get.In.Char);
+      call GET_DISABLE(Get.Mouse.Button);
+      if Disable.Scan<>0                  /* we are animating plot */
+      then call GET_DISABLE(Get.Mouse.Movement);
+
+      if (new.in.char       <> 0)  /* if inchar pending        */
+      or (new.mouse.button  <> 0)  /* or mouse press pending   */
+      or (m$Presses         <> 0)  /* or stacked               */
+      or (Events.Pending    <> 0)  /* or internal smgr events  */
+      or (i                 <> 0)  /* or system event pending  */
+      then do;
+         new.dtd.info = new.dtd.info | 64; /* make sure we come back soon */
+
+         call Get_Enable(Get.DTD.Info);
+            call Get.Next.Screen.Event;
+         call Get_Disable(Get.DTD.Info);
+
+         if Screen.Event.Code <> Get.DTD.Info
+         then return Screen.Event.Code;
+      end;
+
+      if Disable.Scan = 0 then do;
+         IF (REAL.MILLISECONDS-UPD.TIME) IGE 200 THEN DO;
+            UPD.TIME = REAL.MILLISECONDS;
+
+            WRITE(MAM)=CLAV.PTR;
+
+            KEY# = 0;
+            DO WHILE KEY# ILT (8*12);
+               IF (READ(MDI)&DOWN)<>0 THEN DO; /* only display first down key */
+
+                  CALL CHECK.NEXT.EVENT;
+                  I=READ.RAW.PRESSURE(KEY#);
+                  CALL CHECK.NEXT.EVENT;
+
+                  IF PBUF(KEY#) <> I THEN DO;
+                     PBUF(KEY#) = I;
+                     CALL CHECK.NEXT.EVENT;
+                     CALL PRINT.PRESSURE(KEY#,I);
+                     CALL CHECK.NEXT.EVENT;
+
+                     if theMap=#Pressure.Map then do;         /* showing pressure map */
+                        call Plot.Last.Value(i); /* show where we are on map */
+                        reselect = TRUE;
+                        CALL CHECK.NEXT.EVENT;
+                     end;
+                  END;
+                  KEY# = 255;        /* quit loop - found a down key */
+               END;
+               KEY# = KEY# + 1;
+            END;
+         END;
+
+         IF (LKEY<>LAST.NOTE.KEY#) 
+         OR (LVEL<>LAST.NOTE.VEL )
+         OR (LTYP<>LAST.NOTE.TYPE)
+         THEN DO;
+            DISABLE;
+               LKEY = LAST.NOTE.KEY#;
+               LVEL = LAST.NOTE.VEL;
+               LTYP = LAST.NOTE.TYPE;
+            ENABLE;
+
+            call Check.Next.Event;
+
+            CALL CPOS(TOPY + 10,3);
+            CALL PS('LAST KEY: ');  CALL PNUM(LKEY,0);
+            if (LTyp & "10") = 0 then do; /* note from VK keyboard */
+               CALL PS('   VK TTIME: '); CALL PNUM(LVEL,0);
+               J=LVEL;
+               IF J>255 THEN J=255; /* LIMIT TO MAX TTIME OF 255 */
+
+               IF NEW.VEL.SENSITIVITY = 0 THEN DO;
+                  IF V.S.MIN<>100 THEN DO;  /* ONLY IF OTHER THAN FULL SENSITIVITY */
+                     J=J-TTIME.MIN;         /* COMPUTE DISPLACEMENT FROM MIN */
+                     IF J<1 THEN J=1;       /* LIMIT TO POSITIVE NON-ZERO TIMES */
+                     LOAD J; MUL V.S.MUL; J=URES+TTIME.MIN;
+                  END;
+               END;
+
+               WRITE(MAM)=TTMAP.PTR;        /* LOOK UP VOLUME FROM TABLE */
+               WRITE(MAL)=J;
+               J=READ(MD);
+
+               IF NEW.VEL.SENSITIVITY<>0 THEN DO;
+                  IF V.S.MIN<>100 THEN DO;
+                     LOAD RTE.MAX-J; MUL V.S.MUL;
+                     J=RTE.MAX-URES;
+                  END;
+               END;
+
+               WRITE(MAM)=VMAP.PTR+1;          /* LOOK UP VOLUME TO VELOCITY MAPPING */
+               WRITE(MAL)=J;
+               J=READ(MD);
+               CALL PS('   MIDI VEL: '); CALL PNUM(J,0);
+            end;
+            else if (LTyp & "10") <> 0 then do; /* note from MIDI Keyboard */
+               CALL PS('   MIDI VEL: '); CALL PNUM(LVEL,0);
+            end;
+            call Check.Next.Event;
+            call ps('           ');
+
+            if theMap<>10 then do;           /* not showing pressure map */
+               call Check.Next.Event;
+               call Plot.Last.Value(LVel); /* show where we are on map */
+               call Check.Next.Event;
+            end;
+
+            reselect = TRUE;
+         END;
+
+         if reselect<>0 then do;
+            reselect = 0;
+            call Select.New.Cur.Obj(Cur.Obj.Id,-1,-1);
+         end;
+      end; /* of if Disable.Scan = 0 */
+   end;
+
+end GET.NEXT.MAP.EVENT;
+
+GET.PLOT.EVENT: proc swapable;
+   dcl (x,y) fixed;
+
+   do while Exit.My.Screen = 0;          /* wait for exit condition */
+
+      if Screen.Event.Group <> Plot.Group then return;
+
+      if Screen.Event.Code = Get.Screen.Event then do;
+         if (Screen.Event.Info = S#MouseSelect)
+         or (Screen.Event.Info = S#MouseActivate)
+         then do;
+            if (Screen.Event.Id = Plot.Id)
+            then do;
+               if Mouse(BUTTON.RESULT) = (-2) then do; /* got a press */
+                  x = Mouse(PRESS.X)-Base.X;
+                  if x < 0   then x = 0;
+                  if x > 511 then x = 511;
+                  x = shr(x,1);
+
+                  y = Mouse(PRESS.Y) - Base.Y;
+                  if y < 0   then y = 0;
+                  if y > 255 then y = 255;
+
+                  call Update.Map(x,y);
+
+                  call Set.Group.Get(Plot.Group,Get.Mouse.Movement,TRUE);
+                  call Set.Group.Get(Plot.Group,Get.Mouse.Button,TRUE);
+                  Disable.Scan = TRUE;
+               end;
+            end;
+         end;
+      end;
+
+      else if Screen.Event.Code = Get.Mouse.Movement then do;
+         x = Mouse(CURRENT.X)-Base.X;
+         if x < 0   then x = 0;
+         if x > 511 then x = 511;
+         x = shr(x,1);
+
+         y = Mouse(CURRENT.Y) - Base.Y;
+         if y < 0   then y = 0;
+         if y > 255 then y = 255;
+
+         call Update.Map(x,y);
+      end;
+
+      else if Screen.Event.Code = Get.Mouse.Button then do;
+         if Screen.Event.Info = 2 then do; /* got a release */
+            call Set.Group.Get(Plot.Group,Get.Mouse.Movement,FALSE);
+            call Set.Group.Get(Plot.Group,Get.Mouse.Button  ,FALSE);
+            Disable.Scan = FALSE;
+
+            if  (theMap >= #First.TTime.Map)
+            and (theMap <= #Last.TTime.Map)
+            then do;      /* Synclavier TTIME to VOL maps */
+               call COMPUTE.TTIME.MIN(Map);
+            end;
+            call Update.Real.Time.Maps;     /* keep rtp up to date */
+         end;
+      end;
+
+      call Get.Next.Map.Event;   /* get another event */
+   end;
+
+end GET.PLOT.EVENT;
+
+GET.CONTROL.EVENT: proc swapable;
+   dcl (i,j,k) fixed;
+
+   do while Exit.My.Screen = 0;          /* wait for exit condition */
+
+      if Screen.Event.Group <> Control.Group then return;
+
+      if Screen.Event.Code = Get.Screen.Event then do;
+
+         if Screen.Event.Info = S#Deposit then do;
+            if (Screen.Event.Id = Map.Id)
+            then do;
+               theMap = Fetch.Switch(Map.Id);
+               call Update.Numbers;
+               call Update.Raw.Label;
+               call Update.Real.Time.Maps;     /* keep rtp up to date */
+            end;
+
+            else if (Screen.Event.Id = Raw.Id)
+            then do;
+               i = Fetch.Fixed.Point(Raw.Id);
+               if (i < 0) or (i > 255) then do;
+                  i = Curr.Raw;
+                  disable.deposits = TRUE;
+                  call Deposit.Fixed.Point(Raw.Id,i);
+                  disable.deposits = FALSE;
+               end;
+               call Plot.Cursor;
+               Curr.Raw = i;
+               call Plot.Cursor;
+               call Update.Numbers;
+            end;
+
+            else if (Screen.Event.Id = Vol.Id)
+            then do;
+               i = Fetch.Fixed.Point(Vol.Id);
+
+               if (i < 0) or (i > 1000)
+               then i = Map(Curr.Raw);
+               else i = Map.Vol.To.Raw(i);
+
+               call Plot.Cursor;
+               call Adjust.Map(Curr.Raw,i-Map(Curr.Raw));
+               call Plot.Cursor;
+               call Update.Numbers;
+            end;
+
+            else if (Screen.Event.Id = DB.Id)
+            then do;
+               i = Fetch.Fixed.Point(DB.Id);
+
+               if (i > 0) or (i < -480)
+               then i = Map(Curr.Raw);
+               else i = Map.Db.To.Raw(i);
+
+               call Plot.Cursor;
+               call Adjust.Map(Curr.Raw,i-Map(Curr.Raw));
+               call Plot.Cursor;
+               call Update.Numbers;
+            end;
+
+            else if (Screen.Event.Id = DMode.Id)
+            then do;
+               call Change.Current.Map(Fetch.Switch(Map.Id),Fetch.Switch(DMode.Id),FALSE);
+            end;
+
+            else if (Screen.Event.Id = Filter.Id)
+            then do;
+               i = Fetch.Fixed.Point(Filter.Id);
+               if (i < 0) or (i > 128) then do;
+                  i = theFilter;
+                  disable.deposits = TRUE;
+                  call Deposit.Fixed.Point(Filter.Id,i);
+                  disable.deposits = FALSE;
+               end;
+               theFilter = i;
+            end;
+         end; /* of handle S#DEPOSIT event */
+
+         else if (Screen.Event.Info = S#ArrowSelectAttempt)
+         then do;
+            i = Fetch.Fixed.Point(Raw.Id);
+            if (Screen.Event.Obj.Info = L.ARR)
+            then i = i - 1;
+            else i = i + 1;
+            if (i < 0) or (i > 255)
+            then i = Curr.Raw;
+
+            disable.deposits = TRUE;
+            call Deposit.Fixed.Point(Raw.Id,i);
+            disable.deposits = FALSE;
+
+            call Plot.Cursor;
+            Curr.Raw = i;
+            call Plot.Cursor;
+            call Update.Numbers;
+            call Flush.Arrow.Keys.From.D50.Buf;
+         end;
+
+         else if (Screen.Event.Info = S#MouseSelect)
+         or      (Screen.Event.Info = S#MouseActivate)
+         then do;
+            if Screen.Event.Id=Mouse.Id
+            then Exit.My.Screen=1;
+
+            else if Screen.Event.Id = Store.Id then do;
+               call Write.Map.Data(theMap,Map); /* write out current info */
+               if Map.There <> 0
+               then call Draw.Message('Current map has been saved.');
+               else call Draw.Message('No map file ".SMAP-7" found.');
+            end;
+
+            else if Screen.Event.Id = Recall.Id then do;
+               I = Fetch.Switch(Map.Id);
+               if  ((I >= #First.TTime.Map)
+               and  (I <= #Last.TTime.Map))
+               then do;
+                  V.S.Con = I-#First.TTime.Map;
+                  IF NEW.PAN<>0                          /* IF USING NEW KBD */
+                  THEN CALL COMPUTE.SYNC.TTIME.MAP(V.S.CON); /* COMPUTE NEW VELOCITY MAP */
+                  LOAD 0; WRITE(4)=V.S.MIN; DIV 100;     /* COMPUTE HERE FOR FASTER VEL KBD SCAN */
+                  V.S.MUL=RES;                           /* COMPUTE FRACT MUL CONSTANT */
+                  IF (TIM.HEAD.LOOKUP(0,TIM.TINFO.POINTER)=0)
+                  THEN DO;                               /* CREATE T.FRAME IF NOT ONE */
+                     CALL CREATE.TINFO.FRAME;            /* MAKE ONE TO STORE NEW VELOCITY SENSITIVITY */
+                  END;
+                  ELSE DO;
+                     I=TIM.HEAD.LOOKUP(0,TIM.TINFO.POINTER);
+                     CALL P.STORE(I+TI.VSENS,V.S.MIN\256);
+                     CALL P.STORE(I+TI.VCON ,V.S.CON    );
+                  END;
+               END;
+               CALL DISPLAY.PAR;
+               NEW.PRM.INFO=NEW.PRM.INFO\16;             /* SET BIT TO INDICATE OVERALL CHANGE */
+
+               call Change.Current.Map(Fetch.Switch(Map.Id),Fetch.Switch(DMode.Id),TRUE);
+               if Map.There <> 0
+               then call Draw.Message('New map is now active.');
+               else call Draw.Message('No map file found. Using default table.');
+            end;
+
+            else if Screen.Event.Id = Reset.Id then do;
+               call Reset.Current.Map(1);
+               call Draw.Message('Current map has been reset to default values.');
+            end;
+
+            else if Screen.Event.Id = New.Reset.Id then do;
+               call Reset.Current.Map(0);
+               call Draw.Message('Current map has been reset to new default values.');
+            end;
+
+            else if Screen.Event.Id = Copy.Id then do;
+               call Copy.Map;
+               call Draw.Message('Copy of current map is now on Clipboard.');
+            end;
+
+            else if Screen.Event.Id = Paste.Id then do;
+               call Paste.Map;
+               if Map.On.Clipboard<>0
+               then call Draw.Message('Clipboard map is now your current map.');
+               else call Draw.Message('There is no map saved on your Clipboard.');
+            end;
+         end;
+
+         call Get.Next.Map.Event;
+      end;
+
+      else call Get.Next.Map.Event;   /* get another event */
+   end;
+
+end GET.CONTROL.EVENT;
+
+GET.FIRST.SCREEN.EVENT: proc swapable; /* set up a harmless event to get things started */
+
+   Screen.Event.Group= Control.Group;    /* make up null event to */
+   Screen.Event.Code = Get.Screen.Event; /* get the ball rolling  */
+   Screen.Event.Info = S#NulEvent;
+   Screen.Event.Id   = Raw.Id;
+
+end GET.FIRST.SCREEN.EVENT;
+
+Update.Whole.Display: proc swapable;
+   if  ((theMap >= #First.TTime.Map)
+   and  (theMap <= #Last.TTime.Map))
+   or  (theMap = #MIDI.Map)
+   then do;      /* Synclavier TTIME to VOL maps or MIDI VEL to VOL map */
+      if (theMap<>(V.S.Con+#First.TTime.Map))
+      then do;
+         disable.deposits=true;
+            call Deposit.Switch(Map.Id,V.S.Con+#First.TTime.Map);
+         disable.deposits=false;
+         call Change.Current.Map(Fetch.Switch(Map.Id),Fetch.Switch(DMode.Id),FALSE);
+      end;
+      else if (Our.V.S.Min<>V.S.Min)
+      or      (Our.V.S.Mul<>V.S.Mul)
+      then do;
+         call Change.Current.Map(Fetch.Switch(Map.Id),Fetch.Switch(DMode.Id),FALSE);
+      end;
+   end;
+   disable.deposits = TRUE;
+      call Deposit.Fixed.Point(TTime.Min.Id,TTime.Min);
+   disable.deposits = FALSE;
+end Update.Whole.Display;
+
+KEYBOARD.MAPPING.SCREEN: proc (arg) returns (fixed) public swapable;
+   dcl arg   fixed;
+
+   if (mg600 = 0) and (vt640 = 0) then do;
+      call no.graphics.terminal;        /* graphics terminal required for this screen */
+      return (-1);                      /* screen not activated */
+   end;
+
+   call clear.term;                     /* clear the screen */
+   call initialize.screen.manager(TRD.LEN-2);  /* set up xmem for screen manager */
+   call set.screen.animate(0);          /* turn off screen animation */
+
+   Map.On.Clipboard = 0;                /* no map on clipboard to start */
+   Our.V.S.Min = V.S.Min;               /* sample current globals */
+   Our.V.S.Mul = V.S.Mul;
+   theMap = V.S.Con + #First.TTime.Map;
+
+   call Define.Keyboard.Mapping.Screen; /* set up the screen objects */
+
+   call Get_Enable(Get.Ertyp);
+   call Get_Enable(Get.Program.Exit);
+   call Get_Enable(Get.New.Timbre.Info);
+   call Get_Enable(Get.Prm.Info);
+
+   Exit.My.Screen  =0;                  /* init global vars */
+   Goto.This.Screen=0;
+
+   call Update.Real.Time.Maps;          /* keep rtp up to date */
+   call Get.First.Screen.Event;         /* get the first event to handle */
+
+   do while Exit.My.Screen = 0;
+
+      if Screen.Event.Group = 0 then do;
+         if Screen.Event.Code = Get.Program.Exit
+         then Exit.My.Screen = 1;  /* process exit command */
+
+         else if Screen.Event.Code = Get.Ertyp then do;
+            call Handle.System.Error.Codes(Screen.Event.Info);
+         end;
+
+         else if Screen.Event.Code = Get.New.Timbre.Info then do;
+            if (Screen.Event.Info&5)<>0 then do; /* new timbre/new timbre name */
+               call PRINT.CURRENT.TIMBRE.NAME; 
+               call Update.Whole.Display;
+            end;
+            call Update.Real.Time.Maps; /* force our map to be active again */
+         end;
+
+         else if Screen.Event.Code = Get.Prm.Info then do;
+            if (Screen.Event.Info&16)<>0 then do; /* new parameter info */
+               call Update.Whole.Display;
+               call Update.Real.Time.Maps; /* force our map to be active again */
+            end;
+         end;
+
+         call Get.Next.Map.Event;
+      end;
+
+      else if Screen.Event.Group = Plot.Group
+      then call Get.Plot.Event;
+
+      else if Screen.Event.Group = Control.Group
+      then call Get.Control.Event;
+
+      else call Get.Next.Map.Event;
+   end;
+
+   call Get_Disable(Get.Ertyp);
+   call Get_Disable(Get.Program.Exit);
+   call Get_Disable(Get.New.Timbre.Info);
+   call Get_Disable(Get.Prm.Info);
+
+   call Update.Real.Time.Maps;      /* keep rtp up to date    */
+   call Set.Screen.Animate(1);      /* turn animation back on */
+
+   return 0;
+
+end KEYBOARD.MAPPING.SCREEN;
+
+Init.Mapping.Stuff: proc swapable;
+   theMap    = #First.TTime.Map+3;
+   theDMode  = 1; /* Log scale */
+   theFilter = 10;
+end Init.Mapping.Stuff;
+
+call Init.Mapping.Stuff;
+
+END MAPSMOD;

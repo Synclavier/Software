@@ -1,0 +1,1009 @@
+/* :SYNSOU:AUDMOD:AUD-PMEN  $TITLE  Panel Menu Routines  */
+
+/*
+Modifications:
+2014/09/08 - CJ  - Modified COMPUTE.TIME.DISPLAY.SCROLLING.BOUNDARIES for 50-msec updates.
+1998/07/27 - TY  - Rigged COMPUTE.TIME.DISPLAY.SCROLLING.BOUNDARIES to work when using a click track.
+1991/08/14 - cj  - Added UDIO/DDSYN stuff
+1990/07/10 - PF  - Fix big time display to work with Meter Map
+1989/05/02 - TSS - Merged changes for Optical disk to DTD transfer project
+1988/12/20 - cj  - different use of DTD.XFER.MODE for multi-track DDT
+                 - Digital Xfer Mode Selection
+1988/11/11 - LSS - changed 'SEQ EDIT' to 'EVENTS'
+1988/10/31 - cj  - changed 'BACKUP' to 'CUE STOR'
+1988/11/16 - tss - changes to support .SDEF-7 file for Defaults and Panel Layout Memories
+1988/10/03 - cj  - used Beat.Number for time display when using live click track
+1988/08/16 - cj  - moved call to close seq dialog to close.sequencer.panel
+                 - Used cursor.end, cursor.begin differently to provide
+                   Sequence panel scrolling
+1988/08/08 - cj  - Removed Force.Screen.Update - was causing double
+                   updates.  Is no longer needed due to improvements
+                   in Get.Next.AEE.Screen.Event.
+1988/08/04 - cj  - fixed calls to SMPTE.To.Msec to correctly handle
+                   display format being different from in-coming
+                   smpte format.  Show big time display with
+                   offset dialed in.
+1988/07/28 - SGS - Split into AUD-PMEN and AUD-PMN1.
+1988/07/27 - SGS - Added default buttons.
+1988/06/15 - CJ  - added dig xfer on/off buttons.  fixed pmgr bug.
+1988/05/25 - MWH - Make SMPTE true 24 hours; add take button for offset
+1988/05/20 - TSS - Added code to support Mac II
+1988/05/06 - TSS - Moved display notices & corner object to 24th line for termulator
+*/
+
+dcl Panel.Menu.Group       fixed public;
+dcl Panel.Bits             fixed public;  /* bits corresponding to open panels/highlighted cells of PANEL SELECTION MENU   */
+dcl Panel.Menu.Mouse.Hole  fixed public;
+dcl Panel.Menu.Table       fixed public;
+dcl Panel.Menu.User.Id     fixed;         /* id of first user macro STORE button */
+
+dcl Raw.Screen.Id          fixed public;
+
+dcl Big.Time.Begin(1)      fixed public;  /* cursor begin and end times */
+dcl Big.Time.End  (1)      fixed public;  /* for big time scrolling     */
+
+dcl Big.Time.Display.Mode  fixed public;
+dcl Big.Time.Mode.Table    fixed;
+dcl SMPTE.On.Off.Buttons   fixed public;
+dcl SMPTE.Offset.Id        fixed;
+dcl Dig.Xfer.Label         fixed;
+dcl Dig.On.Off.Table       fixed public;  /* id of digital off/in/out/bounce table  */
+dcl Defaults.Label         fixed;
+dcl Defaults.Table         fixed public;  /* id of defaults read/write table  */
+
+dcl Big.Time.Row           lit '0';       /* row and col position of the GIANT time display  */
+dcl Big.Time.Col           lit '2';
+
+dcl Lod.Version.Needed     lit '5';       /* id code of software needed */
+
+SET.PANEL.MENU.HIGHLIGHT:proc (panel,highlight) public swapable;
+   dcl panel               fixed;
+   dcl highlight           fixed;   /* 0=OFF, 1=ON */
+   dcl Panel.To.Cell.Map   data (0,1,2,3,6,5,7,-1,8,4,9,-1,-1,-1,-1,-1);
+   dcl I                   fixed;
+
+   i=Bits(Panel.To.Cell.Map(Panel));
+
+   Panel.Bits=Panel.Bits & (Not I);
+
+   if highlight<>0 then Panel.Bits=Panel.Bits|I;
+
+   call Highlight.Graphics.Button.Table(Panel.Menu.Table,Panel.Bits,2,0);
+
+end SET.PANEL.MENU.HIGHLIGHT;
+
+OPEN.PANEL: proc (Panel.Id,Size) public swapable;
+   dcl (Panel.Id,Size) fixed;
+   dcl Requires.DTD    lit '"000637"'; /* bits for panels which need DTD to work */
+
+   if ((DTD.MAX.SECS <> 0) & (LOD.VERSION >= Lod.Version.Needed))
+   or (simulate_dtd)
+   or ((Requires.DTD&Bits(Panel.Id))=0)   /* panel doesn't really need DTD to work  */
+   then do;                /* up and running with right version   */
+      do case Panel.Id;
+         do;
+            if Size=(-1) then Size=Project.Manager.User.Size;
+            call Open.Project.Manager.Panel(Size);
+         end;
+         call Open.Shuttle.Panel;
+         call Open.Cue.Panel;
+         call Open.Cue.Menu.Panel(Size);
+         call Open.Record.Panel;
+         do;
+            if Size=(-1) then Size=Users.Seq.Size;
+            call Open.Sequencer.Panel(Size);
+         end;
+         call Open.Sync.Panel;
+         ;  /* DISABLED FOR NOW call Open.Routing.Panel; */
+         call Open.Storage.Panel;
+         call Open.Motion.Panel;
+         do;
+            call Open.Optical.Panel(Size);
+         end;
+      end;
+   end;
+   else do; /* some problem with DTD system  */
+      if      DTD.MAX.SECS = 0 then call No.Direct.To.Disk;
+      else if LOD.VERSION  < Lod.Version.Needed then call Display.Notice(NT#DTDVersionError,ATTR#Normal,NulStr,0,0,0);
+   end;
+
+end OPEN.PANEL;
+
+CLOSE.PANEL: proc (Panel.Id) public swapable;
+   dcl Panel.Id fixed;
+
+   if GID(Edit.Dialog.Is.Open)
+   then call Close.Edit.Command.Dialog;
+
+   do case Panel.Id;
+      call Close.Project.Manager.Panel;
+      call Close.Shuttle.Panel;
+      call Close.Cue.Panel;
+      call Close.Cue.Menu.Panel;
+      call Close.Record.Panel;
+      call Close.Sequencer.Panel;
+      call Close.Sync.Panel;
+      ;  /* DISABLED FOR NOW call Close.Routing.Panel;   */
+      call Close.Storage.Panel;
+      call Close.Motion.Panel;
+      call Close.Optical.Panel;
+   end;
+
+end CLOSE.PANEL;
+
+TOGGLE.PANEL.STATE: proc (Panel.Id) swapable;
+   dcl Panel.Id fixed;
+   dcl Panel.To.Cell.Map data (0,1,2,3,6,5,7,-1,8,4,9,-1,-1,-1,-1,-1);
+
+   if (Panel.Bits&Bits(Panel.To.Cell.Map(Panel.Id)))=0
+   then call Open.Panel (Panel.Id,-1);
+   else call Close.Panel(Panel.Id);
+
+end TOGGLE.PANEL.STATE;
+
+/* $SUBTITLE  Some useful Event Handling and Screen Update Routines  */
+
+PUSH.AND.RESET.GET.ENABLE.WORDS: proc swapable;
+   dcl i fixed;
+
+   if GID(Saved.Get.Enables)<>0 then return; /* already something pushed here */
+   write(mdi)=1;              /* set flag to denote - in use   */
+
+   do i=1 to num.of.get.events;
+      write(mdi)=Get.Item.Enabled(i);
+      Get.Item.Enabled(i)=0;
+   end;
+
+end PUSH.AND.RESET.GET.ENABLE.WORDS;
+
+POP.GET.ENABLE.WORDS: proc swapable;
+   dcl i fixed;
+
+   if GID(Saved.Get.Enables)=0 then return;  /* nothing to POP */
+   write(mdi)=0;              /* stack is now free */
+   do i=1 to num.of.get.events;
+      Get.Item.Enabled(i)=read(mdi);
+   end;
+
+end POP.GET.ENABLE.WORDS;
+
+FORCE.SCREEN.UPDATE: proc swapable;
+   dcl (stk) (num.of.get.events) fixed;
+   dcl i                         fixed;
+
+   do i=1 to num.of.get.events;
+      stk(i) = get.item.enabled(i);
+      get.item.enabled(i)=0;
+   end;
+
+   call GET_Enable(Get.Mouse.Button);
+   call Update.Screen;
+   call GET_Disable(Get.Mouse.Button);
+
+   do i=1 to num.of.get.events;
+      get.item.enabled(i)=stk(i);
+   end;
+end FORCE.SCREEN.UPDATE;
+
+/* $SUBTITLE  Routines to Draw and Manage the Giant Time Display  */
+
+/* Routine to compute scroll boundaries for a time display     */
+/* field:                                                      */
+
+COMPUTE.TIME.DISPLAY.SCROLLING.BOUNDARIES: proc(format, begin.time, end.time) PUBLIC swapable;
+   dcl format     fixed;   /* pass time format     */
+   dcl begin.time array;   /* returns begin time   */
+   dcl end.time   array;   /* and end time         */
+
+   dcl F#SEC   lit '0'; /* literals for the different */
+   dcl F#BEATS lit '1'; /* AEE.TIME.FORMAT values     */
+   dcl F#MEAS  lit '2';
+   dcl F#SMPTE lit '3';
+   dcl F#FEET  lit '4';
+   dcl F#MIN   lit '5';
+
+   dcl tmp(1)  fixed;
+   dcl new     fixed;
+
+   /* For beat & measure display, set scroll boundaries to  */
+   /* reflect last beat and next beat:                      */
+
+   if (format=F#Beats) or (format=F#Meas) then do;
+
+      if click.track.mode igt 3
+      then do;    /* USING CLICK TRACK */
+         // I think this block should work in all cases but I'm not terribly confident -TY 1998/07/27 
+         // NOTE: These variables are already in real time.
+         end.time(0) = SAMPLED.ACTUAL.PLAY.TIME.MSB+(NEXT.CLICK ilt SAMPLED.ACTUAL.PLAY.TIME.LSB);
+         end.time(1) = NEXT.CLICK;
+         begin.time(0) = end.time(0)-(NEXT.CLICK ilt EST.RATE);
+         begin.time(1) = NEXT.CLICK-EST.RATE;
+      end;
+      else do;    /* USING INTERNAL OR EXTERNAL CLICK */
+         /* first calculate sequence times of prior and next beats   */
+         call Map.Sequence.Time.To.Nearest.Beats(loc(addr(Sampled.Actual.Sequence.Time.Msb)),
+                                                 loc(addr(Prior.Beat.Msb)),
+                                                 loc(addr(Next.Beat.Msb)));
+
+         /* now map them into the real time return arrays   */
+         call Map.Sequence.Time.To.Real.Time(loc(addr(Prior.Beat.Msb)),begin.time);
+         call Map.Sequence.Time.To.Real.Time(loc(addr(Next.Beat.Msb)),end.time);
+      end;
+   end;
+
+   /* update once every 50 (was 500) msec for smpte & film footage   */
+
+   else if (format=F#SMPTE)
+   or      (format=F#Feet )
+   then do; /* F#SMPTE, F#Feet   */
+
+      load 50; mul samp.speed; mwait; div 1000; new = res;
+      if  (smpte.onoff<>0)
+      then do;                         /* scale for smpte speed   */
+         load new;                     /* new time                */
+         mul smpte.track.rate; mwait;  /* times tracking rate     */
+         div smpte.mode.rate;          /* divide by mode rate     */
+         new=res;                      /* round below             */
+      end;
+      if new<10 then new = 10;         /* limit in case speed = 0 */
+
+      call COPY32(loc(addr(Sampled.Actual.Play.Time.Msb)), tmp);
+      if move>=0 then do;
+         call COPY32(tmp, begin.time);
+         call ADD16(new,tmp);
+         call COPY32(tmp, end.time  );
+      end;
+      else do;
+         call COPY32(tmp, end.time  );
+         if com16(new,tmp) = lw#ilt
+         then call SUB16(new,tmp);
+         else call STR32(0,0,tmp);
+         call COPY32(tmp, begin.time);
+      end;
+   end;
+
+   /* update on second boundaries for minutes/seconds */
+
+   else do; /* F#Min or F#Sec */
+      call COPY32(loc(addr(Sampled.Actual.Play.Time.Msb)), tmp);
+
+      if com16(zero.time,tmp) = lw#ilt
+      then call SUB16(zero.time,tmp);
+      else call STR32(0,0,tmp);
+
+      /* If out past 65535 seconds, then turn off scrolling */
+
+      if tmp(0) IGE 1000 then do;
+         load 65535; mul 1000;
+         begin.time(0) = ures;
+         begin.time(1) =  res;
+         end.time  (0) = (-1);
+         end.time  (1) = (-1);
+      end;
+
+      else do;
+         load tmp(1); uload tmp(0); div 1000; mwait; uload 0; mul 1000;
+         tmp(0) = ures; tmp(1) = res;
+
+         call ADD16(zero.time,tmp);
+         call COPY32(tmp, begin.time);
+         call ADD16(1000,tmp);
+         call COPY32(tmp, end.time  );
+      end;
+   end;
+
+end COMPUTE.TIME.DISPLAY.SCROLLING.BOUNDARIES;
+
+UPDATE.PLAY.SCROLLING.BOUNDARIES: proc swapable;
+
+   /* If showing sequencer time,  set up smart scroll points:  */
+
+   if Big.Time.Display.Mode = BT#SEQ
+   then do;
+
+      call COMPUTE.TIME.DISPLAY.SCROLLING.BOUNDARIES(AEE.Time.Format,
+                                                     Big.Time.Begin,
+                                                     Big.Time.End);
+   end;
+
+   else do;
+      call STR32( 0,  0, Big.Time.Begin);
+      call STR32(-1, -1, Big.Time.End  );
+   end;
+
+   /* Set up scroll points and enable for play scrolling if needed:  */
+
+   call Set.Up.AEE.Play.Scroll.Points;
+
+end UPDATE.PLAY.SCROLLING.BOUNDARIES;
+
+REFRESH.BIG.TIME.DISPLAY: proc public swapable;
+   dcl (ptr,len,i) fixed;
+   dcl (ch1,ch2)   fixed;
+   dcl go          fixed;
+   dcl time    (4) fixed;
+   dcl new.str (8) fixed;
+   dcl old.str (8) fixed;
+   dcl out     (8) fixed;
+   dcl doff    (1) fixed;
+   dcl format      fixed;
+   dcl col.table   data (5,9,7,3,6,6); /* index by aee.time.format - gives base column for cpos()  */
+   dcl row         fixed;
+
+   dcl F#SEC   lit '0'; /* literals for the different */
+   dcl F#BEATS lit '1'; /* AEE.TIME.FORMAT values     */
+   dcl F#MEAS  lit '2';
+   dcl F#SMPTE lit '3';
+   dcl F#FEET  lit '4';
+   dcl F#MIN   lit '5';
+
+   /* Note: passed a REAL TIME # of milliseconds   */
+
+   MSEC.TO.STR: proc (msec,string);
+      dcl msec        array;  /* 32-bit msec */
+      dcl string      array;  /* output string  */
+      dcl buf     (5) fixed;  /* temp buffer */
+      dcl td          lit 'cf#time';   /* time displays for now   */
+
+      do case AEE.Time.Format;   /* branch according to current display format   */
+         do;   /* Seconds.Milliseconds */
+            call MSEC.TO.SEC(msec,td,buf);
+            call check.next.event;
+            call CONV.SEC.MSEC.TO.STR(buf,string,cf#default,cf#default);
+         end;
+         do;   /* Beats */
+            call Map.Real.Time.To.Sequence.Time(msec, msec);
+            if Click.Track.Mode igt 3
+            then do;
+               call Remap.With.Live.Click(msec(0), msec(1), 0, 0, 1);
+               msec(0) = Remapped.Time.Msb;
+               msec(1) = Remapped.Time.Lsb;
+               call MSEC.TO.BEATS(msec,td,1000,buf);
+            end;
+            else call Map.Sequence.Time.To.Beats(msec,buf);
+            call check.next.event;
+            call CONV.BEATS.TO.STR(buf,string,cf#default,cf#suppress);  /* Maxl is supressed to knock off measures   */
+         end;
+         do;   /* Measures:Beats */
+            call Map.Real.Time.To.Sequence.Time(msec, msec);
+            if Click.Track.Mode igt 3
+            then do;
+               call Remap.With.Live.Click(msec(0), msec(1), 0, 0, 1);
+               msec(0) = Remapped.Time.Msb;
+               msec(1) = Remapped.Time.Lsb;
+               call MSEC.TO.BEATS(msec,td,1000,buf);
+            end;
+            else call Map.Sequence.Time.To.Measures.Beats(msec,buf);
+            call check.next.event;
+            call CONV.MEASURES.BEATS.TO.STR(buf,Lookup.Beats.Per.Measure(msec),string,cf#default,cf#suppress);
+         end;
+         do;   /* SMPTE */
+            if Big.Time.Display.Mode = BT#SEQ
+            then call MSEC.TO.SMPTE(msec,td,S$Speed,S$SMode,S$SOffset,buf);
+            else call MSEC.TO.SMPTE(msec,td,S$Speed,S$SMode,S$AltSOffset,buf);
+            call check.next.event;
+            call CONV.SMPTE.TO.STR(buf,string,cf#default,cf#suppress);
+         end;
+         do;   /* Feet:Frames */
+            if Big.Time.Display.Mode = BT#SEQ
+            then call MSEC.TO.FEET(msec,td,S$Speed,S$FMode,S$FOffset,buf);
+            else call MSEC.TO.FEET(msec,td,S$Speed,S$FMode,S$AltFOffset,buf);
+            call check.next.event;
+            call CONV.FEET.TO.STR(buf,string,cf#default,cf#suppress);
+         end;
+         do;   /* Minutes:Seconds   */
+            call MSEC.TO.SEC(msec,td,buf);
+            call check.next.event;
+            call CONV.SEC.MSEC.TO.MIN.SEC.STR(buf,string,cf#default,cf#suppress);
+         end;
+      end;     /* of do case format */
+   end MSEC.TO.STR;
+
+   CLEAR.BIG.TIME.DISPLAY: proc;
+      dcl i fixed;
+      call cpos(Big.Time.Row,Big.Time.Col);
+      do i=0 to 13; call pc(SP); end;
+      call cpos(Big.Time.Row+1,Big.Time.Col);
+      do i=0 to 13; call pc(SP); end;
+   end CLEAR.BIG.TIME.DISPLAY;
+
+   call check.next.event;  /* keep system running  */
+
+   do case Big.Time.Display.Mode;
+
+      do;   /* BT#SMPTE - Showing current incoming SMPTE time  */
+
+         do i=0 to 4;   /* sample last SMPTE time latched for display   */
+            time(i)=core(addr(cur.hrs)+i);
+         end;
+
+         /* add in display offset to big time display */
+
+         call SMPTE.TO.SBITS(Time, S$Smode, Time);
+         write(mam) = BAS.PTR;      /* look up display offset stored with seq */
+         write(mal) = SEQ.DOFFSET;  /* get smpte display offset               */
+         doff(0)    = read(mdi);
+         doff(1)    = read(mdi);
+
+         if read(mdi) = 0                    /* if SEQ.DOFFDIS = 0, then display    */
+         then call ADD32(Time, Doff, Time);  /* offset is enabled.  add it in.      */
+
+         call SBITS.TO.SMPTE(Time, S$Smode, Time);
+
+         call check.next.event;  /* keep system running  */
+
+         call Conv.SMPTE.To.Str(Time,New.Str,cf#default,cf#suppress);
+
+         Format=F#SMPTE;
+      end;
+
+      do;   /* BT#SEQ - Showing current sequencer time   */
+
+         /* If sequencer is stopped, show precise position: */
+
+         if (play=0) then do;
+            disable;
+               time(0)=play.time.msb;
+               time(1)=play.time.lsb;
+            enable;
+         end;
+
+         /* else if playing forward,  show the event time   */
+         /* we just passed (ie a beat boundary)             */
+
+         else if move>=0 then do;   /* play or fast forward */
+            if  (COM32(loc(addr(Sampled.Actual.Play.Time.Msb)), Big.Time.End) >= lw#IEQ)
+            then call COPY32(Big.Time.End, time);
+            else call COPY32(loc(addr(Sampled.Actual.Play.Time.Msb)), time);
+         end;
+
+         /* for rewind - show beginning boundary we just passed   */
+
+         else do;                /* Rewind   */
+            call COPY32(Big.Time.Begin, time);
+         end;
+
+         call Update.Play.Scrolling.Boundaries; /* compute new big.time.begin and big.time.end  */
+         call Msec.To.Str(time,new.str);        /* convert to string */
+
+         Format=AEE.Time.Format;
+      end;
+      do;   /* BT#DTD - Showing current DTD disk addr/time  */
+         Time(0)=Cur.DTD.MS.Msb; /* sample current DTD play time (usually relative to current mapping)   */
+         Time(1)=Cur.DTD.MS.Lsb;
+
+         /* adjust to show time in curr proj */
+
+         call ADD32(Time, Cue.Time.Display.Offset, Time);
+         if Time(0) < 0 then call STR32(0,zero.time,Time);
+         else if COM16(zero.time, Time) = lw#igt
+         then call STR32(0,zero.time,Time);
+
+         call Msec.To.Str(Time,new.str);  /* convert to string */
+
+         Format=AEE.Time.Format;
+      end;
+   end;
+
+   if GID(Big.Time.Format)<>Format then do;
+      write(md)=Format;
+      call Clear.Big.Time.Display;
+   end;
+
+   call check.next.event;
+
+   call GID(Big.Time.String);    /* set up MAM/MAL ptr to start of currently displayed string   */
+   do i=0 to shr(read(md)+1,1);  /* copy old str into buffer   */
+      old.str(i)=read(mdi);
+   end;
+
+   call Save.Cursor;
+   call Set.Term.Attr(ATTR#Normal|ATTR#AltIntensity);
+
+   do while row ilt 2;  /* need to print the string twice for DOUBLE size chars  */
+
+      /* The following algorithm assumes that      */
+      /* the new and the old strings will be the   */
+      /* same length except for the first time     */
+      /* through when the old string is empty.     */
+
+      if old.str(0)=0 then do;   /* don't have any string up yet  */
+         go=1;                   /* print entire new string */
+         call cpos(Big.Time.Row+row,Big.Time.Col+Col.Table(Format));
+      end;
+      else go=(-1);
+
+      do i=0 to new.str(0)-1;
+         ch2=shr(i,1)+1;
+         if (i&1)=0 then do;
+            ch1=old.str(ch2)&255;
+            ch2=new.str(ch2)&255;
+         end;
+         else do;
+            ch1=shr(old.str(ch2),8);
+            ch2=shr(new.str(ch2),8);
+         end;
+
+         if (go<0) and (ch1<>ch2) then do;   /* time to start printing new string   */
+            go=1;
+            call cpos(Big.Time.Row+row,Big.Time.Col+Col.Table(Format)+i);
+         end;
+
+         if go>0 then call pc(ch2);
+      end;
+
+      call check.next.event;
+
+      if go<0 then row=2;  /* strings are the same - bomb out  */
+      row=row+1;        /* step to 2nd row of display    */
+   end;
+
+   call Restore.Cursor;
+
+   call GID(Big.Time.String);
+   do i=0 to shr(new.str(0)+1,1);   /* update saved version of display  */
+      write(mdi)=new.str(i);
+   end;
+
+   call check.next.event;
+
+end REFRESH.BIG.TIME.DISPLAY;
+
+/* $SUBTITLE   */
+
+WRITE.SCREEN.LAYOUT.MACRO.DEF: proc (Mem#, Info) swapable;
+   dcl Mem#      fixed; /* ptr to macro block (0-3)   */
+   dcl Info      array; /*  0 -  7 words: panel info  */
+                        /*  8 - 11 words: XPL name    */
+                        /* 12 - 43 words: globals     */
+   dcl (Dev,Sec) fixed;
+   dcl (Ptr,I,J) fixed;
+
+   if (Defs.There=0) or (Mem# IGT 3) then do;
+      return;
+   end;
+
+   Dev=DefDev; Sec=DefSec+Info#AEEPanelMacros;  /* compute ptr to AEE screen layout macro table */
+   if Sec ILT Info#AEEPanelMacros then Dev=Dev+1;
+
+   call Readdata(Dev,Sec,Misc.Buf,256);   /* read the whole sector      */
+
+   J = Mem# * D#MacroPanelStride;         /* compute base of panel/name */
+
+   do I=0 to D#MacroPanelStride-1;        /* copy panel list in place   */
+      Misc.Buf(J + I)=Info(I);
+   end;
+
+   J = D#MacroGlobalBase + (Mem# *  D#MacroGlobalStride);
+
+   do I=0 to D#MacroGlobalStride-1;
+      Misc.Buf(J + I)=Info(D#MacroGlobals + I);
+   end;
+
+   call Writedata(Dev,Sec,Misc.Buf,256);  /* write the sector back out  */
+
+end WRITE.SCREEN.LAYOUT.MACRO.DEF;
+
+READ.SCREEN.LAYOUT.MACRO.DEFS: proc (Mem#, Buf) swapable;
+   dcl Mem#       fixed;   /* which macro to read  */
+   dcl Buf        array;   /* output buffer  */
+   dcl (Dev,Sec)  fixed;
+   dcl (I,J)      fixed;
+
+   if Defs.There<>0 then do;
+      Dev=DefDev; Sec=DefSec+Info#AEEPanelMacros;  /* compute ptr to AEE screen layout macro table */
+      if Sec ILT Info#AEEPanelMacros then Dev=Dev+1;
+
+      call Readdata(Dev,Sec,Misc.Buf,256);   /* read the whole sector   */
+
+      J = Mem# * D#MacroPanelStride;         /* compute base of panel/name */
+
+      do I=0 to D#MacroGlobals-1;            /* copy panel list in place   */
+         Buf(I) = Misc.Buf(J+I);
+      end;
+
+      J = D#MacroGlobalBase + (Mem# *  D#MacroGlobalStride);
+
+      do I=0 to D#MacroGlobalStride-1;
+         Buf(D#MacroGlobals + I) = Misc.Buf(J + I);
+      end;
+   end;
+   else do; /* zero out array */
+      write("313")=Addr(Buf(0));
+      do I= 0 to D#MacroSize-1;
+         write("373")=0;
+      end;
+   end;
+
+   J=0;
+   do I=0 to D#MacroSize-1;
+      if Buf(I)<>0 then J=1;  /* assume we have a layout defined here   */
+   end;
+
+   if J=0 then do;   /* need to set up default macro  */
+      do case Mem#;
+         do;   /* MEMORY #0: Recording Layout - Project Manager + Record Panel   */
+            I=Lines.In.Project.Manager.Panel;
+            Buf(0)=shl(0,10)|shl(    2,5)|I; /* Project Manager   */
+            Buf(1)=shl(4,10)|shl(  I+2,5)|5; /* Record  Panel     */
+            Buf(2)=shl(2,10)|shl(5+I+2,5)|5; /* Cue Editor Panel  */
+            call Copy.String('USER 1',Loc(Addr(Buf(D#MacroName))));
+         end;
+         do;   /* MEMORY #1: Cue Editing/Sequencing Layout - Shuttle Controller, Cue Edit, and Sequencer Panels   */
+            Buf(0)=shl(1,10)|shl( 2,5)|10;   /* Shuttle Editor    */
+            Buf(2)=shl(3,10)|shl(12,5)|10;   /* Cue Directory     */
+            call Copy.String('USER 2',Loc(Addr(Buf(D#MacroName))));
+         end;
+         do;   /* MEMORY #2: Sequencing Layout - Cue Directory and Sequencer Panels */
+            Buf(0)=shl(3,10)|shl( 2,5)|10;   /* Cue Directory     */
+            Buf(1)=shl(5,10)|shl(12,5)|11;   /* Sequencer Panel   */
+            call Copy.String('USER 3',Loc(Addr(Buf(D#MacroName))));
+         end;
+         do;   /* MEMORY #3: Cue Editing Layout - Shuttle Controller, Cue Editor, and Cue Directory Panels  */
+            Buf(0)=shl(1,10)|shl( 2,5)|10;   /* Shuttle Editor    */
+            Buf(2)=shl(5,10)|shl(12,5)|11;   /* Sequencer Panel   */
+            call Copy.String('USER 4',Loc(Addr(Buf(D#MacroName))));
+         end;
+      end;
+   end;
+end READ.SCREEN.LAYOUT.MACRO.DEFS;
+
+SET.SCREEN.LAYOUT: proc (Layout) swapable;
+   dcl Layout          array; /* list of panels to display (same format as AEE.Screen.Layout)   */
+   dcl found           fixed;
+   dcl status          fixed;
+   dcl (more,next,row) fixed;
+   dcl (i,j)           fixed;
+
+   dcl (new.seq.tracks, new.note.contents, new.name.length) fixed;
+
+   dcl Seq.Tracks            fixed EXTERNAL;       /* access seq panel settings directly...  */
+   dcl Display.Note.Contents fixed EXTERNAL;
+   dcl Display.Name.Length   fixed EXTERNAL;
+
+   /* first look through panels and close all that */
+   /* are either not wanted or are in the wrong spot  */
+   /* or that contain the wrong contents              */
+
+   if (Layout(D#MacroSeqTracks) != 0)              /* look up Seq.Tracks setting             */
+      new.seq.tracks = Layout(D#MacroSeqTracks);   /* if one exists; else preserve           */
+   else                                            /* current setting                        */
+      new.seq.tracks = Seq.Tracks;
+
+   if (Layout(D#MacroSeqContents) != 0)            /* etc.                                   */
+      new.note.contents = Layout(D#MacroSeqContents);
+   else
+      new.note.contents = Display.Note.Contents;
+
+   if (Layout(D#MacroSeqLength) != 0)              /* etc.                                   */
+      new.name.length = Layout(D#MacroSeqLength);
+   else
+      new.name.length = Display.Name.Length;
+
+
+   do i=0 to 7;               /* loop through existing panels  */
+      call GID(AEE.Screen.Layout+i);   /* set up MAM & MAL ptrs   */
+
+      if (read(md)&"37")<>0 then do;   /* here is an open panel   */
+         found=-1;
+         do j=0 to 7;         /* see if it is in correct spot already   */
+            if (Layout(j) == read(md))
+            {
+               if (((shr(Layout(j),10) & "17") != 5)              /* if not seq panel, or content  */
+               ||  (new.seq.tracks    == Seq.Tracks               /* descriptor match, then        */
+               &&   new.note.contents == Display.Note.Contents    /* found a matching panel        */
+               &&   new.name.length   == Display.Name.Length))    /* with the right contents       */
+                  found=J; /* found a matching panel  */
+            }
+         end;
+
+         if found=(-1) then do;           /* no match found, close existing panel   */
+            j=shr(read(md),10)&"17";      /* id of panel to close */
+            call Close.Panel(j);
+         end;
+         else Status=Status|Bits(Found);  /* otherwise panel is already displayed correctly  */
+      end;
+   end;
+
+   /* now loop through panels left to open,  */
+   /* and open them from top to bottom       */
+
+   more=1;
+   do while more<>0;          /* loop until all desired panels are opened  */
+      more=0; row=100;
+
+      do i=0 to 7;   /* look for next panel to reopen */
+         if (Status&Bits(I))=0 then do;      /* have not finished with this word yet   */
+            if (Layout(i)&"37")<>0 then do;  /* # of lines<>0, represents a real panel */
+               more=more+1;                  /* advance # of panels left to open */
+               j=shr(Layout(i),5)&"37";      /* extract panel position  */
+               if j<row then do;             /* top most of remaining panels, so far   */
+                  next=i;                    /* save index  */
+                  row =j;                    /* and its starting row */
+               end;
+            end;
+            else Status=Status|Bits(I);      /* done with panel word, turn on bit   */
+         end;
+      end;
+
+      if more<>0 then do;                    /* have determined next panel to open  */
+         more=more-1;                        /* one less panel left to open   */
+
+         status=status|Bits(next);           /* almost done with panel info   */
+         next=Layout(next);                  /* get panel info word  */
+
+         I=next&"37";                        /* # of lines in panel  */
+         next=shr(next,10)&"17";             /* extract panel id #   */
+
+         if (next == 5)                      /* if openening seq panel, make sure      */
+         {                                   /* content descriptors are correct        */
+            Seq.Tracks            = new.seq.tracks;
+            Display.Note.Contents = new.note.contents;
+            Display.Name.Length   = new.name.length;
+         }
+
+         call Open.Panel(Next,I);            /* open the panel */
+      end;
+   end;
+
+end SET.SCREEN.LAYOUT;
+
+SET.USER.SCREEN.LAYOUT: proc (UserMem#) swapable;
+   dcl UserMem# fixed;  /* which screen layout memory to recall   */
+   dcl Layout (D#MacroSize) fixed;
+
+   if (Panel.Bits&Bits(UserMem#+12))=0 /* user wants to erase current screen  */
+   then UserMem#=(-1);                 /* cause screen to get cleared         */
+
+   if UserMem# ilt 4 then do;
+      call Read.Screen.Layout.Macro.Defs(UserMem#, Layout);
+   end;
+   /* else LAYOUT() will be all zeroes, and will cause screen to be erased */
+
+   call Set.Screen.Layout(Layout);  /* puts desired panels up (or close all panels) */
+
+end SET.USER.SCREEN.LAYOUT;
+
+/* $SUBTITLE   */
+
+DEFINE.PANEL.MENU.PANEL: proc swapable;
+   dcl (FirstId,Id,I)    fixed;
+   dcl Lines (64)        fixed;
+   dcl Smpte.Label       fixed;
+   dcl (ulx,uly,lrx,lry) fixed;
+
+   Deposit.Button.Table: proc (Id,Row,Col,Size,Str1,Str2);
+      dcl Id               fixed;
+      dcl (Row,Col,Size)   fixed;
+      dcl (Str1,Str2)      array;
+      dcl (Buf1,Buf2) (10) fixed;
+
+      call Copy.String(Str1,Buf1);
+      call Copy.String(Str2,Buf2);
+
+      call Deposit.Graphics.Button.Table.Label(Id,Row,Col,Size,Buf1,Buf2);
+   end Deposit.Button.Table;
+
+   dcl x1 lit '(-180)'; /* left x-coordinate base for DISPLAY mode table   */
+   dcl x2 lit '400';    /* left x-coordinate base for GIANT time window    */
+   dcl x3 lit '3250';   /* left x-coordinate base for PANEL MENU table     */
+   dcl x4 lit '6250';   /* left x-coordinate base for DEFAULTS table       */
+
+   dcl y1 lit '250';    /* top  y-coordinate for DISPLAY mode table & GIANT time window   */
+   dcl y3 lit '180';    /* top  y-coordinate for PANEL MENU table          */
+
+   dcl w1 lit '540';    /* x-axis width of DISPLAY mode table              */
+   dcl w2 lit '2800';   /* x-axis width of GIANT time window               */
+   dcl w3 lit '4800';   /* x-axis width of PANEL MENU table                */
+   dcl w4 lit '1800';   /* x-axis width of DEFAULTS table                  */
+
+   call Set.Auto.Allocation.Id(Panel.Menu.Alloc);  /* remaining objects in Panel.Menu.Group  */
+
+   call Set.Default.Action(O#ACT.Middle.Press);
+   call Set.Default.Attr(0,ATTR#Normal);
+   call Set.Default.Attr(1,ATTR#Normal|ATTR#AltIntensity|ATTR#Reverse);
+
+   /* NOTE: The following object is used to catch all screen events  */
+   /*       when the user has set the system in the mode to change   */
+   /*       cue in/out & edit in/out times with the trackball/mouse  */
+   /*       without having to click on the icons. While in this      */
+   /*       mode, most other screen functions are disabled.          */
+   /*       Notice that object is disabled at all times unless       */
+   /*       LOCKED.ITEM gets set to some non-negative value.         */
+
+   Raw.Screen.Id = Define.Graphics.Region (s#aa,0,screen.height,screen.width,0);
+   call Set.Object.Mouse.Access(Raw.Screen.Id,O#ACT.Left.Press|O#ACT.Middle.Press|O#ACT.Right.Press);
+   Locked.Item = (-1);  /* reset every time screen starts up to be safe */
+
+   Panel.Menu.Mouse.Hole = Define.Mouse.Hole.Icon(s#aa,8100,100); /* exit screen icon  */
+   FirstId = Panel.Menu.Mouse.Hole;
+
+   write("313")=addr(misc.buf(0));
+   mr13i=O#ICON.MoveTo; mr13i=x1;    mr13i=0;   /* box around time mode table */
+   mr13i=O#ICON.Plot;   mr13i=x1;    mr13i=y1;
+   mr13i=O#ICON.Plot;   mr13i=x1+w1; mr13i=y1;
+   mr13i=O#ICON.Plot;   mr13i=x1+w1; mr13i=0;
+   mr13i=O#ICON.Plot;   mr13i=x1;    mr13i=0;
+
+   mr13i=O#ICON.MoveTo;  mr13i=x2;      mr13i=y1;  /* box around Big Time  */
+   mr13i=O#ICON.Plot;    mr13i=x2+w2;   mr13i=y1;  /* and the SMPTE offset */
+   mr13i=O#ICON.Plot;    mr13i=x2+w2;   mr13i=0;
+   mr13i=O#ICON.Plot;    mr13i=x2;      mr13i=0;
+   mr13i=O#ICON.Plot;    mr13i=x2;      mr13i=y1;
+
+   /* horizontal line below smpte label/on/off/offset:   */
+
+   mr13i=O#ICON.Connect; mr13i=x2;      mr13i=+196; mr13i=x2+w2;   mr13i=+196;
+
+   /* Vertical lines separating smpte labbel on/off/offset: */
+
+   mr13i=O#ICON.Connect; mr13i=x2+466;  mr13i=+196; mr13i=x2+466;  mr13i=y1;
+   mr13i=O#ICON.Connect; mr13i=x2+483;  mr13i=+196; mr13i=x2+483;  mr13i=y1;
+   mr13i=O#ICON.Connect; mr13i=x2+949;  mr13i=+196; mr13i=x2+949;  mr13i=y1;
+   mr13i=O#ICON.Connect; mr13i=x2+966;  mr13i=+196; mr13i=x2+966;  mr13i=y1;
+   mr13i=O#ICON.Connect; mr13i=x2+1699; mr13i=+196; mr13i=x2+1699; mr13i=y1;
+   mr13i=O#ICON.Connect; mr13i=x2+1716; mr13i=+196; mr13i=x2+1716; mr13i=y1;
+
+   /* horizontal line above digital transfer items:   */
+
+   mr13i=O#ICON.Connect; mr13i=x2;      mr13i=+ 52; mr13i=x2+w2;   mr13i=+ 52;
+
+   /* vertical line between digital transfer label and off/in/out/bounce   */
+
+   mr13i=O#ICON.Connect; mr13i=x2+800;  mr13i=+ 52; mr13i=x2+800;  mr13i=0;
+
+   mr13i=O#ICON.MoveTo; mr13i=x3;    mr13i=y3;  /* box around the panel menu  */
+   mr13i=O#ICON.Plot;   mr13i=x3+w3; mr13i=y3;
+   mr13i=O#ICON.Plot;   mr13i=x3+w3; mr13i=0;
+   mr13i=O#ICON.Plot;   mr13i=x3;    mr13i=0;
+   mr13i=O#ICON.Plot;   mr13i=x3;    mr13i=y3;
+
+   /* box around defaults label and read/write  */
+   mr13i=O#ICON.MoveTo;  mr13i=x4;      mr13i=y1;
+   mr13i=O#ICON.Plot;    mr13i=x4+w4;   mr13i=y1;
+   mr13i=O#ICON.Plot;    mr13i=x4+w4;   mr13i=+196;
+   mr13i=O#ICON.Plot;    mr13i=x4;      mr13i=+196;
+   mr13i=O#ICON.Plot;    mr13i=x4;      mr13i=y1;
+   /* vertical lines between label and read/write  */
+   mr13i=O#ICON.Connect; mr13i=x4+675;  mr13i=+196; mr13i=x4+675;  mr13i=y1;
+   mr13i=O#ICON.Connect; mr13i=x4+692;  mr13i=+196; mr13i=x4+692;  mr13i=y1;
+
+   mr13i=O#ICON.End;
+
+   call Define.Graphics.Icon(s#aa,0,100,0,misc.buf);
+
+   Big.Time.Mode.Table=Define.Graphics.Button.Table(s#aa,x1,-150,x1+w1,+100,1,3,O#GBTAB.Divide);
+
+   SMPTE.Label         =Define.Graphics.Button.Table(s#aa,x2+33,-150,x2+466,-95,1,1,0);
+   call Set.Object.Mouse.Access(SMPTE.Label,0);
+   SMPTE.On.Off.Buttons=Define.Graphics.Button.Table(s#aa,x2+483,-150,x2+949,-95,2,1,O#GBTAB.Divide);
+   SMPTE.Offset.Id     =Define.Graphics.Button.Table(s#aa,x2+966,-150,x2+1699,-95,1,1,0);
+
+   /* Define Digital Transfer Label and Digital Transfer Off/In/Out/Bounce */
+   /* switch:                                                              */
+
+   Dig.Xfer.Label = Define.Graphics.Button.Table
+                    (S#AA, x2, +48, x2+800, +100, 1, 1, 0);
+
+   Dig.On.Off.Table = Define.Graphics.Button.Table
+                      (S#AA, x2+800, +48, x2+w2, +100, 5, 1, 1);
+
+   /* Define Defaults Label and Read/Write table:  */
+   Defaults.Label = Define.Graphics.Button.Table
+                    (S#AA, x4+33, -150, x4+600, -95, 1, 1, 0);
+   call Set.Object.Mouse.Access(Defaults.Label,0);
+
+   Defaults.Table = Define.Graphics.Button.Table
+                    (S#AA, x4+650,-150, x4+w4-33,-95,2,1,O#GBTAB.Divide);
+
+   /* define take buttons for the user macro menu items  */
+   /* define before the PANEL MENU itself so that they   */
+   /* end up on top of the menu                          */
+
+   do i=0 to 3;
+      ulx=x3+w3*(i+4)/8; uly=50;
+      lrx=ulx+100;       lry=100;
+
+      Id=Define.Graphics.Button.Table(s#aa,ulx,uly,lrx,lry,1,1,0);
+      if i=0 then Panel.Menu.User.Id=Id;  /* only save the first one */
+   end;
+
+   Panel.Menu.Table=Define.Graphics.Button.Table(s#aa,x3,-80,x3+w3,+100,8,2,O#GBTAB.Divide);
+
+   if not termulator then do;
+      /* MESSAGE BOX AT 25TH LINE OF PERICOM SCREEN   */
+      call Define.Graphics.Box(S#AA,gpos.x(-10),gpos.y(2300),gpos.x(8010),gpos.y(2400),0);
+   end;
+
+   Corner.Label = Define.Label(S#AA,24-termulator,79,1,NulStr);   /* Dummy object   */
+
+   Panel.Menu.Group = Group.Objects(Panel.Menu.Group.Id,Panel.Menu.Alloc,Panel.Menu.Alloc+999,Get#Screen.Event);
+
+   call Select.New.Cur.Obj(Corner.Label,-1,-1);
+   call Activate.Object.Range(FirstId,Corner.Label);
+   call Update.Object.Range  (FirstId,Corner.Label);
+
+   do i=0 to 3;   /* fill in the user macro STORE buttons   */
+      call Highlight.Graphics.Button.Table(Panel.Menu.User.Id+I,1,1,0);
+   end;
+
+   /* now do all the initial deposits for the above items   */
+
+   Disable.Deposits=true;
+      call Deposit.Button.Table(Big.Time.Mode.Table,0,0,0,'SMPTE'   ,NulStr);
+      call Deposit.Button.Table(Big.Time.Mode.Table,1,0,0,'SEQUENCE',NulStr);
+      call Deposit.Button.Table(Big.Time.Mode.Table,2,0,0,'D-TO-D'  ,NulStr);
+
+      call Deposit.Button.Table(SMPTE.Label         ,0,0,1,'SMPTE:',NulStr);
+      call Deposit.Button.Table(SMPTE.On.Off.Buttons,0,0,1,'ON'    ,NulStr);
+      call Deposit.Button.Table(SMPTE.On.Off.Buttons,0,1,1,'OFF'   ,NulStr);
+      call Deposit.Button.Table(SMPTE.Offset.Id,     0,0,1,'SET OFFSET',NulStr);
+
+      call Deposit.Button.Table(Panel.Menu.Table,0,0,1,'PROJECTS',NulStr);
+      call Deposit.Button.Table(Panel.Menu.Table,0,1,1,'CUE EDIT',NulStr);
+      call Deposit.Button.Table(Panel.Menu.Table,0,2,1,'CUE TRIM',NulStr);
+      call Deposit.Button.Table(Panel.Menu.Table,0,3,1,'CUE DIR' ,NulStr);
+      call Deposit.Button.Table(Panel.Menu.Table,0,4,1,'MOTION'  ,NulStr);
+      call Deposit.Button.Table(Panel.Menu.Table,0,5,1,'EVENTS'  ,NulStr);
+      call Deposit.Button.Table(Panel.Menu.Table,0,6,1,'RECORD'  ,NulStr);
+      call Deposit.Button.Table(Panel.Menu.Table,0,7,1,'SYNC'    ,NulStr);
+      call Deposit.Button.Table(Panel.Menu.Table,1,0,1,'CUE STOR',NulStr);
+      call Deposit.Button.Table(Panel.Menu.Table,1,1,1,'OPT XFER',NulStr);
+
+      do i=0 to 3;
+         call Read.Screen.Layout.Macro.Defs(i, Lines);
+         call Deposit.Button.Table(Panel.Menu.Table,1,4+i,1,Loc(Addr(Lines(D#MacroName))),NulStr);
+      end;
+
+      call Deposit.Button.Table(Dig.Xfer.Label,0,0,0,'Digital Xfer:' ,NulStr);
+
+      call Deposit.Button.Table(Dig.On.Off.Table,0,0,1,'OFF',    NulStr);
+      call Deposit.Button.Table(Dig.On.Off.Table,0,1,1,'IN',     NulStr);
+      call Deposit.Button.Table(Dig.On.Off.Table,0,2,1,'OUT',    NulStr);
+      call Deposit.Button.Table(Dig.On.Off.Table,0,3,0,'BOUNCE', NulStr);
+      call Deposit.Button.Table(Dig.On.Off.Table,0,4,0,'DSP IN', NulStr);
+
+      call Deposit.Button.Table(Defaults.Label,0,0,1,'Defaults:', NulStr);
+
+      call Deposit.Button.Table(Defaults.Table,0,0,1,'READ',  NulStr);
+      call Deposit.Button.Table(Defaults.Table,0,1,1,'WRITE', NulStr);
+
+   Disable.Deposits=false;
+
+   call Update.Object.Range  (FirstId,Corner.Label);
+
+   /* highlight the correct ON/OFF button */
+   call Highlight.Graphics.Button.Table(SMPTE.On.Off.Buttons,Bits(SMPTE.OnOff=0),2,0);
+
+   /* highlight the correct dig xfer button: */
+   call Highlight.Graphics.Button.Table(Dig.On.Off.Table, DTD.Xfer.Mode, 2, 0);
+
+   /* send out terminal command to make top 2 lines   */
+   /* use DOUBLE SIZE characters in transparent mode  */
+   /* this is for the GIANT TIME DISPLAY              */
+
+   call cpos(BIG.TIME.ROW,BIG.TIME.COL);
+   call pc(esc); call pc(asc.sharp); call pc(asc.3); call pc(lf);
+   call pc(esc); call pc(asc.sharp); call pc(asc.4); 
+
+   Big.Time.Display.Mode=BT#SEQ; /* set and display initial giant time mode   */
+   call Highlight.Graphics.Button.Table(Big.Time.Mode.Table,Bits(Big.Time.Display.Mode),2,0);
+
+   /* call Update.Play.Scrolling.Boundaries at least  */
+   /* once so that our begin & and times are set      */
+   /* to be something useful.                         */
+
+   call UPDATE.PLAY.SCROLLING.BOUNDARIES;
+
+   call Refresh.Big.Time.Display;
+
+   call Set.Object.Arrow.Links(Corner.Label,ARR#Auto,ARR#Auto,ARR#Auto,ARR#Auto);
+end DEFINE.PANEL.MENU.PANEL;
+
+OPEN.PANEL.MENU.PANEL: proc public swapable;
+   dcl (sid,row,size) fixed;
+
+   if Allocate.Screen.Space(2,2,loc(addr(sid))) then do;
+      call Define.Panel.Menu.Panel;
+   end;
+end OPEN.PANEL.MENU.PANEL;

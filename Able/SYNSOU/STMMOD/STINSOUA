@@ -1,0 +1,538 @@
+/*	:SYNSOU:STMMOD:STINSOUA  $Title  Sample to Memory Input Handler and Mouse Mapping
+
+Modified:
+1999/10/15 - TY  - Added links to D-page and I-page in STM.SOUND.EDITOR.MOUSE.POS
+1999/10/12 - TY  - Added several commands for selecting the partial and selecting which soundfile in the current patch is displayed.
+1988/07/19 - LSS - further fix SOUND.FILE.SEARCH
+1988/07/07 - LSS - fixed SOUND.FILE.SEARCH for searching poly mem
+1988/04/14 - MWH - Add crossfades to EXTRACT
+1988/03/21 - LSS - added procedure SOUND.FILE.SEARCH for recall
+1988/02/12 - MWH - Improve crossfade handling
+1987/08/10 - MWH - Update all to support max 4 poly bins, 512mb/bin
+1987/02/18 - BSW - part of the STM input module
+*/
+
+change_partial_to: proc (partial) swapable;
+	dcl partial	fixed;	//	Will be passed 0 through 3
+	//
+	if (find.partial == partial)	return;	//	Nothing to do
+	if (tim.head.lookup(0,tim.synth.typ+partial) == TIM#POLY) {	//	if the new partial's synth type is a poly patch list timbre
+		write("313") = count.timbre.frames(partial);					//	then make sure we don't try to point past the last frame
+		if (TDS.LINE# ige read("313")) TDS.LINE# = read("313")-1;
+	}
+	call SELECT.PARTIAL(partial);	//	This executes NEW.TIMBRE.INFO = NEW.TIMBRE.INFO | 2;
+end change_partial_to;
+
+increment_partial: proc swapable;
+	dcl partial	fixed;
+	//
+	partial = find.partial+1;
+	if (partial == 4)	partial = 0;
+	if (tim.head.lookup(0,tim.synth.typ+partial) == TIM#POLY) {	//	if the new partial's synth type is a poly patch list timbre
+		write("313") = count.timbre.frames(partial);					//	then make sure we don't try to point past the last frame
+		if (TDS.LINE# ige read("313")) TDS.LINE# = read("313")-1;
+	}
+	call SELECT.PARTIAL(partial);	//	This executes NEW.TIMBRE.INFO = NEW.TIMBRE.INFO | 2;
+end increment_partial;
+
+decrement_partial: proc swapable;
+	dcl partial	fixed;
+	//
+	partial = find.partial-1;
+	if (partial == -1) partial = 3;
+	if (tim.head.lookup(0,tim.synth.typ+partial) == TIM#POLY) {	//	if the new partial's synth type is a poly patch list timbre
+		write("313") = count.timbre.frames(partial);					//	then make sure we don't try to point past the last frame
+		if (TDS.LINE# ige read("313")) TDS.LINE# = read("313")-1;
+	}
+	call SELECT.PARTIAL(partial);	//	This executes NEW.TIMBRE.INFO = NEW.TIMBRE.INFO | 2;
+end decrement_partial;
+
+increment_timbre_frame: proc swapable;
+	dcl partial	fixed;
+	//	Step up through patch list
+	partial = find.partial;															//	find first selected partial
+	if (tim.head.lookup(0,tim.synth.typ+partial) != TIM#POLY) return;	//	if its synth type is not a poly patch list timbre, then bail
+	if (TDS.LINE# ilt count.timbre.frames(partial)-1) TDS.LINE# = TDS.LINE#+1;	//	Increment TDS.LINE# if not at the last frame
+	UPDATE.SOUND.EDITOR.DISP();	//	Force a replot
+end increment_timbre_frame;
+
+decrement_timbre_frame: proc swapable;
+	dcl partial	fixed;
+	//	Step down through patch list
+	partial = find.partial;															//	find first selected partial
+	if (tim.head.lookup(0,tim.synth.typ+partial) != TIM#POLY) return;	//	if its synth type is not a poly patch list timbre, then bail
+	if (TDS.LINE# != 0) TDS.LINE# = TDS.LINE#-1;								//	Decrement TDS.LINE# if not at the first frame
+	UPDATE.SOUND.EDITOR.DISP();	//	Force a replot
+end decrement_timbre_frame;
+
+/*	$Subtitle Sample-To-Memory Sound Editor Input Handler	*/
+
+STM.SOUND.EDITOR.INPUT: proc(in.cmd,in.arg) public swapable;	/*	Sample-to-Memory Sound Editor character handler	*/
+	dcl (in.cmd,in.arg)	fixed;			/*	new input command and argument	*/
+	dcl keyboard.disable	fixed static;	/*	indicates that keyboard disabled while mouse buttons pressed	*/
+
+	if inc.stm=0 then return;				/*	if system is not configured for poly, get out!	*/
+
+	if err.displayed<>0 then do;
+		call REMOVE.ERR;		/*	remove any error	*/
+		call PRINT.CCAT;		/*	show current cat name	*/
+	end;
+
+	call LOOK.UP.SF.INFO;	/*	get good global info here	*/
+
+	do case in.cmd;
+
+		do;														/*	0: character input	*/
+			if keyboard.disable <> 0 then return;		/*	allow no keyboard action	*/
+																	/*	while mouse buttons are pressed	*/
+			/*	do not captialize characters if caption command	*/
+			if ((stm.cmd.line=0) or (stm.select.mode<>stm.display) or (stm.choice<>stm.cap))
+			and ((lower.a<=in.arg) and (in.arg<=lower.z)) then in.arg=in.arg-"40";	/*	make uppercase	*/
+
+			//	These commands remain in effect regardless of which command menu is current
+			if ((stm.cmd.line == false) || (stm.choice == stm.zoom)) {	//	if not on a command line, or if in zoom mode
+				if			(in.arg == a.space)	 increment_partial();		//	Step up through partials
+				else if	(in.arg == a.less)	 decrement_timbre_frame();	//	Step down through patch list
+				else if	(in.arg == a.greater) increment_timbre_frame();	//	Step up through patch list
+				else if	((in.arg ige a.1) &&
+							 (in.arg ile a.4) &&
+							 (stm.choice != stm.zoom))	change_partial_to(in.arg-a.1);	//	Select specified partial
+				else if	(in.arg ige asc.fkey1) then do case in.arg-asc.fkey1;	//	SPECIAL FUNCTION KEYS
+					decrement_timbre_frame();	//	CASE 0: F5
+					increment_timbre_frame();	//	CASE 1: F6
+					decrement_partial();			//	CASE 2: F7
+					increment_partial();			//	CASE 3: F8
+					/*
+					;									//	CASE 4: F9
+					;									//	CASE 5: F10
+					;									//	CASE 6: F11
+					;									//	CASE 7: F12
+					;									//	CASE 8: Shift-F5
+					;									//	CASE 9: Shift-F6
+					;									//	CASE10: Shift-F7
+					;									//	CASE11: Shift-F8
+					;									//	CASE12: Shift-F9
+					;									//	CASE13: Shift-F10
+					;									//	CASE14: Shift-F11
+					;									//	CASE15: Shift-F12
+					*/
+				end;
+			}
+
+			if ((in.arg=ESC)				  )
+			or ((in.arg=DEL)&(token(0)=0))
+			then do;
+				if (stm.cmd.line<>0) then do;				/*	if in a sub-screen	*/
+					if (STM.EDIT.MODE<>0) and (STM.ANCHOR.SET<>0) then do;	/*	if anchor set erase it	*/
+						call STM.SOUND.EDITOR.INPUT(8,0);
+						STM.ANCHOR.SET=0;
+					end;
+					call SED.COMMAND.ATTRIBUTE.DEPOSIT;	/*	then back to prompt	*/
+				end;
+				else if (in.arg=ESC)
+				then do;
+					EXIT.MY.SCREEN = 1;
+					return;
+				end;
+			end;
+
+			if stm.select.mode=stm.display				/*	if display mode	*/
+			then call STM_DISPLAY_INPUT(in.arg);
+			else if stm.select.mode=stm.modify			/*	if modify mode	*/
+			then call STM_MODIFY_INPUT(in.arg);
+			else if stm.select.mode=stm.store			/*	if store/recall mode	*/
+			then call STM_STORE_INPUT(in.arg);
+			else if stm.select.mode=stm.modify2			/*	if Modify II mode	*/
+			then call STM_MODIFY2_INPUT(in.arg);
+
+			if new.cursor<>0 then do;
+				call CHANGE.CURSOR.TIME;					/*	change cursor time	*/
+				call CHANGE.SIGNAL.LEVEL;					/*	change signal level of current sample	*/
+				new.cursor=0;
+			end;
+		end;	/*	character input	*/
+		;															/*	1: absolute select	*/
+		;															/*	2: scroll down	*/
+		;															/*	3: scroll up	*/
+		do;														/*	4: return to previous screen	*/
+			if mouse(button.result) = -2 then return;				/*	Don't allow press and holds	*/
+			if stm.cmd.line<>0											/*	if in a sub menu	*/
+			then call SED.COMMAND.ATTRIBUTE.DEPOSIT;				/*	then back to prompt	*/
+			else do;
+				EXIT.MY.SCREEN = 1;										/*	return to main menu	*/
+				new.poly.contents = new.poly.contents \ 1;
+			end;
+		end;
+
+		do;														/*	5: cursor on/off	*/
+			if sf.type = 1 then do;
+				call push.graphics.attributes;
+				if in.arg = 0 then do;									/*	turn cursor off	*/
+					call erase.graphics.cursors(stm.graphx,2);	/*	clear cursor	*/
+					keyboard.disable = 1;								/*	disable keyboard	*/
+				end;
+				else if in.arg = 1 then do;							/*	turn cursor on	*/
+					call COMPUTE_PIXEL_TIME(stm.graphx,some.time);
+					if compare_times(some.time,tot.time,3)>0
+					then stm.graphx=COMPUTE_PIXEL_NUMBER(tot.time);	/*	restrain graphics cursor to end of sound file	*/
+					call draw.graphics.cursors(stm.graphx,2);		/*	draw cursor	*/
+					call change.cursor.time;							/*	print them	*/
+					call change.signal.level;
+					keyboard.disable = 0;								/*	enable keyboard	*/
+				end;
+				call pop.graphics.attributes;
+			end;
+			else do;
+				if inc.mouse then mouse.cursor.type = 1;			/*	set back to crosshair	*/
+				call no.sound.file;										/*	disp error	*/
+			end;
+		end;
+
+		do;														/*	6: SET NEW STM CURSOR X POSITION	*/
+			stm.graphx = in.arg - left.rect.minx;
+			if stm.graphx < 0 then stm.graphx = 0;
+			if stm.graphx > display.width then stm.graphx = display.width;
+			call COMPUTE_PIXEL_TIME(stm.graphx,some.time);
+			if compare_times(some.time,tot.time,3)>0				/*	if point is greater than the end of the sound file	*/
+			then stm.graphx=COMPUTE_PIXEL_NUMBER(tot.time);		/*	restrain graphics cursor to end of sound file	*/
+		end;
+
+		do;	/*	7: SET LANDSCAPE PARAMETERS: USES GLOBALS LANDSCAPE.START AND LANDSCAPE.END	*/
+			call COMPUTE.NEW.LANDSCAPE(landscape.start-(landscape.left+1),landscape.end-(landscape.left+1),time.per.lpixel);
+			new.poly.contents = new.poly.contents \ 1;
+		end;
+
+		do;														/*	8: mouse editing	*/
+			if sf.type = 1 then do;			/*	if sound file available	*/
+				call push.graphics.attributes;
+				if in.arg=0 then do;			/*	if no more editing	*/
+					keyboard.disable = 0;	/*	enable keyboard	*/
+					vector_mode;
+					call line_type(1);		/*	erase the dotted line	*/
+					call draw.graphics.cursors(stm.anchorx,2);
+					vector_mode;
+					call line_type(0);
+					transparent_mode;
+				end;
+				else do;							/*	mark the edit point with dotted line	*/
+					vector_mode;
+					call line_type(1);		/*	draw a dotted line	*/
+					call draw.graphics.cursors(stm.anchorx,2);
+					vector_mode;
+					call line_type(0);
+					transparent_mode;
+					call COMPUTE_PIXEL_TIME(stm.anchorx,some.time);	/*	find the sample time of the anchor point	*/
+					tok.ptr=0;
+					token(0)=tok.ptr;
+					call CONVERT.SAMPLE.TIME.TO.STRING(some.time);	/*	put it in token	*/
+					call pbyte(token,tok.ptr,comma);						/*	separate times	*/
+					tok.ptr=tok.ptr+1;
+					token(0)=tok.ptr;
+					call POS.STM.ALPHA.CURSOR;
+				end;
+				call pop.graphics.attributes;
+			end;
+			else do;
+				if inc.mouse then mouse.cursor.type = 1;		/*	set back to crosshair	*/
+				call no.sound.file;			/*	disp error	*/
+			end;
+		end;										/*	of mouse editing	*/
+
+		do;														/*	9: Set mouse editing anchor position	*/
+			stm.anchorx=in.arg-left.rect.minx;					/*	map coordinate to sound display	*/
+			if stm.anchorx<0 then stm.anchorx=0;
+			call COMPUTE_PIXEL_TIME(stm.anchorx,some.time);	/*	find the sample time of the pixel	*/
+			if compare_times(some.time,tot.time,3)>0			/*	if really large restrain it to the end of the file	*/
+			then stm.anchorx=COMPUTE_PIXEL_NUMBER(tot.time);
+		end;
+
+		do;														/*	10: do STM edit	*/
+			call COMPUTE_PIXEL_TIME(stm.graphx,some.time);	/*	find the cusor time	*/
+			call CONVERT.SAMPLE.TIME.TO.STRING(some.time);
+			if stm.choice<>stm.fill
+			then call POS.STM.ALPHA.CURSOR;				/*	print it out	*/
+			call LOOK.UP.SF.INFO;
+			if ((stm.choice=stm.fill)
+			or  (stm.choice=stm.loop)
+			or  (stm.choice=stm.revloop)
+			or  (stm.choice=stm.extract)
+			or  (stm.choice=stm.delete)
+			or  (stm.choice=stm.cut)
+			or  (stm.choice=stm.copy))
+			then do;
+				call pbyte(token,tok.ptr,comma);			/*	separate times from file name*/
+				token(0)=token(0)+1;
+				tok.ptr=tok.ptr+1;
+				call POS.STM.ALPHA.CURSOR;					/*	print it out	*/
+			end;
+			else call SED.COMMAND.ATTRIBUTE.DEPOSIT;
+		end;
+	end;		/*	do case in.cmd	*/
+end STM.SOUND.EDITOR.INPUT;
+
+/*	$Subtitle Sound Editor Mouse Positioning Routine **/
+
+STM.SOUND.EDITOR.MOUSE.POS:  proc(x,y,repeat) public swapable;	/*	Sample-to-Memory Sound Editor Mouse Positioner	*/
+	/*	considers the following STM variables
+		stm.select.mode -> Display, Modify, or Store/Recall
+		stm.choice		 -> Command choice
+	*/
+	dcl (x,y)	fixed;	/*	mouse position in row/col coordinates	*/
+	dcl repeat	fixed;	/*	1-> if repeating; 0-> once for mouse playback or landscape adjust	*/
+
+	dcl select.box		 data	(18, 1,21,16);	/*	mode selection	*/
+	dcl choice.box		 data	(18,18,21,79);	/*	command choices	*/
+	dcl command.choice data	(18,29,43,56,69,79);
+	dcl stm.table		 data	(asc.a,asc.b,asc.c,asc.x,
+									 asc.d,asc.e,asc.f,asc.g,
+									 asc.h,asc.i,asc.j,asc.k,
+									 asc.l,asc.m,asc.n,asc.o,
+									 asc.p,asc.q,asc.r,asc.s,
+									 asc.t,asc.u,asc.v,asc.w);
+
+	if inc.stm=0 then return;							/*	if not configured for poly, don't bother	*/
+
+	if (mouse.hole(x,y)) and (mouse(button.result)=2) then do;	/*	if exit condition	*/
+		if (STM.EDIT.MODE<>0) and (STM.ANCHOR.SET<>0) then do;				/*	if we were in the middle of editing	*/
+			call STM.SOUND.EDITOR.INPUT(8,0);		/*	erase the anchor point	*/
+			STM.ANCHOR.SET=0;								/*	turn it off	*/
+		end;
+		call STM.SOUND.EDITOR.INPUT(in.rtps,0);	/*	return to previous screen	*/
+		return;
+	end;
+
+	if (err.displayed<>0) then do;
+		call REMOVE.ERR;				/*	remove any error	*/
+		call PRINT.CCAT;				/*	show current cat name	*/
+		call POS.STM.ALPHA.CURSOR;	/*	moves the cursor to command line setting location	*/
+	end;
+
+	if  ((x >= left.rect.minx) & (x <= left.rect.maxx))	/*	detect entry into	*/
+	&  (((y >= left.rect.miny) & (y <= left.rect.maxy))	/*	STM sound file		*/
+	or ((y >= right.rect.miny) & (y <= right.rect.maxy)))	/*	windows	*/
+	&  (last.event.info < 0)										/*	only mouse presses	*/
+	then do;
+		call PERFORM.MOUSE.PLAYBACK(repeat);	/*	repeat=1 -> continuous mouse playback; 0->only once	*/
+		return;
+	end;
+
+	if ((x >= landscape.left) & (x <= landscape.right))	/*	detect entry into		*/
+	&  ((y >= landscape.bot)  & (y <= landscape.top))		/*	landscape control		*/
+	&  (last.event.info < 0)										/*	only mouse presses	*/
+	then do;
+		call ADJUST.LANDSCAPE.DISPLAY(repeat);	/*	repeat=1 -> continous adjusting; 0-> only once	*/
+		return;
+	end;
+
+	if mouse(button.result) = -2 then return;
+
+	/*	convert the mouse pixel coordinates to screen coordinates	*/
+	x=CONVERT.MOUSE.X(x);	/*	0-79	*/
+	y=CONVERT.MOUSE.Y(y);	/*	0-23	*/
+	if stm.cmd.line <> 0 then do;							/*	if a command selection	*/
+		if (stm.select.mode=stm.store) and (stm.choice=stm.record) then do;	/*	if in record command	*/
+			if (y>=19) and (y<=20) and (x>=29) and (x<=72) then do;	/*	if within range of something significant	*/
+				if stm.record.choice>1
+				then call CHANGE.RECORD.MENU(stm.record.choice);
+				stm.last.record.choice=stm.record.choice;
+				y=y-19;
+				if (x>=29) and (x<=38) then do;			/*	if mode or trigger	*/
+					stm.record.choice=y;
+					call STM.SOUND.EDITOR.INPUT(in.chin,sp);
+					return;
+				end;
+				else if (x>=51) and (x<=55) then do;	/*	if rate or threshold	*/
+					stm.record.choice=2+y;
+				end;
+				else if (x>=68) and (x<=72) and (y=0) then do;	/*	if gain	*/
+					stm.record.choice=4;
+				end;
+				call POS.STM.ALPHA.CURSOR;					/*	position menu cursor	*/
+			end;
+		end;
+		if (stm.select.mode=stm.modify2) and (stm.choice=stm.tsm) then do;	/*	if in tsm command	*/
+			if (y>=18) and (y<=20) and (x>=18) and (x<=79) then do;	/*	if within range of something significant	*/
+				if tsm.option > 0
+				then call CHANGE.TSM.MENU(tsm.option);	/*	update field before processing mouse	*/
+				tsm.last.option=tsm.option;
+				if (x>=29) and (x<=33) and (y=18) then do;	/*	alg	*/
+					tsm.option = 0;
+					call STM.SOUND.EDITOR.INPUT(in.chin,sp);
+					return;
+				end;
+				else if (x>=54) and (x<=65) and (y=18) then do;
+					tsm.option=1;				/*	length	*/
+				end;
+				else if (x>=66) and (x<=78) and (y=18) then do;
+					tsm.option=2;				/*	ratio		*/
+				end;
+				else if (x>=32) and (x<=53) and (y=19) then do;
+					if tsm.max.option >= 3
+					then tsm.option=3;		/*	max cut/pitch	*/
+				end;
+				else if (x>=54) and (x<=56) and (y=19) then do;
+					if tsm.max.option >=4
+					then tsm.option=4;		/*	justification	*/
+				end;
+				call POS.STM.ALPHA.CURSOR;	/*	position menu cursor	*/
+			end;
+		end;
+		else if (token(0)=0) then do;	/*	if not in the middle of some command	*/
+			if (((x>=select.box(1)) and (x<=select.box(3))) and	/*	if within the limits of the select mode box	*/
+			((y>=select.box(0)) and (y<=select.box(2)))) then do;
+				stm.last.select.mode=stm.select.mode;	/*	save the last selection	*/
+				call ERASE.COMMAND.PROMPT(stm.choice);
+				if		  y=select.box(0)   then y=0;	/*	like pressing 'A'	*/
+				else if y=select.box(0)+1 then y=1;	/*	pressing 'B'		*/
+				else if y=select.box(0)+2 then y=2;	/*	pressing 'C'		*/
+				else y=3;									/*	simulate an 'X'	*/
+				stm.select.mode=y;						/*	map the new selection	*/
+				call DRAW.COMMAND.MENU;					/*	to the new mode	*/
+				token(0)=0; stm.cmd.line=0;			/*	get out of command	*/
+				call POS.STM.ALPHA.CURSOR;				/*	position menu cursor	*/
+			end;
+		end;
+		else return;
+	end;
+	else do;
+		if (((x>=select.box(1)) and (x<=select.box(3))) and	/*	if within the limits of the select mode box	*/
+		((y>=select.box(0)) and (y<=select.box(2)))) then do;
+			if		  y=select.box(0)   then y=0;	/*	like pressing 'A'	*/
+			else if y=select.box(0)+1 then y=1;	/*	pressing 'B'		*/
+			else if y=select.box(0)+2 then y=2;	/*	pressing 'C'		*/
+			else y=3;									/*	simulate an 'X'	*/
+			call STM.SOUND.EDITOR.INPUT(in.chin,stm.table(y));
+		end;
+		else if (((x>=choice.box(1)) and (x<=choice.box(3))) and	/*	if within the limits of the select mode box	*/
+		((y>=choice.box(0)) and (y<=choice.box(2)))) then do;
+			if		  ((x>=command.choice(0)) and (x<command.choice(1))) then x=1;
+			else if ((x>=command.choice(1)) and (x<command.choice(2))) then x=2;
+			else if ((x>=command.choice(2)) and (x<command.choice(3))) then x=3;
+			else if ((x>=command.choice(3)) and (x<command.choice(4))) then x=4;
+			else x=5;
+			call STM.SOUND.EDITOR.INPUT(in.chin,stm.table(x*4+(y-18)));
+		end;
+		else if ((y == 22) and (x >= 46)) {		//	if over the patch assignment message,
+			//	if (locked != false) UNLOCK.SOUND.FILE();	//	not necessary since we're forced to return to this screen
+			SET.TERMULATOR.CURSOR.STYLE(MOUSE_COURSE_STYLE);
+			PATCH.ASSIGNMENT.SCREEN(0);			//	link to I-page
+			SET.TERMULATOR.CURSOR.STYLE(MOUSE_FINE_STYLE);
+			STM.SOUND.EDITOR.DISP();				//	automatically return to L-page
+		}
+		else if ((y == 23) and (x >= 46)) {		//	if over the current catalog,
+			//	if (locked != false) UNLOCK.SOUND.FILE();	//	not necessary since we're forced to return to this screen
+			SET.TERMULATOR.CURSOR.STYLE(MOUSE_COURSE_STYLE);
+			SUBCAT.DIRECTORY.SCREEN(0);			//	link to D-page
+			SET.TERMULATOR.CURSOR.STYLE(MOUSE_FINE_STYLE);
+			STM.SOUND.EDITOR.DISP();				//	automatically return to L-page
+		}
+	end;
+end STM.SOUND.EDITOR.MOUSE.POS;
+
+/*	$page  SOUND.FILE.SEARCH - look for sound file to recall and load it	*/
+
+SOUND.FILE.SEARCH: proc (name, audition) public swapable;	/*	searches the system for sound file to be recalled	*/
+	dcl name						fixed array;	/*	sound file name - could be a treename	*/
+	dcl audition				boolean;	/*	true to audition sound file	*/
+	dcl found					boolean;	/*	true if the sound file has been found	*/
+	dcl add (2)					fixed;	/*	dev/sector address of the file	*/
+	dcl len (2)					fixed;	/*	sector length of the file	*/
+	dcl temp (f#name_len)	fixed;	/*	temporary for a filename	*/
+	dcl i							fixed;
+
+	dcl buf (L#Rec_Length)	fixed;	/*	buffer to pass to INDEX_LOCATE	*/
+
+	DISK_SEARCH: proc (name, level, add, len, audition, print) returns (boolean);	/*	searches a disk level for file and loads it	*/
+		dcl name			fixed array;	/*	name or treename of file to find	*/
+		dcl level		fixed;			/*	catalog level to search	*/
+		dcl add			fixed array;	/*	disk address of the file	*/
+		dcl len			fixed array;	/*	sector length of the file	*/
+		dcl audition	boolean;			/*	true to audition sound file	*/
+		dcl print		boolean;			/*	true to give a message if we can't find file	*/
+		dcl found		boolean;			/*	true if we find and load the file	*/
+
+		found = LOCATE (name, level);	/*	try to find the file	*/
+
+		if found then do;	/*	file was there in the CC	*/
+			if (F#Type = T#Sound) then do;	/*	it is a sound file	*/
+				add (0) = F#MS_Sector; add (1) = F#LS_Sector;
+				len (0) = F#MS_Length; len (1) = F#LS_Length;
+				call RECALL.SOUND.FILE (name, level, add, len, audition, 0);
+			end;
+			else do;	/*	file was not a sound file	*/
+				call type.error;	/*	not a sound file message	*/
+				found = false;		/*	we didn't really find it	*/
+			end;
+		end;
+		else if print then do;	/*	if we should print an error	*/
+			call Handle.Cat.Error(true);	/*	give the reason LOCATE failed	*/
+		end;
+
+		return (found);			/*	true if file there, false if not	*/
+	end DISK_SEARCH;
+
+	found = false;					/*	sound file has not been found yet	*/
+	do i = 0 to 1;					/*	initialize these to zero	*/
+		add (i) = 0; len (i) = 0;
+	end;
+
+	if valid_filename (name) then do;	/*	we have a filename, not a treename	*/
+
+		begin;	/*	look in poly memory first	*/
+			/*	Must set up the global string FNBUF with the filename we are
+				looking for so PS.SEARCH can be called.	*/
+
+			call copy.string					 (fnbuf, temp);	/*	save this global string	*/
+         call copy.string					 (name, fnbuf);	/*	put name into FNBUF	*/
+         LNBUF(0)=0;
+         call remove.spaces.from.string (fnbuf,fnbuf);	/*	dump any spaces from string	*/
+			call uppercase.string			 (fnbuf,fnbuf);	/*	map chars to uppercase	*/
+
+			do i = fnbuf(0) to (2*f#name_len)-1;	/*	zero fill the name	*/
+				call pbyte(fnbuf,i,0);
+			end;
+
+			i = ps.search;							/*	look for the file in poly memory	*/
+			call copy.string (temp, fnbuf);	/*	reset the global string	*/
+
+			if i <> 0								/*	file was found in poly memory	*/
+			then found = RECALL.SOUND.FILE (name, PolyMemDev, add, len, audition, 0);	/*	look in poly memory first	*/
+			else found = false;					/*	file is not in poly memory	*/
+		end;
+
+		if not found then do;	/*	look further - in the current catalog	*/
+			found = DISK_SEARCH (name, 1, add, len, audition, false);	/*	try to find file in CC	*/
+		end;
+
+		if not found then do;			/*	look further - poly cache	*/
+			found = FIND.SOUND (name);	/*	look in poly cache	*/
+			if found then do;	/*	file is in the poly cache	*/
+				add (0) = F#MS_Sector; add (1) = F#LS_Sector;
+				len (0) = F#MS_Length; len (1) = F#LS_Length;
+				call RECALL.SOUND.FILE (name, PolyCacheDev, add, len, audition, 0);
+			end;
+		end;
+
+		if ((not found) and (Find_Device(LaserDev) <> 0)) then do;	/*	look further - optical disk	*/
+			if MOUNT.OPTICAL.VOLUME then do;									/*	optical disk is up and running okay	*/
+				found = INDEX_LOCATE (name, buf, LaserDev);				/*	search optical for file	*/
+				if found then do;													/*	file is in the optical disk	*/
+					add (0) = F#MS_Sector; add (1) = F#LS_Sector;
+					len (0) = F#MS_Length; len (1) = F#LS_Length;
+					call RECALL.SOUND.FILE (name, LaserDev, add, len, audition, 0);
+				end;
+			end;
+		end;	/*	of looking on the optical disk	*/
+
+		if not found then do;			/*	couldn't find it anywhere on the system	*/
+			call file.not.found.error;	/*	print file not found	*/
+		end;
+	end;
+
+	else do;	/*	we must have a treename - search the disk	*/
+		found = DISK_SEARCH (name, 1, add, len, audition, true);	/*	try to find file from current catalog	*/
+	end;
+
+	return (found);	/*	true if file was there, false otherwise	*/
+end SOUND.FILE.SEARCH;
+

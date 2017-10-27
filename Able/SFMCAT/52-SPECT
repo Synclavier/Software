@@ -1,0 +1,108 @@
+/* 52-SPECT  $TITLE  Main Driver for Spectral Analysis Module */
+
+/* Copyright 1985 by New England Digital Corporation */
+
+dcl in.main.module lit '0';
+dcl sector.size    lit '256';
+dcl buf1.len       lit '32';    dcl buf2.len    lit '16';
+
+dcl databuf1((buf1.len+1)*sector.size+1) fixed; /* an extra sector needed in anal_data */
+dcl lsb1    ( buf1.len   *sector.size)   fixed;
+dcl databuf2( buf2.len   *sector.size)   floating; /* NOTE:  floating array */
+
+insert ':-xpl:literals'; 	/* system literals  */
+insert ':-xpl:asciilit'; 	/* ASCII literals  */
+insert ':-xpl:scsi';     	/* SCSI device drivers */
+insert ':-xpl:catrtns';  	/* catalog routines */
+insert ':-xpl:strings';  	/* string handling */
+insert ':-xpl:intrprtr';	/* interpreter interface */
+
+insert ':sfmcat:00-sfm';   /* SFM upper memory definitions and overlay routine */
+insert ':sfmcat:01-io';    /* ascii definitions, interrupt I/O */
+insert ':sfmcat:02-plot';  /* VT-640 plotting procedures */
+insert ':sfmcat:04-angle'; /* fast sine/cosine routine */ 
+insert ':sfmcat:04-ifast'; /* Fast Fourier analysis */
+insert ':sfmcat:06-globl'; /* global variables */
+insert ':sfmcat:07-util';  /* i/o utility procedures */
+insert ':sfmcat:08-symbl'; /* symbol procedures for labeling time domain display */
+insert ':sfmcat:09-files'; /* utility procedures which access catalog */  
+insert ':sfmcat:10-set';   /* read times; set command and menu */
+insert ':sfmcat:40-windo'; /* boxcar, hanning and hamming windows */
+insert ':sfmcat:50-ifft';  /* spectral display */
+insert ':sfmcat:51-input'; /* command line interpreter */
+
+dcl catalog_buffer (c#dir_max - 1) fixed; /* catalog buffer */
+dcl (timing,i)                     fixed;   
+
+call set_catbuf (addr(catalog_buffer(0)), 0); /* set up catalog buffer */
+restore.flag = 1;
+
+mem.siz=memory.size; /* look up configured memory size */
+enable;
+
+if core(loc.rst)<>3 then do; 
+   psr('Spectral Displays can only be invoked through SFM');
+   call tty_wait; /* allow chars to be printed before quitting */
+   call exit(-1);
+end;  
+
+i=core(c#contab+c#vstart)+core(c#contab+c#vlngth)+core(c#contab+c#stklen);
+if i IGE ((60*1024)-1928) then do;
+   /* this check will catch errors where the program is too large for 60K systems */
+   clear;
+   ps('SYSTEM PROGRAMMING ERROR:  This module of SFM is too large to run.');
+   call tty_wait; call exit(-1); /* quit with stop status */
+end;
+
+clock.inc=10/d03_speed;                    /* compute real time clock period */
+any.kbd  =(d130_present and d160_present); /* configured for keyboard */
+dq640    =((terminal.type=t#dq640) and (terminal.graphics=g#dq640));
+
+if dq640 then punits(799,479);
+else          punits(639,479); /* prevent display aliasing */
+
+file1;
+if f.name.bytes=0 then call return_to_sfm(7); /* error */
+call read_system_file (SINTAB.FILE,sintable,sintable.len+intpol.len+1); /* read sine table */
+call assign(in.buf,location(old.buf));
+
+call set_scroll(1,2); 
+keypad_application;
+call scan_input;
+
+do while 1; /* MAIN LOOP */
+
+   if break.rcvd then call stop; /* <BREAK> to exit program */
+
+   if rl.arrow<>0 then do; /* left or right moves */
+      call move_freq(databuf2);
+      timing=0;
+   end;  
+   else if (spectral.cursor.mode>0) and (arrow.count=1) and (not cursor.flag) then begin;
+      if not timing then do; /* store time of update */
+         timing=1; p.milliseconds=milliseconds;
+      end;
+      else if (milliseconds-p.milliseconds)>500 then do; /* time for write */
+         cursor.flag=1; timing=0;
+         call write_cursor(spectral.cursor,databuf2(spectral.cursor),1);
+      end;
+   end;
+
+   if ud.arrow<>0   then do; call scroll_spectrum; break.rcvd=0; end;
+   if wait.for.scan then call scan_input;
+   call dump_hold;
+
+   if (pfkey=1) and (spectral.cursor.mode>0) then do;
+      call toggle_harmonic(databuf2); /* toggle harm lines */
+      break.rcvd=0; /* reset break flag */
+   end;
+   else if pfkey<>0 then do;
+      call change_scale; /* perform scale update */
+      break.rcvd=0; /* reset break flag */
+   end;
+
+   if aux.key<>0 then do; call integrate(databuf2); break.rcvd=0; end;
+   
+   interp_run_host_at_level();
+
+end; /* of main loop */

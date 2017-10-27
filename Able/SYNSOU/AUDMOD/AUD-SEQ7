@@ -1,0 +1,1338 @@
+/* AUD-SEQ7 - handle sequence panel events
+
+   Modified:
+   01/25/90 - MWH - Fix "300 msec delay starting cues" bug (from EditView)
+   10/10/89 - cj - notify Macintosh of time format changes
+   04/24/89 - cj - garbage collection after deleting events
+   03/14/89 - sgs - bug fix for name length on Event Editor
+   10/03/88 - cj - updated cue menu display on time format change in 
+                   case showing times.                             
+*/
+
+/* Handle track number events: */
+
+Handle.Track.Number:proc swapable;
+   dcl i      fixed;
+   dcl j      fixed;
+   dcl tmp(8) fixed;
+
+
+   /* handle jog of track number */
+
+   if (Screen.Event.Info = S#MouseSelect  )
+   or (Screen.Event.Info = S#MouseActivate)
+   then do;
+
+      i = Mouse(Button.Result);
+      j = Screen.Event.Id - Seq.Track.Number;
+
+      if abs(i) <> 2            /* jog value */
+      then do;
+         if abs(i) = 1
+         then do;
+            trkindex(j) = trkindex(j) + 1;
+            if   trkindex(j) <  Num.Kbd.Tracks
+            then trkindex(j) =  Num.kbd.Tracks;
+            if   trkindex(j) >= First.Lod.Track
+            then trkindex(j) =  First.Lod.Track-1;
+         end;
+         else do;
+            trkindex(j) = trkindex(j) - 1;
+            if trkindex(j) < Num.Kbd.Tracks
+            then trkindex(j) = 0;
+         end;
+
+         call Update.Seq.Track.Labels(Seq.Tracks,Seq.Row);
+
+         /* position scroll bar when entering value into */
+         /* column 0:                                    */
+         if Screen.Event.Id = Seq.Track.Number
+         then do;
+            call Set.Seq.Track.Scroll.Bar;
+            if M$PRESSES = 0  /* update scroll bar if user isn't using both barrels. */
+            then call Update.Object(Seq.Track.Scroll.Bar);
+         end;
+
+         /* set up for  placing on this track */
+
+         if TRACK.AVAILABLE.FOR.CUES (trkindex(j))
+         then call SET.PLACE.TRACK (trkindex(j));
+
+         /* Set bits to take new snapshot,  update note area,  update */
+         /* solo display,  update track routing information:          */
+
+         Seq.Refresh = Seq.Refresh \ (4\8\64\128);
+      end;
+      call Update.Object(Screen.Event.Id);
+   end;
+
+   else if Screen.Event.Info = S#Deposit then do;
+
+      call Fetch.String(Screen.Event.Id,tmp);
+
+      i = CONV.STR.TO.FIXED(tmp,0,0);
+
+      if ertyp = 0 then do;
+         if      i = 0   then i = (-1);
+         else if i > 200 then i = 200;
+
+         TRKINDEX(Screen.Event.Id-Seq.Track.Number)=i+1;
+      end;
+      call Update.Seq.Track.Labels(Seq.Tracks,Seq.Row);
+      call Update.Object(Screen.Event.Id);
+
+      /* position scroll bar when entering value into */
+      /* column 0:                                    */
+      if Screen.Event.Id = Seq.Track.Number
+      then do;
+         call Set.Seq.Track.Scroll.Bar;
+         if M$PRESSES = 0  /* update scroll bar if user isn't using both barrels. */
+         then call Update.Object(Seq.Track.Scroll.Bar);
+      end;
+
+      /* set up for  placing on this track */
+
+      if TRACK.AVAILABLE.FOR.CUES (i + 1)
+      then call SET.PLACE.TRACK   (i + 1);
+
+      /* Set bits to take new snapshot,  update note area,  update */
+      /* solo display,  update track routing information:          */
+
+      Seq.Refresh = Seq.Refresh \ (4\8\64\128);
+   end;
+
+end Handle.Track.Number;
+
+/* $page - handle user entry of volume, routing */
+
+Handle.Seq.Out.Event: proc swapable;
+   dcl tmp(32) fixed;
+   dcl i   fixed;
+   dcl j   fixed;
+   dcl k   fixed;
+   dcl l   fixed;
+   dcl p   fixed;
+
+   i = Screen.Event.Id - Seq.Track.Out.Gstring;  /* get col # */
+   j = TRKINDEX(i);                              /* get trk # */
+
+   /* see if this track is represented by TBUT.PTR;  Select the */
+   /* corresponding trout.trk# if so                            */
+
+   if j > 0 then do;
+      do k = 0 to Num.Track.Buttons - 1;
+         if TBUT.MAPPING(k) = j
+         then do;
+            TROUT.TRK# = k;
+            call SELECT.PARAMETER(trrout.l-par.l);    /* select new parm */
+         end;
+      end;
+   end;
+
+   /* Check for jog: */
+
+   if (Screen.Event.Info = S#MouseSelect  )
+   or (Screen.Event.Info = S#MouseActivate)
+   then do;
+
+      k = Mouse(Button.Result);
+
+      if  (abs(k) <> 2)   /* if jog is desired      */
+      and (j      >  0)   /* and track chosen       */
+      then do;
+
+         if TRK.HEAD.LOOKUP(j,THD.CUE.TRACK)<>0     /* cue track         */
+         then l=TRK.HEAD.LOOKUP(j,THD.CUE.OUT);     /* get dtd output #  */
+
+         else if (TRK.HEAD.LOOKUP(j,THD.NN.MSB)<>0) /* non-empty, non-Q  */
+              or (TRK.HEAD.LOOKUP(j,THD.NN.LSB)<>0) /* track: get mc #   */
+         then l=TRK.HEAD.LOOKUP(j,THD.TROU);
+
+         if l <> 0
+         then l = (l&63)+1;          /* get 1 - x */
+
+         if abs(k) = 1               /* increment       */
+         then do;
+            l = l + 1;
+         end;
+
+         else do;                    /* decrement       */
+            l = l - 1;
+            if l < 0 then l = 0;
+         end;
+
+         Screen.Event.Info = S#Deposit;  /* enter deposit processing */
+
+      end;
+   end;
+
+   else if Screen.Event.Info = S#Deposit then do;
+
+      if j > 0 then do;     /* if track is displayed in this column */
+         call Fetch.Graphics.String(Screen.Event.Id,tmp);  /* get new value   */
+
+         l = CONV.STR.TO.FIXED(tmp,0,0);          /* get integer     */
+
+         if ERTYP <> 0                            /* spaces or nul   */
+         then l = 0;                              /* str - turn off  */
+
+      end;
+   end;
+
+   if  (Screen.Event.Info = S#Deposit)
+   then do;
+
+      /* set new.prm.info to force update at some point even if */
+      /* select.parameter above has failed                      */
+
+      new.prm.info = new.prm.info \ 64;
+
+      write(mam) = TRK.HEAD;        /* see if track head */
+      write(mal) = j;
+      p = read(md);
+
+      /* store -2 in displayed value to force screen refresh */
+
+      call PID(Seq.Panel.Output.Values + i, -2);
+
+      /* if actual track is displayed, look further */
+
+      if j > 0 then do;     /* if track is displayed in this column */
+
+         if TRK.HEAD.LOOKUP(j,THD.CUE.TRACK)<>0     /* cue track         */
+         then do;
+            if   l > DTD.NUM.VOICES               /* limit to valid  */
+            then l = DTD.NUM.VOICES;              /* range           */
+            if l <> 0 then l = 128 + (l-1);
+         end;
+
+         else if (TRK.HEAD.LOOKUP(j,THD.NN.MSB)<>0) /* non-empty, non-Q  */
+              or (TRK.HEAD.LOOKUP(j,THD.NN.LSB)<>0) /* track: get mc #   */
+         then do;
+            if   l > Multi.Max               /* limit to valid  */
+            then l = Multi.Max;              /* range           */
+            if l <> 0 then l = 64 + (l-1);
+         end;
+
+         l = l \ shl(l,8);                  /* store in both halves for routing */
+
+         if p = 0          /* if no trk head, then get one    */
+         then do;
+            if ALLOCATE.TRK.HEADER(j) = 0
+            then return;
+            call COPY.TIMBRE(ALWAYS.EMPTY.TRACK, j);    /* place null timbre on track */
+         end;
+
+         /* store dtd value in both halves for now */
+
+         if TRK.HEAD.LOOKUP(j,THD.CUE.TRACK)<>0     /* cue track         */
+         then call TRK.HEAD.STORE(j, THD.CUE.OUT, l);
+
+         else if (TRK.HEAD.LOOKUP(j,THD.NN.MSB)<>0) /* non-empty, non-Q  */
+              or (TRK.HEAD.LOOKUP(j,THD.NN.LSB)<>0) /* track: get mc #   */
+         then call TRK.HEAD.STORE(j, THD.TROU, l);
+
+         NEW.MOTION             = 1;   /* SEND NEW CUE TRACK CONSTANTS       */
+         NEW.CUE.TRACK.SETTINGS = 1;   /* OVER AFTER NEW ROUTING ASSIGNMENT  */
+
+         call Update.Seq.Track.Values; /* provide speedy update to user      */
+
+      end;
+   end;
+
+end Handle.Seq.Out.Event;
+
+Handle.Seq.Vol.Event: proc swapable;
+   dcl tmp(32) fixed;
+   dcl i   fixed;
+   dcl j   fixed;
+   dcl k   fixed;
+   dcl p   fixed;
+
+   i = Screen.Event.Id - Seq.Track.Vol.Gstring;  /* get col # */
+   j = TRKINDEX(i);                              /* get trk # */
+
+   /* see if this track is represented by TBUT.PTR;  Select the */
+   /* corresponding trout.trk# if so                            */
+
+   if j > 0 then do;
+      do k = 0 to Num.Track.Buttons - 1;
+         if TBUT.MAPPING(k) = j
+         then do;
+            TROUT.TRK# = k;
+            call SELECT.PARAMETER(trvol.l-par.l);    /* select new parm */
+         end;
+      end;
+   end;
+
+   if Screen.Event.Info = S#Deposit then do;
+
+      /* set new.prm.info to force update at some point even if */
+      /* select.parameter above has failed                      */
+
+      new.prm.info = new.prm.info \ 64;
+
+      write(mam) = TRK.HEAD;        /* see if track head */
+      write(mal) = j;
+      p = read(md);
+
+      /* store -2 in displayed value to force screen refresh */
+
+      call PID(Seq.Panel.Tvol.Values + i, -2);
+
+      /* if actual track is displayed, look further */
+
+      if j > 0 then do;     /* if track is displayed in this column */
+         call Fetch.Graphics.String(Screen.Event.Id,tmp);  /* get new value   */
+
+         k = CONV.STR.TO.FIXED(tmp,1,0);          /* get integer     */
+
+         if ERTYP = 0                             /* continue if no  */
+         then do;                                 /* error           */
+
+            if   k IGT 1000                       /* limit to valid  */
+            then k = 1000;                        /* range           */
+
+            if p = 0          /* if no trk head, then get one    */
+            then do;
+               if ALLOCATE.TRK.HEADER(j) = 0
+               then return;
+               call COPY.TIMBRE(ALWAYS.EMPTY.TRACK, j);    /* place null timbre on track */
+            end;
+
+            call TRK.HEAD.STORE(j, THD.TVOL, k);
+
+            NEW.MOTION             = 1;   /* SEND NEW CUE TRACK CONSTANTS       */
+            NEW.CUE.TRACK.SETTINGS = 1;   /* OVER AFTER NEW ROUTING ASSIGNMENT  */
+
+            call Update.Seq.Track.Values; /* provide speedy update to user      */
+
+         end;
+      end;
+   end;
+
+end Handle.Seq.Vol.Event;
+
+Handle.Seq.Track.Name.Event: proc swapable;
+   dcl tmp(32) fixed;
+   dcl i   fixed;
+   dcl j   fixed;
+   dcl p   fixed;
+
+   i = Screen.Event.Id - Seq.Track.Name.Gstring;  /* get col # */
+   j = TRKINDEX(i);                               /* get trk # */
+
+   if Screen.Event.Info = S#Deposit then do;
+
+      write(mam) = TRK.HEAD;        /* see if track head */
+      write(mal) = j;
+      p = read(md);
+
+      /* if actual track is displayed, look further */
+
+      if j > 0 then do;     /* if track is displayed in this column */
+         call Fetch.Graphics.String(Screen.Event.Id,tmp);  /* get new value   */
+
+         if p = 0          /* if no trk head, then get one    */
+         then do;
+            if ALLOCATE.TRK.HEADER(j) = 0
+            then return;
+            call COPY.TIMBRE(ALWAYS.EMPTY.TRACK, j);    /* place null timbre on track */
+         end;
+
+         if tmp(0) > 32 then tmp(0) = 32;
+
+         call TRK.HEAD.LOOKUP(j, THD.TRACK.TITLE);
+         call COPY.OUT(addr(tmp(0)), 17);
+
+         call Update.Seq.Track.Labels(Seq.Tracks,Seq.Row);
+      end;
+   end;
+
+end Handle.Seq.Track.Name.Event;
+
+/* $page - handle events from track scroll bar */
+
+Handle.Seq.Track.Scroll.Bar: proc swapable;
+   dcl i      fixed;
+   dcl j      fixed;
+   dcl max    fixed;
+   dcl tmp(5) fixed;
+
+   /* Routine to compute track # from scroll bar position. */
+   /* Routine returns value,  starting with 0,  and        */
+   /* ending at the last legit value                       */
+
+   Compute.Track: proc(max,pos);
+      dcl max fixed;
+      dcl pos fixed;
+
+      load max; mul pos; mwait; div 1000;
+      if rem >= 500 then return res + 1;
+      else               return res    ;
+   end Compute.Track;
+
+   /* Routine to assign 16 consecutive new track numbers: */
+
+   Assign.New.Tracks: proc(newnum);
+      dcl newnum fixed;
+      dcl i      fixed;
+
+      do i = 0 to 15;
+         trkindex(i) = newnum + i;
+         if   trkindex(i) >= First.Lod.Track
+         then trkindex(i) =  First.Lod.Track-1;
+      end;
+
+      call Update.Seq.Track.Labels(Seq.Tracks,Seq.Row);
+      call Update.Object(Seq.Track.Number);    /* update on track # quickly */
+      call Set.Seq.Track.Scroll.Bar;           /* update scroll bar quickly */
+      if M$PRESSES = 0  /* update scroll bar if user isn't using both barrels. */
+      then call Update.Object(Seq.Track.Scroll.Bar);
+
+      /* set up for  placing on this track */
+
+      if TRACK.AVAILABLE.FOR.CUES (newnum)
+      then call SET.PLACE.TRACK   (newnum);
+
+      /* Set bits to take new snapshot,  update note area,  update */
+      /* solo display,  update track routing information:          */
+
+      Seq.Refresh = Seq.Refresh \ (4\8\64\128);
+   end Assign.New.Tracks;
+
+   /* get largest allowed track # for column 1: */
+
+   max = (First.Lod.Track - Num.KBD.Tracks) - (Seq.Tracks-1) - 1;
+
+   /* Upon selection,  show track number in column 1: */
+
+   if (Screen.Event.Info = S#SBBoxMove)
+   then do; 
+      i = Fetch.Scroll.Bar(Seq.Track.Scroll.Bar); /* 0 - 1000          */
+      i = Compute.Track(max, i);                  /* 0 - max allowable */
+      call CONV.FIXED.TO.STR(i + 1, 0, 3, cf#right, tmp);
+      disable.deposits = 1;
+      call Deposit.String(Seq.Track.Number, tmp);
+      disable.deposits = 0;
+      call Update.Object (Seq.Track.Number     );
+   end;
+
+   /* assign all of them on the deposit: */
+
+   else if (Screen.Event.Info = S#Deposit)
+   then do;
+      i = Fetch.Scroll.Bar(Seq.Track.Scroll.Bar); /* 0 - 1000          */
+      i = Compute.Track(max, i);                  /* 0 - max allowable */
+      call Assign.New.Tracks(Num.KBD.Tracks + i);
+   end;
+
+   else if Screen.Event.Info = S#SBArrowForward then do;
+      i = trkindex(0);
+      if i = 0 then i = Num.Kbd.Tracks;
+      else          i = i + 1;
+
+      if i > (max + Num.KBD.Tracks) then i = (max + Num.KBD.Tracks);
+
+      call Assign.New.Tracks(i);
+   end;
+
+   else if Screen.Event.Info = S#SBArrowBack then do;
+      i = trkindex(0) - 1;
+      if i < Num.Kbd.Tracks then i = Num.KBD.Tracks;
+
+      call Assign.New.Tracks(i);
+   end;
+
+   else if Screen.Event.Info = S#SBPageForward then do;
+      i = trkindex(0);
+      if i = 0 then i = Num.Kbd.Tracks;
+      else          i = i + Seq.Tracks;
+
+      if i > (max + Num.KBD.Tracks) then i = (max + Num.KBD.Tracks);
+
+      call Assign.New.Tracks(i);
+   end;
+
+   else if Screen.Event.Info = S#SBPageBack then do;
+      i = trkindex(0) - Seq.Tracks;
+      if i < Num.Kbd.Tracks then i = Num.KBD.Tracks;
+
+      call Assign.New.Tracks(i);
+   end;
+end Handle.Seq.Track.Scroll.Bar;
+
+/* $page - routines to handle display of permanent dialog line */
+
+Handle.Seq.Settings.Command.Table:proc swapable;
+   dcl tmp(1) fixed;
+
+   if Screen.Event.Info = S#MouseSelect
+   then do;
+
+      call Map.Graphics.Button.Table.Mouse.Press(Seq.Settings.Command.Table, tmp);
+
+      /* close dialog box on second click: */
+
+      if Perm.Dialog.Mode = (tmp(0)+1)
+      then do;
+         call Highlight.Graphics.Button.Table    /* un-highlight    */
+         (Seq.Settings.Command.Table, 0,  2, 0); /* lights quickly  */
+         call Define.Seq.Permanent.Dialog(Seq.Perm.Dialog.Row, 0);
+      end;
+      else do;
+
+         call Highlight.Graphics.Button.Table               /* highlight       */
+         (Seq.Settings.Command.Table, bits(tmp(0)),  2, 0); /* lights quickly  */
+
+         if Perm.Dialog.Mode <> 0     /* close prior perm dialog box */
+         then call Define.Seq.Permanent.Dialog(Seq.Perm.Dialog.Row, 0);
+
+         call Define.Seq.Permanent.Dialog(Seq.Perm.Dialog.Row, tmp(0)+1);
+         
+         call Refresh.Seq.Track.Solo.Display; /* set up soloing on possible new 'Select Tracks' line */
+
+      end;
+
+   end;
+
+end Handle.Seq.Settings.Command.Table;
+
+/* handle verify,  undo,  search */
+
+Handle.Verify.Undo.Search: proc swapable;
+   dcl tmp(1) fixed;
+
+   if Screen.Event.Info = S#MouseSelect
+   then do;
+
+      call Map.Graphics.Button.Table.Mouse.Press(Seq.Verify.Undo.Search, tmp);
+
+      do case (tmp(0));
+
+         do;    /* verify button */
+            if  (Ripple.Mode        =  2)  /* if user hit this button */
+            and (Ripple.Verify.Rows <> 0)  /* to verify,  then do it  */
+            then do;
+               do case (Ripple.Edit.Type);
+                  call CHANGE.SEQ.SELECTED.NOTE.TIMES (Ripple.Verify.Rows,1);
+                  call Change.Seq.Note.Duration (Ripple.Edit.Row, Ripple.Edit.Track, Ripple.Edit.Code, 1);
+                  call Change.Seq.Note.Pitch    (Ripple.Edit.Row, Ripple.Edit.Track, Ripple.Edit.Code, 1);
+               end;
+            end;
+         end;
+
+         do;     /* undo   */
+         end;
+
+         do;     /* search */
+         end;
+      end;
+   end;
+
+end Handle.Verify.Undo.Search;
+
+Handle.Seq.Move.Copy:proc swapable;
+   dcl tmp(1) fixed;
+   dcl i      fixed;
+
+   if Screen.Event.Info = S#MouseSelect
+   then do;
+
+      call Map.Graphics.Button.Table.Mouse.Press(Seq.Move.Copy, tmp);
+
+      i = tmp(1);
+
+      if  (Seq.Dialog.Mode = SEQ#EventMoveDialog) /* dialog is already */
+      and (Move.Or.Copy    = i                  ) /* open              */
+      then call Close.Seq.Dialog;                 /* then close it     */
+
+      else do;
+         Move.Or.Copy = i;
+         call Open.Seq.Event.Move.Dialog;
+      end;
+
+   end;
+end Handle.Seq.Move.Copy;
+
+Handle.Seq.Delete.Move.Play.From:proc swapable;
+   dcl tmp(1) fixed;
+   dcl i      fixed;
+
+   if Screen.Event.Info = S#MouseSelect
+   then do;
+
+      call Map.Graphics.Button.Table.Mouse.Press(Seq.Delete.Move.Play.From, tmp);
+
+      do case (tmp(0));
+
+         do;                             /* Delete Events */
+            if Seq.Dialog.Mode = SEQ#EventDeleteDialog 
+            then do;
+               call GARBAGE.COLLECT.AFTER.DELETE(DELETE.SEQ.NOTES.SUBROUTINE);
+               call Close.Seq.Dialog;
+               call Clear.All.Highlights;
+            end;
+            else call Open.Seq.Event.Delete.Dialog;
+         end;
+
+         do;                  /* move/copy - handled elsewhere */
+         end;
+
+         do;                  /* play from     */
+
+            call Highlight.Graphics.Button.Table.Entry
+               (Seq.Delete.Move.Play.From, 2, 0, 1, 2, 0);
+
+            /* find first selected row with a note on it */
+
+            i = 0;
+            do while (i < Seq.Event.Display.Size)
+            and      ((Highlighted(i) & Note.Area.Contents(i)) = 0);
+               i = i + 1;
+            end;
+
+            if  (Find.Row.Time(i, tmp) < 0)
+            then call COPY32(Seq.Refresh.Time, tmp);
+
+            call Stop.Sequencer;                   /* stop     */
+            call SCROLL.SEQ  (tmp(0), tmp(1), 1);  /* scroll   */
+            call Continue.Seq.With.Pre.Roll(Silent.Pre.Roll.Value);
+
+            Seq.Panel.Started.Play = 1;
+            call Set.Group.Get(Seq.Group,Get.Mouse.Button,true);
+         end;
+      end;
+   end;
+end Handle.Seq.Delete.Move.Play.From;
+
+/* $page - handle add commands */
+
+Handle.Seq.Add.Commands: proc swapable;
+   dcl tmp(1) fixed;
+   dcl i      fixed;
+
+   if Screen.Event.Info = S#MouseSelect
+   then do;
+
+      call Map.Graphics.Button.Table.Mouse.Press(Seq.Add.Commands, tmp);
+
+      i = (tmp(1) * 2) + tmp(0);
+
+      do case i;
+         call Create.Seq.Note(1);   /* add note + */
+         call Create.Seq.Note(2);   /* add ilp    */
+         call Create.Seq.Note(0);   /* add note - */
+         call Create.Seq.Note(3);   /* add rte    */
+      end;
+   end;
+
+end Handle.Seq.Add.Commands;
+
+/* $page - handle events for permanent dialog line id's */
+
+Redefine.Contents: proc(NewSize,ReSize) swapable;
+   dcl (NewSize) fixed;
+   dcl (ReSize ) fixed;
+
+   call Define.Sequencer.Template(Seq.Row,Seq.Event.Display.Left.X,Seq.Size,NewSize,ReSize);
+
+   Seq.Refresh = Seq.Refresh \ (4\8\16\32\64\128);
+
+   call Select.New.Cur.Obj(Corner.Label,-1,-1);   /* in case old object is no longer there */
+end Redefine.Contents;
+
+Handle.Perm.Dialog.Mode.1.Events: proc swapable;
+   dcl i      fixed;
+   dcl tmp(1) fixed;
+
+   if Screen.Event.Id = Display.#.Of.Tracks
+   then do;
+      if Screen.Event.Info = S#Deposit
+      then do;
+
+         i = Fetch.Fixed.Point(Display.#.Of.Tracks);
+
+         if i <  1 then i =  1;
+         if i > 16 then i = 16;
+
+         disable.deposits = 1;
+         call Deposit.Fixed.Point(Display.#.Of.Tracks, i);
+         disable.deposits = 0;
+         call Update.Object(Display.#.Of.Tracks);
+
+         call Redefine.Contents(i, 1);
+
+         /* But keep the cursor on the display # of tracks column */
+         /* so user can type another value:                       */
+
+         call Select.New.Cur.Obj(Display.#.Of.tracks,-1,-1);
+      end;
+   end;
+
+   if Screen.Event.Id = Display.#.Of.Rows
+   then do;
+      if Screen.Event.Info = S#Deposit
+      then do;
+         i = Fetch.Fixed.Point(Display.#.Of.Rows);
+
+         if i <  1 then i =  1;
+         if i > 14 then i = 14;
+
+         if i <> (Seq.Size-4)     /* if new size is different ... */
+         then do;
+            if Motion.Group <> 0         /* assume we will butt   */
+            then Users.Seq.Size = i + 4; /* up under motion       */
+            else Users.Seq.Size = i + 5; /* panel                 */
+
+            call Close.Sequencer.Panel;
+            call Open.Sequencer.Panel(Users.Seq.Size);
+         end;
+
+      end;
+   end;
+
+   else if Screen.Event.Id = Display.Events.Table
+   then do;
+      if Screen.Event.Info = S#MouseSelect
+      then do;
+
+         call Map.Graphics.Button.Table.Mouse.Press(Display.Events.Table, tmp);
+
+         Display.Note.Contents = Display.Note.Contents xor bits(tmp(0)+8);
+
+         call Highlight.Graphics.Button.Table
+         (Display.Events.Table, shr(Display.Note.Contents,8), 2, 0);
+
+         /* If bringing RTEs in or out,  and show velocity = 0,  then */
+         /* must undefine/define the table.                           */
+
+         if (bits(tmp(0)+8) = Display.Rtes)
+         and ((Display.Note.Contents & Display.Velocity) = 0)
+         and (NOTE.AREA.INFORMATION.WOULD.BE.DIFFERENT)
+         then call Redefine.Contents(Seq.Tracks, 2);
+         else Seq.Refresh = Seq.Refresh \ (4\8);  /* else just refresh */
+
+      end;
+   end;
+
+   else if Screen.Event.Id = Display.Info.Table
+   then do;
+      if Screen.Event.Info = S#MouseSelect
+      then do;
+         call Map.Graphics.Button.Table.Mouse.Press(Display.Info.Table, tmp);
+
+         Display.Note.Contents = Display.Note.Contents xor bits(tmp(0));
+
+         call Highlight.Graphics.Button.Table
+         (Display.Info.Table, Display.Note.Contents & 255, 2, 0);
+
+         /* If changing velocity on/off and we are showing rte's,  then */
+         /* just update screen (do not need to redefine):               */
+
+         if  (bits(tmp(0)) = Display.Velocity)               /* if changing display of velocity but we */
+         and ((Display.Note.Contents & Display.Rtes) <>  0)  /* are already showing RTEs, then just    */
+         then Seq.Refresh = Seq.Refresh \ (8\16);            /* refresh the panel.                     */
+         else if (NOTE.AREA.INFORMATION.WOULD.BE.DIFFERENT)  /* else if new info changes display       */
+         then call Redefine.Contents(Seq.Tracks, 2);         /* then redefine screen                   */
+         else if (Display.Note.Contents & bits(tmp(0))) <> 0 /* else if adding column that won't fit   */
+         then call Display.Notice(NT#NoRoomOnPanel,ATTR#Reverse,Nulstr,0,0,0);   /* give an error      */
+
+      end;
+   end;
+
+   else if Screen.Event.Id = Display.Name.Len.Id
+   then do;
+      if Screen.Event.Info = S#Deposit
+      then do;
+
+         i = Fetch.Fixed.Point(Display.Name.Len.Id);
+
+         if i <  1 then i =  1;
+         if i > 32 then i = 32;
+
+         disable.deposits = 1;
+         call Deposit.Fixed.Point(Display.Name.Len.Id, i);
+         disable.deposits = 0;
+         call Update.Object(Display.Name.Len.Id);
+
+         Display.Name.Length = i;
+
+         call Redefine.Contents(Seq.Tracks, 2);
+
+         /* but keep the cursor there so use can continue typing: */
+
+         call Select.New.Cur.Obj(Display.Name.Len.Id,-1,-1);
+      end;
+   end;
+
+end Handle.Perm.Dialog.Mode.1.Events;
+
+Handle.Perm.Dialog.Mode.2.Events: proc swapable;
+   dcl i      fixed;
+   dcl tmp(1) fixed;
+   dcl map.to.aee data (0,5,1,2,3,4); /* map switch to aee time format */
+
+   if Screen.Event.Id = Display.Format.Table
+   then do;
+      if Screen.Event.Info = S#MouseSelect
+      then do;
+
+         call Map.Graphics.Button.Table.Mouse.Press(Display.Format.Table, tmp);
+         call Highlight.Graphics.Button.Table
+         (Display.Format.Table, bits(tmp(0)), 2, 0);
+
+         call Set.AEE.Time.Format(map.to.aee(tmp(0)));
+
+         call UPDATE.SYNC.PANEL(true);     /* update sync panel format switch (and dialog, if any) */
+
+         /* Create a system event when the AEE time format changes */
+
+         new.seq.info = new.seq.info \ 8;
+
+      end;
+   end;
+
+end Handle.Perm.Dialog.Mode.2.Events;
+
+Handle.Perm.Dialog.Mode.3.Events: proc swapable;
+   dcl i      fixed;
+   dcl tmp(1) fixed;
+
+   DEPOSIT.BUTTON.LABEL: proc (Id,Row,Col,Size,Str1,Str2);
+      dcl Id              fixed;
+      dcl (row,col)       fixed;
+      dcl size            fixed;
+      dcl str1            array;
+      dcl str2            array;
+      dcl (buf1,buf2) (8) fixed;
+
+      call Copy.String(Str1,Buf1);
+      call Copy.String(Str2,Buf2);
+
+      call Deposit.Graphics.Button.Table.Label(Id,Row,Col,Size,Buf1,Buf2);
+   end DEPOSIT.BUTTON.LABEL;
+
+   if Screen.Event.Id = Display.Ripple.Table
+   then do;
+      if Screen.Event.Info = S#MouseSelect
+      then do;
+
+         call Map.Graphics.Button.Table.Mouse.Press(Display.Ripple.Table, tmp);
+
+         Ripple.Mode = tmp(0);
+
+         call Highlight.Graphics.Button.Table
+         (Display.Ripple.Table, bits(Ripple.Mode), 2, 0);
+
+         /* draw box in verify button if doing ripple editing: */
+
+         call Highlight.Graphics.Button.Table.Entry
+            (Seq.Verify.Undo.Search, 0, 0, shl(Ripple.Mode <> 0,1), 4, 1);
+
+         if  (Ripple.Mode        <> 0)  /* if user hits 'on' or 'verify' */
+         and (Ripple.Verify.Rows <> 0)  /* and some edits pending,       */
+         then do;                       /* then do them.                 */
+            do case (Ripple.Edit.Type);
+               call CHANGE.SEQ.SELECTED.NOTE.TIMES (Ripple.Verify.Rows,1);
+               call Change.Seq.Note.Duration (Ripple.Edit.Row, Ripple.Edit.Track, Ripple.Edit.Code, 1);
+               call Change.Seq.Note.Pitch    (Ripple.Edit.Row, Ripple.Edit.Track, Ripple.Edit.Code, 1);
+            end;
+         end;
+         else call Clean.Out.Verify.Tracks; /* clean out pending changes if clicking 'OFF' */
+      end;
+   end;
+
+   else if Screen.Event.Id = Display.Show.Headings.Table
+   then do;
+      if Screen.Event.Info = S#MouseSelect
+      then do;
+         call Map.Graphics.Button.Table.Mouse.Press(Display.Show.Headings.Table, tmp);
+
+         Show.No.Headings = tmp(0);
+
+         call Highlight.Graphics.Button.Table
+         (Display.Show.Headings.Table, bits(Show.No.Headings), 2, 0);
+
+         call Redefine.Contents(Seq.Tracks, 3);
+      end;
+   end;
+
+   else if Screen.Event.Id = Display.Scroll.Table
+   then do;
+      if Screen.Event.Info = S#MouseSelect
+      then do;
+         call Map.Graphics.Button.Table.Mouse.Press(Display.Scroll.Table, tmp);
+
+         Seq.Scroll.Mode = tmp(0) xor 1;
+
+         call Highlight.Graphics.Button.Table
+         (Display.Scroll.Table, bits(Seq.Scroll.Mode xor 1), 2, 0);
+
+         /* enable or disable for scrolling based upon */
+         /* where we are and the new state of          */
+         /* Seq.Scroll.Mode:                           */
+
+         call Set.Up.AEE.Play.Scroll.Points;
+
+         /* If re-enabling for scrolling,  then do a scroll right  */
+         /* now.  set bits to sample sequencer time,  and          */
+         /* refresh screen                                         */
+
+         if Seq.Scroll.Mode = 0
+         then Seq.Refresh = Seq.Refresh \ (1\4\8);
+      end;
+   end;
+
+   else if Screen.Event.Id = Display.Show.Offsets.Table
+   then do;
+      if Screen.Event.Info = S#MouseSelect
+      then do;
+         call Map.Graphics.Button.Table.Mouse.Press(Display.Show.Offsets.Table, tmp);
+
+         Show.Offsets = tmp(0);
+
+         call Highlight.Graphics.Button.Table
+         (Display.Show.Offsets.Table, bits(show.offsets), 2, 0);
+
+         if Seq.End.Time.Heading <> 0      /* change column headings */
+         then do i = 0 to Seq.Tracks-1;
+            if Seq.Heading.Contents <> 0
+            then call Deposit.Button.Label(Seq.End.Time.Heading+i, 0, 0, 1, 'Offset Time', NulStr);
+            else call Deposit.Button.Label(Seq.End.Time.Heading+i, 0, 0, 1, 'End Time', NulStr);
+            if Show.Offsets <> 0
+            then call Deposit.Button.Label(Seq.End.Time.Heading+i, 0, 0, 1, 'Offset Time', NulStr);
+            else call Deposit.Button.Label(Seq.End.Time.Heading+i, 0, 0, 1, 'End Time', NulStr);
+         end;
+         Seq.Heading.Contents = Show.Offsets;
+
+         if Seq.End.Time.Locked.Table <> 0
+         then do;
+            do i = 0 to Seq.Tracks - 1;
+               if Show.Offsets <> 0
+               then call Highlight.Graphics.Button.Table
+                    (Seq.End.Time.Locked.Table+i, -1, 1, 1);
+               else call Highlight.Graphics.Button.Table
+                    (Seq.End.Time.Locked.Table+i,  0, 1, 1);
+            end;
+         end;
+
+         /* set bit to cause update when we can.  must force an */
+         /* update to all rows,  since the note information     */
+         /* actually does not change.                           */
+
+         Seq.Refresh = Seq.Refresh \ 8 \ 16;
+
+      end;
+   end;
+
+   else if Screen.Event.Id = Display.Print.Table
+   then do;
+
+      if Screen.Event.Info = S#MouseSelect
+      then do;
+
+         call Map.Graphics.Button.Table.Mouse.Press(Display.Print.Table, tmp);
+
+         call Highlight.Graphics.Button.Table
+         (Display.Print.Table, bits(tmp(0)), 2, 0);
+
+         do case tmp(0);
+
+            do;                /* print page */
+               call Close.Seq.Dialog;
+               call Draw.Message('Printing Event List ...');
+               call tty_wait;
+               call Clean.Out.Verify.Tracks;
+               call wait.for.complete.refresh;
+               call print.headings;
+               call print.sequence.panel;
+               call print.end.of.page;
+               call Erase.Message;
+            end;
+
+            do;                /* print all  */
+               call Close.Seq.Dialog;
+               call Draw.Message('Printing Complete Event List ...');
+               call tty_wait;
+               call Clean.Out.Verify.Tracks;
+               call STR32(0, 0, Seq.Refresh.Time);
+               Seq.Note.Skip = 0;
+               call Take.New.AEE.Snapshot;  /* take a sequence snapshot */
+               call wait.for.complete.refresh;
+               call print.headings;
+               call print.sequence.panel;
+               do while (Seq.Screen.End(0) <> (-1)) & (New.In.Char = 0);
+                  call Advance.AEE.Snapshot.By.1.Page;
+                  call wait.for.complete.refresh;
+                  call print.sequence.panel;
+               end;
+               call print.end.of.page;
+               if New.In.Char <> 0              /* get and toss new in */
+               then do;                         /* char                */
+                  call Get.Next.D50.In.Char;
+                  New.In.Char = 0;
+                  call Draw.Message('Printing Halted');
+               end;
+               else call Erase.Message;
+            end;
+
+         end;
+
+         call Highlight.Graphics.Button.Table
+         (Display.Print.Table, 0, 2, 0);
+
+      end;
+   end;
+
+end Handle.Perm.Dialog.Mode.3.Events;
+
+Handle.Perm.Dialog.Mode.4.Events: proc swapable;
+   dcl i      fixed;
+   dcl tmp(1) fixed;
+   dcl p.y             fixed;
+   dcl t.y             fixed;
+   dcl dir             fixed;
+
+   if Screen.Event.Id = Display.Erase.Bounce.Clear
+   then do;
+      if Screen.Event.Info = S#MouseSelect
+      then do;
+
+         call Map.Graphics.Button.Table.Mouse.Press(Display.Erase.Bounce.Clear, tmp);
+
+         call PROCESS.SEQ.TRACK.CMD.BUTTON.EVENT(tmp(0));
+
+      end;
+   end;
+
+   else if Screen.Event.Id = Display.Solo.Track.Switch
+   then do;
+      if Screen.Event.Info = S#MouseSelect
+      then do;
+
+         p.y = mouse(press.y);                       /* if click is in upper */
+         t.y  = tpos.y(p.y);                         /* half of the transp   */
+         if p.y > gpos.y(t.y*100-50) then dir = +32; /* row, then dir is up  */
+         else                             dir = -32;
+
+         i = Display.Solo.Tracks.Base + dir;
+
+         if i < 0  then i = 64;    /* for now, only access 1 - 96 */
+         if i > 64 then i =  0;
+
+         call Highlight.Graphics.Button.Table  /* un-higlight existing */
+         (Display.Solo.Tracks.#1, 0, 2, 0);    /* track solos          */
+         call Highlight.Graphics.Button.Table
+         (Display.Solo.Tracks.#1, 0, 2, 1);
+
+         call Highlight.Graphics.Button.Table
+         (Display.Solo.Tracks.#2, 0, 2, 0);
+         call Highlight.Graphics.Button.Table
+         (Display.Solo.Tracks.#2, 0, 2, 1);
+
+         call Fill.Track.Table(Display.Solo.Tracks.#1, Display.Solo.Tracks.Base);
+         call Fill.Track.Table(Display.Solo.Tracks.#1, i);
+         call Fill.Track.Table(Display.Solo.Tracks.#2, Display.Solo.Tracks.Base + 16);
+         call Fill.Track.Table(Display.Solo.Tracks.#2, i + 16);
+         Display.Solo.Tracks.Base = i;
+
+         /* Set up new highlighting */
+         call REFRESH.SEQ.TRACK.SOLO.DISPLAY;
+
+      end;
+   end;
+
+   else if Screen.Event.Id = Display.Solo.Tracks.#1
+   then do;
+      if Screen.Event.Info = S#MouseSelect
+      then do;
+
+         call Map.Graphics.Button.Table.Mouse.Press(Display.Solo.Tracks.#1, tmp);
+         i = tmp(0) + 8*tmp(1);
+
+         if Seq.Dialog.Mode = SEQ#TrackBounceDialog
+         then call STUFF.BOUNCE.TRACK(Display.Solo.TracKs.Base + Num.Kbd.Tracks + i);
+         else do;
+            call Toggle.Track.Solo.State(Display.Solo.Tracks.Base + Num.Kbd.Tracks + i);
+
+            call REFRESH.SEQ.TRACK.SOLO.DISPLAY;
+
+            if Seq.Dialog.Mode = SEQ#TrackEraseDialog
+            then call OPEN.SEQ.TRACK.ERASE.DIALOG;
+         end;
+
+      end;
+   end;
+
+   else if Screen.Event.Id = Display.Solo.Tracks.#2
+   then do;
+      if Screen.Event.Info = S#MouseSelect
+      then do;
+         call Map.Graphics.Button.Table.Mouse.Press(Display.Solo.Tracks.#2, tmp);
+         i = tmp(0) + 8*tmp(1);
+
+         if Seq.Dialog.Mode = SEQ#TrackBounceDialog
+         then call STUFF.BOUNCE.TRACK(Display.Solo.Tracks.Base + Num.Kbd.Tracks + 16 + i);
+         else do;
+            call Toggle.Track.Solo.State(Display.Solo.Tracks.Base + Num.KBD.Tracks + 16 + i);
+
+            call REFRESH.SEQ.TRACK.SOLO.DISPLAY;
+
+            if Seq.Dialog.Mode = SEQ#TrackEraseDialog
+            then call OPEN.SEQ.TRACK.ERASE.DIALOG;
+         end;
+
+      end;
+   end;
+
+   else if Screen.Event.Id = Display.DTD.Tracks
+   then do;
+      if Screen.Event.Info = S#MouseSelect
+      then do;
+         call Map.Graphics.Button.Table.Mouse.Press(Display.DTD.Tracks, tmp);
+         i = tmp(0) + 8*tmp(1);
+
+         call Toggle.Track.Solo.State(First.Lod.Track + i);
+
+         call REFRESH.SEQ.TRACK.SOLO.DISPLAY;
+
+         if (Seq.Dialog.Mode = SEQ#TrackEraseDialog )
+         or (Seq.Dialog.Mode = SEQ#TrackBounceDialog)
+         then call Close.Seq.Dialog;
+
+      end;
+   end;
+
+end Handle.Perm.Dialog.Mode.4.Events;
+
+/* $page - Get Sequencer Event */
+
+GET.SEQUENCER.EVENT: proc (event) returns (fixed) public swapable;
+   dcl event                          fixed;
+   dcl i                              fixed;
+   
+   do while 1;
+
+      if event <> Get.Null.Event then do;
+
+         if Screen.Event.Group <> Seq.Group then do;
+
+            /* special check here (for now) or error messages that always */
+            /* glom our dialog line                                       */
+
+            if Screen.Event.Code = Get.Ertyp then do;
+               if Screen.Event.Info then do;
+                  call Set.Term.Attr(Attr#Normal);
+                  call cpos(24,0);
+                  call Erase.To.End.Of.Line;
+                  call PS.ERROR(Latched.Ertyp);
+               end;
+            end;
+
+            else return event;
+         end;
+
+         if event = Get.Screen.Event then do;
+
+            if      (Seq.Track.Number <> 0)
+            and     (Screen.Event.Id >= Seq.Track.Number)
+            and     (Screen.Event.Id <= (Seq.Track.Number + Seq.Tracks - 1))
+            then do; /* changing track assignments in a column */
+               call Handle.Track.Number;
+            end;
+
+            else if (Seq.Track.Out.Gstring <> 0)
+            and     (Screen.Event.Id >= Seq.Track.Out.Gstring)
+            and     (Screen.Event.Id <= (Seq.Track.Out.Gstring + Seq.Tracks - 1))
+            then do; /* changing track output */
+               call Handle.Seq.Out.Event;
+            end;
+
+            else if (Seq.Track.Vol.Gstring <> 0)
+            and     (Screen.Event.Id >= Seq.Track.Vol.Gstring)
+            and     (Screen.Event.Id <= (Seq.Track.Vol.Gstring + Seq.Tracks - 1))
+            then do; /* changing track output */
+               call Handle.Seq.Vol.Event;
+            end;
+
+            else if (Seq.Track.Name.Gstring <> 0)
+            and     (Screen.Event.Id >= Seq.Track.Name.Gstring)
+            and     (Screen.Event.Id <= (Seq.Track.Name.Gstring + Seq.Tracks - 1))
+            then do; /* user typed in track name */
+               call Handle.Seq.Track.Name.Event;
+            end;
+
+            else if (Seq.Track.Solo.Buttons <> 0)
+            and     (Screen.Event.Id >= Seq.Track.Solo.Buttons)
+            and     (Screen.Event.Id < (Seq.Track.Solo.Buttons + Seq.Tracks))
+            then do; /* user wants to toggle a track's solo state */
+               if Seq.Dialog.Mode = SEQ#TrackBounceDialog
+               then call STUFF.BOUNCE.TRACK (trkindex(Screen.Event.Id - Seq.Track.Solo.Buttons));
+               else call Toggle.Seq.Track.Display.Solo(Screen.Event.Id-Seq.Track.Solo.Buttons); /* passed trk column # */
+            end;
+
+            else if Screen.Event.Id = Seq.Track.Scroll.Bar then do;
+               call Handle.Seq.Track.Scroll.Bar;
+            end;
+
+            else if Screen.Event.Id = Seq.Note.Scroll.Bar then do;
+               call Handle.Seq.Note.Scroll.Bar;
+            end;
+
+            else if Screen.Event.Id = Seq.Event.Take.Table
+            then do;
+               call Handle.Seq.Take;
+            end;
+
+            else if Screen.Event.Id = Seq.Event.Time.Table then do;
+               call Handle.Seq.Event.Time;
+            end;
+
+            else if (Seq.Pitch.Name.Table <> 0)
+            and     (Screen.Event.Id >=  Seq.Pitch.Name.Table                  )
+            and     (Screen.Event.Id <= (Seq.Pitch.Name.Table + Seq.Tracks - 1))
+            then do; /* user typed in track name */
+               call Handle.Seq.Pitch.Name;
+            end;
+
+            else if (Seq.Key.Number.Table <> 0)
+            and     (Screen.Event.Id >=  Seq.Key.Number.Table                  )
+            and     (Screen.Event.Id <= (Seq.Key.Number.Table + Seq.Tracks - 1))
+            then do; /* user typed in track name */
+               call Handle.Seq.Key.Number;
+            end;
+
+            else if (Seq.Event.Name.Table <> 0)
+            and     (Screen.Event.Id >=  Seq.Event.Name.Table                  )
+            and     (Screen.Event.Id <= (Seq.Event.Name.Table + Seq.Tracks - 1))
+            then do; /* user typed in track name */
+               call Handle.Seq.Event.Name;
+            end;
+
+            else if (Seq.Duration.Table <> 0)
+            and     (Screen.Event.Id >=  Seq.Duration.Table                  )
+            and     (Screen.Event.Id <= (Seq.Duration.Table + Seq.Tracks - 1))
+            then do; /* user typed in track name */
+               call Handle.Seq.Duration;
+            end;
+
+            else if (Seq.End.Time.Locked.Table <> 0)
+            and     (Screen.Event.Id >=  Seq.End.Time.Locked.Table                 )
+            and     (Screen.Event.Id <= (Seq.End.Time.Locked.Table + Seq.Tracks - 1))
+            then do;
+               if (Screen.Event.Info = S#MouseSelect) then do;
+                  i = (Screen.Event.Id - Seq.End.Time.Locked.Table);
+                  Seq.End.Times.Locked = Seq.End.Times.Locked xor bits(i);
+                  if (Seq.End.Times.Locked & bits(i)) <> 0
+                  then call Highlight.Graphics.Button.Table
+                       (Seq.End.Time.Locked.Table+i, -1, 1, 0);
+                  else call Highlight.Graphics.Button.Table
+                       (Seq.End.Time.Locked.Table+i,  0, 1, 0);
+                  call Clean.Out.Verify.Tracks;
+               end;
+            end;
+
+            else if (Seq.End.Time.Take.Table <> 0)
+            and     (Screen.Event.Id >=  Seq.End.Time.Take.Table                 )
+            and     (Screen.Event.Id <= (Seq.End.Time.Take.Table + Seq.Tracks - 1))
+            then do;
+               call Handle.Seq.End.Time.Take;
+            end;
+
+            else if (Seq.End.Time.Table <> 0)
+            and     (Screen.Event.Id >=  Seq.End.Time.Table                  )
+            and     (Screen.Event.Id <= (Seq.End.Time.Table + Seq.Tracks - 1))
+            then do; /* user typed in track name */
+               call Handle.Seq.End.Time;
+            end;
+
+            else if (Seq.Velocity.Table <> 0)
+            and     (Screen.Event.Id >=  Seq.Velocity.Table                  )
+            and     (Screen.Event.Id <= (Seq.Velocity.Table + Seq.Tracks - 1))
+            then do; /* user typed in track name */
+               call Handle.Seq.Velocity;
+            end;
+
+            else if (Seq.Caption.Table <> 0)
+            and     (Screen.Event.Id >=  Seq.Caption.Table                  )
+            and     (Screen.Event.Id <= (Seq.Caption.Table + Seq.Tracks - 1))
+            then do; /* user typed in track name */
+               call Handle.Seq.Caption;
+            end;
+
+            else if Screen.Event.Id = Seq.Settings.Command.Table
+            then call Handle.Seq.Settings.Command.Table;
+
+            else if Screen.Event.Id = Seq.Verify.Undo.Search
+            then call Handle.Verify.Undo.Search;
+
+            else if Screen.Event.Id = Seq.Move.Copy
+            then call Handle.Seq.Move.Copy;
+
+            else if Screen.Event.Id = Seq.Delete.Move.Play.From
+            then call Handle.Seq.Delete.Move.Play.From;
+
+            else if Screen.Event.Id = Seq.Drag.Take then do;
+               if Screen.Event.Info = S#MouseSelect then do;
+                  call TAKE.SYSTEM.SEQUENCE.TIME(Seq.Refresh.Time);
+                  Seq.Note.Skip = 0;
+                  call UPDATE.SEQ.POSITION.DISPLAY (Seq.Refresh.Time);
+                  call Take.New.AEE.Snapshot;  /* take a sequence snapshot */
+               end;
+            end;
+
+            else if Screen.Event.Id = Seq.Drag.Time then do;
+               if Screen.Event.Info = S#Deposit then do;
+                  call Fetch.32Bit.MSEC(Seq.Drag.Time,Seq.Refresh.Time);
+                  Seq.Note.Skip = 0;
+                  call Take.New.AEE.Snapshot;  /* take a sequence snapshot */
+               end;
+               else if Screen.Event.Info = S#ObjectDrag then do;
+                  call Perform.AEE.Drag.Function(Screen.Event.Id,Screen.Event.Obj.Info);
+                  call Select.New.Cur.Obj(Corner.Label,-1,-1);
+               end;
+            end;
+
+            else if Screen.Event.Id = Seq.Add.Commands
+            then call Handle.Seq.Add.Commands;
+
+            /* check for regular dialog line items: */
+
+            else if (Screen.Event.Id >= Seq.Dialog.First.Id)
+            and     (Screen.Event.Id <= Seq.Dialog.Last.Id)
+            then do; /* an event which gets sent to the dialog box handlers */
+               call Handle.Seq.Dialog.Event;
+            end;
+
+            /* Check for permanent dialog line items: */
+
+            else if (Perm.Dialog.Mode = 1)
+            then call Handle.Perm.Dialog.Mode.1.Events;
+
+            else if (Perm.Dialog.Mode = 2)
+            then call Handle.Perm.Dialog.Mode.2.Events;
+
+            else if (Perm.Dialog.Mode = 3)
+            then call Handle.Perm.Dialog.Mode.3.Events;
+
+            else if (Perm.Dialog.Mode = 4)
+            then call Handle.Perm.Dialog.Mode.4.Events;
+         end;
+
+         /* peform selection function by dragging: */
+
+         else if event=Get.Mouse.Movement then do;
+            call Handle.Seq.Mouse.Movement;
+         end;          /* of Mouse Movement Event */
+
+         else if event=Get.Mouse.Button then do; /* probably a button release */
+            call Handle.Seq.Mouse.Release;
+         end;          /* of Mouse Button event */
+
+      end;
+
+      event = Get.Next.Screen.Event;
+
+   end;
+end GET.SEQUENCER.EVENT;

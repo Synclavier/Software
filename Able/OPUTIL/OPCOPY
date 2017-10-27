@@ -1,0 +1,1376 @@
+/*
+   Optical Disk Copy Utility
+   by Kip Olson, July 1988
+
+   Modification History:
+   06 JUL 88 - KJO - Creation date
+   12 AUG 88 - KJO - Added serial number support
+   26 AUG 88 - KJO - Fixed bug in serial number display
+   24 FEB 96 - CWJ - Removed protection
+*/
+
+configuration ModelC,MulDiv;
+
+pdl 1024; /* need large stack for recursive variables */
+
+insert ':-xpl:reldat';
+insert ':-xpl:asciilit'; /* ASCII literals */
+insert ':-xpl:termutil'; /* Interrupt terminal utilities */
+insert ':-xpl:scsirout'; /* SCSI routines */
+insert ':-xpl:catswap';  /* Catalog routines */
+insert ':-xpl:fileswap'; /* File managment routines */
+insert ':-xpl:scsicmds'; /* SCSI commands */
+insert ':-xpl:optical';  /* Optical disk routines */
+insert ':-xpl:devutil';
+insert ':-xpl:strings';
+insert ':-xpl:messages';
+insert ':-xpl:intrprtr';
+
+dcl Title       data ('Optical Disk Copy Utility - ');
+
+
+/* Interrupt Handler: */
+
+dcl ClockTicks      				fixed;
+dcl (MS_Seconds,LS_Seconds)	fixed;
+dcl real.milliseconds		 	fixed;
+
+when d03int then begin;
+  real.milliseconds = real.milliseconds + 5;
+  
+  ClockTicks = ClockTicks + 1;
+
+   if ClockTicks ige 200 then do;			/* a second has gone by */
+      ClockTicks = 0;
+
+      LS_Seconds = LS_Seconds + 1; /* count the total no. seconds */
+      if LS_Seconds = 0 then MS_Seconds = MS_Seconds + 1;
+   end;
+end;
+
+
+insert ':oputil:ablesim';				/* bring in RTP simulation		*/
+insert ':oputil:recrdsou';				/* cloned ex-mem record mod	*/
+insert ':synsou:indexmod:indexsrc';	/* and index routines			*/
+
+
+/* OpCopy variables and subroutines: */
+
+/* The following literals are used as indices into an array that is used	*/
+/* to store information about the source and/or destination device.  They	*/
+/* are strictly for internal use.														*/
+
+dcl g$Volume_Name  lit '0'; /* volume name (including length word) */
+
+dcl g$MS_DirStart  lit '17'; /* sector start of directory */
+dcl g$LS_DirStart  lit '18';
+
+dcl g$MS_DirLen    lit '19'; /* sector length of directory */
+dcl g$LS_DirLen    lit '20';
+
+dcl g$MS_DataStart lit '21'; /* sector start of data area */
+dcl g$LS_DataStart lit '22';
+
+dcl g$MS_DataLen   lit '23'; /* sector length of data area */
+dcl g$LS_DataLen   lit '24';
+
+dcl g$Rec_Length   lit '26';
+
+
+/* Source Volume information record only: */
+/* A volume parameter record is embedded at the beginning of this record */
+dcl s$Files      lit '26'; /* no. files on disk */
+dcl s$DevAdr     lit '27'; /* device address of drive */
+dcl s$Megabytes  lit '28'; /* no. megabytes */
+dcl s$Name       lit '0';  /* volume name */
+
+dcl s#Rec_Length lit '29';
+
+dcl Source(s#Rec_Length - 1) fixed;
+
+/* Destination Volume information record only: */
+/* A volume parameter record is embedded at the beginning of this record */
+dcl d$Files      lit '26'; /* no. files copied */
+dcl d$DevAdr     lit '27'; /* device address of drive */
+dcl d$Total      lit '28'; /* total files to copy */
+dcl d$Errors     lit '29'; /* no. errors */
+dcl d$Row        lit '30'; /* row on screen for update */
+dcl d$Serial     lit '31'; /* serial number of volume */
+dcl d$MS_Time    lit '32'; /* no. seconds copy has taken */
+dcl d$LS_Time    lit '33';
+dcl d$Name       lit '0';  /* volume name */
+
+dcl d#Rec_Length lit '34';
+
+dcl Dest(d#Rec_Length - 1) fixed; /* destination information */
+
+dcl DestFirstFile			fixed;
+dcl (MS_LogTime,LS_LogTime)	fixed; 		/* time for next log save to disk */
+dcl ListBuf  (L#Rec_Length - 1) fixed; 	/* file list record */
+dcl HeaderBuf(E#Header_Max - 1) fixed; 	/* sound file header record */
+
+
+/* Bit definitions for output device */
+dcl TerminalDev   lit '1'; /* output to terminal */
+dcl PrinterDev    lit '2'; /* output to printer */
+dcl FileDev       lit '4'; /* output to file */
+dcl OutputDev     fixed;   /* device(s) to output to */
+dcl LogDev        fixed;   /* device(s) to log to */
+
+dcl LogFileName       data (':USER:COPYLOG');
+dcl LogFileLen        lit '100';				/* size of log file in sectors */
+dcl LogSaveInterval   lit '60';				/* interval in seconds to flush log to disk */
+dcl LogSaved          boolean;				/* TRUE if log contents have been saved */
+
+dcl OutFile           file;					/* output file */
+dcl OutBufLen         lit '256';				/* size of output buffer in words */
+dcl OutBuf(OutBufLen - 1) fixed;				/* output buffer */
+dcl OutBufPtr         lit 'addr(OutBuf(0))'; /* pointer to output buffer */
+dcl OutBufMed         lit '0';				/* buffer is in internal memory */
+dcl Line(80 / 2)      fixed;					/* output line */
+dcl LineNum           fixed;					/* line number */
+
+dcl CatCache fixed;
+
+dcl SourceLevel       fixed;					/* level no. of source drive */
+dcl DestLevel         fixed;					/* level no. of destination drive */
+
+dcl SourceDevName   (NAM_BUF_SIZE_BYTES/2) fixed;
+dcl DestDevName     (NAM_BUF_SIZE_BYTES/2) fixed;
+dcl SenseMes        (MESSAGE_BUF_SIZE/2  ) fixed;
+dcl CatMes          (MESSAGE_BUF_SIZE/2  ) fixed;
+dcl StatMes			  (100)                  fixed;
+dcl ibuf				  (100) 						 fixed;
+
+dcl SourceStatBuf  (Stat#Rec_Length - 1) fixed;
+dcl DestStatBuf    (Stat#Rec_Length - 1) fixed;
+dcl SourceTreeName (100) fixed;
+dcl DestTreeName   (100) fixed;
+
+dcl SourceSerial      fixed;
+dcl DestSerial        fixed;
+
+dcl RetryMax          lit '4';				/* max no. times to retry operation */
+dcl ErrorMax          lit '20';				/* max no. errors allowed */
+dcl BufSecSize        fixed;					/* size of external memory buffer in sectors */
+
+insert ':oputil:opprint'; 			 			/* get output routines */
+
+OpenLogFile: proc(TreeName) returns (boolean); /* open log file */
+   dcl TreeName fixed array; 		/* treename of log file */
+
+   call Cache_Treename(true); 	/* start treename caching */
+   CatCache = Cache(C#BufPtr,C#BufMed); /* cache catalog buffer into itself */
+
+   if Replace(TreeName, t#text, 0, LogFileLen, 0, 1) then do; 				/* room for this file */
+      OutFile = Open_File(TreeName,'w',OutBufPtr,OutBufMed,OutBufLen);	/* try to open this file for output */
+      if OutFile <> NullF then do;													/* file opened successfully */
+         Line(0) = 0;																	/* initialize file variables */
+         LineNum = 1;
+			pstring ('   Log file created: '); pstringr(TreeName);
+         return (TRUE);																	/* output file is ready to go */
+      end;
+   end;
+
+   call Cache_Treename(false); /* stop treename caching */
+   call Disable_Cache(CatCache); /* disable caching */
+
+   pstring('   ERROR creating log file: ');
+   call PrintError; crlf;
+
+   return (FALSE); /* output file not ready to go */
+end OpenLogFile;
+
+CloseLogFile: proc returns (boolean); /* close log file */
+
+   OutFile = Close_File(OutFile); /* close output file */
+
+   call Cache_Treename(false); /* stop treename caching */
+   call Disable_Cache(CatCache); /* disable caching */
+
+   return (true); /* return status of close */
+end CloseLogFile;
+
+LogError: proc(d,ErrMsg,SCSIError); /* log errors */
+   dcl d         fixed; /* device address where error occurred */
+   dcl ErrMsg    fixed array; /* error message to display */
+   dcl SCSIError boolean; /* true to include SCSI error message */
+
+   pcmd(''); crlf;
+   erase_line;
+   pcmd('');
+
+   OutputDev = LogDev; /* print CR only on log device */
+   newline;
+
+   OutputDev = (TerminalDev or LogDev); /* also output to log */
+
+   call PrintErrorMessage(d,ErrMsg,SCSIError); /* print message */
+
+   OutputDev = LogDev; /* print CR only on log device */
+   newline;
+
+   OutputDev = TerminalDev; /* set back to terminal only */
+	
+	pos(14,0);
+
+   Dest(d$Errors) = Dest(d$Errors) + 1; /* count errors */
+end LogError;
+
+CopyString: proc(s,d); /* copy source string to destination */
+   dcl s fixed array; /* source string */
+   dcl d fixed array; /* destination string */
+   dcl i fixed;
+
+   do i = 0 to shr(s(0) + 1,1);
+      d(i) = s(i);
+   end;
+end CopyString;
+
+SaveVolume: proc(buf); 	/* save volume paremeters */
+   dcl buf fixed array; /* array to save global variables in */
+
+   call CopyString(O$Volume_Name,loc(addr(buf(g$Volume_Name)))); /* store volume name */
+
+   buf(g$MS_DirStart)  = O$MS_DirStart;
+   buf(g$LS_DirStart)  = O$LS_DirStart;
+
+   buf(g$MS_DirLen)    = O$MS_DirLen;
+   buf(g$LS_DirLen)    = O$LS_DirLen;
+
+   buf(g$MS_DataStart) = O$MS_DataStart;
+   buf(g$LS_DataStart) = O$LS_DataStart;
+
+   buf(g$MS_DataLen)   = O$MS_DataLen;
+   buf(g$LS_DataLen)   = O$LS_DataLen;
+
+end SaveVolume;
+
+RestoreVolume: proc(buf); /* restore volume parameters */
+   dcl buf fixed array; /* array to store global variables from */
+
+   call CopyString(loc(addr(buf(g$Volume_Name))),O$Volume_Name); /* restore volume name */
+
+   O$MS_DirStart  = buf(g$MS_DirStart);
+   O$LS_DirStart  = buf(g$LS_DirStart);
+
+   O$MS_DirLen    = buf(g$MS_DirLen);
+   O$LS_DirLen    = buf(g$LS_DirLen);
+
+   O$MS_DataStart = buf(g$MS_DataStart);
+   O$LS_DataStart = buf(g$LS_DataStart);
+
+   O$MS_DataLen   = buf(g$MS_DataLen);
+   O$LS_DataLen   = buf(g$LS_DataLen);
+
+end RestoreVolume;
+
+AddDrive: proc(index); /* add drive to be copied */
+	dcl index fixed; /* index of first file in file list to copy */
+
+	pstring ('   ');
+	if index = 0 then pstring('All');
+	else unum(Source(s$Files) - index,0);
+
+	pstring(' source files will be copied to volume ');
+	pstringr(O$Volume_Name);
+
+	DestFirstFile = index; /* first file to copy */
+end AddDrive;
+
+FormatDestination: proc returns (boolean); /* format destination cartridge */
+	dcl (date,time) fixed;
+	dcl i fixed;
+
+	pstring('   Enter name of volume or RETURN to use source name (');
+	pstring(loc(addr(Source(s$Name))));
+	get_string('): ', TRUE, O$Volume_Name, shl(H#Name_Max,1)); crlf;
+
+	if O$Volume_Name(0) = 0 /* user wants to use source name */
+	then do i = 0 to shr(Source(s$Name) + 1,1); /* copy over source volume name */
+		O$Volume_Name(i) = Source(s$Name + i);
+	end;
+
+	S$SenseKey = S$Good;
+	  
+	Dest(d$Serial) = 0;
+
+	if ReadHeader(SourceLevel) then do;		/* read source volume header */
+
+		do i = 0 to H#Caption_Max;				/* copy over caption */
+			HeaderBuf(i) = gbuf(H$Caption + i);
+		end;
+
+		date = gbuf(H$Date);						/* get date and time stamp */
+		time = gbuf(H$Time);
+
+		if Optical_Format(O$Volume_Name,HeaderBuf,date,time,Dest(d$Serial),DestLevel) then do; /* format cartridge */
+			pstring('   Cartridge formatted as '); pstring(O$Volume_Name);
+			pstring(' with serial number '); unum(Dest(d$Serial),0); crlf;
+
+			return (true); /* format was successful */
+		end;
+
+		call PrintErrorMessage(Dest(d$DevAdr),'formatting volume',TRUE); crlf;
+	end;
+	else do;
+		call PrintErrorMessage(Source(s$DevAdr),'reading header',TRUE); crlf;
+	end;
+
+	return (false); /* format failed */
+end FormatDestination;
+
+ /* Return Codes for CopyFile */
+
+dcl FileCopied lit '0'; /* file was copied successfully */
+dcl SkipFile   lit '1'; /* file could not be copied - skip file */
+dcl SkipDisk   lit '2'; /* unrecoverble write failure - skip disk */
+
+CopyFile: proc(FileName) returns (fixed); /* copy file data */
+   dcl FileName fixed array; /* name of file to copy */
+   dcl (MS_Source,LS_Source) fixed;
+   dcl (MS_Dest,LS_Dest)     fixed;
+   dcl (MS_Total,LS_Total)   fixed;
+   dcl (MS_Moved,LS_Moved)   fixed;
+   dcl (MSW,LSW)             fixed;
+   dcl WriteError boolean;
+   dcl Retries    fixed;
+   dcl chunk      fixed;
+
+   ReadSourceEntry: proc(Entry) returns (boolean); /* read source directory entry */
+      dcl Entry fixed; /* entry to read */
+      dcl i     fixed;
+
+      call RestoreVolume(Source); /* restore source volume parameters */
+
+      do i = 1 to RetryMax; /* retry a number of times */
+         S$SenseKey = ReadEntry(Entry,SourceLevel); /* get optical disk entry for this file */
+
+         if S$SenseKey = S$Good then return (true); /* got it */
+      end;
+
+      call LogError(Source(s$DevAdr),'reading directory entry',TRUE); /* entry read failed */
+      OutputDev = LogDev;
+      ps('File = '); ps(FileName);
+      ps(', Directory entry = '); pn(Entry,0); newline;
+      OutputDev = TerminalDev;
+
+      return (false); /* retries exceeded */
+   end ReadSourceEntry;
+
+   ReplaceDestFile: proc returns (boolean); /* create directory entry for this file */
+      dcl Type                 fixed;
+      dcl (MS_Len,LS_Len)      fixed;
+      dcl WordLen              fixed;
+      dcl i                    fixed;
+
+      call Get_File_Name(E$$Name,E#Name_Max,FileName); /* get file name from buffer */
+
+      Type = gbuf(E$File_Type);
+      MS_Len = gbuf(E$MS_SecLen);
+      LS_Len = gbuf(E$LS_SecLen);
+      WordLen = gbuf(E$LS_WordLen);
+
+      do i = 0 to E#Header_Max - 1; /* copy header */
+         HeaderBuf(i) = gbuf(E$Header + i);
+      end;
+
+      call RestoreVolume(Dest);
+
+      if Optical_Replace(FileName,Type,MS_Len,LS_Len,WordLen,HeaderBuf,-1,DestLevel) /* save new entry for this file */
+      then return (true); /* replace was successful */
+
+      call LogError(Dest(d$DevAdr),'writing directory entry',TRUE); /* replace failed */
+      OutputDev = LogDev;
+      ps('File = '); ps(FileName);
+      ps(', Entry = '); pn(O$EntryCount,0); newline;
+      OutputDev = TerminalDev;
+
+      return (false); /* replace failed */
+   end ReplaceDestFile;
+
+   ReadSourceFile: proc(MS_Sec,LS_Sec,SecLen) returns (boolean); /* read data from source disk */
+      dcl (MS_Sec,LS_Sec) fixed; /* starting sector */
+      dcl SecLen          fixed; /* no. sectors to read */
+      dcl i               fixed;
+
+      call RestoreVolume(Source);
+
+      do i = 1 to RetryMax; /* do retries */
+         S$SenseKey = TransferOptical(S$ExtendedRead,MS_Sec,LS_Sec,SecLen,SourceLevel); /* try to read these sectors */
+
+         if S$SenseKey = S$Good /* no error */
+         then return (true); /* got them */
+      end;
+
+      call LogError(Source(s$DevAdr),'reading source file',TRUE); /* read failed */
+      OutputDev = LogDev;
+      ps('File = '); ps(FileName);
+      ps(', Sector = '); pln(MS_Sec,LS_Sec,0);
+      ps(', Length = '); pn(SecLen,0); newline;
+      OutputDev = TerminalDev;
+
+      return (false); /* replace failed */
+   end ReadSourceFile;
+
+   WriteDestFile: proc(MS_Sec,LS_Sec,SecLen) returns (boolean); /* write data to destination disk */
+      dcl (MS_Sec,LS_Sec) fixed; /* starting sector */
+      dcl SecLen          fixed; /* no. sectors to write */
+      dcl i               fixed;
+
+      call RestoreVolume(Dest);
+
+      S$SenseKey = TransferOptical(S$ExtendedWrite,MS_Sec,LS_Sec,SecLen,DestLevel); /* try to read these sectors */
+
+      if S$SenseKey = S$Good /* no error */
+      then return (true); /* got them */
+
+      call LogError(Source(s$DevAdr),'writing source file',TRUE); /* write failed */
+      OutputDev = LogDev;
+      ps('File = '); ps(FileName);
+      ps(', Sector = '); pln(MS_Sec,LS_Sec,0);
+      ps(', Length = '); pn(SecLen,0); newline;
+      OutputDev = TerminalDev;
+
+      return (false); /* replace failed */
+   end WriteDestFile;
+
+   DeleteFile: proc(Entry) returns (boolean);
+      dcl Entry fixed; /* entry to delete */
+
+      call RestoreVolume(Dest);
+
+      if Optical_Delete(FileName,Entry,DestLevel) /* try to delete this file */
+      then return (true);
+
+      call LogError(Dest(d$DevAdr),'deleting file',TRUE); /* delete failed */
+      OutputDev = LogDev;
+      ps('File = '); ps(FileName);
+      ps(', Entry = '); pn(Entry,0); newline;
+      OutputDev = TerminalDev;
+
+      return (false); /* delete failed */
+   end DeleteFile;
+
+   /* main procedure */
+
+   do Retries = 1 to RetryMax; /* retry a number of times */
+
+      if not ReadSourceEntry(ListBuf(L$Dir_Entry)) /* get optical disk entry for this file */
+      then return (SkipFile); /* couldn't read entry, so skip this file */
+
+      if not ReplaceDestFile /* create directory entry for this file */
+      then return (SkipDisk); /* replace failed, so now disk is corrupted */
+
+      MS_Source = ListBuf(L$MS_SecStart); /* first sector to read */
+      LS_Source = ListBuf(L$LS_SecStart);
+
+      MS_Dest = (F#MS_Sector and "HFF"); /* first sector to write */
+      LS_Dest = F#LS_Sector;
+
+      MS_Total = ListBuf(L$MS_SecLen); /* no. sectors to transfer */
+      LS_Total = ListBuf(L$LS_SecLen);
+
+      if (LS_Total and "1") <> 0 then do; /* make sure sector length is not odd */
+         LS_Total = LS_Total + 1;
+         if LS_Total = 0 then MS_Total = MS_Total + 1;
+      end;
+
+      WriteError = false;
+      MS_Moved = 0; LS_Moved = 0; /* no sectors moved yet */
+
+      do while (not WriteError) /* no write errors have occurred */
+      and ((MS_Moved ilt MS_Total) or ((MS_Moved = MS_Total) and (LS_Moved ilt LS_Total))); /* repeat until file is transferred */
+
+         msw = MS_Total - MS_Moved; /* find amount left to transfer */
+         if LS_Total ilt LS_Moved then msw = msw - 1;
+         lsw = LS_Total - LS_Moved;
+
+         if msw <> 0 /* more than 64k sectors to move */
+         then chunk = 65534; /* set to 64K */
+         else chunk = lsw; /* set to amount left to move */
+         if chunk igt BufSecSize then chunk = BufSecSize; /* limit to size of buffer */
+
+         if not ReadSourceFile(MS_Source,LS_Source,chunk) then do; /* read source data */
+            if DeleteFile(O$EntryCount - 1) /* read failed, so delete this file */
+            then return (SkipFile); /* read failed, so skip this file */
+            else return (SkipDisk); /* delete failed, so skip this disk */
+         end;
+
+         LS_Source = LS_Source + chunk; /* update starting sector */
+         if LS_Source ilt chunk then MS_Source = MS_Source + 1;
+
+         if not WriteDestFile(MS_Dest,LS_Dest,chunk) /* write destination data */
+         then WriteError = TRUE; /* write failed, so retry the entire operation again, if possible */
+
+         LS_Dest = LS_Dest + chunk; /* update starting sector */
+         if LS_Dest ilt chunk then MS_Dest = MS_Dest + 1;
+
+         LS_Moved = LS_Moved + chunk; /* count sectors moved */
+         if LS_Moved ilt chunk then MS_Moved = MS_Moved + 1;
+         
+         interp_run_host_non_timer();
+
+      end;
+
+      if not WriteError then do; /* no write errors, so file copied successfully */
+         return (FileCopied); /* indicate successful copy */
+      end;
+   end;
+
+   if DeleteFile(O$EntryCount - 1) /* copy failed so delete this file */
+   then return (SkipFile); /* skip this file */
+   else return (SkipDisk); /* delete failed, so skip this disk */
+end CopyFile;
+
+CopyFiles: proc(FirstFile); 			/* copy files from source to destination */
+   dcl FirstFile            fixed;	/* first file to copy from source */
+   dcl FileName(100)        fixed;	/* name of file being copied */
+   dcl (sector,word)        fixed;
+   dcl count                fixed;
+   dcl stat                 fixed;
+   dcl FilesCopied          fixed;
+   dcl FilesSkipped         fixed;
+	dcl FileCount				 fixed;
+
+   GetName: proc(buf,fname); /* get file name */
+      dcl buf    fixed array;
+      dcl fname  fixed array;
+      dcl i      fixed;
+
+      do i = 0 to L#Name_Max - 1; /* copy name over */
+         fname(1 + i) = buf(L$Name + i);
+      end;
+
+      i = shl(L#Name_Max,1);
+      do while (i <> 0) and (byte(fname,i - 1) = 0);
+         i = i - 1;
+      end;
+      fname(0) = i; /* store length of name */
+   end;
+
+   PrintName: proc(name);
+      dcl name fixed array;
+      dcl i    fixed;
+
+      do i = name(0) + 1 to 8; /* print leading spaces */
+         pc(a.SP);
+      end;
+      ps(name);
+   end PrintName;
+
+   PrintCompletion: proc; /* print completion statistics */
+      dcl (msw,lsw) fixed;
+
+      msw = MS_Seconds - Dest(d$MS_Time); /* calculate elapsed time */
+      if LS_Seconds ilt Dest(d$LS_Time) then msw = msw - 1;
+      lsw = LS_Seconds - Dest(d$LS_Time);
+
+		OutputDev = LogDev;
+      newline;
+      ps('--------------------------------------------'); newline;
+      ps('          C O P Y  C O M P L E T E'); newline;
+      ps('--------------------------------------------'); newline;
+      ps('  Source Volume:        ');
+      call PrintName(loc(addr(Source(s$Name))));
+      ps('   ('); call PrintDTL(Source(s$DevAdr)); ps(')'); newline;
+      ps('  Destination Volume:   ');
+      call PrintName(loc(addr(Dest(d$Name))));
+      ps('   ('); call PrintDTL(Dest(d$DevAdr)); ps(')'); newline;
+      ps('  Serial Number:        '); pn(Dest(d$Serial),8); newline;
+      newline;
+      ps('  Total files copied:   '); pn(FilesCopied,8); newline;
+      ps('  Total files skipped:  '); pn(FilesSkipped,8); newline;
+      ps('  Total errors:         '); pn(Dest(d$Errors),8); newline;
+      ps('  Total copy time:      '); pt(msw,lsw,8,true,false); newline;
+      ps('--------------------------------------------'); newline;
+      OutputDev = TerminalDev;
+   end PrintCompletion;
+
+   write("5") = FirstFile; /* multiply index by record length to get word offset in file list */
+   write("6") = L#Rec_Length;
+   write("324") = read("5");
+   write("7") = 256; 	/* divide by 256 to get sector offset */
+
+   sector = read("5"); /* store sector offset */
+   word   = read("4"); /* store word offset in that sector */
+
+   call Seek(FileList,I$FileStart + sector,3);	/* seek to sector of first file to copy */
+   call Seek(FileList,shl(word,1),1); 				/* seek to word of first file to copy */
+
+   Dest(d$Files ) = 0; /* no files copied yet */
+   Dest(d$Errors) = 0; /* no errors yet 		 */
+   FilesCopied = 0;
+   FilesSkipped = 0;
+
+	pos(13,0);
+	pstringr ('Starting file copy...');
+
+	FileCount = 0;
+	
+   do count = FirstFile to I$FileCount - 1;						/* loop over files in file list */
+      call FRead(ListBuf,shl(L#Rec_Length,1),1,FileList);	/* get file list record */
+      call GetName(ListBuf,FileName);								/* get file name */
+
+		pos(14,0);
+		erase_line;
+		pstring ('   ');
+		pt(MS_Seconds,LS_Seconds,8,true,false);
+		pstring ('   ');
+		pnum(count - FirstFile + 1, 6);
+		pstring (' out of ');
+		pnum(I$FileCount - FirstFile, 6);
+		pstring ('   Copying: '); pstringr(FileName);
+
+      stat = CopyFile(FileName); /* try to copy this file */
+
+      if stat = FileCopied then do; /* file was copied successfully */
+         Dest(d$Files) = Dest(d$Files) + 1; /* count this file */
+         FilesCopied = FilesCopied + 1; /* count no. files copied */
+      end;
+      else if stat = SkipDisk then do; /* unrecoverable write error occurred - skip this disk */
+         pstringr ('Copy aborted: See error log');
+         OutputDev = LogDev;
+         newline;
+         ps('WARNING: Copy aborted on '); call PrintDTL(Dest(d$DevAdr));
+         ps(' due to fatal error'); newline;
+			ps('Error occurred copying file: '); ps(FileName); newline;
+         OutputDev = TerminalDev;
+
+         return (false); /* give up */
+      end;
+      else if stat = SkipFile then do; /* could not copy file - skip it */
+         OutputDev = LogDev;
+         newline;
+         ps('WARNING: File '); ps(FileName);
+         ps(' was not copied'); newline;
+         OutputDev = TerminalDev;
+         FilesSkipped = FilesSkipped + 1; /* count files skipped */
+      end;
+
+      if Dest(d$Errors) igt ErrorMax then do; /* too many errors */
+         pstringr ('Copy aborted: Too many errors');
+
+         OutputDev = LogDev;
+         newline;
+         ps('WARNING: Copy aborted on '); call PrintDTL(Dest(d$DevAdr));
+         ps(' due too many errors'); newline;
+         ps('Error count = '); pn(Dest(d$Errors),0); newline;
+			ps('Error occurred copying file: '); ps(FileName); newline;
+         OutputDev = TerminalDev;
+
+         return (false); /* give up */
+      end;
+
+		FileCount = FileCount + 1;
+		if (FileCount == 10)
+		{
+         OutputDev = LogDev;
+         newline;
+			ps('10 more files copied; last file was: '); ps(FileName); newline;
+			call FFLush(OutFile);								/* flush log file buffer */
+			LogSaved = true;										/* log now saved on disk */
+         OutputDev = TerminalDev;
+			FileCount = 0;
+		}
+		
+      if  (MS_Seconds igt MS_LogTime)
+      or ((MS_Seconds  =  MS_LogTime) and (LS_Seconds igt LS_LogTime)) then do; /* time to flush log to disk */
+         if not LogSaved then do; /* log has changed since last time */
+            call FFLush(OutFile); /* flush log file buffer */
+            LogSaved = true; /* log now saved on disk */
+         end;
+         MS_LogTime = MS_Seconds; /* calculate next time to save */
+         LS_LogTime = LS_Seconds + LogSaveInterval;
+         if LS_LogTime ilt LogSaveInterval then MS_LogTime = MS_LogTime + 1;
+      end;
+
+      if not term_idle then do; /* key was hit */
+         if rchar = 0 then do; /* break hit */
+            pcmd(''); crlf;
+            erase_line;
+            pcmd('');
+            if Get_YN('Do you wish to stop copying and exit [Y(es) or N(o)]? ') then do; /* user wants to quit */
+					OutputDev = LogDev;
+					newline;
+					ps('WARNING: Copy aborted on '); call PrintDTL(Dest(d$DevAdr));
+					ps(' by user'); newline;
+					ps('Error count = '); pn(Dest(d$Errors),0); newline;
+					ps('Last file copied was: '); ps(FileName); newline;
+					OutputDev = TerminalDev;
+               return (false);
+            end;
+            pcmd('');
+				pos(14,0);
+         end;
+      end;
+   end; /* looping over files */
+
+   call PrintCompletion; /* print completion stats */
+
+   if FilesSkipped = 0 /* no files were skipped */
+   then pstringr ('Copy complete: All files copied');
+   else do; /* some files were skipped */
+      pstringr ('Copy complete: ');
+      unum(FilesSkipped,0); pstring(' files skipped');
+   end;
+
+	if (Dest(d$Errors) != 0)
+	{
+		crlf;
+		pstring ('Warning: '); pnum(Dest(d$Errors), 0); pstringr(' errors occurring during this copy');
+		pstringr('          Check W0:COPYLOG for complete error report');
+	}
+
+	return (true);		/* copy  more-or-less OK */
+end CopyFiles;
+
+CopyDestination: proc; /* copy source to destinations */
+   dcl i     fixed;
+
+	LS_Seconds = 0;
+	MS_Seconds = 0;
+	
+   Dest(d$Total) = Source(s$Files) - DestFirstFile; /* get total files to copy */
+   Dest(d$MS_Time) = MS_Seconds;
+   Dest(d$LS_Time) = LS_Seconds;
+
+   return (CopyFiles(DestFirstFile)); /* copy source files to destination */
+end CopyDestination;
+
+FindSourceFiles: proc returns (fixed); /* find source files on destination (not used) */
+   dcl count fixed;
+   dcl done  boolean;
+
+   dcl sf.id.field lit '128'; /* location of caption in sound file header */
+
+   CompareFiles: proc(lbuf) returns (boolean); /* TRUE if files are the same */
+      dcl lbuf fixed array;
+      dcl i    fixed;
+
+      if gbuf(E$$Type) <> E#Dir_Entry then return (false); /* not a directory entry */
+
+      do i = 0 to L#Name_Max - 1; /* compare names */
+         if gbuf(E$$Name + i) <> lbuf(L$Name + i) then return (false);
+      end;
+
+      do i = 0 to 3; /* compare sector and word lengths */
+         if gbuf(E$LS_SecLen + i) <> lbuf(L$LS_SecLen + i) then return (false);
+      end;
+
+      if gbuf(E$File_Type) <> lbuf(L$File_Type) then return (false); /* compare file types */
+
+      do i = 0 to shr(lbuf(L$Caption) + 1,1) - 1; /* compare caption data */
+         if gbuf(E$Header + sf.id.field + i) <> lbuf(L$Caption + 1 + i) then return (false);
+      end;
+
+      return (TRUE); /* files are the same */
+   end CompareFiles;
+
+   call RestoreVolume(Source); /* restore source volume parameters */
+   call Seek(FileList,I$FileStart,3); /* seek to beginning of file list */
+
+   count = 0; /* start at first file */
+   done = false;
+   do while (count ilt I$FileCount) and (not done); /* loop over all files in file list */
+      call FRead(ListBuf,shl(L#Rec_Length,1),1,FileList); /* get file list record */
+
+      S$SenseKey = ReadEntry(count,SourceLevel); 	/* get optical disk entry */
+
+      if S$SenseKey = S$Good then do; 					/* got entry */
+         if CompareFiles(Listbuf) then do; 			/* optical entry contents same as index entry contents */
+            count = count + 1; /* another file is the same */
+         end;
+         else done = true; /* not the same, so quit here */
+      end;
+      else done = true; /* could not read entry, so quit here */
+   end;
+
+   if count <> 0 then count = count - 1; /* copy last file again in case it was not fully copied before */
+
+   return (count);
+end FindSourceFiles;
+
+CompareNames: proc(Name1,Name2) returns (fixed); /* compare names */
+  dcl (Name1,Name2) fixed array; /* names to compare */
+  dcl i fixed;
+
+  do i = 0 to L#Name_Max - 1; /* loop over all characters in name */
+	 if      rot(Name1(i),8) ilt rot(Name2(i),8) then return (-1); /* less than */
+	 else if rot(Name1(i),8) igt rot(Name2(i),8) then return (1); /* greater than */
+  end;
+
+  return (0); /* equal */
+end CompareNames;
+
+GetSourceFile: proc returns (fixed); /* get index of first source file to copy */
+  dcl FileName(L#Name_Max) fixed;
+  dcl count     fixed;
+  dcl (i,c,len) fixed;
+
+  do while 1; /* loop until they give an answer */
+    pos(8,0);
+	 get_string('   Enter name of first source file to copy or RETURN to copy them all: ',TRUE,FileName,shl(L#Name_Max,1)); crlf;
+
+	 if FileName(0) = 0 then return (0); /* copy all files */
+
+	 len = FileName(0);
+	 do i = 0 to shl(L#Name_Max,1) - 1; /* turn into "FCB" type string (zero filled) */
+		if i < len then do; /* valid name character */
+		   c = byte(FileName,i); /* get character of name */
+		   if (c >= l.a) and (c <= l.z) then c = c - "40"; /* make upper case */
+		end;
+		else c = 0; /* insert a null */
+		call pbyte(loc(addr(FileName(0)) - 1),i,c); /* add character to target name */
+	 end;
+
+	 call Seek(FileList,I$FileStart,3); /* seek to beginning of file list */
+
+	 count = 0;
+	 do while count ilt I$FileCount; /* loop over all files in index file */
+		call FRead(ListBuf,shl(L#Rec_Length,1),1,FileList); /* get file list record */
+
+		c = CompareNames(FileName,loc(addr(ListBuf(L$Name)))); /* check names */
+
+		if c = 0 then return (count); /* name = file, so return index */
+		else if c < 0 then count = I$FileCount; /* name < file, so it is not there */
+
+		count = count + 1;
+	 end;
+
+	 pstringr('   File not found. Please try again.');
+  end;
+end GetSourceFile;
+
+/* Main Program */
+
+dcl SourceName  (H#Name_Max) fixed;
+dcl DestName    (H#Name_Max) fixed;
+
+dcl CatBuf(C#Dir_Max - 1)    fixed; /* catalog buffer */
+dcl Drive fixed;
+dcl DoIt    					  fixed;
+dcl GotSource 					  fixed;
+dcl GotDest						  fixed;
+dcl (i,j)						  fixed;
+dcl Complete					  fixed;
+dcl retry_num					  fixed;
+
+enable;
+
+BufSecSize = EXAMOUNT; 														/* get no. sectors of external memory */
+if (BufSecSize and "1") <> 0 then BufSecSize = BufSecSize - 1; /* make it even for 1024-byte sectors */
+
+CmdLine   = 22;
+OutputDev = TerminalDev;
+LogDev    = FileDev;
+LogSaved  = false; /* log has not been saved yet */
+
+call init_optical_controller;							/* init controller												*/
+
+call Set_CatBuf(addr(CatBuf(0)),0);					/* set catalog buffer											*/
+
+/* Relocate optical buffer to 0 in external memory.  e.g. override what init.optical.disk.stuff			*/
+/* does.  We use a large ext mem buffer for the actual file copy...												*/
+
+call Set_OptBuf(0,1); 									/* set optical buffer in external memory; location 0	*/
+
+/* Perform the index update using the same external memory (e.g. do the udpate after the copy!!!)		*/
+
+call DefineStack (2,128);									/* define stack in external memory						*/
+call DefineMArea(-1, 0, 130, 0, examount - 130);	/* use remainder of external memory for update		*/
+
+Complete = true;
+
+SourceLevel = 10;
+DestLevel   = 11;
+
+DoIt      = false;
+GotSource = false;
+GotDest   = false;
+
+while (DoIt == false || GotSource == false || GotDest == false)
+{
+	if (Complete != 0)
+	{
+		/* lines 0,1: */
+		clear_screen;
+		pstring(Title); pstringr(rel.date);
+//		pstring('Available Memory ='); #unum(BufSecSize,6); pstringr(' sectors');
+		crlf;
+		
+		if (find_device(10) == 0 || find_device(11) == 0)
+		{
+			pstringr(' Error: Two Optical drives are needed for this software');
+
+			if (interp_is_running != 0)
+			{
+				pstringr('        Use InterChange to set up two optical drives before');
+				pstringr('        using OPCOPY.');
+			}
+			else
+			{
+				pstringr('        Use CONFIGUR to set up two optical drives before');
+				pstringr('        using OPCOPY.');
+			}
+			
+			flush_term;
+			
+			exit(1);
+		}
+		
+		/* lines 2-7: */
+		pstringr ('Instructions for OPCOPY:');
+		pstringr ('   1) Information on both optical volumes is shown below'); 
+		pstringr ('   2) press <RETURN> to copy all files as shown');
+		pstringr ('   3) press <SPACE> or <i> to interchange source and destination drives');
+		pstringr ('   4) Press <BREAK> or Q to quit');
+		crlf;
+		
+		Complete = false;
+	}
+
+	fetch_level_name(SourceLevel, SourceDevName);		/* get names of hardware units */
+	fetch_level_name(DestLevel,   DestDevName  );
+
+	GotSource  = false;
+	GotDest    = false;
+	StatMes(0) = 0;
+
+	pos(9, 0); erase_line; pstring ('FROM: ');
+	
+	if (SourceLevel == 10)
+		{pstring ('Optical Zero: "O0:"  '); pstringr(SourceDevName);}
+	else
+		{pstring ('Optical One : "O1:"  '); pstringr(SourceDevName);}
+
+	reread_source:;
+	
+	if (ReadHeader(SourceLevel) != 0)
+	{
+		call Get_File_Name(H$Name, H#Name_Max, SourceName); /* get name from buffer */
+		SourceSerial = gbuf(H$Serial);
+		
+		if (Open_Optical(SourceTreeName, SourceLevel) != 0)
+		{
+			if (Get_Statistics(SourceLevel, SourceStatBuf) != 0)
+			{
+				dcl (ms_tot, ls_tot, ms_used, ls_used, percent) fixed;
+				
+				ms_used = SourceStatBuf(Stat$MS_Used);
+				ls_used = SourceStatBuf(Stat$LS_Used);
+				
+				ms_tot = ms_used + SourceStatBuf(Stat$MS_Free);
+				ls_tot = ls_used + SourceStatBuf(Stat$LS_Free);
+				if (ls_tot ILT ls_used)
+					ms_tot = ms_tot + 1;
+				
+				write("5") = ls_used;	/* no. sectors used */
+				write("4") = ms_used;;
+				write("7") = 2048;								/* divide to get megabytes */
+				Source(S$MegaBytes) = read("5") + (read("4") != 0); /* round up */
+				
+				while (ms_tot != 0)
+				{
+					ls_tot  = shr(ls_tot,  1) | shl(ms_tot,  15);
+					ms_tot  = shr(ms_tot,  1);
+					ls_used = shr(ls_used, 1) | shl(ms_used, 15);
+					ms_used = shr(ms_used, 1);
+				}
+				
+				write(5) = ls_used; write(6) = 100; write("324") = read(5); write(7) = ls_tot;
+				percent = read(5);
+
+				erase_line; pstring ('   Volume Name:    '); pstringr (SourceName);
+				erase_line; pstring ('   Serial Number:  '); pnum(SourceSerial, 6); crlf;
+				erase_line; pstring ('   Megabytes used: '); pnum(Source(S$MegaBytes), 6);
+				            pstring ('   ('); pnum(percent, 2); pstring ('% full)');
+								pstring ('   for '); pnum(I$FileCount, 6); pstring (' files'); crlf;
+
+				GotSource = true;
+			}
+		}
+	}
+	
+	else if ((c#status   == e#none)
+	&&       (S$SenseKey == S$UnitAttention)
+	&&       (retry_num  <  50))
+	{
+		retry_num = retry_num + 1;
+		goto reread_source;
+	}			
+	
+	if (GotSource == false)
+	{
+		get_sense_code_message        (S$SenseKey, SenseMes);
+		add_optical_sense_code_message(S$SenseKey, SenseMes);
+		get_cat_code_message          (C#Status,   CatMes  );
+		add_optical_cat_code_message  (C#Status,   CatMes  );
+	
+		erase_line; pstringr ('   Could not mount volume:');
+		erase_line; pstring  ('      S$SenseKey = '); pnum (S$SenseKey, 6); pstring ('  '); pstringr(SenseMes);
+		erase_line; pstring  ('      C#Status   = '); pnum (c#status,   6); pstring ('  '); pstringr(CatMes  );
+
+		if (StatMes(0) = 0)
+		   copy.error.message('   SOURCE Drive is not ready; see specific error message above', StatMes);
+	}
+	
+	/* Do destination: */
+	
+	pos(14, 0); erase_line; pstring ('TO:   ');
+	
+	if (DestLevel == 10)
+		{pstring ('Optical Zero: "O0:"  '); pstringr(DestDevName);}
+	else
+		{pstring ('Optical One : "O1:"  '); pstringr(DestDevName);}
+	
+	reread_dest:;
+	
+	if (ReadHeader(DestLevel) != 0)
+	{
+		call Get_File_Name(H$Name, H#Name_Max, DestName); /* get name from buffer */
+		DestSerial = gbuf(H$Serial);
+		
+		if (Mount_Volume(DestLevel) != 0)
+		{
+			if (Get_Statistics(DestLevel, DestStatBuf) != 0)
+			{
+				dcl (ms_tot, ls_tot, ms_used, ls_used, percent, megabytes_used) fixed;
+				dcl (ms_avail, ls_avail, megabytes_avail) fixed;
+				
+				ms_used = DestStatBuf(Stat$MS_Used);
+				ls_used = DestStatBuf(Stat$LS_Used);
+				
+				ms_avail = DestStatBuf(Stat$MS_Free);
+				ls_avail = DestStatBuf(Stat$LS_Free);
+				
+				ms_tot = ms_used + ms_avail;
+				ls_tot = ls_used + ls_avail;
+				if (ls_tot ILT ls_used)
+					ms_tot = ms_tot + 1;
+				
+				write("5") = ls_used;	/* no. sectors used */
+				write("4") = ms_used;;
+				write("7") = 2048;								/* divide to get megabytes */
+				megabytes_used = read("5") + (read("4") != 0); /* round up */
+				
+				write("5") = ls_avail;	/* no. sectors used */
+				write("4") = ms_avail;;
+				write("7") = 2048;								/* divide to get megabytes */
+				megabytes_avail = read("5");
+				
+				while (ms_tot != 0)
+				{
+					ls_tot  = shr(ls_tot,  1) | shl(ms_tot,  15);
+					ms_tot  = shr(ms_tot,  1);
+					ls_used = shr(ls_used, 1) | shl(ms_used, 15);
+					ms_used = shr(ms_used, 1);
+				}
+				
+				write(5) = ls_used; write(6) = 100; write("324") = read(5); write(7) = ls_tot;
+				percent = read(5);
+				
+				erase_line; pstring ('   Volume Name:    '); pstringr (DestName);
+				erase_line; pstring ('   Serial Number:  '); pnum(DestSerial, 6); crlf;
+				erase_line; pstring ('   Megabytes used: '); pnum(megabytes_used, 6);
+				            pstring ('   ('); pnum(percent, 2); pstring ('% full)');
+								pstring ('   Megabytes available: '); pnum(megabytes_avail, 6); crlf;
+	
+				GotDest = true;
+			}
+		}
+	}
+	
+	else if (S$SenseKey == S$BlankCheck)
+	{
+		dcl megabytes fixed;
+		
+		i         = find_device(DestLevel);
+		megabytes = 0;
+
+		if (i != 0)
+		{
+			write(5) = core(i + s#seccyl);
+			write(6) = core(i + s#totcyl);
+			write("324") = read(5);
+			write(7) = (2048+40);		/* reduce by 2% for directory & defects; see optical_format... */
+			megabytes = read(5);
+		}
+		
+		erase_line; pstringr ('   Blank media ready for use');
+		erase_line; pstring  ('   Megabytes available: '); pnum(megabytes, 6); crlf;
+		erase_line; crlf;
+		
+		GotDest = true;
+	}
+	
+	else if ((c#status   == e#none)
+	&&       (S$SenseKey == S$UnitAttention)
+	&&       (retry_num  <  50))
+	{
+		retry_num = retry_num + 1;
+		goto reread_dest;
+	}			
+
+	if (GotDest == false)
+	{
+		get_sense_code_message        (S$SenseKey, SenseMes);
+		add_optical_sense_code_message(S$SenseKey, SenseMes);
+		get_cat_code_message          (C#Status,   CatMes  );
+		add_optical_cat_code_message  (C#Status,   CatMes  );
+	
+		erase_line; pstringr ('   Could not read volume header:');
+		erase_line; pstring  ('      S$SenseKey = '); pnum (S$SenseKey, 6); pstring ('  '); pstringr(SenseMes);
+		erase_line; pstring  ('      C#Status   = '); pnum (c#status,   6); pstring ('  '); pstringr(CatMes  );
+		
+		if (StatMes(0) = 0)
+		   copy.error.message('   DESTINATION Drive is not ready; see specific error message above', StatMes);
+	}
+	
+
+	if (GotSource != 0 && GotDest != 0 && StatMes(0) == 0)	
+		copy.error.message('   Press <RETURN> to proceed', StatMes);
+	
+	pos(19, 0);
+	erase_line; pstringr ('Status:');
+	erase_line; pstringr (StatMes);
+	
+	flush_term;
+
+	i    = rchar;
+	DoIt = false;
+	
+	if (i == a.sp || i == a.i || i == l.i)
+	{
+		i = SourceLevel;
+		SourceLevel = DestLevel;
+		DestLevel = i;
+	}
+	
+	else if (i == a.q || i == l.q || i == 0)
+		exit(0);
+		
+	else if (i == a.refresh)
+		Complete = true;
+		
+	if (i == a.cr) DoIt = true;
+}
+
+/* Start of copy: Check things */
+
+pos(22,0);
+get_string ('Enter ''OK'' and  <RETURN> to start copy ->', false, ibuf, 2);
+if (compare (ibuf, 'OK') == false)
+{
+	crlf;
+	pstringr('Terminating.');
+	flush_term;
+	exit(1);
+}
+
+clear_screen;
+pstring(Title); pstringr(rel.date);
+crlf;
+
+GotSource = false;
+GotDest   = false;
+
+pstring ('Checking SOURCE      volume: ');
+
+if (SourceLevel == 10)
+	{pstring ('Optical Zero: "O0:"  '); pstringr(SourceDevName);}
+else
+	{pstring ('Optical One : "O1:"  '); pstringr(SourceDevName);}
+	
+if (ReadHeader(SourceLevel) != 0)
+{
+	call Get_File_Name(H$Name, H#Name_Max, SourceName); /* get name from buffer */
+	SourceSerial = gbuf(H$Serial);
+		
+	if (Open_Optical(SourceTreeName, SourceLevel) != 0)
+	{
+		if (Get_Statistics(SourceLevel, SourceStatBuf) != 0)
+		{
+			call SaveVolume(Source);						/* save source volume parameters */
+
+			i = find_device(SourceLevel);
+			
+			if (i != 0)
+				Source(s$DevAdr) = core(i + s#devadr);
+				
+			Source(S$Files) = I$FileCount;				/* store no. files */
+
+			pstringr ('   OK');
+
+			GotSource = true;
+		}
+	}
+}
+
+if (GotSource == false)
+{
+	get_sense_code_message        (S$SenseKey, SenseMes);
+	add_optical_sense_code_message(S$SenseKey, SenseMes);
+	get_cat_code_message          (C#Status,   CatMes  );
+	add_optical_cat_code_message  (C#Status,   CatMes  );
+
+	pstringr ('   Could not mount volume:');
+	pstring  ('      S$SenseKey = '); pnum (S$SenseKey, 6); pstring ('  '); pstringr(SenseMes);
+	pstring  ('      C#Status   = '); pnum (c#status,   6); pstring ('  '); pstringr(CatMes  );
+	crlf;
+	pstringr ('Failed.');
+	flush_term;
+	exit(1);
+}
+
+pstring ('Checking DESTINATION volume: ');
+
+if (DestLevel == 10)
+	{pstring ('Optical Zero: "O0:"  '); pstringr(DestDevName);}
+else
+	{pstring ('Optical One : "O1:"  '); pstringr(DestDevName);}
+
+if (ReadHeader(DestLevel) == 0 && S$SenseKey == S$BlankCheck)
+{
+	pstringr('   Media in drive is not initialized.');
+
+	if (Get_YN('   Do you wish to initialize this media [Y(es) or N(o)]? ') != 0)
+	{
+		crlf;
+		if (FormatDestination == false)
+		{
+			crlf;
+			pstringr('Terminating.');
+			flush_term;
+			exit(1);
+		}
+	}
+	else
+	{
+		crlf;
+		pstringr('Terminating.');
+		flush_term;
+		exit(1);
+	}
+}
+
+if (ReadHeader(DestLevel) != 0)
+{
+	call Get_File_Name(H$Name, H#Name_Max, DestName); /* get name from buffer */
+	DestSerial = gbuf(H$Serial);
+	
+	if (Mount_Volume(DestLevel) != 0)
+	{
+		call SaveVolume(Dest);							/* save destination volume parameters */
+		call ReadHeader(DestLevel);					/* get volume header into buffer */
+		
+		i = find_device(DestLevel);
+		
+		if (i != 0)
+			Dest(d$DevAdr) = core(i + s#devadr);
+		
+		Dest(d$Serial) = gbuf(H$Serial);				/* store serial number */
+		
+		if O$EntryCount = 0 then do;					/* nothing on this disk */
+			call AddDrive(0);								/* copy all files */
+		end;
+		else do;												/* some data already on disk */
+			crlf; // ????
+			pstring('   WARNING: Destination Volume '); pstring(O$Volume_Name);
+			pstring(' already contains '); unum(O$EntryCount,0); pstringr(' files.');
+	
+			if Get_YN('   Do you wish to use this volume [Y(es) or N(o)]? ') then do;
+				crlf;
+				i = GetSourceFile(); 	/* get index of first source file to copy */
+				call AddDrive(i); 		/* copy these files */
+			end;
+			else do;
+				crlf;
+				pstringr('Terminating.');
+				flush_term;
+				exit(1);
+			end;
+		end;
+
+		if (OpenLogFile(LogFileName) == false)
+		{
+			crlf;
+			pstringr ('Failed.');
+			flush_term;
+			exit(1);
+		}
+
+		pstringr ('   OK');
+		
+		GotDest = true;
+	}
+}
+		
+if (GotDest == false)
+{
+	get_sense_code_message        (S$SenseKey, SenseMes);
+	add_optical_sense_code_message(S$SenseKey, SenseMes);
+	get_cat_code_message          (C#Status,   CatMes  );
+	add_optical_cat_code_message  (C#Status,   CatMes  );
+
+	pstringr ('   Could not read volume header:');
+	pstring  ('      S$SenseKey = '); pnum (S$SenseKey, 6); pstring ('  '); pstringr(SenseMes);
+	pstring  ('      C#Status   = '); pnum (c#status,   6); pstring ('  '); pstringr(CatMes  );
+	
+	crlf;
+	pstringr ('Failed.');
+	flush_term;
+	exit(1);
+}
+
+/* If we pass all of the above hurdles, create the log file and start copying */
+
+OutputDev = LogDev;
+	ps('Error log for '); ps(Title); ps(rel.date); newline;
+	newline;
+	ps('   Source     : '); ps(SourceName); newline;
+	ps('   Destination: '); ps(DestName  ); newline;
+	newline;
+OutputDev = TerminalDev;
+
+/* If files copy OK, do an update... */
+
+if (CopyDestination() != 0)
+{
+	dcl ok boolean;
+	pos(19,0);
+
+	pstringr ('Starting .INDEX file update...');
+	flush_term;
+	
+	ok = Open_Optical(DestTreeName,DestLevel);				/* try to open optical volume */
+	
+	if (not ok) and (S$SenseKey = S$Good) then do;			/* catalog error */
+		if (c#status = e#no_file)									/* no index file or index file not up to date */
+		or (c#status = e#not_uptodate)
+		then ok = true;												/* ok to do update */
+	end;
+	
+	if (ok) and (Update_Index_File(DestTreeName, DestLevel)) then do;
+		pstringr ('');
+		pstringr ('   Update successful - index file created');
+		flush_term;
+	end;
+	else do;
+		get_sense_code_message        (S$SenseKey, SenseMes);
+		add_optical_sense_code_message(S$SenseKey, SenseMes);
+		get_cat_code_message          (C#Status,   CatMes  );
+		add_optical_cat_code_message  (C#Status,   CatMes  );
+		flush_term;
+		print;
+		print '   Update failed:';
+		print '      S$SenseKey = ', S$SenseKey, '  ', string(SenseMes);
+		print '      C#Status   = ', c#status,   '  ', string(CatMes  );
+	end;
+}
+
+call CloseLogFile; /* close log file */
+
+flush_term;
+
+

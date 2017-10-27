@@ -1,0 +1,851 @@
+/*	:SYNSOU:TRAPMOD:TRAPSEQ1  $TITLE  MORE ROUTINES TO PROCESS SEQUENCE EDITING PACKETS	*/
+
+/*
+Modified:
+1999/03/29 - TY  - Changed calls to "Append.Sequencer.Tempo.Map.Record" and "Append.Sequencer.Meter.Map.Record"
+						 in "Handle.Sequence.Editing"
+1992/02/24 - PF  - Moved some extern dcls to trapsou for Tempo/Meter maps
+1991/09/13 - CJ  - Added ability to get and set DTD track names over protocol
+1991/06/19 - PF  - Added poly RAM event stuff
+1991/02/12 - TSS - added note editing capability to Place.Sequence.Event
+1991/02/12 - TSS - Split this file from TRAPSEQ so you can edit it with SED
+						 The following mods info was just copied from TRAPSEQ
+1991/01/30 - MWH - Report which tracks have had new notes
+1991/01/17 - tss - Changed values of TRK#NOTE, TRK#CUE, TRK#EMPTY literals
+1991/01/15 - tss - Added code to send Note track info in snapshots
+1991/01/11 - MWH - Report which tracks have had new notes
+1990/11/06 - pf  - Added argument to Activate.Sequence.For.New.Map -
+						  contains "Divisions" word from MIDI File
+1990/10/24 - MWH - Force an "answer" from all "request" messages
+1990/07/10 - pf  - Added meter map protocol messages
+1990/06/05 - cj  - Checked for 'no-rewind' bit in snapshot request (RET#NOBACK)
+					  - Fixed bug in send.event.snapshot
+					  - Called different garbage collect routine to speed up note moves
+1990/05/31 - cj  - Abort sequence snapshot mid stream if new request comes in.
+1990/05/25 - TSS - Really fix bug in sequence snapshot routine
+1990/05/24 - TSS - Fix bug in sequence snapshot routine
+1990/02/21 - MWH - deal with empty track heads (change from PForstman)
+*/
+
+Send.Event.String: proc (des,tag,track,time,count,which,string) swapable;
+	dcl des			fixed;	/*	Protocol destination node id	*/
+	dcl tag			fixed;	/*	Tag we received in the request	*/
+	dcl track		fixed;	/*	Track number (still in Synclavier format)	*/
+	dcl time			array;	/*	Time (still in Synclavier format)	*/
+	dcl count		fixed;	/*	Event count	*/
+	dcl which		fixed;	/*	Which string: 0=trk, 1=name, 2=caption, 3=timbre	*/
+	dcl string		array;	/*	XPL-style string but with NULL at end, INCLUDED in length!	*/
+	dcl len			fixed;	/*	Length of the "C" string, chars, including null	*/
+	dcl l_time(1)	array;	/*	Local copy of the time array	*/
+	dcl i				fixed;
+
+	len = string(0);
+
+	write(mam) = misc.ptr;
+	write(mdi) = L#Event_String + len - 1;	/*	Add string length	*/
+	write(mdi) = des;
+	write(mdi) = T#Event_String;
+	write(mdi) = tag;
+	write(mdi) = track - 2;
+	call copy32(time,l_time);
+	if com16(ZERO.TIME,l_time) <> lw#igt	/*	If the time is large enough	*/
+	then call sub16(ZERO.TIME,l_time);		/*	Remove "ZERO.TIME" offset	*/
+	else call str32(0,0,l_time);				/*	Else, put us at zero	*/
+	write(mdi) = l_time(lw#msb);
+	write(mdi) = l_time(lw#lsb);
+	write(mdi) = count;
+	write(mdi) = which;
+	do i=1 to shr(len+1,1);						/*	Number of words to send	*/
+		write(mdi) = rot(string(i),8);		/*	Swap the bytes in the string!	*/
+	end;
+
+	return(Send.Protocol.Packet.With.Retry(misc.ptr,1,SEND_RETRY_TIME));
+
+end Send.Event.String;
+
+/*	$SUBTITLE Find an event or track string so we can send it	*/
+
+Process.Event.String: proc (packet,des) swapable;
+	dcl packet		array;	/*	Data coming in	*/
+	dcl des			fixed;	/*	Destination node id	*/
+	dcl which		fixed;	/*	Which string: 0=trk, 1=name, 2=caption, 3=timbre	*/
+	dcl len			fixed;
+	dcl track		fixed;
+	dcl tag			fixed;
+	dcl string		pointer;
+	dcl i				fixed;
+	dcl time	(1)	fixed;	/*	Dummy time field; always zero	*/
+	dcl event (Event.Record.Size-1)	fixed;	/*	Event record	*/
+	dcl no.name		data ('*Unnamed Timbre*');
+
+	tag = packet(0);					/*	get return tag handy				*/
+
+	if  (packet(5) = STR#TRK)		/*	if getting track name			*/
+	and (packet(1) >= 200)			/*	of DTD track, then map			*/
+	and (packet(1) <  216)			/*	to first.lod.track...			*/
+	and (dtd.max.secs <> 0)			/*	if DTD is running					*/
+	then packet(1) = FIRST.LOD.TRACK + (packet(1) - 200);
+	else packet(1) = proto.to.sync.strk(packet(1));	/*	Convert track number		*/
+
+	if packet(1) = -1
+	then do;				/*	Didn't find the event; return an empty string	*/
+		event(0) = 1;	/*	Use as empty string	*/
+		event(1) = 0;	/*	Containing only a null character	*/
+		return(Send.Event.String(des,tag,packet(1),loc(addr(packet(2))),packet(4),which,event));
+	end;
+	call add16(ZERO.TIME,loc(addr(packet(2))));	/*	Add "ZERO.TIME" offset	*/
+	do i=0 to (Spointer.Record.Size - 1);			/*	Get arguments passed in	*/
+		event(i) = packet(i+1);							/*	Trk#, Seq_time, Count	*/
+	end;
+	which = packet(5);
+
+	if which < STR#TRK									/*	Be sure arguments are within limits	*/
+	OR which > STR#TIMBRE
+	then do;				/*	Invalid argument; return an empty string	*/
+		event(0) = 1;	/*	Use as empty string	*/
+		event(1) = 0;	/*	Containing only a null character	*/
+		return(Send.Event.String(des,tag,packet(1),loc(addr(packet(2))),packet(4),which,event));
+	end;
+
+	call str32(0,0,time);								/*	Dummy time field	*/
+
+	if which = STR#NAME OR which = STR#CAPTION	/*	Send event name or caption	*/
+	then do;
+
+		/*	If we can exactly find the event being talked about, send its name or caption	*/
+		if Get.Sequencer.Event.Information(event) = Good.Event.Status then do;
+
+			/*	Append a trailing null to the NED string	*/
+			/*	and limit the length if too long	*/
+			/*	NOTE THAT THIS MAY CLOBBER A BYTE OF THE "event" RECORD!!	*/
+			/*	(but that's OK because we don't re-use it here)	*/
+
+			if which = STR#NAME then do;
+				event(Event.Cue.Name) = event(Event.Cue.Name) + 1;	/*	Add one for null	*/
+				if event(Event.Cue.Name) > 33
+				then event(Event.Cue.Name) = 33;		/*	Limit to 32 characters	*/
+				call pbyte(loc(addr(event(Event.Cue.Name))),event(Event.Cue.Name)-1,0);
+			end;
+
+			else do;	/*	STR#CAPTION	*/
+				event(Event.Caption) = event(Event.Caption) + 1;	/*	Add one for null	*/
+				if event(Event.Caption) > 52
+				then event(Event.Caption) = 52;		/*	Limit to 51 characters	*/
+				call pbyte(loc(addr(event(Event.Caption))),event(Event.Caption)-1,0);
+			end;
+
+			if which = STR#NAME then string = addr(event(Event.Cue.Name	));
+			else	/*	STR#CAPTION	*/  string = addr(event(Event.Caption	));
+
+			return(Send.Event.String(des,tag,event(Event.Track#),loc(addr(event(Event.Time.Msb))),event(Event.Time.Count),which,loc(string)));
+
+		end;			/*	of found the event	*/
+
+		else do;		/*	Didn't find the event; return an empty string	*/
+			event(0) = 1;	/*	Use as empty string	*/
+			event(1) = 0;	/*	Containing only a null character	*/
+			return(Send.Event.String(des,tag,packet(1),loc(addr(packet(2))),packet(4),which,event));
+		end;
+
+	end;		/*	of sending name or caption	*/
+
+	else do;	/*	Send the track or timbre name	*/
+
+		len = 0;												/*	No string found yet	*/
+
+		track = event(Event.Track#);					/*	Save the track#	*/
+
+		if which = STR#TRK then do;					/*	Track name	*/
+
+			len = TRK.HEAD.LOOKUP(track,THD.TRACK.TITLE);
+
+			/*	Note: this re-uses the buffer "event" for the name to save memory	*/
+
+			if len <> 0 then do;							/*	Found a track name	*/
+				call Copy.In(addr(event(0)),shr(len+3,1));
+			end;
+
+			else if track >= FIRST.LOD.TRACK			/*	else if DTD, snarf	*/
+			then do;											/*	desired info			*/
+				call Snarf.Track.Directory;			/*	get dtd directory		*/
+				write(mam) = scsi.ptr;					/*	get data					*/
+				write(mal) = (DTD.Track.Directory.Len * (track - FIRST.LOD.TRACK))
+							  + DTD.Track.Directory.Title;
+				event(0)	= 16;								/*	length of string		*/
+				len		= 16;								/*	to fall through		*/
+				do i = 1 to 8;								/*	get string data		*/
+					event(i) = read(mdi);				/*	space filled at		*/
+				end;											/*	this point.				*/
+
+			end;
+
+			else do;											/*	No track name, try first cue	*/
+				/*	NOTE: This code depends on the fact that the keyboard and	*/
+				/*	split keyboard timbres are both TRACKS 0 & 1 and TIMBRES		*/
+				/*	0 & 1.  LOOKUP.TRACK.TIMBRE.NAME works ONLY for sequencer	*/
+				/*	tracks, but NOT for the keyboard track!!							*/
+
+				if track < NUM.KBD.TRACKS
+				then call LOOKUP.TIMBRE.NAME(track,event);	/*	Timbres 0 & 1 are for tracks 0 & 1	*/
+				else call LOOKUP.TRACK.TIMBRE.NAME(track,event);
+				len = event(0);
+			end;
+
+		end;
+
+		else do;	/*	STR#TIMBRE	*/						/*	Timbre name	*/
+			if track < NUM.KBD.TRACKS
+			then call LOOKUP.TIMBRE.NAME(track,event);	/*	Timbres 0 & 1 are for tracks 0 & 1	*/
+			else call LOOKUP.TRACK.TIMBRE.NAME(track,event);
+			len = event(0);
+			write(mam)=trk.head;								/*	now check the track head	*/
+			write(mal)=track;
+			if read(md)<>0 and len=0 then do;			/*	track head but no name		*/
+				do i=0 to 8;event(i)=no.name(i);end;	/*	use "*Unnamed Timbre*"		*/
+				len = event(0);								/*	update with the new length	*/
+			end;
+		end;
+
+		if len <> 0 then do;								/*	Found a name	*/
+			len = len + 1;									/*	Allow for "C" style null at end	*/
+			if len > 33 then len = 33;					/*	Limit to 32 characters	*/
+			call pbyte(event,len-1,0);					/*	Put null byte at end of string	*/
+			event(0) = len;								/*	Make this the string length	*/
+
+			return(Send.Event.String(des,tag,track,time,0,which,event));
+
+		end;	/*	of found a name	*/
+
+		else do;		/*	Didn't find a name; return an empty string	*/
+			event(0) = 1;	/*	Use as empty string	*/
+			event(1) = 0;	/*	Containing only a null character	*/
+			return(Send.Event.String(des,tag,track,time,0,which,event));
+		end;
+
+
+	end;		/*	of sending track or timbre name	*/
+
+	return(TRUE);											/*	Nothing to do if here	*/
+
+end Process.Event.String;
+
+/*	$SUBTITLE Receive an event string	*/
+
+Receive.Event.String: proc (packet) swapable;
+	dcl packet	array;
+	dcl len		fixed;
+	dcl which	fixed;
+	dcl trk		fixed;
+	dcl (i,j)	fixed;
+	dcl event (Event.Record.Size-1)	fixed;	/*	Event record	*/
+	dcl Set.DTD.Drive.Name proc(fixed, array) external;	/*	simple routine in audmod. should be moved to lod-dtd.	*/
+
+	if  (packet(4) = STR#TRK)		/*	if setting track name		*/
+	and (packet(0) >= 200)			/*	of DTD track, then map		*/
+	and (packet(0) <  216)			/*	to first.lod.track...		*/
+	and (dtd.max.secs <> 0)			/*	if DTD is running				*/
+	then packet(0) = FIRST.LOD.TRACK + (packet(0) - 200);
+	else packet(0) = proto.to.sync.strk(packet(0));	/*	Convert track number		*/
+
+	if packet(0) = -1
+	then return(TRUE);				/*	Illegal argument, so that's all we can do	*/
+	call add16(ZERO.TIME,loc(addr(packet(1))));		/*	Add "ZERO.TIME" offset	*/
+	do i=0 to (Spointer.Record.Size - 1);				/*	Get event ID passed in	*/
+		event(i) = packet(i);								/*	Trk#, Seq_time, Count	*/
+	end;
+	which = packet(4);
+
+	do i=5 to 31;
+		packet(i) = rot(packet(i),8);		/*	Convert string to Able byte order	*/
+	end;
+
+	/*	get length of string. Look for a null at the end of the C string	*/
+	len = 0;
+	do while (len < 52) and (byte(loc(addr(packet(5-1))),len) <> 0);
+		len = len + 1;
+	end;
+
+	if (which == STR#LCAP1)					/*	reset caption buffer at start of long caption	*/
+	{
+		write(mam) = LCAP.PTR;
+		write(md ) = 0;
+	}
+
+	/*	if long caption messages, build the caption in external memory	*/
+
+	if (which == STR#LCAP1 || which == STR#LCAP2 || which == STR#LCAP3)
+	{
+		dcl cur_length	fixed;
+
+		write(mam) = LCAP.PTR;				/*	get current length	*/
+		cur_length = read(md);
+
+		if (cur_length IGT 510)				/*	limit						*/
+			cur_length = 510;
+
+		if (cur_length + len > 510)
+			len = 510 - cur_length;
+
+		do i = 0 to len - 1;
+			j = byte(loc(addr(packet(5-1))), i);
+
+			write(mam) = LCAP.PTR;
+			write(mal) = 1 + shr(cur_length, 1);
+
+			if ((cur_length & 1) != 0)
+				write(md) = (read(md) & 0x00FF) + (shl(j,8));
+			else
+				write(md) = j;
+
+			cur_length = cur_length + 1;
+		end;
+
+		write(mam) = LCAP.PTR;
+		write(md ) = cur_length;
+
+		if (which == STR#LCAP1 || which == STR#LCAP2)
+			then return(TRUE);
+
+		len = cur_length;						/*	puglish final length at this time	*/
+	}
+
+	if which < STR#TRK						/*	Be sure arguments are within limits	*/
+	OR which > STR#LCAP3
+	OR which = STR#TIMBRE
+	then return(TRUE);
+
+	if which = STR#NAME OR which = STR#CAPTION OR which = STR#LCAP3 then do;			/*	Receive event name or caption	*/
+
+		/*	If we can exactly find the event being referenced, change its name	*/
+		if Get.Sequencer.Event.Information(event) = Good.Event.Status then do;
+
+			if event(Event.Type) = Event.Type.Cue	/*	Must be these to change name	*/
+			OR event(Event.Type) = Event.Type.Event
+			then do;
+
+				/*	First, we must remove the existing event	*/
+				if Remove.Sequencer.Event(event) = Good.Event.Status then do;
+
+					/*	Clean up sequence after removing an event	*/
+					call Stop.Sequencer;	/*	stop sequencer for the garbage collect	*/
+					call Garbage.Collect.Event.Area(event(Event.Track#));
+
+					if which = STR#NAME then do;			/*	Change the name			*/
+						if len > 32 then len = 32;			/*	Limit to 32 characters	*/
+						event(Event.Cue.Name + 0) = len;	/*	Length of the string		*/
+						do i=1 to shr(len+1,1);				/*	Number of words to send	*/
+							event(Event.Cue.Name + i) = packet(5+(i-1));	/*	Next pair of characters	*/
+						end;
+
+						/*	Will find ID of the named cue or return zero if not found	*/
+						event(Event.Cue.Id) = Locate.DTD.Cue(loc(addr(event(Event.Cue.Name))));
+					end;
+
+					else do;										/*	Changing the caption	*/
+						if len > Event.Cap.Max.Bytes then len = Event.Cap.Max.Bytes;
+
+						event(Event.Caption + 0) = len;	/*	Length of the string	*/
+
+						if (which == STR#CAPTION)			/*	caption in packet		*/
+						{
+							do i=1 to shr(len+1,1);			/*	Number of words to store	*/
+								event(Event.Caption + i) = packet(5+(i-1));
+							end;
+						}
+						else										/*	else is in external memory by now	*/
+						{
+							write(mam) = LCAP.PTR;
+							write(mal) = 1;
+
+							do i=1 to shr(len+1,1);			/*	Number of words to store	*/
+								event(Event.Caption + i) = read(mdi);
+							end;
+						}
+					end;
+
+					call Place.Event.In.Sequence(event);	/*	Now, re-create the event	*/
+
+				end;	/*	of removed existing event	*/
+			end;		/*	of cue or complex cue	*/
+		end;			/*	of found event	*/
+	end;				/*	of event name or caption	*/
+
+	else if (event(Event.Track#) >= FIRST.LOD.TRACK)
+	then do;
+		trk = event(Event.Track#);						/*	Get the track number	*/
+		if len > 16 then len = 16;						/*	Limit to 16 characters	*/
+
+		packet(0) = len;									/*	clobber packet here	*/
+
+		do i=1 to shr(len+1,1);							/*	Number of words to send	*/
+			packet(i) = packet(5+(i-1));				/*	Next pair of characters	*/
+		end;
+		call Set.DTD.Drive.Name(trk - FIRST.LOD.TRACK, packet);
+
+		if store.dtd.info = 1							/*	if sitting on O page	*/
+		then call send.to.lod(dtd.select.song,0);	/*	Select song dir		*/
+
+	end;
+
+	else do;			/*	Set the track name	*/
+
+		trk = event(Event.Track#);						/*	Get the track number	*/
+		write(mam)=trk.head;								/*	See if track header exists	*/
+		write(mal)=trk;
+		if read(md)=0 then do;							/*	no track header	*/
+			if ALLOCATE.TRK.HEADER(trk) = 0			/*	try to allocate one	*/
+			then return(TRUE);
+			call COPY.TIMBRE(ALWAYS.EMPTY.TRACK,trk);	/*	put null timbre on new track	*/
+		end;
+
+		if len > 32 then len = 32;						/*	Limit to 32 characters	*/
+
+		/*	At this point, just use the packet for scratch to build the XPL string	*/
+		packet(0) = len;
+
+		do i=1 to shr(len+1,1);							/*	Number of words to send	*/
+			packet(i) = packet(5+(i-1));				/*	Next pair of characters	*/
+		end;
+
+		call TRK.HEAD.LOOKUP(trk,THD.TRACK.TITLE);
+		call Copy.Out(addr(packet(0)),shr(len+3,1));
+
+  		interp_seq_dirtyness(1);
+		
+		New.Seq.Info = New.Seq.Info | 2;				/*	New track name	*/
+		write(MAM) = D115D.Note.Change.Tracks;
+		write(MAL) = trk;						/*	Remember track # on new.seq.info	*/
+		write(MD) = "177777";				/*	"new notes" OR "new timbre"		*/
+
+	end;		/*	of setting the track name	*/
+
+	return(TRUE);
+
+end Receive.Event.String;
+
+/*	$SUBTITLE Delete an event	*/
+
+Delete.Event: proc (packet) swapable;
+	dcl packet	array;	/*	Data packet is exactly an "Spointer" record	*/
+
+	packet(0) = proto.to.sync.strk(packet(0));	/*	Convert track number	*/
+	if packet(0) = -1
+	then return(TRUE);		/*	Illegal argument, so that's all we can do	*/
+	call add16(ZERO.TIME,loc(addr(packet(1))));	/*	Add "ZERO.TIME" offset	*/
+	if Remove.Sequencer.Event(packet) = Good.Event.Status
+	then do;
+		call Stop.Sequencer;	/*	stop sequencer for the garbage collect	*/
+		call Garbage.Collect.Event.Area(packet(Spointer.Track#));
+	end;
+	return(TRUE);
+end Delete.Event;
+
+/*	$SUBTITLE Recall an event in the sequence to the cue editor	*/
+
+Recall.Event.For.Edit: proc (packet) swapable;
+	dcl packet	array;			/*	Data packet is an "Spointer" record	*/
+	dcl event (Event.Record.Size-1)	fixed;				/*	Event record	*/
+	dcl i			fixed;
+
+	packet(0) = proto.to.sync.strk(packet(0));	/*	Convert track number		*/
+	if packet(0) = -1
+	then return(TRUE);			/*	Illegal argument, so that's all we can do	*/
+	call add16(ZERO.TIME,loc(addr(packet(1))));	/*	Add "ZERO.TIME" offset	*/
+	do i=0 to (Spointer.Record.Size - 1);			/*	Get event ID passed in	*/
+		event(i) = packet(i);							/*	Trk#, Seq_time, Count	*/
+	end;
+
+	/*	If we can exactly find the event being referenced, call it up	*/
+	/*	as long as the Cue Id is available:										*/
+
+	if (Get.Sequencer.Event.Information(event) = Good.Event.Status)
+	then do;
+		if  (Event(Event.Cue.Id) <> 0)
+		and ((event(event.type) = event.type.event)
+		or   (event(event.type) = event.type.cue	))
+		then do;
+			/*	Set up pointer for possible "replace in sequence" function.	*/
+
+			call blockmove(Event, Recalled.Event.Spointer, spointer.record.size);
+
+			/*	Select "cue reel:															*/
+
+			call SET.DTD.CURRENT.REEL(0);
+
+			/*	Read the basic cue into memory:										*/
+
+			call Fetch.Entire.DTD.Cue(Event(Event.Cue.Id),Current.Cue.Ptr);
+
+			/*	Update the fetched cue information to reflect the in/out	*/
+			/*	changes specific to this event:									*/
+
+			write(mam) = Current.Cue.Ptr;
+			call COPY.IN(addr(MISC.BUF(0)), CUE.NAME);
+
+			call ADD32(loc(addr(event(event.in.msb))),
+						  loc(addr(misc.buf(EVENT.IN.S#.MSB))),
+						  loc(addr(misc.buf(CUE.S.MSB))));
+			call ADD32(loc(addr(event(event.out.msb))),
+						  loc(addr(misc.buf(EVENT.IN.S#.MSB))),
+						  loc(addr(misc.buf(CUE.E.MSB))));
+			call ADD32(loc(addr(event(event.mark.msb))),
+						  loc(addr(misc.buf(EVENT.IN.S#.MSB))),
+						  loc(addr(misc.buf(CUE.OFF.MSB))));
+			call COPY32(loc(addr(misc.buf(CUE.OFF.MSB))),
+							loc(addr(misc.buf(CUE.EDIT.IN.MSB))));
+
+			misc.buf(CUE.FIN)  = event(event.fade.in);
+			misc.buf(CUE.FOUT) = event(event.fade.out);
+
+			write(mam) = Current.Cue.Ptr;
+			call COPY.OUT(addr(MISC.BUF(0)), CUE.NAME);
+
+			Current.Cue.Sync.Mode = 0;		/*	force to "PRE"					*/
+
+			call Deposit.A.New.Current.Cue(1);
+
+			/*	Use common routine to get cue caption from the event:		*/
+
+			call ASSIGN.NEW.DTD.CUE.CAPTION(loc(addr(event(event.caption))));
+
+			/*	Set the sync time of the cue to match the event start time:	*/
+
+			call Map.Sequence.Time.To.Real.Time(loc(addr(Event(Event.Time.Msb))),
+															Cue.Sync.Time);
+
+			call UPDATE.CURRENT.CUE.RECORD;
+
+			call UnSet.Cue.Modified;
+		end;
+		else if (event(Event.Type) = Event.Type.Note)
+		or		  (event(Event.Type) = Event.Type.Poly)
+		then do;
+			call COPY.TIMBRE(packet(0),0);	/*	copy timbre from track to kbd	*/
+		end;
+	end;
+	else call Present.Protocol.Error.Message(NT#SystemError,ATTR#Reverse,0,0,0);
+
+	return(TRUE);
+
+end Recall.Event.For.Edit;
+
+/*	This routine is uses the external memory data structure at					*/
+/*	D115D.Note.Change.Tracks.  This is a single sector which						*/
+/*	contains the tracks which have changed since they were last					*/
+/*	requested.  Each word of the sector represents a track.  When a track	*/
+/*	is changed, the word whose offset is the Synclavier track number is		*/
+/*	set to "-1" (all one bits).  When track information is broadcast to		*/
+/*	a particular D115D channel, the bits corresponding to that channel		*/
+/*	are cleared.  The lowest bit is for board-0 / channel-0, the next			*/
+/*	bit is for board-0 / channel-1, then board-1 / channel-0, etc.				*/
+
+Send.Changed.Tracks: proc (packet,des) swapable;
+	dcl packet	array;	/*	Protocol data packet	*/
+	dcl des		fixed;	/*	Which node to send reply to	*/
+	dcl chan		fixed;	/*	Which channel # (0-7) we are talking to	*/
+	dcl bit		fixed;	/*	Bit mask for the channel we're looking at	*/
+	dcl tag		fixed;
+	dcl stat		fixed;	/*	Send packet return status	*/
+	dcl (i,j)	fixed;
+	dcl buf(15)	fixed;	/*	Read track bits into here from external memory	*/
+
+	tag = packet(0);
+	chan = Map.D115.Node.ID(des);	/*	Which bit to look at in each word of external memory	*/
+	bit = bits(chan);
+
+	/*	Get the track change data for this channel	*/
+	write(mam) = D115D.Note.Change.Tracks;
+	write(mal) = 2;		/*	Ignore the 2 keyboard tracks	*/
+	do i=0 to 12;			/*	We need to cover 200 tracks (but we have 254 words in external memory)	*/
+		do j=0 to 15;		/*	For all bits in this word		*/
+			if (bit & read(mdi)) <> 0 then do;	/*	If the bit for this channel is set in external memory	*/
+				buf(i) = buf(i) | bits(j);			/*	Set the corresponding S-trk bit for our outgoing protocol message	*/
+			end;
+		end;
+	end;
+
+	write(mam) = misc.ptr;
+
+	write(mdi) = L#Changed_Trks;
+	write(mdi) = des;
+	write(mdi) = T#Changed_Trks;
+	write(mdi) = tag;
+	write(mdi) = 0;				/*	Base track number	*/
+	do i=0 to 15;
+		write(mdi) = buf(i);		/*	Track bits for this channel	*/
+	end;
+
+	stat = Send.Protocol.Packet(misc.ptr,1);
+
+	if (stat = FALSE) then return(FALSE);	/*	Coming back later; don't clear track bits	*/
+	else do;
+		/*	Success if here (not coming back to try again) so zero track bits	*/
+		write(mam) = D115D.Note.Change.Tracks;
+		write(mal) = 2;			/*	Ignore the 2 keyboard tracks	*/
+		do i=0 to 253;				/*	We need to cover 200 tracks (but we have 254 words in external memory)	*/
+			write(mdi) = read(md) & not(bit);
+		end;
+
+		return(TRUE);				/*	OK	*/
+	end;
+
+end Send.Changed.Tracks;
+
+/*	$SUBTITLE Remove time from a track	*/
+
+Remove.Time.From.A.Track: proc (packet) swapable;
+	dcl packet			array;	/*	Arguments passed in	*/
+	dcl track			fixed;	/*	Track number	*/
+	dcl seq.time(1)	fixed;	/*	Sequence time: where to remove time	*/
+	dcl the.time(1)	fixed;	/*	Amount of time to remove from the track	*/
+
+	/*	Get arguments passed in	*/
+	track = proto.to.sync.strk(packet(0));			/*	Convert track number	*/
+	if track = -1 then return(TRUE);
+	call copy32(loc(addr(packet(1))),seq.time);
+	call add16(ZERO.TIME,seq.time);					/*	Add "ZERO.TIME" offset	*/
+	call copy32(loc(addr(packet(3))),the.time);
+
+	call Delete.Time.From.Trk(track,seq.time(lw#msb),seq.time(lw#lsb),the.time(lw#msb),the.time(lw#lsb));
+
+	return(TRUE);
+
+end Remove.Time.From.A.Track;
+
+/*	$SUBTITLE Add time to a track	*/
+
+Add.Time.To.A.Track: proc (packet) swapable;
+	dcl packet			array;	/*	Arguments passed in	*/
+	dcl track			fixed;	/*	Track number	*/
+	dcl seq.time(1)	fixed;	/*	Sequence time: where to add time	*/
+	dcl the.time(1)	fixed;	/*	Amount of time to add to the track	*/
+
+	/*	Get arguments passed in	*/
+	track = proto.to.sync.strk(packet(0));			/*	Convert track number	*/
+	if track = -1 then return(TRUE);
+	call copy32(loc(addr(packet(1))),seq.time);
+	call add16(ZERO.TIME,seq.time);					/*	Add "ZERO.TIME" offset	*/
+	call copy32(loc(addr(packet(3))),the.time);
+
+	call Insert.Time.On.Trk(track,seq.time(lw#msb),seq.time(lw#lsb),the.time(lw#msb),the.time(lw#lsb));
+
+	return(TRUE);
+
+end Add.Time.To.A.Track;
+
+Process.Place.Cue.Message: proc swapable;
+	dcl i	fixed;
+
+	i = PLACE.DTD.CUE.IN.SEQUENCER(Recalled.Event.Spointer, 0);
+
+	do case (i);
+		call Present.Protocol.Error.Message(NT#EventPlaced,				ATTR#Normal, GID(Cue.Place.Track)-1,0,0);
+		call Present.Protocol.Error.Message(NT#NoEventForReplace,		ATTR#Reverse,0,0,0);
+		call Present.Protocol.Error.Message(NT#MustSaveCueBeforePlace,	ATTR#Reverse,0,0,0);
+		call Present.Protocol.Error.Message(NT#EventTracksDontMatch,	ATTR#Reverse,0,0,0);
+		call Present.Protocol.Error.Message(NT#VersionDoesntMatch,		ATTR#Reverse,0,0,0);
+		call Present.Protocol.Error.Message(NT#MustSaveCueBeforePlace,	ATTR#Reverse,0,0,0);
+		call Present.Protocol.Error.Message(NT#BadPlaceTrack,				ATTR#Reverse,0,0,0);
+		call Present.Protocol.Error.Message(NT#NoRoomForPlace,			ATTR#Reverse,0,0,0);
+		call Present.Protocol.Error.Message(NT#CueListIsFull,				ATTR#Reverse,GID(Cue.Place.Track)-1,0,0);
+		call Present.Protocol.Error.Message(NT#SystemError,				ATTR#Reverse,0,0,0);
+	end;
+
+	return(TRUE);
+
+end Process.Place.Cue.Message;
+
+/*	$SUBTITLE  Dispatch to individual handling routines	*/
+
+Handle.Sequence.Editing: proc swapable;
+	dcl (len,des)					fixed;
+	dcl subtype						fixed;
+	dcl data_words					lit '32';	/*	Number of data words to read	*/
+	dcl packet(data_words-1)	fixed;		/*	Array to hold data from packet	*/
+	dcl ret							fixed;
+	dcl i								fixed;
+
+	write(mam) = Packet.Ptr;
+
+	write(mal) = P#LEN;	  len = read(md);
+	write(mal) = P#SOURCE; des = read(md);
+
+	write(mal) = P#TYPE;
+	subtype	  = read(md) & "377";
+
+	write(mal) = P#DATA;
+	write("313") = addr(packet(0));
+	rpc data_words;
+	write("373") = read(mdi);
+
+	ret = 1;		/*	assume ok unless someone returns a specific error	*/
+
+	if subtype < 16
+	then do case subtype;						/*	Branch on specific command (0-15)	*/
+
+		begin;	/*	0:  Save snapshot of current sequence	*/
+			dcl  Save.Undoseq proc external;
+			call Save.Undoseq;					/*	Save it	*/
+		end;
+
+		do;		/*	1:  Restore to .UNDOSEQ	*/
+			dcl  Undo.Sequence.Changes proc external;
+			call Undo.Sequence.Changes;
+		end;
+
+		do;		/*	2:  Erase the whole sequence	*/
+			ret = Erase.Sequence;
+		end;
+
+		do;		/*	3: Request Sequence Data Area (IE Tempo Map)	*/
+			call Send.Several.Sequence.Data.Area.Records(packet, des);
+		end;
+
+		do;		/*	4: Not used (indicates Sequence Data outgoing)	*/
+			call Present.Protocol.Error.Message(NT#SystemError,ATTR#Reverse,0,0,0);
+		end;
+
+		begin;	/*	5: Initialize Sequence Data area (IE Erase Tempo/Meter Map)	*/
+
+			dcl Erase.Tempo.Map.Info proc external;
+			dcl Erase.Meter.Map.Info proc external;
+
+			if packet(0) IGE #.OF.MAP.PTRS	/*	check for bad argument				*/
+			then call Present.Protocol.Error.Message(NT#SystemError,ATTR#Reverse,0,0,0);
+			else do case packet(0);
+				call Erase.Tempo.Map.Info;		/*	Tempo.Map#	*/
+				call Erase.Meter.Map.Info;		/*	Meter.Map#	*/
+			end;
+		end;
+
+		do;		/*	6: Add to Sequencer Data Area (ie in-coming Tempo Map Record)	*/
+
+			/*	Append this record to the end of the tempo map:	*/
+
+			if packet(0) IGE #.OF.MAP.PTRS	/*	check for bad argument				*/
+			then call Present.Protocol.Error.Message(NT#SystemError,ATTR#Reverse,0,0,0);
+			else do;
+				do case packet(0);
+					//	i = Append.Sequencer.Tempo.Map.Record(loc(addr(packet(1))),loc(addr(packet(3))));
+					i = Append.Sequencer.Tempo.Map.Record(loc(addr(packet(3))));
+					//	i = Append.Sequencer.Meter.Map.Record(loc(addr(packet(1))),loc(addr(packet(3))));
+					i = Append.Sequencer.Meter.Map.Record(loc(addr(packet(3))));
+				end;
+				if i = (-1)	/*	give error if out of memory	*/
+				then call Present.Protocol.Error.Message(NT#SystemError, ATTR#Reverse,0,0,0);
+			end;
+		end;
+
+		do;		/*	7: Activate Sequencer Data area (ie initialize sequence		*/
+					/*		for the new tempo map we just loaded in).						*/
+
+			call Activate.Sequence.For.New.Map(packet(0),packet(1));
+		end;
+
+		do;		/*	8: Request able seq path name	*/
+			Send.Able.Seq.Path(packet, des);
+		end;
+
+		do;		/*	9: Not used (indicates able seq path outgoing)	*/
+			 call Present.Protocol.Error.Message(NT#SystemError,ATTR#Reverse,0,0,0);
+		end;
+
+		do;		/*	10 - receive able seq path	*/
+			ret = Receive.Able.Seq.Path(packet);
+		end;
+
+		do;		/*	11 - store able sequence in path name	*/
+			ret = Recall.Path.Sequence(packet);
+		end;
+
+		do;		/*	12 - store able sequence in path name	*/
+			ret = Store.Path.Sequence(packet);
+		end;
+
+		do;		/*	13 - scroll able sequence in path name	*/
+			ret = Scroll.Sequence.Path(packet);
+		end;
+	end;			/*	of branch on specific command (0-15)	*/
+
+	else if subtype < 32
+	then do case (subtype - 16);	/*	Branch on specific command (16-31)	*/
+
+		do;		/*	16:  Ask for snapshot of events on tracks	*/
+			ret = Send.Event.Snapshot(packet,des,0);
+		end;
+
+		do;		/*	17:  Ask for an events	*/
+			ret = Send.Event(packet,des);
+		end;
+
+		do;		/*	18:  Request the default values for an event	*/
+			ret = Send.Event.Defaults(packet,des);
+		end;
+
+	end;			/*	of branch on specific command (16-31)	*/
+
+
+	else if subtype < 48
+	then do case (subtype - 32);	/*	Branch on specific command (32-47)	*/
+
+		do;		/*	32:  Event description, w/o name or caption	*/
+			ret = Place.Sequence.Event(packet);
+		end;
+
+		do;		/*	33:  Change event item	*/
+			ret = Change.Event.Item(packet);
+		end;
+
+		do;		/*	34:  Request a string for an event or track	*/
+			ret = Process.Event.String(packet,des);
+		end;
+
+		do;		/*	35:  Return event or track string data	*/
+			/*	This is handled by the request routine	*/
+		end;
+
+		do;		/*	36:  Process an incoming string for an event or track	*/
+			ret = Receive.Event.String(packet);
+		end;
+
+		do;		/*	37:  Delete an event from a track	*/
+			ret = Delete.Event(packet);
+		end;
+
+		do;		/*	38:  Call up event by ID	*/
+			ret = Recall.Event.For.Edit(packet);
+		end;
+
+		do;		/*	39:  Get tracks with note changes	*/
+			ret = Send.Changed.Tracks(packet,des);
+		end;
+
+	end;			/*	of branch on specific command (32-47)	*/
+
+
+	else if subtype < 64
+	then do case (subtype - 48);	/*	Branch on specific command (48-63)	*/
+
+		do;		/*	48:  Remove time from a track	*/
+			ret = Remove.Time.From.A.Track(packet);
+		end;
+
+		do;		/*	49:  Add time to a track	*/
+			ret = Add.Time.To.A.Track(packet);
+		end;
+
+
+	end;			/*	of branch on specific command (48-63)	*/
+
+	else if subtype < 80
+	then do case (subtype - 64);	/*	Branch on specific command (64-79)	*/
+
+		do;		/*	64:  place cue	*/
+			ret = Process.Place.Cue.Message;
+		end;
+
+	end;			/*	of branch on specific command (64-79)	*/
+
+	return (ret);				/*	return processed status	*/
+
+end Handle.Sequence.Editing;

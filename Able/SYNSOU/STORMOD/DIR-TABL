@@ -1,0 +1,173 @@
+/*	:SYNSOU:STORMOD:DIR-TABL  $TITLE  Routines to Process Recall Screen Scrolling Table Events
+
+Modified:
+2000/02/27 - TY  - Changed calls to Recall.Sound.File() to indirectly accommodate display of sound file loops
+1989/05/02 - TSS - Merged changes for Optical disk to DTD transfer project
+1989/04/29 - TSS - "Literalized" use of GET.CURRENT.FILENAME.AND.INFO
+1987/12/21 - MWH - Use Get.Next.Optical.Event directly
+*/
+
+dcl ArrowKey.Increment	lit '(shr(GID(DirTableRows),1)+1)';	/*	number of lines to scroll at page top & bottom	*/
+
+Get.Next.Store.DirTable.Event: proc swapable;
+	dcl Name (SFNAME#Arr_Len)	fixed;
+	dcl Info (SFINFO#Arr_Len)	fixed;
+	dcl LineType					fixed;
+	dcl (Col,Row)					fixed;
+	dcl (MaxCol,X)					fixed;
+	dcl FileAddr	(1)			fixed;
+	dcl FileLen		(1)			fixed;
+	dcl (mx,my)						fixed;
+	dcl ChosenItemType			fixed;
+	dcl NameStr(F#Name_Len)		fixed;	/*	catalog name, if selected	*/
+
+	do while Exit.My.Screen=0;				/*	wait for exit condition	*/
+
+		if Screen.Event.Group<>GID(WindowGrp) then return;
+
+		if Screen.Event.Code=Get.Screen.Event then do;
+
+			if Screen.Event.Id<>GID(DirTable) then return;
+
+			if (Screen.Event.Info=S#MouseSelect)
+			or (Screen.Event.Info=S#MouseActivate)
+			or (Screen.Event.Info=S#KeyActivate)
+			then do;
+
+				LineType=Fetch.DirTable.Item.Type(Screen.Event.Table.Row,Screen.Event.Table.Col);
+
+				if (LineType<>ITEM$Eof)&(Screen.Event.Info<>S#KeyActivate) then do;	/*	mouse click	*/
+					if MaxRowItems(LineType) IGT 1 then do;	/*	more than 1 file per line	*/
+						X=Mouse(PRESS.X);								/*	get x coord of last click	*/
+						X=TPos.X(X);									/*	map to transparent char position	*/
+						X=X-Fetch.Object.Info(GID(DirTable),O#Trans.Col);	/*	relative to left edge of table	*/
+						load X; div MaxItemChars(LineType);
+						X=res;											/*	map to logical column	*/
+					end;
+					else X=0;
+				end;
+				else X=Screen.Event.Table.Col;
+
+				if (Screen.Event.Info<>S#KeyActivate) then do;	/*	mouse click	*/
+					call Set.DirTable.Position(Screen.Event.Table.Row,X);	/*	new logical position	*/
+					call Update.Object(Screen.Event.Id);
+					/*	file/cat is actually recalled after an S#ObjectDragAbort, below	*/
+				end;
+
+				else do;	/*	key activate	*/
+					ChosenItemType = Fetch.DirTable.Item.Type(Screen.Event.Table.Row,Screen.Event.Table.Col);
+					if (ChosenItemType = ITEM$Filename)
+					then do;								/*	load file into menu table	*/
+						/*	NOTE: Above line also repositions		*/
+						/*			index file vars to current item	*/
+
+						if Get.Current.FileName.And.Info(Name,Info)=ITEM$Filename
+						then do;
+							call Copy32(loc(addr(Info(SFINFO#F_Base  ))),FileAddr);
+							call Copy32(loc(addr(Info(SFINFO#F_SecLen))),FileLen);
+							call Recall.Sound.File(Name,DirDevice,FileAddr,FileLen,(FunctionInfo&INFO$AUDITION)<>0,0);	/*	load sound file	*/
+							call Set.Term.Attr(ATTR#Normal);
+							call PRINT.CCAT;
+						end;
+					end;
+					else if (ChosenItemType = ITEM$Category)
+					then do;								/*	load category (sub-catalog) into menu table	*/
+					//	if Handle.Catalog.Select(NameStr) then do;
+					//		call PRINT.CCAT;
+					//		call Close.Device.Menu;			/* redraw menu */
+					//		call Open.Device.Menu(1,6);
+					//		call Change.Device(1);			/* redraw table for cur device */
+					//	end;
+					end;
+				end;
+			end;
+
+			else if (Screen.Event.Info=S#ArrowSelect)
+			or		  (Screen.Event.Info=S#ArrowSelectAttempt)
+			then do;
+
+				call Flush.Arrow.Keys.From.D50.Buf;
+
+				LineType=Fetch.DirTable.Item.Type(0,Screen.Event.Table.Row);
+
+				if (Screen.Event.Info=S#ArrowSelect) then do;
+					if ((LineType <> ITEM$Filename)
+					and (LineType <> ITEM$Category)) then
+						X = 0;			/*	user arrowed beyond end of data	*/
+					else X = Screen.Event.Table.Col;
+					call Set.DirTable.Position(Screen.Event.Table.Row,X);	/*	new logical position	*/
+				end;
+				else do;	/*	S#ArrowSelectAttempt (trying to leave table)	*/
+					if (Screen.Event.Obj.Info=U.ARR)
+					or (Screen.Event.Obj.Info=D.ARR)
+					then do;	/*	page up and page down	*/
+						if Screen.Event.Obj.Info=U.ARR
+						then call Scroll.DirTable.Backward(ArrowKey.Increment);
+						else call Scroll.DirTable.Forward (ArrowKey.Increment);
+
+						call Set.ScrollBar.Pos;	/*	keep scroll box in correct position	*/
+					end;
+				end;
+			end;
+
+			/*	$PAGE	*/
+
+			else if (Screen.Event.Info=S#ObjectDragAbort) then do;
+
+				mx=Mouse(Release.x); my=Mouse(Release.y);
+
+				if POINT.IN.OBJECT(GID(DirTable),mx,my)
+				then do;											/*	make sure release was in table	*/
+
+					call MAP.POINT.TO.TABLE.CELL(mx,my,GID(DirTable),Loc(Addr(Col)));
+
+					if  (Col=Screen.Event.Table.Col)
+					and (Row=Screen.Event.Table.Row)
+					then do;	/*	dropped on original position - recall sound file	*/
+
+						LineType=Fetch.DirTable.Item.Type(Screen.Event.Table.Row,Screen.Event.Table.Col);
+
+						/*	NOTE: Above line also repositions		*/
+						/*			index file vars to current item	*/
+
+						if LineType=ITEM$Filename then do;	/*	load file into menu table	*/
+							if Get.Current.FileName.And.Info(Name,Info)=ITEM$Filename
+							then do;
+								call Copy32(loc(addr(Info(SFINFO#F_Base  ))),FileAddr);
+								call Copy32(loc(addr(Info(SFINFO#F_SecLen))),FileLen);
+								call Recall.Sound.File(Name,DirDevice,FileAddr,FileLen,(FunctionInfo&INFO$AUDITION)<>0,0);	/*	load sound file	*/
+								call Set.Term.Attr(ATTR#Normal);
+								call PRINT.CCAT;
+							end;
+						end;
+						else if LineType=ITEM$Category then do;
+						//	if Handle.Catalog.Select(NameStr) then do;
+						//		call PRINT.CCAT;
+						//		call Close.Device.Menu;		/* redraw menu */
+						//		call Open.Device.Menu(1,6);
+						//		call Change.Device(1);		/* redraw table for cur device */
+						//	end;
+						end;
+					end;
+				end;
+			end;
+		end;
+
+		call Get.Next.Optical.Event;			/*	get the next event to handle	*/
+	end;
+
+end Get.Next.Store.DirTable.Event;
+
+Get.Next.Store.DirWindow.Event: proc swapable;
+
+	do while Exit.My.Screen=0;					/*	wait for exit condition	*/
+
+		if Screen.Event.Group<>GID(WindowGrp) then return;
+
+		if Get.Next.Window.Event then do;	/*	returns true if table is next event	*/
+			call Get.Next.Store.DirTable.Event;
+		end;
+		/*	else call Set.DirTable.Position(-1,-1);	*/
+
+	end;
+end Get.Next.Store.DirWindow.Event;

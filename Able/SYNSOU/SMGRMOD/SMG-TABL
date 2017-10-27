@@ -1,0 +1,1356 @@
+/* SMG-TABL $TITLE  Screen Manager Table Routines
+
+   Modified:
+   05/08/89 - SGS - Added error check to Compute.Cell.Ptr
+   08/22/88 - CJ  - Disable.And.Disexhibit.Table.Cell
+   11/23/87 - MWH - Remove graphics strings as valid table type
+   11/19/87 - MWH - Table cells need to be one word longer!!!
+   11/17/87 - MWH - Split into 2 libraries; SMGR is too big
+   10/19/87 - MWH - Screen.Changed, Update, Exhibit, Enable USED CONSISTENTLY
+   10/06/87 - MWH - Make unreferenced procedures NON-public
+   09/25/87 - MWH - Use literals for suffix lengths
+   
+*/
+
+/* Each cell of a table is made up of two status bytes followed by
+   an exact copy of the suffix of the type object.  For transparent
+   mode cells the row,col,and width information is not stored with
+   each cell. */
+
+COPY.EXMEM: proc (source,dest,words) swapable; /* Copy xmem words at from source loc to dest loc */
+   dcl source  fixed;  /* Source      xmem ptr (relative to Screen.Base) */
+   dcl dest    fixed;  /* Destination xmem ptr (relative to Screen.Base) */
+   dcl words   fixed;  /* Length of copy in words */
+
+   call Copy.Ext.Mem (Screen.Base,source,Screen.Base,Dest,words); /* Copy for as long as source */
+end COPY.EXMEM;
+
+CELL.IN.TABLE: proc (Id,Col,Row) returns (fixed) swapable;
+   dcl id   fixed;
+   dcl col  fixed;
+   dcl row  fixed;
+
+   if Locate.Object(id) then do;
+      if Read.Object(Object.Ptr+O#Type) <> O$Table then return 0;
+
+      return ((col < Read.Object(Object.Ptr+O#TABL.Across))
+              & (col >= 0)
+              & (row < Read.Object(Object.Ptr+O#TABL.Down))
+              & (row >= 0));
+   end;
+   else return 0;
+end CELL.IN.TABLE;
+
+COMPUTE.CELL.PTR: proc (Ptr,Col,Row) returns (fixed) swapable;  /* Computes memory ptr to cell in a table */
+   dcl ptr fixed; /* Pointer to table */
+   dcl Col fixed; /* Column of table to compute */
+   dcl Row fixed; /* Row of table to compute */
+
+   if Col ige Read.Object(ptr+O#TABL.Across)  /* error check - if index is */
+   then Col=Read.Object(ptr+O#TABL.Across)-1; /* out of range, set to max */
+   if Row ige Read.Object(ptr+O#TABL.Down)    /* index                    */
+   then Row=Read.Object(ptr+O#TABL.Down)-1;
+
+   return((Row * Read.Object(ptr+O#TABL.Across) + Col) /* Row * Cells Across + Cols  */
+           * Read.Object(ptr+O#TABL.Cell.Mem))           /* * Cellmem */
+           + ptr+O#TABL.Table;                           /* + Offset of table */
+
+end COMPUTE.CELL.PTR;
+
+/* Read.Table.Cell.Info copies object data from a table cell to the  */
+/* table type object.   it is passed both pointers                   */
+
+READ.TABLE.CELL.INFO: proc (table.ptr,cell.ptr,type.ptr) swapable;
+   dcl table.ptr fixed;
+   dcl cell.ptr  fixed;
+   dcl type.ptr  fixed;
+   dcl cell.mem  fixed;
+
+   call Write.Object(type.ptr+O#Status,Read.Object(Cell.Ptr)&Not(O#STAT.Enable));  /* Disable it so it does not refresh */
+   call Write.Object(type.ptr+O#Attr,Read.Object(Cell.Ptr+O#TABL.Cell.Attr));
+   cell.mem = Read.Object(table.ptr+O#TABL.Cell.Mem);
+   if Read.Object(type.ptr+O#Type) > 0
+   then call Copy.Exmem(cell.ptr+O#TABL.Cell.Data,type.ptr+O#Suffix+3,cell.mem-O#TABL.Cell.Data);
+   else call Copy.Exmem(cell.ptr+O#TABL.Cell.Data,type.ptr+O#Suffix,cell.mem-O#TABL.Cell.Data);
+
+end READ.TABLE.CELL.INFO;
+
+/* Store.Table.Cell.Info copies data from a type object back to   */
+/* a table cell                                                   */
+
+STORE.TABLE.CELL.INFO: proc(table.ptr,cell.ptr,type.ptr) swapable;
+   dcl table.ptr   fixed;
+   dcl cell.ptr    fixed;
+   dcl type.ptr    fixed;
+   dcl cell.mem    fixed;
+   dcl cell.typ    fixed;
+
+   Cell.Typ = Read.Object(type.ptr+O#Type);
+   Cell.mem = Read.Object(table.ptr+O#TABL.Cell.Mem);
+
+   if Cell.Typ > 0                          /* transparent object */
+   then call Copy.Exmem(type.ptr+O#Suffix+3,Cell.Ptr+O#TABL.Cell.Data,Cell.mem-O#TABL.Cell.Data);
+   else call Copy.Exmem(type.ptr+O#Suffix,Cell.Ptr+O#TABL.Cell.Data,Cell.mem-O#TABL.Cell.Data);
+
+   call Write.Object(Cell.Ptr,                              /* re-write cell status word  */
+                     (Read.Object(Cell.Ptr)&O#STAT.Enable)  /* keeping it's enable bit */
+                    \(Read.Object(Type.ptr+O#Status)&(not(O#STAT.Enable))));
+   call Write.Object(Cell.Ptr+O#TABL.Cell.Attr,
+                     Read.Object(type.ptr+O#Attr));
+end STORE.TABLE.CELL.INFO;
+
+
+DEFINE.TABLE:  proc (id,across,down,cell.type.id) public swapable;
+   dcl id            fixed;  /* Id# to be given table */
+   dcl across        fixed;  /* Number of cells across table */
+   dcl down          fixed;  /* Number of cells down table */
+   dcl cell.type.id  fixed;  /* Number of another object which acts as a type for table */
+   dcl cell.type     fixed;  /* Type of cells */
+   dcl cell.mem      fixed;  /* Memory words required for each cell */
+   dcl cell.ptr      fixed;
+   dcl table.mem     fixed;  /* Memory words required for cell storage (not incl header and suffix info) */
+   dcl type.ptr      fixed;  /* Pointer to type object */
+   dcl TypeObjAttr   fixed;
+   dcl (i,j)         fixed;  /* Loop vars */
+
+   Id = Allocate.Id(Id);   /* keep system info up to date, possibly auto allocate id */
+
+   if Locate.Object(cell.type.id) then do;
+
+      type.ptr    = Object.Ptr;
+      cell.type   = Read.Object(type.ptr+O#Type);
+      TypeObjAttr = Read.Object(type.ptr+O#Attr);
+
+      if cell.type > 0 then cell.mem = Read.Object(type.ptr)-(O#Hlen-1)-3;
+      else                  cell.mem = Read.Object(type.ptr)-(O#Hlen-1);
+      
+      cell.mem  = cell.mem + O#TABL.Cell.Data;            /* add two words for status bits */
+      table.mem = cell.mem*across*down;    /* size of table for disp and cur values */
+
+      if Allocate.New.Object(O#Hlen+(O#TABL.Size-1)+table.mem) then do;
+
+         call Write.Object(Object.Ptr+O#Type, O$Table);
+         call Write.Object(Object.Ptr+O#Status,O#STAT.Update);
+         call Write.Object(Object.Ptr+O#Id,   Id);
+         call Write.Object(Object.Ptr+O#ULX,  Read.Object(Type.Ptr+O#ULX));
+         call Write.Object(Object.Ptr+O#ULY,  Read.Object(Type.Ptr+O#ULY));
+         call Write.Object(Object.Ptr+O#LRX,  limit.x(Read.Object(Type.Ptr+O#ULX)
+                           +across*(Read.Object(type.ptr+O#LRX)
+                            -Read.Object(type.ptr+O#ULX))));
+         call Write.Object(Object.Ptr+O#LRY,  limit.y(Read.Object(Type.Ptr+O#ULY)
+                           -(down*(Read.Object(type.ptr+O#ULY)
+                            -Read.Object(type.ptr+O#LRY)))));
+         call Write.Object(Object.Ptr+O#Action,Read.Object(type.ptr+O#Action));
+         call Write.Object(Object.Ptr+O#ObjectGets,Read.Object(type.ptr+O#ObjectGets));
+
+         if cell.type > 0 then do;  /* Transparent mode object */
+            call Write.Object(Object.Ptr+O#Trans.Row, Read.Object(type.ptr+O#Trans.Row));
+            call Write.Object(Object.Ptr+O#Trans.Col, Read.Object(type.ptr+O#Trans.Col));
+            call Write.Object(Object.Ptr+O#Trans.Width,Read.Object(type.ptr+O#Trans.Width));
+         end;
+
+         call Write.Object(Object.Ptr+O#TABL.Cell.Type.Id, cell.type.id);
+         call Write.Object(Object.Ptr+O#TABL.Cell.Mem, cell.mem);  /* total cell size inc status bits */
+         call Write.Object(Object.Ptr+O#TABL.Across, across);
+         call Write.Object(Object.Ptr+O#TABL.Down, down);
+
+         if Cell.Type > 0
+         then Type.Ptr=Type.Ptr+O#Suffix+3;      /* compute pointer to type */
+         else Type.Ptr=Type.Ptr+O#Suffix;        /* object data             */
+
+         write(mam)=Screen.Base+shr(type.ptr,8); /* read type object data */
+         write(mal)=type.ptr;                    /* into temp array       */
+         call Copy.In(addr(misc.buf(0)),cell.mem-O#TABL.Cell.Data);
+
+         cell.ptr=Object.Ptr+O#TABL.Table; /* init ptr to start of table cell data */
+
+         do i = 0 to across*down-1;        /* Copy type object suffix into each cell */
+
+            write(mam)=Screen.Base+shr(cell.ptr,8);
+            write(mal)=cell.ptr;           /* point at cell    */
+            write(mdi)=O#STAT.Enable\O#STAT.Update;      /* enable each cell */
+            write(mdi)=TypeObjAttr;        /* and set up display attributes from type object */
+            
+            write("313")=addr(misc.buf(0)); /* copy type data into this cell */
+            if inc.poly or (modc<>0) then do;
+               rpc cell.mem-O#TABL.Cell.Data;
+               write(mdi)=read("373");
+            end;
+            else do;                       /* model B processor */
+               do j=1 to cell.mem-O#TABL.Cell.Data;
+                  write(mdi)=read("373");
+               end;
+            end;
+
+            cell.ptr=cell.ptr+cell.mem;    /* advance ptr to next cell */
+         end;
+         Screen.Changed = true;
+         return Id;
+      end;
+      else return 0;
+   end;
+end DEFINE.TABLE;
+
+
+MAP.POINT.TO.TABLE.CELL: proc(x,y,id,cell) public swapable;
+   dcl (x,y)       fixed;  /* (X,Y) to map */
+   dcl (id)        fixed;  /* pointer to table */
+   dcl (cell)      array;
+   dcl (ptr)       fixed;
+
+   /* NOTE: Does no check to see if x,y are actually in the table region */
+
+   if Locate.Object(id) then do;
+
+      ptr = Object.Ptr;
+
+      if Read.Object(ptr+O#Type) = O$Table then do;
+         if Locate.Object(Read.Object(ptr+O#TABL.Cell.Type.Id)) then do;
+            Cell(0)  = (x-Read.Object(ptr+O#ULX))          /* (x-Table left edge)/cell.width */
+                        / ( Read.Object(Object.Ptr+O#LRX)
+                           -Read.Object(Object.Ptr+O#ULX));
+            if (Cell(0)<0) then cell(0)=0;
+            else if cell(0) >= Read.Object(ptr+O#TABL.ACROSS)
+            then    cell(0) = Read.Object(ptr+O#TABL.ACROSS)-1;
+
+            Cell(1)  = (Read.Object(ptr+O#ULY)-y)          /* (Table top edge-y)/cell height */
+                        / ( Read.Object(Object.Ptr+O#ULY)
+                           -Read.Object(Object.Ptr+O#LRY));
+            if (Cell(1)<0) then cell(1)=0;
+            else if cell(1) >= Read.Object(ptr+O#TABL.DOWN)
+            then    cell(1) = Read.Object(ptr+O#TABL.DOWN)-1;
+         end;
+      end;
+   end;
+end MAP.POINT.TO.TABLE.CELL;
+
+
+MAP.OBJECT.TO.TABLE.CELL: proc (obj.id,table.id,cell) returns (fixed) public swapable;
+   dcl obj.id         fixed;
+   dcl obj.ptr        fixed;
+   dcl table.id       fixed;
+   dcl table.ptr      fixed;
+   dcl cell           array;
+   dcl (obj.x,obj.y)  fixed;  /* declare in order */
+   dcl obj.width      fixed;
+   dcl obj.height     fixed;
+   dcl type           fixed;
+   dcl inp.width      fixed;
+
+   /* modified 7-21-87  cls */
+
+   /* Input.Type: This procedure returns true if the type passed to the
+      procedure is a type which allows numbers or letters to be deposited
+      to it from the keyboard via the screen. 7-13-87 cls */
+
+   Input.Type: procedure (type) returns (fixed);
+      dcl type fixed;  /* type in question */
+
+      if (type = O$Fixed.Point)
+      or (type = O$32Bit.Msec)
+      or (type = O$32Bit.SMPTE)
+      or (type = O$Sound.File.Time)
+      or (type = O$String)
+      then return 1;
+      else return 0;
+         
+   end Input.Type;
+
+
+   /* Calculate.Object.Center: Calculates appropriate center for given
+      object.  If the object is one that can be typed into, the center
+      returned is the center of the current cursor position.  If it
+      is not one of these objects, it is merely the center of the
+      object.  For tables, this is done on the level of the cell, not
+      the object.   7-15-87 cls
+
+      WARNING: This procedure modifies the global variable "Object.Ptr" !! 
+    */
+    
+   Calculate.Object.Center: procedure (obj.id,obj.ptr,direction,coordinates) returns (fixed);
+      dcl obj.id      fixed;  /* object whose center is in question */
+      dcl obj.ptr     fixed;  /* pointer to aforemention object */
+      dcl direction   fixed;  /* must be < 2 for cursor checking */
+      dcl coordinates array;  /* where the coordinates of center are stored for return */
+      dcl (obj.x,obj.y)          fixed; /* working version of coordinates of center */
+      dcl (obj.height,obj.width) fixed; /* height, width in pixels of object */
+      dcl type                   fixed; /* type of object */
+      dcl inp.width              fixed; /* more width info for table calculations */
+
+      type = Read.Object(Obj.Ptr + O#Type);
+      if type <> O$Table then do;
+         obj.height= Read.Object(Obj.Ptr+O#ULY)-Read.Object(Obj.Ptr+O#LRY);
+         obj.y   = Read.Object(Obj.ptr+O#LRY)+shr(obj.height,1);
+
+         if  Input.Type(type)   /* one of the objects characters are entered to */
+         and ((Read.Object(Obj.Ptr + O#Action) & O#ACT.Get.Disabled) = 0) /* input not disabled */
+         and (direction < 2)    /* we are moving up or down, not sideways */
+         then do;  /* calculate from center of last character typed */
+            obj.width = gpix.x(token(0) * 100 + 50);   /* number of pixels to center of last character typed */
+            obj.x = Read.Object(Obj.Ptr + O#ULX) + obj.width;
+         end;
+         else do;  /* find center */
+             obj.width = Read.Object(Obj.Ptr+O#LRX)-Read.Object(Obj.Ptr+O#ULX);
+             obj.x = Read.Object(Obj.Ptr+O#ULX)+shr(obj.width,1);
+         end;
+      end;
+      else do;   /* Old object is a table */
+         if Locate.Object(Read.Object(obj.ptr+O#TABL.Cell.Type.Id)) then do;
+            obj.height= Read.Object(Object.Ptr+O#ULY)-Read.Object(Object.Ptr+O#LRY);
+            obj.y = Read.Object(obj.ptr+O#ULY)
+                  - ((Read.Object(obj.ptr+O#TABL.Cur.Row)
+                  * obj.height) + shr(obj.height,1));
+            obj.width = Read.Object(Object.Ptr + O#LRX) - Read.Object(Object.Ptr + O#ULX);
+            if  Input.Type(Read.Object(Object.Ptr + O#Type))
+            and ((Read.Object(Obj.Ptr + O#Action) & O#ACT.Get.Disabled) = 0)
+            then do; /* calculate from center of last character typed in appropriate cell */
+               inp.width = gpix.x(token(0) * 100 + 50);
+               obj.x = Read.Object(Obj.Ptr + O#ULX)
+                     + ((Read.Object(obj.ptr + O#TABL.Cur.Col)
+                     * obj.width) + inp.width);
+            end;
+            else do; /* calculate from center of appropriate cell */
+               obj.x = Read.Object(obj.ptr + O#ULX)
+                     + ((Read.Object(obj.ptr + O#TABL.Cur.Col)
+                     * obj.width) + shr(obj.width,1));
+            end;
+         end;
+         else return false;
+      end;
+
+      coordinates(0) = obj.x;
+      coordinates(1) = obj.y;
+      return true;
+
+   end Calculate.Object.Center;
+
+   if Locate.Object(table.id) then do;
+      table.ptr = Object.Ptr;
+
+      if Read.Object(table.ptr+O#Type) <> O$Table then return false;
+
+      if Locate.Object(obj.id) then do;
+         obj.ptr = Object.Ptr;
+         if Calculate.Object.Center(obj.id,obj.ptr,0,loc(addr(obj.x)))
+         then do;
+            call Map.Point.To.Table.Cell(obj.x,obj.y,table.id,loc(addr(cell(0))));
+            return true;
+         end;
+      end;
+   end;
+   return false;
+end MAP.OBJECT.TO.TABLE.CELL;
+
+/* $page - routines to enable and disable table cells */
+
+ENABLE.TABLE.CELL: proc (id,col,row) public swapable;
+   dcl id       fixed;
+   dcl col      fixed;
+   dcl row      fixed;
+   dcl cell.ptr fixed;
+
+   if Locate.Object(id) then do;
+      if (col < Read.Object(Object.Ptr+O#TABL.Across))
+      &  (row < Read.Object(Object.Ptr+O#TABL.Down))
+      then do;
+         cell.ptr = Compute.Cell.Ptr(Object.Ptr,col,row);
+         call Write.Object(cell.ptr,Read.Object(cell.ptr)\O#STAT.Enable);
+      end;
+   end;
+end ENABLE.TABLE.CELL;
+
+DISABLE.TABLE.CELL: proc (id,col,row) public swapable;
+   dcl id       fixed;
+   dcl col      fixed;
+   dcl row      fixed;
+   dcl cell.ptr fixed;
+
+   if Locate.Object(id) then do;
+      if (col < Read.Object(Object.Ptr+O#TABL.Across))
+      &  (row < Read.Object(Object.Ptr+O#TABL.Down))
+      then do;
+         cell.ptr = Compute.Cell.Ptr(Object.Ptr,col,row);
+         call Write.Object(cell.ptr,Read.Object(cell.ptr)&not(O#STAT.Enable));
+      end;
+   end;
+end DISABLE.TABLE.CELL;
+
+/* Routine to disable a table cell and clear the 'exhibit' bit.    */
+/* This is used when an object is explicitly erased by the caller. */
+
+DISABLE.AND.DISEXHIBIT.TABLE.CELL: proc (id,col,row) public swapable;
+   dcl id       fixed;
+   dcl col      fixed;
+   dcl row      fixed;
+   dcl cell.ptr fixed;
+
+   if Locate.Object(id) then do;
+      if (col < Read.Object(Object.Ptr+O#TABL.Across))
+      &  (row < Read.Object(Object.Ptr+O#TABL.Down))
+      then do;
+         cell.ptr = Compute.Cell.Ptr(Object.Ptr,col,row);
+         call Write.Object(cell.ptr,Read.Object(cell.ptr)&not(O#STAT.Enable\O#STAT.Exhibit));
+      end;
+   end;
+end DISABLE.AND.DISEXHIBIT.TABLE.CELL;
+
+/* Update single cell of table without setting screen.changed.   used for */
+/* real time table cells                                                  */
+
+UPDATE.TABLE.CELL: proc (table.ptr,cell.ptr,type.ptr,col,row) swapable;
+   dcl table.ptr   fixed;      /* pass pointer to table object */
+   dcl cell.ptr    fixed;      /* and pointer to cell          */
+   dcl type.ptr    fixed;      /* and pointer to type object   */
+   dcl row         fixed;      /* also row and column for      */
+   dcl col         fixed;      /* display purposes             */
+   dcl typ         fixed;
+   dcl cell.status fixed;
+   dcl width       fixed;
+   dcl cell.mem    fixed;
+
+   typ      = Read.Object(type.ptr+O#Type);     /* Save type */
+   cell.mem = Read.Object(table.ptr+O#TABL.Cell.Mem);  /* Cell size in words */
+
+   Disable.Attr.Reset=Disable.Attr.Reset+1; /* set flag to optimize term attr calls */
+
+   cell.status = Read.Object(cell.ptr);
+
+   if ((cell.status&O#STAT.Enable) <>0)
+   & (((cell.status&O#STAT.Exhibit)= 0)
+   or ((cell.status&O#STAT.Update)<>0)
+   or (shr(cell.status&O#STAT.Disp.Attr.Set,1)<>(cell.status&O#STAT.Attr.Set))) /* attributes changed */
+   then do;  /* Status has changed; update cell */
+
+      call Read.Table.Cell.Info(Table.ptr,Cell.ptr,Type.ptr);
+
+      if typ > 0 then do;  /* Transparent mode cell */
+         width = Read.Object(type.ptr+O#Trans.Width); /* Width of cells in characters */
+         call Write.Object(type.ptr+O#Trans.Row,Row+Read.Object(table.ptr+O#Trans.Row)); /* Set up transparent row */
+         call Write.Object(type.ptr+O#Trans.Col,(Col*Width)+Read.Object(table.ptr+O#Trans.Col)); /* Set up transparent column */
+      end;
+
+      write(md) = Read.Object(Type.ptr+O#Status) \ O#STAT.Enable; /* enable for update only */
+      
+      /* Do the update by calling a standard routine */
+
+      if      Typ = O$Fixed.Point     then call Update.Fixed.Point(type.ptr);
+      else if Typ = O$32Bit.MSEC      then call Update.32Bit.MSEC(type.ptr);
+      else if Typ = O$32Bit.SMPTE     then call Update.32Bit.SMPTE(type.ptr);
+      else if Typ = O$Sound.File.Time then call Update.Sound.File.Time(type.ptr);
+      else if Typ = O$Label           then call Update.Label(type.ptr);
+      else if Typ = O$String          then call Update.String(type.ptr);
+      else if Typ = O$Switch          then call Update.Switch(type.ptr);
+      else if Typ = O$Scroll.Bar      then call Update.Scroll.Bar(type.ptr);
+
+      call Store.Table.Cell.Info(Table.ptr,Cell.ptr,Type.ptr);
+
+      write(md) = Read.Object(Type.ptr+O#Status) & (not(O#STAT.Enable)); /* disable type object now */
+   end;
+
+   Disable.Attr.Reset=Disable.Attr.Reset-1;
+   if Disable.Attr.Reset=0 then call Set.Term.Attr(ATTR#Normal);
+
+end UPDATE.TABLE.CELL;
+
+PUBLISH.TABLE.CELL: proc (table.ptr,cell.ptr,type.ptr,col,row) swapable;
+   dcl table.ptr   fixed;      /* pass pointer to table object */
+   dcl cell.ptr    fixed;      /* and pointer to cell          */
+   dcl type.ptr    fixed;      /* and pointer to type object   */
+   dcl row         fixed;      /* also row and column for      */
+   dcl col         fixed;      /* display purposes             */
+   dcl typ         fixed;
+   dcl cell.status fixed;
+   dcl width       fixed;
+   dcl cell.mem    fixed;
+
+   typ      = Read.Object(type.ptr+O#Type);            /* Save type */
+   cell.mem = Read.Object(table.ptr+O#TABL.Cell.Mem);  /* Cell size in words */
+
+   cell.status = Read.Object(cell.ptr);
+
+   call Read.Table.Cell.Info(Table.ptr,Cell.ptr,Type.ptr);
+
+   if typ > 0 then do;  /* Transparent mode cell */
+      width = Read.Object(type.ptr+O#Trans.Width); /* Width of cells in characters */
+      call Write.Object(type.ptr+O#Trans.Row,Row+Read.Object(table.ptr+O#Trans.Row)); /* Set up transparent row */
+      call Write.Object(type.ptr+O#Trans.Col,(Col*Width)+Read.Object(table.ptr+O#Trans.Col)); /* Set up transparent column */
+   end;
+
+   write(md) = Read.Object(Type.ptr+O#Status) \ O#STAT.Enable; /* enable for update only */
+   
+   /* Do the update by calling a standard routine */
+
+   if Typ = O$Label then call Publish.Label(type.ptr, col);
+
+   call Store.Table.Cell.Info(Table.ptr,Cell.ptr,Type.ptr);
+
+   write(md) = Read.Object(Type.ptr+O#Status) & (not(O#STAT.Enable)); /* disable type object now */
+
+end PUBLISH.TABLE.CELL;
+
+UPDATE.TABLE: proc (table.ptr) public swapable;
+   dcl table.ptr   fixed;
+   dcl type.ptr    fixed;
+   dcl cell.ptr    fixed;
+   dcl row         fixed;
+   dcl col         fixed;
+   dcl typ         fixed;
+   dcl status      fixed;  
+   dcl cell.status fixed;
+   dcl width       fixed;
+   dcl cell.mem    fixed;
+   dcl inc         fixed;
+   dcl end.row     fixed;
+
+   COMPUTE.CELL.PTR: proc (table.ptr,Col,Row) returns (fixed);  /* Computes memory ptr to cell in a table */
+      dcl table.ptr fixed; /* Pointer to table */
+      dcl Col       fixed; /* Column of table to compute */
+      dcl Row       fixed; /* Row of table to compute */
+
+      return     ((Row * Read.Object(table.ptr+O#TABL.Across) + Col) /* Row * Cells Across + Cols  */
+                 * Read.Object(table.ptr+O#TABL.Cell.Mem))           /* * Cellmem */
+                 + table.ptr+O#TABL.Table;                           /* + Offset of table */
+
+   end COMPUTE.CELL.PTR;
+
+   status = Read.Object(table.ptr+O#Status);   /* Read object status bits */
+
+   if (status & O#STAT.Enable) = 0       /* Object may not be drawn on screen */
+   then do;                              /* Just turn off update bit */
+      call Write.Object(table.ptr+O#Status,(Status & NOT(O#STAT.Update)));
+      return;
+   end;
+
+   if (status and O#STAT.Update) <> 0 then do;
+      if Locate.Object(Read.Object(table.ptr+O#TABL.Cell.Type.Id)) then do; /* If type Object exists */
+
+         type.ptr = Object.Ptr;                   /* table.ptr to type object */
+         typ      = Read.Object(type.ptr+O#Type);     /* Save type */
+         cell.mem = Read.Object(table.ptr+O#TABL.Cell.Mem);  /* Cell size in words */
+
+         if (Read.Object(table.ptr+O#TABL.Bits)&O#TABL.Bits.Refresh.Dir) = 0 then do;
+            row = 0;
+            end.row = Read.Object(table.ptr+O#TABL.Down);
+            inc = 1;
+         end;
+         else do;
+            row = Read.Object(table.ptr+O#TABL.Down)-1;
+            end.row = -1;
+            inc = -1;
+         end;
+
+         Disable.Attr.Reset=Disable.Attr.Reset+1; /* set flag to optimize term attr calls */
+
+         do while row <> end.row;   /* do all rows */
+            do col = 0 to Read.Object(table.ptr+O#TABL.Across)-1;  /* do all cols across */
+
+               cell.ptr = Compute.Cell.Ptr(table.ptr,col,row);
+
+               cell.status = Read.Object(cell.ptr);
+
+               if ((cell.status&O#STAT.Enable) <>0)
+               & (((cell.status&O#STAT.Exhibit)= 0)
+               or ((cell.status&O#STAT.Update)<>0)
+               or (shr(cell.status&O#STAT.Disp.Attr.Set,1)<>(cell.status&O#STAT.Attr.Set))) /* attributes changed */
+               then do;  /* Status has changed; update cell */
+
+                  if (in.event <> out.event)   /* if event stacked up */
+                  or (Check.Next.Event <> 0)   /* or system item      */
+                  then do;  /* See if we need to exit early */
+                     Screen.Changed = true;
+                     Disable.Attr.Reset=Disable.Attr.Reset-1;
+                     if Disable.Attr.Reset=0 then call Set.Term.Attr(ATTR#Normal);
+                     return;  /* Keep mouse and system moving */
+                  end;
+
+                  call Read.Table.Cell.Info(Table.ptr,Cell.ptr,Type.ptr);
+
+                  if typ > 0 then do;  /* Transparent mode cell */
+                     width = Read.Object(type.ptr+O#Trans.Width); /* Width of cells in characters */
+                     call Write.Object(type.ptr+O#Trans.Row,Row+Read.Object(table.ptr+O#Trans.Row)); /* Set up transparent row */
+                     call Write.Object(type.ptr+O#Trans.Col,(Col*Width)+Read.Object(table.ptr+O#Trans.Col)); /* Set up transparent column */
+                  end;
+
+                  write(md) = Read.Object(Type.ptr+O#Status) \ O#STAT.Enable; /* enable for update only */
+         
+                  /* Do the update by calling a standard routine */
+
+                  if      Typ = O$Fixed.Point     then call Update.Fixed.Point(type.ptr);
+                  else if Typ = O$32Bit.MSEC      then call Update.32Bit.MSEC(type.ptr);
+                  else if Typ = O$32Bit.SMPTE     then call Update.32Bit.SMPTE(type.ptr);
+                  else if Typ = O$Sound.File.Time then call Update.Sound.File.Time(type.ptr);
+                  else if Typ = O$Label           then call Update.Label(type.ptr);
+                  else if Typ = O$String          then call Update.String(type.ptr);
+                  else if Typ = O$Switch          then call Update.Switch(type.ptr);
+                  else if Typ = O$Scroll.Bar      then call Update.Scroll.Bar(type.ptr);
+
+                  call Store.Table.Cell.Info(Table.ptr,Cell.ptr,Type.ptr);
+
+                  write(md) = Read.Object(Type.ptr+O#Status) & (not(O#STAT.Enable)); /* disable type object now */
+               end;
+            end;
+            row = row + inc;
+         end;
+
+         Disable.Attr.Reset=Disable.Attr.Reset-1;
+         if Disable.Attr.Reset=0 then call Set.Term.Attr(ATTR#Normal);
+
+      end;
+
+      call Write.Object(table.ptr+O#Status,(Status&not(O#STAT.Update\O#STAT.Disp.Attr.Set))
+                        \(O#STAT.Exhibit\shl(Status&O#STAT.Attr.Set,1))); /* object now displayed and refreshed */
+   end;
+
+end UPDATE.TABLE;
+
+ERASE.TABLE: proc (id) public swapable;
+   dcl id   fixed;
+   if Fetch.Object.Info(id,O#TABL.Cell.Type.Id) > 0 then do;
+      call Erase.Transparent.Object(id);
+   end;
+end ERASE.TABLE;
+
+FETCH.TABLE.CUR.CELL: proc(id,cell) public swapable;
+   dcl id      fixed;
+   dcl cell    array;
+
+   if Locate.Object(id) then do;
+      cell(0) = Read.Object(Object.Ptr+O#TABL.Cur.Col);
+      cell(1) = Read.Object(Object.Ptr+O#TABL.Cur.Row);
+   end;
+end FETCH.TABLE.CUR.CELL;
+
+SET.TABLE.CUR.CELL: proc(id,col,row) public swapable;
+   dcl id          fixed;
+   dcl col         fixed;
+   dcl row         fixed;
+   dcl across      fixed;
+   dcl down        fixed;
+
+   if not Cell.In.Table(id,col,row) then return;
+
+   if Locate.Object(id) then do;
+      across = Read.Object(Object.Ptr+O#TABL.Across);
+      down   = Read.Object(Object.Ptr+O#TABL.Down);
+
+      if      col < 0 then col = 0;
+      else if col >= Across then col = across - 1;
+      if      row < 0 then row = 0;
+      else if row >= Down then row = Down - 1;
+
+      call Write.Object(Object.Ptr+O#TABL.Cur.Col,col);
+      call Write.Object(Object.Ptr+O#TABL.Cur.Row,row);
+   end;
+end SET.TABLE.CUR.CELL;
+
+SET.TABLE.CELL.STATUS: proc(id,col,row,bit,setting) public swapable;
+   dcl id       fixed;
+   dcl col      fixed;
+   dcl row      fixed;
+   dcl bit      fixed;
+   dcl setting  fixed;
+   dcl status   fixed;
+   dcl cell.ptr fixed;
+
+   if not (Cell.In.Table(id,col,row)) then return;
+
+   if Locate.Object(id) then do;                        /* Find object */
+      Cell.Ptr = Compute.Cell.Ptr(Object.Ptr,col,row);
+      status = Read.Object(Cell.Ptr);                   /* Get its status word */
+      if setting = 0 then status = (status & not(bit)); /* Set the passed bit to the passed setting */
+      else                status = status\bit;
+      call Write.Object(cell.ptr,status);               /* Write it to the object */
+      call Write.Object(Object.Ptr+O#Status,Read.Object(Object.Ptr+O#Status)\O#STAT.Update); /* Cause to check table for changes */
+      Screen.Changed = true;                            /* force check of status bits */
+   end;
+end SET.TABLE.CELL.STATUS;
+
+SET.TABLE.CELL.ATTR: proc(id,col,row,set,attr) public swapable;
+   dcl id            fixed;   /* Id of table */
+   dcl col           fixed;
+   dcl row           fixed;
+   dcl set           fixed;
+   dcl attr          fixed; /* bits as used in Set.Term.Attr */
+   dcl attr.byte     fixed;
+   dcl old.attr.byte fixed;
+   dcl attr.word     fixed;
+   dcl newbits       fixed;
+   dcl newflags      fixed;
+   dcl table.ptr     fixed;
+   dcl type.ptr      fixed;
+   dcl cell.ptr      fixed;
+   dcl cell.status   fixed;
+   dcl rt            fixed;
+
+   if not Cell.In.Table(id,col,row) then return;
+
+   if Locate.Object(id) then do;
+
+      if Read.Object(Object.Ptr+O#Type) < 0      /* Graphics Object */
+      then return;
+
+      Table.ptr = Object.ptr;
+      cell.ptr = Compute.Cell.Ptr(Object.Ptr,col,row);
+
+      attr.word = Read.Object(Cell.Ptr+O#TABL.Cell.Attr);
+
+      if set = 0 then attr.byte = Attr.Word&255;     /* Low byte */
+      else            attr.byte = shr(Attr.Word,8);  /* High byte */
+      old.attr.byte = attr.byte;
+
+      newflags  = (attr&127);
+      newbits   = (shr(attr,8)&127);
+
+      if (attr&Bit7)<>0 then attr.byte = 0;  /* Normal */
+
+      attr.byte = (attr.byte xor ((newflags&attr.byte) xor newbits));
+
+      if attr.byte <> old.attr.byte /* force refresh only if changes occurred */
+      then do;
+
+         if set = 0 then attr.word = (attr.word&"177400")\attr.byte;
+         else            attr.word = (attr.word&255)\shl(attr.byte,8);
+         call Write.Object(Cell.Ptr+O#TABL.Cell.Attr,attr.word);
+
+         /* if we are changing the attribute set that we are not displaying */
+         /* then no terminal io is needed (unless the screen already        */
+         /* needs updating.  Check here for optimizing                      */
+
+         cell.status = Read.Object(cell.ptr);
+
+         if (shr(cell.status&O#STAT.Disp.Attr.Set,1)<>(cell.status&O#STAT.Attr.Set)) 
+         or (((cell.status&O#STAT.Attr.Set)<>0) = set)
+         then do;
+
+            write(md) = (Read.Object(cell.ptr)\(O#STAT.Update)); /* Force refresh of this cell */
+
+            if (Check.Update.On.Deposit(Table.Ptr) <> 0)
+            then do;       /* See if table should be updated on deposit */
+               if Locate.Object(Read.Object(Table.ptr+O#TABL.Cell.Type.Id)) then do;
+                  call Update.Table.Cell(Table.Ptr,cell.ptr,Object.ptr,col,row);
+               end;
+            end;
+         end;
+      end;      /* of changes occurred */
+   end;         /* of object exists */
+end SET.TABLE.CELL.ATTR;
+
+SET.SEVERAL.TABLE.CELL.ATTRS: proc(id,col,row,numcells,updown,set,attr) public swapable;
+   dcl id            fixed;   /* Id of table */
+   dcl (col,row)     fixed;   /* starting cell */
+   dcl numcells      fixed;   /* how many cells */
+   dcl updown        fixed;   /* 0 => left to right, 1 => up and down */
+   dcl set           fixed;
+   dcl attr          fixed; /* bits as used in Set.Term.Attr */
+
+   dcl attr.byte     fixed;
+   dcl old.attr.byte fixed;
+   dcl attr.word     fixed;
+   dcl newbits       fixed;
+   dcl newflags      fixed;
+   dcl cell.ptr      fixed;
+   dcl (trows,tcols) fixed;
+
+   COMPUTE.CELL.PTR: proc (Ptr,Col,Row) returns (fixed); /* Computes memory ptr to cell in a table */
+      dcl ptr fixed; /* Pointer to table */
+      dcl Col fixed; /* Column of table to compute */
+      dcl Row fixed; /* Row of table to compute */
+
+      /****** LOCAL COPY FOR SPEED ********/
+
+      return     ((Row * Read.Object(ptr+O#TABL.Across) + Col) /* Row * Cells Across + Cols  */
+                 * Read.Object(ptr+O#TABL.Cell.Mem))           /* * Cellmem */
+                 + ptr+O#TABL.Table;                           /* + Offset of table */
+
+   end COMPUTE.CELL.PTR;
+
+   if Locate.Object(id) then do;
+
+      if Read.Object(Object.Ptr+O#Type) < 0      /* Graphics Object */
+      then return;                               /* No attributes available */
+
+      trows=Read.Object(Object.Ptr+O#TABL.Down);
+      tcols=Read.Object(Object.Ptr+O#TABL.Across);
+
+      if (col IGE tcols) or (row IGE trows) then return; /* not in table */
+      
+      if updown=0 then do;                       /* fill from left to right */
+         cell.ptr=(trows*tcols)-(row*tcols+col); /* cells left in table */
+      end;
+      else do;                                   /* fill from top to bottom */
+         cell.ptr=(trows*tcols)-(col*trows+row); /* cells left in table */
+      end;
+      if numcells igt cell.ptr then numcells=cell.ptr; /* limit to end of table */
+
+
+      do while numcells<>0;                    /* loop until all cells processed */
+
+         cell.ptr = Compute.Cell.Ptr(Object.Ptr,col,row);
+
+         attr.word = Read.Object(Cell.Ptr+O#TABL.Cell.Attr);
+
+         if set = 0 then attr.byte = Attr.Word&255;     /* Low byte */
+         else            attr.byte = shr(Attr.Word,8);  /* High byte */
+         old.attr.byte = attr.byte;
+
+         newflags  = (attr&127);
+         newbits   = (shr(attr,8)&127);
+
+         if (attr&Bit7)<>0 then attr.byte = 0;  /* Normal */
+
+         attr.byte = (attr.byte xor ((newflags&attr.byte) xor newbits));
+
+         if attr.byte <> old.attr.byte /* force refresh only if changes occurred */
+         then do;
+            if set = 0 then attr.word = (attr.word&"177400")\attr.byte;
+            else            attr.word = (attr.word&255)\shl(attr.byte,8);
+            call Write.Object(Cell.Ptr+O#TABL.Cell.Attr,attr.word);
+            write(md) = (Read.Object(cell.ptr)\(O#STAT.Update)); /* Force refresh! */
+            write(md) = (Read.Object(Object.Ptr+O#Status)\O#STAT.Update);
+            Screen.Changed = true;
+         end;
+
+         if updown=0 then do;        /* setting left to right     */
+            col=col+1;
+            if col=tcols then do; col=0; row=row+1; end;
+         end;
+         else do;                    /* setting top to bottom     */
+            row=row+1;
+            if row=trows then do; row=0; col=col+1; end;
+         end;
+         numcells=numcells-1;        /* one less cell to set      */
+      end;                           /* of loop over cells to set */
+   end;                              /* of object exists          */
+end SET.SEVERAL.TABLE.CELL.ATTRS;
+
+SET.TABLE.CELL.ATTR.SET: proc(id,col,row,set) public swapable;
+   dcl id    fixed;
+   dcl col   fixed;
+   dcl row   fixed;
+   dcl set   fixed;
+
+   if not Cell.In.Table(id,col,row) then return;
+
+   if Locate.Object(id) then do;
+      if Read.Object(Object.Ptr+O#Id) < 0
+      then return;
+
+      call Set.Table.Cell.Status(id,col,row,O#STAT.Attr.Set,set&1);
+      call Set.Table.Cell.Status(id,col,row,O#STAT.Update,true);
+      call Set.Object.Status(id,O#STAT.Update,true);
+      Screen.Changed = true;
+   end;
+end SET.TABLE.CELL.ATTR.SET;
+
+SET.TABLE.CONTROL.BITS:  proc(Id,Bit,Val) public swapable;
+   dcl Id  fixed; /* id # for table */
+   dcl Bit fixed; /* which bit to set */
+   dcl Val fixed; /* value to set bit to */
+
+   if Locate.Object(id) then do;   /* table exists */
+      if Read.Object(Object.Ptr+O#Type)=O$Table
+      then do; /* make sure object is a table */
+         Val=Val&1;  /* just to be safe */   
+         if Val<>0 then Val=Bit;
+         write(md)=(Read.Object(Object.Ptr+O#TABL.Bits)&Not Bit)\Val;
+      end;
+   end;
+
+end SET.TABLE.CONTROL.BITS;
+
+RESET.TABLE.CELL.DISPLAY.STATUS: proc (ptr,action) public swapable; /* resets display bits in all table cells */
+   dcl ptr           fixed;
+   dcl action        fixed;     /* 0 = reset display status bit */
+                                /* 1 = store null string, set status display bit, clear status refresh bit */
+                                /* 2 = store null label,  set status display bit,  clear status refresh bit */
+   dcl (across,down) fixed;
+   dcl cellmem       fixed;
+   dcl cellptr       fixed;
+   dcl i             fixed;
+
+   if Read.Object(Ptr+O#Type)<>O$Table then return;
+
+   across =Read.Object(Ptr+O#TABL.Across);
+   down   =Read.Object(Ptr+O#TABL.Down);
+   cellmem=Read.Object(Ptr+O#TABL.Cell.Mem);
+   cellptr=Ptr+O#TABL.Table;         /* init ptr to start of table cell data */
+
+   do i=0 to across*down-1;          /* Loop over cells */
+      write(mam)=Screen.Base+shr(cellptr,8);
+      write(mal)=cellptr;                       /* point at cell    */
+
+      do case (action);
+         do;                                    /* 0: clear display bit */
+            write(md )=read(md)&(not O#STAT.Exhibit); /* turn off display bit */
+         end;
+         do;                                    /* store null string */
+            write(md) = (read(md)                       /* set status bit   */
+                      & (not(O#STAT.Update)))           /* so no refresh    */
+                      \ O#STAT.Exhibit;                 /* null string      */
+            call Write.Object(cellptr+O#TABL.Cell.Data+(O#STR.String-O#Suffix-3),0);      /* stor null string */
+            Screen.Changed = true;
+         end;
+         do;                                    /* store null label */
+            write(md) = (read(md)                       /* set status bit   */
+                      & (not(O#STAT.Update)))           /* so no refresh    */
+                      \ O#STAT.Exhibit;                 /* null string      */
+            call Write.Object(cellptr+O#TABL.Cell.Data+(O#LABL.Label-O#Suffix-3),0);      /* stor null string */
+            Screen.Changed = true;
+         end;
+      end;
+
+      cellptr=cellptr+cellmem;       /* advance ptr to next cell */
+   end;
+
+end RESET.TABLE.CELL.DISPLAY.STATUS;
+
+/* High level routine passed id, col, row */
+
+DEPOSIT.TABLE: proc(Id,Col,Row) public swapable;
+   dcl Id       fixed;
+   dcl Ptr      fixed;  /* Ptr to table */
+   dcl Status   fixed;  /* Status word for the whole table */
+   dcl Col      fixed;  /* Col/Row define cell in which to deposit */
+   dcl Row      fixed;  /*   the value stored in Cell.Type.Id      */
+   dcl Cell.Id  fixed;  /* Cell containg deposit cell */
+   dcl Cell.Typ fixed;  /* Type of cell; used to do copy */
+   dcl Cell.Mem fixed;  /* Size of each cell in words */
+   dcl Cell.Ptr fixed;
+   dcl Typ.Ptr  fixed;
+
+   if not Cell.In.Table(id,col,row) then return;
+
+   if Locate.Object(id) then do;
+      ptr = Object.Ptr;
+      status = Read.Object(ptr + O#Status);
+
+      if Locate.Object(Read.Object(ptr+O#TABL.Cell.Type.Id)) then do;
+
+         Typ.Ptr=Object.ptr;
+         cell.ptr = Compute.Cell.Ptr(ptr,col,row);
+
+         call Store.Table.Cell.Info(ptr,cell.ptr,Typ.ptr);
+
+         call Write.Event.Queue(Get.Screen.Event,S#Deposit,id);
+
+         /* do not automatically set update bit since value    */
+         /* may not have changed.                              */
+         /* write(md) = (Read.Object(cell.ptr)\O#STAT.Update); */
+
+         /* but do set update bit in table, so we check it     */
+         /* for cells that need updating                       */
+
+         write(md) = (Read.Object(ptr + O#Status)\O#STAT.Update);
+
+         if Check.Update.On.Deposit(ptr) <> 0
+         then call Update.Table.Cell(ptr,cell.ptr,Typ.ptr,col,row);  /* Do update right now */
+      end;
+   end;
+end DEPOSIT.TABLE;
+
+PUBLISH.TABLE: proc(Id,Col,Row) public swapable;
+   dcl Id       fixed;
+   dcl Ptr      fixed;  /* Ptr to table */
+   dcl Status   fixed;  /* Status word for the whole table */
+   dcl Col      fixed;  /* Col/Row define cell in which to deposit */
+   dcl Row      fixed;  /*   the value stored in Cell.Type.Id      */
+   dcl Cell.Id  fixed;  /* Cell containg deposit cell */
+   dcl Cell.Typ fixed;  /* Type of cell; used to do copy */
+   dcl Cell.Mem fixed;  /* Size of each cell in words */
+   dcl Cell.Ptr fixed;
+   dcl Typ.Ptr  fixed;
+
+   if not Cell.In.Table(id,col,row) then return;
+
+   if Locate.Object(id) then do;
+      ptr = Object.Ptr;
+      status = Read.Object(ptr + O#Status);
+
+      if Locate.Object(Read.Object(ptr+O#TABL.Cell.Type.Id)) then do;
+
+         Typ.Ptr=Object.ptr;
+         cell.ptr = Compute.Cell.Ptr(ptr,col,row);
+
+         call Store.Table.Cell.Info(ptr,cell.ptr,Typ.ptr);
+
+         call Publish.Table.Cell(ptr,cell.ptr,Typ.ptr,col,row);  /* Do update right now */
+      end;
+   end;
+end PUBLISH.TABLE;
+
+GET.TABLE: Proc (ptr) returns (fixed) public swapable;
+   dcl ptr         fixed;
+   dcl id          fixed;
+   dcl tptr        fixed;
+   dcl ret         fixed;
+   dcl cell.mem    fixed;
+   dcl cell.ptr    fixed;
+   dcl typ         fixed;
+   dcl row         fixed;
+   dcl col         fixed;
+   dcl (ncol,nrow) fixed;  /**** Must be declared in order ****/
+   dcl width       fixed;
+   dcl cell.status fixed;
+   dcl table.exit  fixed;
+   dcl i           fixed;
+   dcl tid         fixed;
+
+   tid=Read.Object(ptr+O#TABL.Cell.Type.Id);       /* save type id in temp */
+
+   if Locate.Object(tid) then do;                  /* find Cell type object */
+      tptr = Object.Ptr;                           /* save Ptr to type object */
+      typ  = Read.Object(tptr+O#Type);             /* Type of table object */
+
+      id       = Read.Object(ptr+O#Id);            /* Id of table */
+      col      = Read.Object(ptr+O#TABL.Cur.Col);  /* Current col of table */
+      row      = Read.Object(ptr+O#TABL.Cur.Row);  /* Current row of table */
+      cell.mem = Read.Object(ptr+O#TABL.Cell.Mem); /* Memory for each cell in words */
+      cell.ptr = Compute.Cell.Ptr(ptr,col,row);    /* Get pointer to cell */
+
+      call Write.Object(tptr+O#Status,Read.Object(cell.ptr));  /* Write status */
+
+      if typ > 0 then do;                     /* Transparent mode cell */
+         width = Read.Object(tptr+O#Trans.Width); /* Width of cells in characters */
+         call Write.Object(tptr+O#Trans.Row,Row+Read.Object(ptr+O#Trans.Row));
+         call Write.Object(tptr+O#Trans.Col,Col*Width+Read.Object(ptr+O#Trans.Col));
+         call Copy.Exmem(cell.ptr+O#TABL.Cell.Data,tptr+O#Suffix+3,cell.mem-O#TABL.Cell.Data);
+      end;
+      else do;  /* Graphics cell */
+         call Copy.Exmem(cell.ptr+O#TABL.Cell.Data,tptr+O#Suffix,cell.mem-O#TABL.Cell.Data);
+      end;
+
+      /* Do the get by calling a standard routine */
+      if      typ = O$Fixed.Point     then ret = Get.Fixed.Point(tptr);
+      else if typ = O$32Bit.MSEC      then ret = Get.32Bit.Msec(tptr);
+      else if typ = O$32Bit.SMPTE     then ret = Get.32Bit.SMPTE(tptr);
+      else if typ = O$Sound.File.Time then ret = Get.Sound.File.Time(tptr);
+      else if typ = O$Label           then ret = Get.Label(tptr);
+      else if typ = O$String          then ret = Get.String(tptr);
+      else if typ = O$Switch          then ret = Get.Switch(tptr);
+
+      call Write.Object(cell.ptr,Read.Object(tptr+O#Status));
+
+      if typ > 0      /* Copy object suffix from type object back to table cell */
+      then call Copy.Exmem(tptr+O#Suffix+3,cell.ptr+O#TABL.Cell.Data,cell.mem-O#TABL.Cell.Data);
+      else call Copy.Exmem(tptr+O#Suffix  ,cell.ptr+O#TABL.Cell.Data,cell.mem-O#TABL.Cell.Data);
+
+      write(md)=Read.Object(tptr+O#Status)&(Not O#STAT.Enable); /* Disable Type Object */
+      write(md)=Read.Object( ptr+O#Status)\O#STAT.Update;       /* set flag to refresh table */
+      Screen.Changed = true;
+
+      i = out.event;
+      write(mam) = Queue.Base;
+      do while i <> in.event;      /* loop over all events in queue */
+         write(mal) = shl(i,3)+2;  /* point to next event id */
+         if read(md)=tid then do;  /* this event is our id   */
+            write(mdi) = id;       /* change to table event  */
+            write(mdi) = col;
+            write(mdi) = row;
+         end;
+         i = (i + 1) & (queue.events-1); /* step to next event */
+      end;
+
+      return ret;    
+   end;
+
+   else do;  /* Locate failed */
+      return Get.Next.Event;
+   end;
+end GET.TABLE;
+
+/* Fetch.Table is a higher level routine that fetches table data from */
+/* and Id, col, and row                                               */
+
+FETCH.TABLE: proc (id,col,row) public swapable;
+   dcl id       fixed;
+   dcl col      fixed;
+   dcl row      fixed;
+   dcl ptr      fixed;
+   dcl cell.ptr fixed;
+
+   if Locate.Object(id) then do;
+      ptr = Object.Ptr;
+
+      if Locate.Object(Read.Object(ptr+O#TABL.Cell.Type.Id)) then do;
+         cell.ptr = Compute.Cell.Ptr(ptr,col,row);
+         call Read.Table.Cell.Info (ptr,cell.ptr,object.ptr);
+      end;
+   end;
+
+end FETCH.TABLE;
+
+/* $SUBTITLE FILL.TABLE.STR fills a string table with entries */
+
+FILL.STRING.TABLE: proc(id,col,row,order,string) public swapable;
+   dcl id         fixed;
+   dcl string     fixed array;  /* Items to fill in format 'item|item|item|item' */
+   dcl tmpstr(40) fixed;
+   dcl col        fixed;
+   dcl row        fixed;
+   dcl order      fixed;   /* 0 -> Fill down  1 -> Fill across */
+   dcl ptr        fixed;
+   dcl typ        fixed;
+   dcl maxcol     fixed;
+   dcl maxrow     fixed;
+   dcl maxlen     fixed;
+   dcl (i,j,k)    fixed;
+   dcl type.id    fixed;
+
+   if not Cell.In.Table(id,col,row) then return;
+
+   if Locate.Object(id) then do;              /* Get ptr for the Table */
+      ptr     = Object.Ptr;                   /* save it because we use locate again later */
+      i       = 0;
+      maxcol  = Read.Object(ptr+O#TABL.Across);
+      maxrow  = Read.Object(ptr+O#TABL.Down);
+      type.id = Read.Object(ptr+O#TABL.Cell.Type.Id);
+
+      if Locate.Object(Type.Id) then do; /* Get type */
+         typ = Read.Object(Object.Ptr+O#Type);
+
+         if      typ = O$String          then maxlen = Read.Object(Object.Ptr+O#STR.Max.Chars);
+         else if typ = O$Label           then maxlen = Read.Object(Object.Ptr+O#Trans.Width);
+         else return;  /* Not a string type */
+
+         do while (i < string(0)) & (col <= maxcol) & (row <= maxrow);
+            j = 0;
+            do while (byte(string,i) <> a.bar) & (i < string(0));
+               call pbyte(tmpstr,j,byte(string,i));
+               j = j + 1;
+               i = i + 1;
+            end;
+            tmpstr(0) = j;
+
+            call Fetch.Table(id,col,row);         /* Get current info type into table */
+            call Deposit.Token(type.id,tmpstr);   /* Deposit string into type object */
+            call Deposit.Table(id,col,row);       /* Deposit type into table */
+
+            i = i + 1;  /* Skip bar */
+
+            if order = 0 then do;       /* By row */
+               row = row + 1;
+               if row >= maxrow then do; /* should never get > */
+                  row = 0;
+                  col = col + 1;
+               end;
+            end;
+            else do;                    /* By column */
+               col = col + 1;
+               if col >= maxcol then do; /* should never get > */
+                  col = 0;
+                  row = row + 1;
+               end;
+            end;
+         end;
+      end;
+   end;
+end FILL.STRING.TABLE;
+
+/* $SUBTITLE Routines to Support Inserting of Rows into Tables */
+
+HARDWARE.TABLE.SCROLL: proc (Ptr,Row,Up.Down) swapable;
+   dcl Ptr          fixed;
+   dcl Row          fixed; /* Row at which insert is to take place */
+   dcl Up.Down      fixed; /* 0 => Shift upper rows up, 1 => Shift lower rows down */
+   dcl des.ptr      fixed;
+   dcl sou.ptr      fixed;
+   dcl copy.len     fixed;
+   dcl row.wds      fixed;
+   dcl num.rows     fixed;
+   dcl (top,bot)    fixed;
+   dcl (i,j)        fixed;
+
+   row.wds =  Read.Object(Ptr+O#TABL.Across)
+            * Read.Object(Ptr+O#TABL.Cell.Mem); /* words per row */
+   
+   if Up.Down=0 then do;                     /* scrolling up   */
+      des.ptr=Compute.Cell.Ptr(Ptr,0,0);     /* ptr to top of table */
+      sou.ptr=des.ptr+row.wds;
+      copy.len=row*row.wds;                  /* words to shuffle up */
+
+      top=Read.Object(Ptr+O#Trans.Row);      /* top & bottom rows of scrolling region */
+      bot=top+row;
+   end;
+   else do;                                  /* scrolling down */
+      num.rows=Read.Object(Ptr+O#TABL.Down); /* number of rows in table */
+
+      sou.ptr=Compute.Cell.Ptr(Ptr,0,row);   /* ptr to row to scroll down */
+      des.ptr=sou.ptr+row.wds;
+      copy.len=(num.rows-row-1)*row.wds;     /* number of words shuffle down */
+      
+      top=Read.Object(Ptr+O#Trans.Row)+row;  /* top & bottom rows of scrolling region */
+      bot=Read.Object(Ptr+O#Trans.Row)+num.rows-1;
+   end;
+
+   if copy.len<>0                            /* need to shuffle memory */
+   then call Copy.ExMem(sou.ptr,des.ptr,copy.len);
+
+   call Scroll.Screen(top,bot,1-Up.Down-Up.Down); /* actually do the scroll */
+end HARDWARE.TABLE.SCROLL;
+
+SOFTWARE.TABLE.SCROLL: proc (Ptr,Row,Up.Down) swapable;
+   dcl Ptr      fixed;
+   dcl Row      fixed;
+   dcl Up.Down  fixed; /* 0 => Shift upper rows up, 1 => Shift lower rows down */
+   dcl (I,J,Id) fixed;
+   dcl TypePtr  fixed;
+   dcl Cell.Ptr fixed;
+
+   COMPUTE.CELL.PTR: proc (Ptr,Col,Row) returns (fixed);  /* Computes memory ptr to cell in a table */
+      dcl ptr fixed; /* Pointer to table */
+      dcl Col fixed; /* Column of table to compute */
+      dcl Row fixed; /* Row of table to compute */
+
+      return     ((Row * Read.Object(ptr+O#TABL.Across) + Col) /* Row * Cells Across + Cols  */
+                 * Read.Object(ptr+O#TABL.Cell.Mem))           /* * Cellmem */
+                 + ptr+O#TABL.Table;                           /* + Offset of table */
+
+   end COMPUTE.CELL.PTR;
+
+   if not Locate.Object(Read.Object(Ptr+O#TABL.Cell.Type.Id)) then return;
+
+   TypePtr=Object.Ptr;
+   Id=Read.Object(Ptr+O#Id);
+
+   if Up.Down=0 then do;
+      do i=1 to row;
+         do j=0 to Read.Object(Ptr+O#TABL.Across)-1; /* loop over columns in table */
+            cell.ptr=Compute.Cell.Ptr(Ptr,j,i);
+            call Read.Table.Cell.Info(Ptr,cell.ptr,TypePtr);
+
+            write(md)=Read.Object(TypePtr+O#Status)\(O#STAT.Update);
+
+            cell.ptr=Compute.Cell.Ptr(Ptr,j,i-1);
+            call Store.Table.Cell.Info(Ptr,cell.ptr,TypePtr);
+         end;
+      end;
+   end;
+   else do;
+      i=Read.Object(Ptr+O#TABL.Down)-1; /* row number of bottom table row */
+      do while i>row;
+         do j=0 to Read.Object(Ptr+O#TABL.Across)-1; /* loop over columns in table */
+            cell.ptr=Compute.Cell.Ptr(Ptr,j,i-1);
+            call Read.Table.Cell.Info(Ptr,cell.ptr,TypePtr);
+
+            write(md)=Read.Object(TypePtr+O#Status)\(O#STAT.Update);
+
+            cell.ptr=Compute.Cell.Ptr(Ptr,j,i);
+            call Store.Table.Cell.Info(Ptr,cell.ptr,TypePtr);
+         end;
+         i=i-1;
+      end;
+   end;
+   Screen.Changed = true;
+
+end SOFTWARE.TABLE.SCROLL;
+
+/* $PAGE */
+
+FILL.TABLE.ROWS.WITH.NULLS: proc (Id,TypeId,TopRow,BotRow) swapable;
+   dcl (Id,TypeId)     fixed;
+   dcl (TopRow,BotRow) fixed;
+   dcl Row             fixed;
+   dcl (Ptr,I,J)       fixed;
+   dcl ObjType         fixed;
+   dcl HardScroll      fixed;
+
+   if Locate.Object(Id) then do;
+      Ptr=Object.Ptr;
+
+      ObjType=Fetch.Object.Info(TypeId,O#Type); /* get type of table */
+      if (ObjType<>O$Label) and (ObjType<>O$String) then return;
+
+      if  (TypeId>0)
+      and ((Read.Object(Ptr+O#TABL.Bits)&O#TABL.Bits.Hardware.Scroll)<>0)
+      then HardScroll=true;
+
+      do Row=TopRow to BotRow;
+         do i=0 to Read.Object(Ptr+O#TABL.Across)-1; /* loop over columns */
+            j=Compute.Cell.Ptr(Ptr,i,row);
+
+            /* store null string in table */
+
+            if ObjType=O$Label                       
+            then call Write.Object(j+O#TABL.Cell.Data+(O#LABL.Label-O#Suffix-3),0);      /* stor null string */
+            else call Write.Object(j+O#TABL.Cell.Data+(O#STR.String-O#Suffix-3),0);      /* stor null string */
+
+            if hardscroll                            /* did a hardware scroll */
+            then write(md) = (Read.Object(j)         /* set status bit   */
+                           & (not(O#STAT.Update)))   /* so no refresh    */
+                           \ O#STAT.Exhibit;         /* null string      */
+
+            else write(md)=Read.Object(j)\(O#STAT.Update); /* set refresh bit */
+
+         end;
+      end;
+      Screen.Changed = true;
+   end;                                              /* of table exists */
+end FILL.TABLE.ROWS.WITH.NULLS;
+
+/* $PAGE */
+
+INSERT.TABLE.ROWS:  proc (Id,InsertRow,Up.Down,Num.Rows) public swapable; /* Inserts new row into table, possibly causing hardware scroll */
+   dcl Id           fixed; /* Id # of table to insert into */
+   dcl InsertRow    fixed;
+   dcl Up.Down      fixed; /* 0 => Shift upper rows up, 1 => Shift lower rows down */
+   dcl Num.Rows     fixed; /* Number of rows to insert */
+   dcl Ptr          fixed;
+   dcl (scol,srow)  fixed;
+   dcl (sattr)      fixed;
+   dcl (i,j)        fixed;
+
+   if Locate.Object(id) then do;  /* object exists */
+
+      if not Cell.In.Table(id,0,insertrow) then return; /* passed row is out of range */
+
+      Ptr=Object.Ptr;
+
+      scol=Read.Object(Ptr+O#TABL.Cur.Col);
+      srow=Read.Object(Ptr+O#TABL.Cur.Row);
+
+      i=Compute.Cell.Ptr(Ptr,Scol,Srow);
+      sattr=Read.Object(i)&O#STAT.Attr.Set; /* looks up table cell STATUS */
+
+      write(md)=read(md)&(Not O#STAT.Attr.Set); /* turn off attr set bit */
+      if up.down=0 
+      then i=O#TABL.Bits.Refresh.Dir;
+      else i=0;
+      write(md)=(Read.Object(Ptr+O#TABL.Bits)&(Not O#TABL.Bits.Refresh.Dir))\i;
+
+      if  (Read.Object(Ptr+O#TABL.Cell.Type.Id)>0) /* this table can be hardware scrolled */
+      and((Read.Object(Ptr+O#TABL.Bits)&O#TABL.Bits.Hardware.Scroll)<>0)
+      and (VT100<>0)               /* terminal supports hardware scroll */
+      then do;                     /* user wants fast hardware scrolling algorithm */
+         do I=0 to Num.Rows-1;
+            call Hardware.Table.Scroll(Ptr,InsertRow,Up.Down);
+         end;
+      end;
+      else do;  /* manually copy each cell to its new position */
+         do I=0 to Num.Rows-1;
+            call Software.Table.Scroll(Ptr,InsertRow,Up.Down);
+         end;
+      end;
+
+      if 1 then do; /* Now fill newly inserted row with some initial values */
+         if Up.Down=0 then do;
+            I=InsertRow-Num.Rows+1; /* top    row */
+            J=InsertRow;            /* bottom row */
+         end;
+         else do;
+            I=InsertRow;            /* top    row */
+            J=InsertRow+Num.Rows-1; /* bottom row */
+         end;
+         call Fill.Table.Rows.With.Nulls(Id,Read.Object(Ptr+O#TABL.Cell.Type.Id),I,J);
+      end;
+
+      call Write.Object(Ptr+O#TABL.Cur.Col,scol);    /* restore current cell position */
+      call Write.Object(Ptr+O#TABL.Cur.Row,srow);
+      i=Compute.Cell.Ptr(Ptr,scol,srow);
+      write(md)=(Read.Object(i)&(Not (O#STAT.Attr.Set /* and O#STAT.Exhibit ?? */ )))\sattr;      /* **** change this ? **** */
+                                                      /* ^ commented out 5/25/88 - SGS */
+
+      if Check.Update.On.Deposit(ptr) <> 0
+      then call Update.Table(ptr);                   /* Do update right now */
+
+   end;                                              /* of Table Object exists */
+end INSERT.TABLE.ROWS;

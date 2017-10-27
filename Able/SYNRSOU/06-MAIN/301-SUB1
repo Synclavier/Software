@@ -1,0 +1,1192 @@
+/* 301-SUB1   $TITLE  SYNTHESIZER DRIVERS, COMPUTE.STEREO, RTE SCALING
+
+   Modified:
+   04/04/91 - CJ  - Handled SUPR differently for Lee Kopp bugs.  Left FM
+                    connected at end of FM notes to fix MC FM clicks for
+                    Lee Kopp.
+   02/07/91 - MWH - Combine 3200, 6400 and 9600 RTP's
+   09/06/89 - MWH - Unsplit 06-MAIN now that the compiler can cope
+   11/10/88 - PF - FIXED RIBBON CODE TO WORK WITH MULTI TRACK MIDI CODE (THD.LIVE.RTES)
+   10/03/88 - SGS - Made changes to support multi-chan stuff for MONO VOICE cards
+   09/19/88 - SGS - Modified Compute.Stereo to disable panning for mono voice cards
+    1/12/88 - TS - SPLIT UP 06-MAIN MODULE INTO TWO PIECES
+   06/22/87 - MWH - Move multi.syn2 to external memory at MFM.PTR
+   06/18/87 - MWH - Move MULTI.POLY array to external memory
+   12/30/86 - cj - mods for mono sampling
+   12/15/86 - MASKED OFF BITS IN REPEAT RATE
+   11/18/86 - CJ - ADDED TIM.TVOL.LOOK
+    7/28/86 - CJ,KJC - SET UP FREQ FOR STEREO
+    7/24/86 - CJ,KJC - CLEANUP.SYNTH CHANGED FOR STEREO PLAYBACK
+    7/13/86 - CJ - ADDED NORIG
+    6/25/86 - KJC - changed idle pi, incr, and mod (in CLEANUP.SYNTH)
+    5/15/86 - "official" creation of release-M modules
+*/
+
+/* SETUP.FREQ IS CALLED TO INITIALIZE THE FREQUENCY OF A CHANNEL PRIOR TO
+   STARTING THE ENVELOPE ATTACK,  OR WHEN A FREQUENCY PARAMETER CHANGES */
+
+/* NOTE - WE COULD GET INTERRUPTED HERE DURING A KNOB UPDATE OR REAL TIME
+   EFFECTS UPDATE BEFORE A NOTE WAS STARTED.   IN THIS CASE, HALF/OLD AND
+   HALF/NEW FREQUENCY INFO WOULD BE WRITTEN OUT.   SINCE WE CHECK PSTAT
+   AFTER COMPUTING ALL FREQUENCY ITEMS,  CORRECT INFO WOULD BE REWRITTEN
+   HERE IF THIS HAPPEND */
+
+SETUP.FRQS: PROC PUBLIC;   /* STORE FREQUENCY INFO IN PARTIAL BLOCK, POSSIBLY WRITE TO SYNTH */
+  DCL (TB,TBP,PTL,TRK,THP)    FIXED   EXTERNAL; 
+  DCL (BASE,J)                FIXED;   /* TEMP FOR BASE FREQUENCY */
+  DCL (T1,T2,T3)              FIXED;
+  DCL (FREE.R0)               LIT  'IF 0 THEN WRITE("300")=READ("300")';
+
+  /* COMPUTE FREQUENCIES */
+
+  WRITE(MAM)=THP;                     /* POINT TO TRACK HDR     */
+  WRITE(MAL)=THD.MRNPTR;
+
+  IF READ(MD)=NPTR THEN DO;           /* CHANGING MOST RECENT   */
+     WRITE(MAL)=THD.CLPITCH;
+     WRITE(MD )=CURRF;                /* STORE INFO THERE       */
+  END;
+
+  WRITE(MAM)=TBP;                     /* POINT TO TIMBRE HEAD   */
+
+  WRITE(MAL)=TIM.LOG.PT+PTL;          /* LOOK UP LOG OF PTUN    */
+  BASE=LOGTBASE+READ(MD)+CURRF+RTUNG; /* COMPUTE FREQUENCY FOR OVERALL TUNING, PITCH, PARTIAL TUNING, TONE BEND */
+
+  IF PLOG<>0 THEN DO;                 /* CHECK FOR CHORUS */
+     WRITE(MAL)=PLOG;                 /* LOOK UP CHORUS   */
+     IF RCHOR=10000 THEN              /* USE FULL VALUE */
+     BASE=BASE+READ(MD);              /* ADD IN CHORUS QUICKLY IF NOT SCALED */
+     ELSE BASE=BASE+READ(MD)*RCHOR/10000;  /* ELSE USE SIGNED MULTIPLY/DIVIDE HERE */
+  END;
+
+  /* $PAGE - EMIT FREQUENCY CODES TO CORRECT SYNTHESIZER */
+
+  /* NOTE: MAM IS LOADED TO TIMBRE HEAD */
+
+  IF  ((INC.MONO=0)                   /* IF NO SAMPLING AT ALL */
+  AND  (INC.POLY=0))
+  OR (MCHN&(B.MONO\B.POLY))=0 THEN DO;    /* OR ORIGINAL SYNTHESIZER - COMPUTE ITEMS */
+
+     IF DO.FM<>0 THEN DO;                 /* MUST COMPUTE FM INFO   */
+       WRITE(MAL)=TIM.LOG.RA+PTL;         /* LOOK UP LOG RATIO HERE */
+       J=READ(MD);                        /* READ CODED RATIO HERE  */
+       CALL COMPUTE.OSYN.FREQ(KEYN,BASE+VIBVL); /* COMPUTE CARRIER FOR ORIGINAL SYNTH */
+       FREE.R0;                           /* FOR COMPILER */
+       WRITE("302")=ADDR(T1);             /* COPY NOTEADD, NOTENUM, NOTEINC */
+       FREE.R0;
+       WRITE("303")=ADDR(NOTEADD);        /* INTO T1, T2, T3         */
+       WRITE("362")=READ("363");          /* MR3I TO MR2I            */
+       WRITE("362")=READ("363");          /* MR3I TO MR2I            */
+       WRITE("362")=READ("363");          /* MR3I TO MR2I            */
+       IF J<0 THEN DO;                    /* NEGATIVE RATIO          */
+          J=J+10000;                      /* RESTORE TRUE SIGNED LOG */
+          IF RRATO<>10000 THEN
+          J=J*RRATO/10000;                /* USE SIGNED MUL/DIV TO SCALE RATIO */
+          CALL COMPUTE.OSYN.FREQ(KEYN,2816+J+LOGTBASE); /* CONSTANT MODULATOR FREQUENCY - NO VIBRATO, NO TONE BEND, NO TRANSPOSITION */
+       END;
+       ELSE DO;                           /* NORMAL RATIO            */
+         J=J-15000;                       /* RESTORE TRUE SIGNED LOG */
+         IF RRATO<>10000 THEN             /* SEE IF ANY RTES         */
+         J=J*RRATO/10000;                 /* USE SIGNED MUL/DIV TO SCALE RATIO */
+         J=MVIBV+J;                       /* GET MODULATOR VIBRATO + RATIO INFO */
+         IF J<>VIBVL THEN CALL COMPUTE.OSYN.FREQ(KEYN,BASE+J); /* RE-COMPUTE IF RATIO<>0 OR MVIBV<>VIBVL */
+       END;
+       DISABLE;                           /* FOR STORING IN PARTIAL BLOCK */
+       FREE.R0;                           /* FOR COMPILER */
+       WRITE("302")=ADDR(MONU);           /* COPY NOTEADD, NOTENUM, NOTEINC */
+       FREE.R0;
+       WRITE("303")=ADDR(NOTEADD);        /* INTO MONU, MNNU, MINC */
+       WRITE("362")=READ("363");          /* MR3I TO MR2I */
+       WRITE("362")=READ("363");          /* MR3I TO MR2I */
+       WRITE("362")=READ("363");          /* MR3I TO MR2I */
+       FREE.R0;                           /* FOR COMPILER */
+       WRITE("302")=ADDR(UONU);           /* COPY T1, T2, T3 */
+       FREE.R0;
+       WRITE("303")=ADDR(T1);             /* INTO UONU, UNNM, UINC */
+       WRITE("362")=READ("363");          /* MR3I TO MR2I */
+       WRITE("362")=READ("363");          /* MR3I TO MR2I */
+       WRITE("362")=READ("363");          /* MR3I TO MR2I */
+       ENABLE;
+     END;
+     ELSE DO;                             /* NO FM - MODULATOR ONLY */
+       CALL COMPUTE.OSYN.FREQ(KEYN,BASE+VIBVL); /* COMPUTE CARRIER FOR ORIGINAL SYNTH */
+       DISABLE;                           /* FOR STORING IN PARTIAL BLOCK */
+       FREE.R0;                           /* FOR COMPILER */
+       WRITE("302")=ADDR(UONU);           /* COPY NOTEADD, NOTENUM, NOTEINC */
+       FREE.R0;
+       WRITE("303")=ADDR(NOTEADD);        /* INTO UONU, UNNM, UINC */
+       WRITE("362")=READ("363");          /* MR3I TO MR2I */
+       WRITE("362")=READ("363");          /* MR3I TO MR2I */
+       WRITE("362")=READ("363");          /* MR3I TO MR2I */
+       ENABLE;
+     END;
+
+     /* $PAGE - UPDATE SYNTH HERE IF NOTE IS ACTIVE */
+
+     IF  (PSTAT<>DELAY.STATE)            /* IF NOT IN DELAY PHASE */
+     AND (PSTAT<>DONE.STATE)             /* CHECK FOR IDEC TO 0   */
+     THEN DO;                            /* IF NOTE IS ACTIVE,  THEN WRITE TO SYNTH DIRECTLY */
+        DISABLE;                         /* DISABLE INTERRUPTS HERE (TRY TO PRESERVE PHASE MOD VS CAR) */
+        IF ((SUPR&"177400")=0)           /* IF NOT SUPPRESSED     */
+        THEN DO;
+           IF (SMCHN<>0) THEN DO;           /* SET UP FREQUENCIES OF SPLICE CHANNEL AS WELL */
+              FREE.R0;                      /* FOR FOLLOWING ADDR */
+              WRITE("301")=ADDR(UCHN);      /* GET POINTER TO CHANNEL LIST */
+              FREE.R0;                      /* FOR FOLLOWING ADDR */
+              WRITE("302")=ADDR(UONU);      /* SET UP MEM POINTERS - R2, R3 */
+              WRITE("303")=READ("302");     /* MOVE COPY TO R1 FOR SPLICE CHANNEL WRITES */
+              WRITE(CHA)=READ("361");       /* SEND OUT CHANNEL - UCHN  */
+              WRITE(FUN)=ONU; WRITE(DAT)=READ("362");
+              WRITE(FUN)=NNU; WRITE(DAT)=READ("362"); 
+              WRITE(FUN)=INC; WRITE(DAT)=READ("362");
+              WRITE(CHA)=READ("361");       /* SEND OUT CHANNEL - SUCHN */
+              WRITE(FUN)=ONU; WRITE(DAT)=READ("363");
+              WRITE(FUN)=NNU; WRITE(DAT)=READ("363"); 
+              WRITE(FUN)=INC; WRITE(DAT)=READ("363");
+              FREE.R0;                      /* FOR FOLLOWING TEST */
+              IF READ("362")<>0 THEN DO;    /* CHECK DO.FM - COMPILER USES R0 HERE */
+                 WRITE("303")=READ("302");  /* INCR SPLICE CHANNEL POINTER */
+                 WRITE(CHA)=READ("361");    /* AND MODULATOR */
+                 WRITE(FUN)=ONU; WRITE(DAT)=READ("362");
+                 WRITE(FUN)=NNU; WRITE(DAT)=READ("362"); 
+                 WRITE(FUN)=INC; WRITE(DAT)=READ("362");
+                 WRITE(CHA)=READ("361");     /* AND SPLICE MODULATOR CHANNEL */
+                 WRITE(FUN)=ONU; WRITE(DAT)=READ("363");
+                 WRITE(FUN)=NNU; WRITE(DAT)=READ("363");
+                 WRITE(FUN)=INC; WRITE(DAT)=READ("363");
+              END;
+           END;
+           ELSE DO; /* SET UP MODULATOR AND CARRIER ONLY */
+              WRITE(CHA)=UCHN;              /* SEND OUT CHANNEL */
+              WRITE("302")=ADDR(UONU);      /* SET UP MEM POINTERS - R2 */
+              WRITE(FUN)=ONU; WRITE(DAT)=READ("362");
+              WRITE(FUN)=NNU; WRITE(DAT)=READ("362"); 
+              WRITE(FUN)=INC; WRITE(DAT)=READ("362");
+              FREE.R0;                       /* FOR FOLLOWING TEST */
+              IF READ("362")<>0 THEN DO;     /* CHECK DO.FM - COMPILER CLOBBERS R0 HERE */
+                 FREE.R0;                    /* FOR FOLLOWING MCHN LOOKUP */
+                 WRITE(CHA)=MCHN;            /* AND MODULATOR      */
+                 WRITE(FUN)=ONU; WRITE(DAT)=READ("362");
+                 WRITE(FUN)=NNU; WRITE(DAT)=READ("362"); 
+                 WRITE(FUN)=INC; WRITE(DAT)=READ("362");
+              END;
+           END;
+        END;
+        ENABLE; /* INTERRUPTS ON AGAIN */
+     END;       /* ELSE LEAVE IN NOTE BLOCK FOR QUED I/O */
+  END;          /* OF BEGIN FOR ORIGINAL SYNTHESIZER */
+
+  /* $PAGE - HANDLE FREQ UPDATE OF MONO & POLY SYNTH */
+
+  ELSE IF (INC.MONO<>0)&((MCHN&B.MONO)<>0) THEN DO;  /* MONO SAMPLING (W. DISK) */
+     CALL COMPUTE.MSYN.FREQ(BASE+VIBVL+MRLCH);       /* GET DATA FOR MONO SYNTH */
+     UNNM=NOTENUM;                                   /* STORE IN PARTIAL BLOCK */
+     IF PSTAT<>DELAY.STATE THEN DO;                  /* IF NOTE IS ACTIVE,  THEN WRITE TO SYNTH DIRECTLY */
+        DISABLE;
+        IF MCHN=MONO.CHAN THEN DO;                   /* WE ARE THE OUTPUT CHANNEL */
+           MONO.PD=NOTENUM;                          /* SAVE IN CASE NOTE HAS NOT STARTED */
+           IF (OUTPUT.ACTIVE<>0) THEN DO;            /* WRITE OUT IF WE ARE RUNNING */
+              WRITE(D66)=8+2;
+              WRITE(D67)=NOTENUM-2;                  /* SET NEW PITCH IF THIS IS UPDATE VS NOTE START */
+           END;
+        END;
+        ENABLE;
+     END;
+  END;
+
+  ELSE IF (INC.POLY<>0) THEN DO;                /* MEANS POLY SYNTH */
+     CALL COMPUTE.PSYN.FREQ(BASE+VIBVL+MRLCH);  /* COMPUTE INFO FOR POLY SYNTH */
+     IF UCHN<>0 THEN NOTEADD=SHL(NOTEADD,1);    /* STEREO SOUND FILE - USE PINC OF 2    */
+     DISABLE;                                   /* FOR STORING IN PARTIAL BLOCK */
+     FREE.R0;                                   /* FOR COMPILER */
+     WRITE("302")=ADDR(UONU);                   /* COPY NOTEADD, NOTENUM, NOTEINC */
+     FREE.R0;
+     WRITE("303")=ADDR(NOTEADD);                /* INTO UONU, UNNM, UINC */
+     WRITE("362")=READ("363");                  /* MR3I TO MR2I */
+     WRITE("362")=READ("363");                  /* MR3I TO MR2I */
+     WRITE("362")=READ("363");                  /* MR3I TO MR2I */
+     IF PSTAT<>DELAY.STATE THEN DO;             /* IF NOTE IS ACTIVE,  THEN WRITE TO SYNTH DIRECTLY */
+        WRITE(PSC)=MCHN; WRITE(PSF)=PSPI;       /* SET UP FOR PHASE INC WRITE */
+        WRITE(PSD)=0; WRITE(PSD)=NOTEADD;       /* PHASE INC */
+        WRITE(PSD)=NOTEINC; WRITE(PSD)=NOTENUM; /* INCREMENT, MODULUS */
+     END;
+     ENABLE;
+  END;
+END SETUP.FRQS;
+
+/* $SUBTITLE - REAL TIME EFFECTS:
+
+   THE ROUTINE 'SCALE' IS USED TO SCALE NOTE PARAMETERS FOR REAL TIME EFFECTS */
+
+/* NOTE:
+
+   1. DO NOT CALL SCALE IF NO REAL TIME EFFECTS ARE PATCHED (WILL RETURN 0).
+   2. ALWAYS SCALE WITH A POSITIVE MAX VALUE.
+   3. NUMBER RETURNED IS FOR 0 TO +N*MAX WHERE N IS THE NUMBER
+      OF REAL TIME EFFECTS PATCHED IN (I.E. THEY ADD) 
+   4. A SIGNED NUMBER FROM -N*MAX TO +N*MAX IS RETURNED IN
+      THE VARIABLE 'SIGNED.SCALE'. */
+
+
+/* NOTE - TO SPEED UP OPERATION,  SCALE IS ALWAYS CALLED WITH:
+
+   MAM:  POINTING TO TIMBRE HEAD
+   MAL:  POINTING TO TIM.VE.ATK.LOOK (OR OTHER .LOOK)
+
+   MAM IS PRESERVED BY 'SCALE'; MAL IS CLOBBERED  */
+
+
+DCL SIGNED.SCALE FIXED;             /* USED FOR PITCH BEND RESULT (+/-) */
+
+SCALE: PROC(MAX);                   /* SCALE MAX- MAX IS ALWAYS +.  RETURNS 0 THROUGH +VAL */
+   DCL (TB,TBP,PTL,TRK,THP)  FIXED   EXTERNAL; 
+   DCL (J,K,L,MAX,WRD)   FIXED;
+   DCL OFFSET            FIXED;     /* CORRECT SIGNED RESULT FOR BETTER PEDAL/TONE BEND USAGE */
+
+   DCL DIVLOOK DATA (1,16,256,4096);
+
+   LOAD READ(MD);                   /* GET WORD FOR THIS PARAMETER     */
+   DIV DIVLOOK(PTL);                /* EXTRACT 4 BIT FIELD FOR PARTIAL */
+   LOAD RES&15;                     /* STORE IN MUL/DIV FOR SPEED      */
+
+   IF RES=0 THEN DO;                /* NOT ROUTED TO THIS PARTIAL      */
+      SIGNED.SCALE=MAX;
+      RETURN MAX;        
+   END;
+
+   WRITE(MAL)=(TIM.RTE.PATCHES-1)+RES;
+   WRD=READ(MD);                    /* GET PATCHING WORD               */
+
+   SIGNED.SCALE=0;                  /* INIT VALUE TO 0 */
+   OFFSET=0;                        /* INIT OFFSET TO NONE */
+
+   DO WHILE WRD <>0;                /* PROCESS EACH 5-BIT FIELD IN WORD     */
+
+      J=WRD&"37";                   /* EXTRACT 5-BIT FIELD, REMOVE IT */
+
+      IF (WRD&"077740")<>0          /* SEE IF ANY MORE (SPEEDS UP LAST ONE) */
+      THEN WRD=SHR(WRD,5);          /* GET NEXT FIELD */
+      ELSE WRD=0;                   /* ELSE NO MORE TO DO */
+
+      IF J<8 THEN DO;               /* 2,3,4,5,6,7 - INFO FROM NOTE BLOCK */
+         K=CORE(NPTR+(VELPT-1)+SHR(J,1));         /* LOOK UP WORD FROM NBLK */
+         IF (J&1)<>0 THEN DO;       /* INVERTED DESIRED */
+            K=ROT(K,8);             /* GET UPPER HALF FOR INVERTED FUNCTION */
+            OFFSET=OFFSET-MAX;      /* CORRECT FOR PROPER TONE BEND */
+         END;
+         IF J=4 THEN DO;                          /* NORMAL PRESSURE - USE LSB'S FROM RPRED */
+            K=SHL(K,8)\SHR(RPRED,8);              /* CONSTRUCT 16-BIT PRESSURE VALUE */
+            LOAD MAX; MUL K; K=RES; DIV SHL(RTE.MAX,8);   /* SCALE IT */
+         END;
+         ELSE DO;                                 /* NORMAL 8 - BIT SCALING */
+            LOAD MAX; MUL K&255; K=RES; DIV RTE.MAX;      /* PERFORM SCALING */
+         END;
+         SIGNED.SCALE=SIGNED.SCALE+RES;           /* ADD IN SCALED RESULT */
+      END;
+
+      ELSE DO;                      /* 8-19 - INFO FROM RTE.DATA */
+
+         WRITE(MAM)=THP;            /* GET RTE INFO FROM TRACK */
+
+         IF J<18 THEN DO;           /* ALL BUT RIBBON - LOOK UP FROM NOTE BLOCK OR RTE.DATA */
+            IF  ((RECD<>0    )              /* RECORDING */
+            AND  (RECD.TRK<>0))             /* SYNCLAVIER RECORDING */
+            OR  (NORIG<>0)                  /* OR IS A SEQUENCER NOTE */
+            THEN WRITE(MAL)=THD.RTES     +SHR(J-8,1);  /* LOOK UP RECORDED RTE DATA */
+            ELSE WRITE(MAL)=THD.LIVE.RTES+SHR(J-8,1);  /* THIS IS A LIVE NOTE (FROM KBD OR MIDI) */
+            K=READ(MD);                     /* READ IT IN       */
+            IF J<16 THEN DO;                /* 8,9,10,11,12,13,14,15 - POS ONLY */
+               IF (J&1)<>0 THEN DO;         /* INVERTED DESIRED */
+                  K=ROT(K,8);               /* GET UPPER HALF FOR INVERTED FUNCTION */
+                  OFFSET=OFFSET-MAX;        /* CORRECT FOR PROPER TONE BEND */
+                  J=J&"177776";             /* REMOVE LSB FOR FOLLOWING COMPARE */
+               END;
+               LOAD MAX;
+               MUL K&255; MWAIT; DIV RTE.MAX;     /* PERFORM SCALING */
+               SIGNED.SCALE=SIGNED.SCALE+RES;     /* ADD IN SCALED RESULT */
+            END;
+            ELSE DO;                        /* PWHEEL : + AND - */
+               IF (J&1)<>0 THEN DO;         /* INVERTED DESIRED - NO OFFSET CORRECTION NEEDED HERE */
+                  K=ROT(K,8);               /* GET UPPER HALF FOR INVERTED FUNCTION */
+               END;
+               IF (K&128)<>0 THEN K=K\"177400"; /* EXPAND TO -100 - 0 */
+               ELSE               K=K&"000377"; /* EXTRACT POS NUMBER ONLY 0 - +100 */
+               LOAD MAX; MUL ABS(K); L=RES; DIV 100;
+               IF K<0 THEN SIGNED.SCALE=SIGNED.SCALE-RES;     /* SUBTRACT OUT */
+               ELSE        SIGNED.SCALE=SIGNED.SCALE+RES;
+            END;
+         END;
+         ELSE DO;                            /* RIBBON */
+            IF  ((RECD<>0)                  /* RECORDING */
+            AND (RECD.TRK<>0))              /* SYNCLAVIER RECORDING */
+            OR  (NORIG<>0)                  /* OR IS A SEQUENCER NOTE */
+            THEN WRITE(MAL)=(THD.RTES     +(6-18))+J;  /* NOTE CAME FROM SEQUENCER */
+            ELSE WRITE(MAL)=(THD.LIVE.RTES+(6-18))+J;  /* LOOK UP + RIBBON FROM (6), - RIBBON FROM (7) */
+            K=READ(MD);
+            LOAD MAX; MUL ABS(K); L=RES; DIV SHL(100,8);
+            IF K<0 THEN SIGNED.SCALE=SIGNED.SCALE-RES;     /* SUBTRACT OUT */
+            ELSE        SIGNED.SCALE=SIGNED.SCALE+RES;
+         END;
+
+         WRITE(MAM)=TBP;
+
+      END;
+
+   END;
+
+   J=SIGNED.SCALE;                     /* ASSUME POS VALUE */
+   IF SIGNED.SCALE<0 THEN J=0;         /* RETURN POS ONLY - LEAVE SIGNED IN SIGNED.SCALE */
+   SIGNED.SCALE=SIGNED.SCALE+OFFSET;   /* PROVIDE MORE USEFUL PITCH BEND WITH PEDAL BY USING OFFSET */
+   RETURN J;                           /* RETURN SCALED VALUE */
+
+END SCALE;
+
+/* $SUBTITLE  Routine to Compute Stereo Control Information */
+
+/* STEREO MODES:
+.    0 = NONE              7  = DELETED (STATIC)   13 = DELETED
+.    1 = PEDAL    L TO R   8  = DELETED (STATIC)   14 = DELETED
+.    2 = PEDAL    R TO L   9  = SYNC SINE L TO R   15 = SINE L TO R
+.    3 = KEYBOARD L TO R   10 = SYNC SINE R TO L   16 = SINE R TO L
+.    4 = KEYBOARD R TO L   11 = SYNC SQR  L TO R   17 = SQR  L TO R 
+.    5 = TRIGGER  R TO L   12 = SYNC SQR  R TO L   18 = SQR  R TO L
+.    6 = TRIGGER  L TO R                           19 = RANDOM
+.                                                  20 = RANDOM
+.  AMPLITUDE MODULATION:
+.    21=SYNCHRONOUS AM ATTACK
+.    22=NON-SYNC    AM ATTACK
+.    23=SYNCHRONOUS AM DECAY
+.    24=NON-SYNC    AM DECAY */
+
+/* NOTE - COMPUTE.STEREO CAN BE CALLED MOST ANY TIME WITHOUT INTERRUPTING
+THE CONTINUITY OF AM/STEREO COMPUTATIONS.  THE PHASE ACCUMULATOR 'PANA'
+IS ONLY INITIALIZED DURING THE NOTE START, AND IS NOT RESET BY COMPUTE.STEREO. */
+
+RND:PROC(MAX#);             /* PROCEDURE TO GET NEXT PSEUDO RANDOM NUMBER */
+   DCL MAX# FIXED;
+   RANDOM#=ROT(RANDOM#+"124356",1) XOR "123456";
+   WRITE(5)=RANDOM#; WRITE(7)=MAX#; /* COMPUTE REMAINDER */
+   RETURN READ(4);          /* PERFORM MODULO FUNCTION */
+END RND;
+
+COMPUTE.STEREO: PROC;       /* USES GLOBAL VARIABLE - RETURNS NUMBER */
+   DCL (TB,TBP,PTL,TRK,THP)     FIXED   EXTERNAL; 
+   DCL (CENTER,MODE,DEPTH,RATE) FIXED; /* STEREO CONTROL VARS */
+   DCL (I,J,VAL)                FIXED;
+   DCL (GLIDEBITS,VIBWAVE)      FIXED;
+   DCL (GLIDERATE)              FIXED;
+
+   COMPUTE.SINE:PROC;               /* COMPUTE INITIAL/NEW VALUE FOR SINE WAVE DYNAMIC PAN */
+      DCL (I) FIXED;                /* USES GLOBAL DEPTH */
+      I=PANA+2500;                  /* CORRECT FOR PHASE ERROR */
+      IF I>=10000 THEN I=I-10000;   /* MODULO 10000 FIRST */
+      IF I>=5000  THEN I=10000-I;   /* 0-4999, THEN 5000 DOWN TO 1 */
+      I=SHL(I,1);                   /* PRODUCES 0-10000 TRIANGLE */
+      LOAD I; MUL DEPTH; I=RES; DIV 5000; /* MAP 0-10000 TO 0-(2*DEPTH) */
+      RETURN RES-DEPTH;             /* COMPUTE -DEPTH TO +DEPTH TRIANGLE FUNCTION */
+   END COMPUTE.SINE;
+
+   /* $PAGE - MAIN CODE FOR 'COMPUTE.STEREO' */
+
+   IF MONO_VOICES_PRESENT
+   THEN DO;                /* DO THIS UNTIL FIGURE OUT HOW TO ENABLE AM */
+      AVOL=SHL(RVOL,8);    /* PANNING (BUT STILL NOT STEREO PANNING)    */
+      RETURN 256;
+   END;
+
+   I=PTPTR+P.GLIDEBITS;                  /* GET POINTER TO GLIDE BITS WORD */
+   WRITE(MAM)=PAR.PTR+SHR(I,8); WRITE(MAL)=I;
+   GLIDEBITS=READ(MDI);
+   GLIDERATE=READ(MD);   
+
+   IF READ(MAL)>=(P.GLIDERATE-P.VIBWAVE) /* SEE IF ON SAME SECTOR FOR SPEED (HAPPENS MOST OF THE TIME) */
+   THEN DO;
+      WRITE(MAL)=READ(MAL)-(P.GLIDERATE-P.VIBWAVE);
+      VIBWAVE=READ(MD);   
+   END;
+   ELSE DO;                              /* LOOK UP VIBWAVE */
+      I=PTPTR+P.VIBWAVE;                 /* GET POINTER TO VIBWAVE WORD */
+      WRITE(MAM)=PAR.PTR+SHR(I,8); WRITE(MAL)=I;
+      VIBWAVE=READ(MD);   
+   END;
+
+   CENTER=(SHR(GLIDEBITS,2)+50)&"177";   /* GET CENTER - MAP TO 0 TO 100,  50 IS CENTER */
+   WRITE(5)=CENTER*256; WRITE(7)=100; CENTER=READ(5); /* MAP CENTER TO 0-256 */
+
+   WRITE(MAM)=TBP;                       /* POINT TO TIMBRE HEAD   */
+
+   WRITE(MAL)=TIM.S.PAN.LOOK;
+   IF READ(MD)<>0 THEN DO;               /* STEREO PAN REAL TIME EFFECTS */
+      IF CENTER=128 THEN CENTER=0;       /* IF IN CENTER, USE FULL SCALE */
+      I=SCALE(SHL(ABS(CENTER-128),1));   /* SCALE 0-256                  */
+      IF CENTER<128 THEN CENTER=CENTER+I;
+      ELSE               CENTER=CENTER-I;
+      IF CENTER<0   THEN CENTER=0;    /* CHECK FOR LIMITS AFTER SCALING */
+      IF CENTER>256 THEN CENTER=256;  /* LIMIT TO LOGICAL LIMITS FOR NOW */
+   END;
+
+   MODE=SHR(VIBWAVE,7); /* GET MODE = 0 - 24 (SEE TABLE ABOVE) */
+
+   AVOL=SHL(RVOL,8);    /* ASSUME NO A.M. - SET UP VOLUME HERE */
+
+   IF MODE=0 THEN DO;   /* NO STEREO - QUICK RETURN */
+      PANR=0;           /* DISABLE FUTURE PAN COMPUTATIONS */
+      RETURN CENTER;    /* USE CENTER POSITION 0-256 FOR MODE 0 */
+   END;
+
+   /* NOTE: THIS CODE HAS NOT BEEN TESTED !! */
+   ELSE IF ((MODE < 21)       /* TRYING TO DO STEREO PANNING ON A */
+   AND (MONO_VOICES_PRESENT)) /* SYSTEM THAT HAS MONO VOICES ONLY */
+   THEN DO;
+      RETURN 256;             /* ALL AMPLITUDE GOES TO RIGHT (MONO) CHANNEL */
+   END;
+
+   DEPTH=SHR(GLIDEBITS,9);       /* GET DEPTH = 0 - 50 */
+   RATE =SHR(GLIDERATE,10);      /* GET RATE  = 0 - 60 */
+
+   WRITE(MAL)=TIM.S.DEP.LOOK;
+   IF READ(MD)<>0 THEN DO;
+      DEPTH=SCALE(DEPTH);
+      IF DEPTH>50 THEN DEPTH=50; /* LIMIT TO MAX DEPTH */
+   END;
+   WRITE(MAL)=TIM.S.RATE.LOOK;
+   IF READ(MD)<>0 THEN DO;
+      RATE =SCALE(RATE);
+      IF RATE>60 THEN RATE=60;   /* LIMIT TO MAX */
+   END;
+   
+   IF MODE<=20 THEN DO;          /* STEREO MODE (VS. A.M.) - MAP DEPTH TO 0-128 */
+      LOAD 128; MUL DEPTH; DEPTH=RES; DIV 50; DEPTH=RES; /* CREATE DEPTH 0-128 FOR STEREO PAN FUNCTIONS */
+   END;                          /* ELSE LEAVE DEPTH 0-50 FOR A.M. */
+
+   PANF=SHL(MODE,9)+CENTER;      /* STORE INFO FOR DYNAMIC ROUTINE IF ACTIVATED */
+   PANR=SHL(DEPTH,8)+RATE;       /* STORE DEPTH & RATE IN CASE UPDATING NEEDED */
+
+   /* $PAGE - COMPUTE INITIAL STEREO INFO FOR EACH MODE */
+
+   /* NOW COMPUTE INITIAL/NEW VALUE FOR STEREO/A.M. */
+   /* NOTE - WE MUST CAREFULLY COMPUTE THE INITIAL/CURRENT VALUE
+             SINCE THIS ROUTINE IS USED TO COMPUTE CHANGES FOR
+             REAL TIME EFFECTS */
+
+   VAL=-DEPTH;                    /* MOST COMMON INITIAL VALUE IS -DEPTH */
+
+   DO CASE SHR(MODE-1,1);         /* BRANCH ACCORDING TO MODE CLASS - COMPUTE INITIAL VALUE */
+      DO;                         /* 1,2:  PEDAL */
+         VAL=0;                   /* NOT USED ON NEW PANEL - STERO PAN IS SCALED ABOVE */
+         PANR=0;                  /* NO UPDATING NEEDED */
+      END;
+      DO;                          /* 3,4:  KEYBOARD SPREAD */
+         I=KEYN+SHR(CENTER,2)-(SYNC.MIDDLE.C+32); /* COMPUTE DISTANCE FROM "CENTER" KEY */
+         VAL=I*DEPTH/2;            /* SCALE BY DEPTH; ADJUST SO MAJOR THIRD  HAS 0-100 AT FULL DEPTH */
+         PANR=0;                   /* NO UPDATING NEEDED */
+      END;
+      DO;                          /* 5,6:  TRIGGERED PING-PONG */
+         IF PANA=0 THEN DO;
+            WRITE(MAM)=THP;
+            WRITE(MAL)=THD.TRIGGER;
+            PANA=256\READ(MD);     /* SAVE SIDE FOR THIS PARTIAL */
+            WRITE(MAM)=TBP;
+         END;
+         IF PANA THEN VAL=-VAL;    /* CONTROL DEPTH FROM TRIGGERED SIDE AFTER NOTE START */
+         PANR=0;                   /* NO UPDATING NEEDED */
+      END;
+      PANR=0;                    /* 7,8:  DELETED */
+      DO;                        /* 9,10:  SYNCHRONOUS SINE (ACTUALLY USE TRIANGLE) */
+         IF PANA=0 THEN DO;      /* INITIALIZE IF NOTE START */
+            WRITE(MAL)=TIM.PAN.PHASE+PTL;
+            PANA=READ(MD);       /* START WITH CURRENT PHASE (THIS IS SAME AS CURRENT VALUE IN CASE OF UPDATE) */
+         END;
+         VAL =COMPUTE.SINE;      /* COMPUTE CURRET SINE POSITION, RETURN IT */
+      END;
+      DO;        /* 11,12:  SYNCHRONOUS SQR */
+         IF PANA=0 THEN DO;      /* INITIALIZE IF NOTE START */
+            WRITE(MAL)=TIM.PAN.PHASE+PTL;
+            PANA=READ(MD);       /* START WITH CURRENT PHASE (THIS IS SAME AS CURRENT VALUE IN CASE OF UPDATE) */
+         END;
+         IF PANA>=5000 THEN VAL=-VAL; /* CHANGE SIGN */
+      END;
+      PANR=0;    /* 13,14:  DELETED */
+      DO;        /* 15,16:  INDEPENDENT SINE PAN - STARTS AT CENTER POSITION */
+         IF PANA=0 THEN VAL=0;            /* INITIALIZE QUICKLY IF FIRST TIME THROUGH */
+         ELSE           VAL=COMPUTE.SINE; /* COMPUTE CURRENT VALUE ON UPDATE */
+      END;
+      DO;        /* 17,18:  INDEPENDENT SQUARE WAVE PING-PONG */
+         IF PANA>=5000 THEN VAL=-VAL; /* CHANGE SIGN */
+      END;
+      DO;        /* 19,20:  RANDOM */
+         IF PANA=0 THEN PANA=RND(1000)+1; /* GET RANDOM NUMBER ON NOTE START */
+         LOAD DEPTH; MUL PANA; VAL=RES; DIV 500; /* COMPUTE 0-2*DEPTH */
+         VAL=RES-DEPTH;                   /* RANDOM - OFFSET BY +/- DEPTH */
+         PANR=0;                          /* NO UPDATING NEEDED */
+      END;
+      DO;        /* 21,22:  SYNCHRONOUS/NONSYNCHRONOUS AMPLITUDE MODULATION ATTACK */
+         IF (MODE=21)&(PANA=0) THEN DO;
+            WRITE(MAL)=TIM.PAN.PHASE+PTL;
+            PANA=READ(MD);       /* START WITH CURRENT PHASE (THIS IS SAME AS CURRENT VALUE IN CASE OF UPDATE) */
+         END;
+      END;
+      DO;        /* 23,24:  SYNCHRONOUS/NONSYNCHRONOUS AMPLITUDE MODULATION DECAY */
+         IF (MODE=23)&(PANA=0) THEN DO;
+            WRITE(MAL)=TIM.PAN.PHASE+PTL;
+            PANA=READ(MD);       /* START WITH CURRENT PHASE (THIS IS SAME AS CURRENT VALUE IN CASE OF UPDATE) */
+         END;
+      END;
+
+   END; /* OF DO CASE */
+
+   /* $PAGE - CHECK FOR ANY DYNAMIC PANNING, COMPUTE INITIAL A.M. VALUE */
+
+   IF PANR<>0 THEN DO;          /* SET FLAG TO PERFORM DYNAMIC PANNING COMPUTATION FOR NOTE */
+      WRITE(MAL)=TIM.ANY.DPAN;
+      WRITE(MD )=1;
+   END;
+
+   IF MODE>20 THEN DO;          /* AMPLITUDE MODULATION - COMPUTE INITIAL VALUE */
+      I=PANA; /* LOOK UP INITIAL VALUE */
+      IF MODE>22 THEN I=I+7500; /* PHASE OFFSET FOR DECAY */
+      ELSE            I=I+2500; /* PHASE OFFSET FOR ATTACK */
+
+      IF I>=10000 THEN I=I-10000;        /* MODULO 10000 */
+      LOAD I; MUL 256; I=RES; DIV 10000; /* MAP 0-9999 TO 0-255 */
+      WRITE(MAM)=STB.PTR+SHR(RES,8); WRITE(MAL)=RES;
+      I=READ(MD);       /* LOOK UP INFO FROM SINE TABLE */
+
+      J=RVOL;           /* GET MAX VOLUME FOR THIS PARTIAL (BASIC VOL + RTE'S) */
+      WRITE(5)=I;       WRITE(6)=J;     I=READ(5); WRITE(7)=2047; /* SCALE VOLUME BY SINE FUNCTION */
+      WRITE(5)=READ(5); WRITE(6)=DEPTH; I=READ(5); WRITE(7)=50;   /* SCALE BY DEPTH ALLOW FULL MODULATION NOW */
+      AVOL=SHL(J-RES,8);            /* STORE A.M. VOLUME FOR FRACTIONAL MULTIPLY */
+
+      /* NOTE: THIS CODE HAS NOT BEEN TESTED !! */
+      IF (MONO_VOICES_PRESENT) THEN RETURN 256;   /* USE FULL RIGHT POSITION IF ONLY MONO VOICES */
+
+      ELSE RETURN CENTER;                /* USE SPECIFIED CENTER POSITION IF DOING A.M. */
+
+   END; /* AMPLITUDE MODULATION */
+
+   IF NOT(MODE) THEN VAL=-VAL;      /* REVERSE FROM CENTER IF REQUIRED */
+   VAL=CENTER+VAL;                  /* OFFSET FROM CENTER */
+   IF VAL<0 THEN VAL=0; IF VAL>256 THEN VAL=256; /* LIMIT */
+
+   RETURN VAL;                       /* RETURN STEREO POS 0-256 */
+END COMPUTE.STEREO;
+
+/* $PAGE - CLEAN UP SYNTH CHANNEL */
+
+/* STOP SYNTHESIZER CHANNEL AT END OF NOTE TO KEEP CHANNELS IN PHASE */
+
+CLEANUP.SYNTH:PROC(MODCHAN,VOLCHAN) PUBLIC;      /* STOP SYNTH CHANNEL FOR GIVEN PAIR */
+  DCL (MODCHAN,VOLCHAN) FIXED;     
+  IF  ((INC.MONO=0)                          /* IF NO SAMPLING AT ALL */
+  AND  (INC.POLY=0))
+  OR (MODCHAN&(B.MONO\B.POLY))=0 THEN DO;    /* OR ORIGINAL SYNTHESIZER - COMPUTE ITEMS */
+     DISABLE;
+     WRITE(MAM)=FM.VOL.SHADOW;
+     WRITE(CHA)=MODCHAN;                     /* MODULATOR FIRST   */
+     WRITE(FUN)=IDIV; WRITE(DAT)=255; WRITE(FUN)=IADD; WRITE(DAT)=255;
+     WRITE(FUN)=ILIM; WRITE(DAT)=0;
+     WRITE(FUN)=ONU;  WRITE(DAT)=0;
+     WRITE(FUN)=NNU;  WRITE(DAT)=255;
+     WRITE(FUN)=INC;  WRITE(DAT)=255; /* WRITE LARGE INC TO ZERO THETA */
+     WRITE(MAL)=VOLCHAN;
+     WRITE(MD )=0;
+     WRITE(CHA)=VOLCHAN;
+     WRITE(FUN)=EDIV; WRITE(DAT)=255; WRITE(FUN)=EADD; WRITE(DAT)=255;
+     WRITE(FUN)=ELIM; WRITE(DAT)=0;
+     WRITE(FUN)=INC;  WRITE(DAT)=255; /* HARDWARE ALSO WRITES ONU=0,NNU=255 !! */
+     WRITE(FUN)=VOL;  WRITE(DAT)=0;   /* ZERO OUT VOLUME REGISTER */
+     ENABLE;
+  END;
+  ELSE IF (INC.MONO<>0)&((MODCHAN&B.MONO)<>0) THEN DO;  /* MONO SAMPLING (W. DISK) */
+     DISABLE;                         /* FOR CHECK OF MONO.PPTR */
+     IF (MODCHAN=MONO.CHAN)           /* IT MUST BE US,  OR STOLEN COUSIN */
+     THEN DO;
+        MONO.CHAN=0;                  /* ONLY ZERO OUT MONO.CHAN HERE */
+        IF (OUTPUT.ACTIVE<>0)
+        THEN CALL ABORT.IO;           /* CLEAN UP IF ACTUALLY DOING OUTPUT */
+     END;
+     ENABLE; 
+  END;
+  ELSE IF (INC.POLY<>0) THEN DO;                  /* MEANS POLY SYNTH */
+     DISABLE;
+     IF VOLCHAN<>0 THEN DO;                       /* SLAVE CHANNEL - REGULAR NOTE */
+        IF MULTI.THERE<>0 THEN DO;                /* TURN OFF MULTI    */
+           WRITE(D32)="21";                       /* SELECT MULTI I/O  */
+           WRITE(MAM)=MPOLY.PTR;                  /* POINT AT MULTICHANNEL-POLY MAP */
+           WRITE(MAL)=VOLCHAN&255;                /* POLY VOICE NUMBER */
+           IF MONO_VOICES_PRESENT                 /* VOICE IS MONO DAC TYPE */
+           THEN WRITE(D33) = READ(MD)&255;        /* TURN IT OFF */
+           ELSE DO;
+              WRITE(D33)=SHR(READ(MD),8);         /* TURN OFF LEFT     */
+              WRITE(D33)=READ(MD)&255;            /* TURN OFF RITE     */
+           END;
+        END;
+        WRITE(PSC)=VOLCHAN; WRITE(PSF)=PSPI;      /* WRITE IDLE PI, INCR, MODUL */
+        WRITE(PSD)=0;   WRITE(PSD)=0;             /* PHASE INCR OF ZERO    */
+        IF 0 THEN DO;                             /* COULD SET 100 KHZ     */
+           WRITE(PSD)=255; WRITE(PSD)=0;          /* INCR 256, MODULUS 256 */
+        END;
+        ELSE DO;                                  /* OR LEAVE CUR FREQ     */
+           WRITE(PSF)=PSON;
+        END;
+        WRITE(PSD)=0;                             /* TURN OFF CHANNEL      */
+        WRITE(PSF)=PSEMOD;
+        WRITE(PSD)=4095; WRITE(PSD)=4095;       /* MODULUS 1, INCR 4096     */
+        WRITE(PSD)=   1; WRITE(PSD)=4095;       /* DELTA, COUNT             */
+        WRITE(PSD)=4095;                        /* ENV ACCUMULATOR          */
+        WRITE(PSD)=   0; WRITE(PSD)=0;          /* LIMIT, CVAL              */
+        WRITE(PSF)=PSRCVOL;                     /* WRITE VOL INFO           */
+        WRITE(PSD)=   0; WRITE(PSD)=0;          /* R, L CVOL                */
+        WRITE(PSD)=   0; WRITE(PSD)=0;          /* R, L DVOL                */
+        WRITE(MAM)=POLY.PSRDVOL.SHADOW;
+        WRITE(MAL)=VOLCHAN;
+        WRITE(MD )=0;
+        WRITE(PSC)=MODCHAN;                     /* SELECT MASTER CHANNEL    */
+        WRITE(PSF)=PSADEVSM;                    /* TURN OFF EVEN STEREO MASTER */
+        WRITE(PSD)=0;
+     END;
+     ELSE DO;                                   /* NOT A SLAVE CHANNEL */
+        WRITE(PSC)=MODCHAN;
+     END;
+     IF MULTI.THERE<>0 THEN DO;                   /* TURN OFF MULTI    */
+        WRITE(D32)="21";                          /* SELECT MULTI I/O  */
+        WRITE(MAM)=MPOLY.PTR;                     /* POINT AT MULTICHANNEL-POLY MAP */
+        WRITE(MAL)=MODCHAN&255;                   /* POLY VOICE NUMBER */
+        IF MONO_VOICES_PRESENT                    /* VOICE IS MONO DAC TYPE */
+        THEN WRITE(D33) = READ(MD)&255;           /* TURN IT OFF */
+        ELSE DO;
+           WRITE(D33)=SHR(READ(MD),8);            /* TURN OFF LEFT     */
+           WRITE(D33)=READ(MD)&255;               /* TURN OFF RITE     */
+        END;
+     END;
+     WRITE(PSF)=PSPI;                             /* WRITE IDLE PI, INCR, MODUL */
+     WRITE(PSD)=0;   WRITE(PSD)=0;                /* PHASE INCR OF ZERO */
+     IF 0 THEN DO;                             /* COULD SET 100 KHZ     */
+        WRITE(PSD)=255; WRITE(PSD)=0;          /* INCR 256, MODULUS 256 */
+     END;
+     ELSE DO;                                  /* OR LEAVE CUR FREQ     */
+        WRITE(PSF)=PSON;
+     END;
+     WRITE(PSD)=0;                                /* TURN OFF CHANNEL */
+     WRITE(PSF)=PSEMOD;
+     WRITE(PSD)=4095; WRITE(PSD)=4095;       /* MODULUS 1, INCR 4096     */
+     WRITE(PSD)=   1; WRITE(PSD)=4095;       /* DELTA, COUNT             */
+     WRITE(PSD)=4095;                        /* ENV ACCUMULATOR          */
+     WRITE(PSD)=   0; WRITE(PSD)=0;          /* LIMIT, CVAL              */
+     WRITE(PSF)=PSRCVOL;                     /* WRITE VOL INFO           */
+     WRITE(PSD)=   0; WRITE(PSD)=0;          /* R, L CVOL                */
+     WRITE(PSD)=   0; WRITE(PSD)=0;          /* R, L DVOL                */
+     WRITE(MAM)=POLY.PSRDVOL.SHADOW;
+     WRITE(MAL)=MODCHAN;
+     WRITE(MD )=0;
+     ENABLE;
+  END;
+END CLEANUP.SYNTH;
+
+/* $PAGE - SUPPRESS AND UNSUPPRESS */
+
+/* WHEN THE ENVELOPE VALUE OF A CHANNEL HAS REACHED ZERO,  IT IS BEST
+   TO 'TURN OFF' THAT CHANNEL TO MINIMIZE FEEDTHROUGH. */
+
+/* MUST PRESERVE MAM POINTER */
+
+SUPPRESS: PROC;  /* PROCEDURE TO SUPPRESS FREQUENCY COMPUTATIONS FOR CHANNEL TO STOP FEEDTHROUGH */
+  DISABLE;
+  SUPR=SUPR\"100000";   /* SET SIGN BIT IN PARTIAL BLOCK */
+  BEGIN;                /* DO NOT CHECK PSTAT HERE, IN CASE STOLEN CHANNEL */
+     IF  ((INC.MONO=0)                      /* IF NO SAMPLING AT ALL */
+     AND  (INC.POLY=0))
+     OR  (MCHN&(B.MONO\B.POLY))=0 THEN DO;  /* OR ORIGINAL SYNTHESIZER - COMPUTE ITEMS */
+        IF MCHN<>0 THEN DO;                 /* SKIP OVER MIDI-ONLY BLOCKS */
+           WRITE(CHA)=MCHN;                 /* MODULATOR FIRST */
+           WRITE(FUN)=ONU;  WRITE(DAT)=0;
+           WRITE(FUN)=NNU;  WRITE(DAT)=255;
+           WRITE(FUN)=INC;  WRITE(DAT)=255; /* WRITE LARGE INC TO ZERO THETA */
+           WRITE(CHA)=UCHN;
+           WRITE(DAT)=255;                  /* HARDWARE ALSO WRITES ONU=0,NNU=255 !! */
+           IF (SMCHN<>0) THEN DO;           /* SET UP FREQUENCIES OF SPLICE CHANNEL AS WELL */
+              WRITE(CHA)=SMCHN;             /* MODULATOR FIRST */
+              WRITE(FUN)=ONU;  WRITE(DAT)=0;
+              WRITE(FUN)=NNU;  WRITE(DAT)=255;
+              WRITE(FUN)=INC;  WRITE(DAT)=255; /* WRITE LARGE INC TO ZERO THETA */
+              WRITE(CHA)=SUCHN;
+              WRITE(DAT)=255; /* HARDWARE ALSO WRITES ONU=0,NNU=255 !! */
+           END;
+        END;
+     END;
+     ELSE IF (INC.MONO<>0)&((MCHN&B.MONO)<>0) THEN DO;  /* MONO SAMPLING (W. DISK) */
+        /* SUPPRESSING NOT DONE FOR MONO SAMPLING */
+     END;
+     ELSE IF (INC.POLY<>0) THEN DO;                   /* MEANS POLY SYNTH */
+        /* SUPPRESSING NOT DONE FOR POLY SYNTH */
+     END;
+     ENABLE;
+  END;
+END SUPPRESS;
+
+UN.SUPPRESS: PROC;  /* ALLOW CONTINUATION */
+  DISABLE;
+  SUPR=SUPR&"077777";
+  ENABLE;
+  IF  ((INC.MONO=0)                       /* IF NO SAMPLING AT ALL */
+  AND  (INC.POLY=0))
+  OR  (MCHN&(B.MONO\B.POLY))=0 THEN DO;   /* OR ORIGINAL SYNTHESIZER - MUST RE-WRITE OUT INFO */
+     IF  (PSTAT<>DELAY.STATE)             /* NOT DELAYING STILL    */
+     AND (MCHN <>0          )             /* NOT A MIDI-ONLY BLOCK */
+     THEN CALL SETUP.FRQS;                /* SET UP PROPER FREQUENCIES IF ACTIVE, DECAYING, OR REPEAT/DELAY PARTIAL */
+  END;
+END UN.SUPPRESS;
+
+/* $PAGE - SUBROUTINES FOR SPECIAL EFFECTS:
+
+   1. COMPUTE.GLIDE      --  PORTAMENTO 
+   2. COMPUTE.HADJ       --  HARMONIC ADJUST
+   3. COMPUTE.KBD.ENV    --  KEYBOARD ENVELOPE
+   4. COMPUTE.VOL        --  COMPUTE NEW VOLUME INFO FOR TIED NOTES, UPDATES */
+
+/* PASSED - TIMBRE PARAMETER POINTER IN 'PTPTR' */
+/*          NOTE BLOCK       POINTER IN 'NPTR ' */
+/*          PARTIAL BLOCK    POINTER IN 'PPTR ' */
+
+/* RETURNS MAM POINTER TO TBP */
+
+COMPUTE.GLIDE:PROC PUBLIC;              /* PROCEDURE TO SET UP GLIDE INFORMATION */
+  DCL (TB,TBP,PTL)  FIXED   EXTERNAL; 
+  DCL (I)                   FIXED;
+  DCL (GLIDEBITS,GLIDERATE) FIXED;
+
+  I=PTPTR+P.GLIDEBITS;           /* GET POINTER TO GLIDE BITS WORD */
+  WRITE(MAM)=PAR.PTR+SHR(I,8); WRITE(MAL)=I;
+  GLIDEBITS=READ(MDI);
+  GLIDERATE=READ(MD )&1023;
+
+  GLIDE=(GLIDEBITS&"3")\1;       /* PERFORM GLIDE ALWAYS IF THIS PROCEDURE CALLED - LOOK UP LOG/LIN FROM TIMBRE DEF */
+  LOAD GLIDERATE; MUL GLIDERATE; 
+  MWAIT; DIV 1000;               /* USE SQUARE LAW HERE */
+  I=RES;
+
+  WRITE(MAM)=TBP;
+  WRITE(MAL)=TIM.P.RATE.LOOK;
+
+  IF READ(MD)<>0 THEN DO;        /* SCALE PORT RATE WITH RTES */
+     I=SCALE(I);
+     IF I>1000 THEN I=1000;      /* LIMIT TO MAX */
+  END;
+
+  IF (GLIDE&"2")<>0 THEN DO;    /* LINEAR CALLED FOR */
+    I=I*(DESTF-CURRF)/1000;     /* COMPUTE LINEAR RATE */
+    IF I=0 THEN DO; 
+       IF DESTF<CURRF THEN I=-1; 
+       ELSE I=+1; 
+    END;
+  END;
+
+  LIND=I;                       /* STORE IN PARTIAL BLOCK */
+
+END COMPUTE.GLIDE;
+
+/* PASSED - NOTE BLOCK       POINTER IN 'NPTR ' */
+/*          PARTIAL BLOCK    POINTER IN 'PPTR ' */
+
+/* RETURNS MAM POINTING TO TBP                  */
+
+COMPUTE.HADJ: PROC;  /* COMPUTE HARMONIC ADJUST INFO */
+  DCL (TB,TBP,PTL)  FIXED   EXTERNAL; 
+  DCL ( I,  J,  K)  FIXED;
+
+  LOAD KEYN; DIV 12;        /* COMPUTE OCTAVE NUMBER */
+  I=READ(5); K=READ(4);     /* GET OCTAVE BASE, KEY NUMBER */
+
+  WRITE(MAM)=TBP;
+  WRITE(MAL)=TIM.HARM.ADJ+(PTL*TIM.HARM.ADJ.STR)+I;
+
+  I=READ(MDI);              /* GET FIRST POINT, ADVANCE POINTER FOR NEXT READ */
+  IF K<>0 THEN DO;          /* SCALE IT FOR KEY WITHIN OCTAVE */
+    J=READ(MD)-I;           /* GET DIFFERENCE BETWEEN C'S     */
+    I=I+J*K/12;             /* PERFORM LINEAR INTERPOLATION WITHIN THIS OCTAVE - MAY BE PLUS OR MINUS DELTA - USE SIGNED MUL/DIV */
+  END;
+
+  HADJ=I;
+
+END COMPUTE.HADJ;
+
+/* $PAGE - KEYBOARD ENVELOPE SUBROUTINE, VOLUME UPDATE SUBROUTINE */
+
+/* PASSED - TIMBRE PARAMETER POINTER IN 'PTPTR' */
+/*          NOTE BLOCK       POINTER IN 'NPTR ' */
+/*          PARTIAL BLOCK    POINTER IN 'PPTR ' */
+
+COMPUTE.KBD.ENV: PROC(MAX);  /* COMPUTE VOLUME FOR KEYBOARD ENVELOPE - PASS MAX */
+   DCL (TBP,PTL)                       FIXED EXTERNAL;
+   DCL (MAX,I,J,K,N)                   FIXED;
+   DCL (L.KEY,R.KEY,L.KEY.SL,R.KEY.SL) FIXED;
+
+   WRITE(MAM)=TBP;
+   WRITE(MAL)=TIM.PINFO.POINTERS+PTL;
+
+   IF READ(MD)=0 THEN DO;
+      I=PTPTR+P.EPEAKL;
+      WRITE(MAM)=PAR.PTR+SHR(I,8); WRITE(MAL)=I;
+      L.KEY=SHR(READ(MDI),10)+12;
+      R.KEY=SHR(READ(MDI),10)+12;
+      IF L.KEY<=13 THEN L.KEY= 1;       /* EXTEND TO LOWEST  KEY */
+      IF R.KEY>=73 THEN R.KEY=85;       /* EXTEND TO HIGHEST KEY */
+
+      I=PTPTR+P.IPEAKL;
+      WRITE(MAM)=PAR.PTR+SHR(I,8); WRITE(MAL)=I;
+      L.KEY.SL=SHR(READ(MDI),10);
+      R.KEY.SL=SHR(READ(MDI),10);
+   END;
+
+   ELSE DO;
+      I=READ(MD)+PI.KBDL;        /* LOOK UP KBD ENVELOPE INFO */
+      WRITE(MAM)=PAR.PTR+SHR(I,8); WRITE(MAL)=I;
+      L.KEY   =READ(MDI);
+      R.KEY   =READ(MDI);
+      L.KEY.SL=READ(MDI);
+      R.KEY.SL=READ(MD );
+   END;
+
+   I=L.KEY;          /* LOOK UP LEFT KEY LIMIT (THIS IS LEFTMOST KEY WITH FULL VOLUME). MAP TO C0-C7 (+1) */
+   N=KEYN+1;         /* LOOK UP KEY NUMBER FOR SPEED - ADD ONE TO MATCH STORED VALUES */
+
+   IF N<I THEN DO;   /* KEY IS TO RIGHT - SCALE DOWN VOLUME */
+      J=L.KEY.SL;    /* LOOK UP LEFT KEY SLOPE */
+      IF N < (I-J) THEN RETURN 0; /* ZERO VOLUME - TO LEFT OF KEY */
+      LOAD MAX; MUL (N-(I-J)+1); K=RES; /* COMPUTE NUMERATOR - SLOPE OF 1 KEY IS ACTUALLY 2 */
+      DIV (J+1); RETURN RES; 
+   END;
+
+   I=R.KEY; /* GET RIGHTMOST FULL VOLUME KEY C0-C7 */
+
+   IF N>I THEN DO;   /* MUST SCALE DOWN */
+      J=R.KEY.SL;    /* RIGHT KEY SLOPE - TO RIGHT OF KEY AREA */
+      IF N > (I+J) THEN RETURN 0; /* NO VOLUME */
+      LOAD MAX; MUL (I+J-N+1); K=RES;
+      DIV (J+1); RETURN RES;
+   END;
+
+   RETURN MAX; /* USE MAX IF BETWEEN KEYS */
+
+END COMPUTE.KBD.ENV;
+
+/* $PAGE - SUBROUTINE TO COMPUTE CURRENT VOLUME LEVEL */
+
+
+/* PASSED - TIMBRE PARAMETER POINTER IN 'PTPTR' */
+/*          NOTE BLOCK       POINTER IN 'NPTR ' */
+/*          PARTIAL BLOCK    POINTER IN 'PPTR ' */
+
+COMPUTE.VOL:PROC PUBLIC;                 /* ROUTINE TO COMPUTE AN UPDATED VOLUME FOR NEW SBITS */
+   DCL (TB,TBP,PTL,TRK,THP)  FIXED EXTERNAL; 
+   DCL (I,J)                 FIXED;     /* MUST CALL WITH PTPTR SET UP TO POINT TO TIMBRE INFO */
+
+   I=SHL(255,8);                    /* ASSUME USE OF MAX VOLUME */
+   IF (SBITS&B.VOL)<>0 
+   THEN I=SBITS&"177400";           /* GET VOLUME DATA IN UPPER HALF */
+
+   WRITE(MAM)=THP;
+   WRITE(MAL)=THD.TVOL;             /* LOOK UP TRACK VOLUME   */
+   LOAD     READ(MD);               /* TRACK VOLUME * PARTIAL VOLUME = 0-255 */
+
+   WRITE(MAM)=TBP;
+   WRITE(MAL)=PTL;                  /* +TIM.VOLUME.LEV */
+
+   MUL      READ(MD);               /* MUL BY VOLUME.LEV            */
+   LOAD     URES;                   /* GET FRACTIONAL RESULT, 0-255 */
+
+   MUL      I;
+   I = URES;                        /* FRACTIONAL MULTIPLY RESULT */
+
+   WRITE(MAL)=TIM.OPTIONS+PTL;
+   IF (READ(MD)&KBD.ENV)<>0 
+   THEN I=COMPUTE.KBD.ENV(I);       /* COMPUTE KBD ENV    */
+
+   BVOL=I;                          /* STORE BASIC VOLUME */
+
+   WRITE(MAM)=TBP;
+   WRITE(MAL)=TIM.VE.PKSUS.LOOK;
+   IF READ(MD)<>0 THEN DO;          /* RTE IS THERE */
+      I=SCALE(I);
+      IF I>255 THEN I=255;          /* LIMIT TO 255 */
+   END;
+
+   WRITE(MAL)=TIM.TVOL.LOOK;        /* ALSO CHECK FOR TRACK VOLUME */
+   IF READ(MD)<>0 THEN DO;
+      I=SCALE(I);
+      IF I>255 THEN I=255;          /* LIMIT TO 255 */
+   END;
+
+   RVOL=I;                          /* STORE VOLUME CORRECTED FOR RTE'S */
+
+   J=PTPTR+P.VIBWAVE;               /* CHECK FOR A.M. */
+   WRITE(MAM)=PAR.PTR+SHR(J,8); WRITE(MAL)=J;
+
+   IF READ(MD) IGE SHL(21,7) THEN CALL COMPUTE.STEREO; /* COMPUTE CURRENT VOLUME IF AMPLITUDE MODULATION - NOTE NUMEROUS BUGS IN PAN & AM CODE IF THERE IS A DELAY */
+   ELSE AVOL=SHL(I,8);                                 /* NO A.M. - SET AVOL HERE */
+
+   IF (I=0)&(SUPR>=0) THEN CALL SUPPRESS;              /* STOP SOUND TO AVOID FEED THROUGH IF NEW VOLUME IS ZERO */
+
+END COMPUTE.VOL;
+
+/* $PAGE - SUBROUTINES FOR REPEAT/ARPEGGIATE */
+
+
+STEP.ARP.PTR: PROC(T#);                 /* STEP ARPEGGIATE POINTER TO NEXT NOTE FOR THIS TRACK */
+  DCL (I,J,T#,NPTR,FIRST) FIXED;        /* NOTE:  **** INTERNAL NPTR */
+
+  WRITE(MAM)=TRK.HEAD;
+  WRITE(MAL)=T#;
+  WRITE(MAM)=READ(MD);
+  WRITE(MAL)=THD.ARP;
+
+  NPTR=READ(MD);                        /* GET POINTER TO CURRENT ARPEGGIATED NOTE */
+
+  IF NPTR=0 THEN RETURN;                /* OOPS? */
+
+  I=RTIM; J=REMAIN;                     /* SAVE ACTUAL TRIGGER TIME INFO FROM ORIGINAL NPTR */
+  FIRST=NPTR;                           /* SAVE POINTER TO CURRENT NOTE */
+  NPTR=NFPTR;                           /* GET NEXT BLOCK */
+  DO WHILE NPTR<>FIRST;                 /* SCAN ACTIVE NOTE LIST */
+    IF NPTR=0 THEN NPTR=NOTELIST;       /* IF WE REACH END, START OVER */
+    ELSE DO;                            /* CHECK */
+      IF (TRACK=T#)&(NSTAT=0)           /* ACTIVE NOTE FOR THIS TRACK */
+      THEN WRITE(MD)=NPTR;              /* THEN USE IT */
+      NPTR=NFPTR;                       /* CHECK NEXT BLOCK */
+    END;
+  END;
+
+  NPTR=READ(MD);                        /* POINT TO BLOCK   */
+  RTIM=I; REMAIN=J;                     /* SAVE ACTUAL TRIGGER TIME INFO FROM ORIGINAL NPTR */
+
+  IF ((RRATE&"020000")=0)               /* NOTE HAS NOT BEEN TRIGGERED YET - JUST TRIGGER IT NEXT LOOP TIME AT RTIM,REMAIN */
+  THEN RETURN;                          /* TRIGGER THIS NOTE NEXT TIME AROUND */
+
+  IF ((RRATE&"040000")<>0)              /* IF REPEATING ARPEGGIATE CALLED FOR */
+  THEN DO;                              /* TRIGGER THIS NOTE AGAIN */
+     RRATE=RRATE & (NOT("020000"));     /* ALLOW RETRIGGER IF REPEATING ARPEGGIATE */
+     RETURN;
+  END;
+  ELSE WRITE(MD)=0;                     /* ALL NOTES TRIGGERED, NON REPEATING ARPEGGIATE - STOP ARPEGGIATING TIMER */
+
+END STEP.ARP.PTR;
+
+BACK.ARP.PTR: PROC(T#);          /* CALLED WHEN ENDING NOTE IF NPTR=ARP.PTR(TB) */
+   DCL (I,J,T#,NPTR) FIXED;      /* NOTE :  ***INTERNAL NPTR**** */
+
+   WRITE(MAM)=TRK.HEAD;
+   WRITE(MAL)=      T#;
+   WRITE(MAM)=READ(MD);
+   WRITE(MAL)= THD.ARP;
+
+   NPTR=READ(MD);                /* POINT TO CURRENT BLOCK */
+
+   IF NPTR=0 THEN RETURN;        /* OOPS?                  */
+
+   I=RTIM; J=REMAIN;             /* SAVE ARPEGGIATE TIME OF THAT NOTE BLOCK */
+   NPTR=NFPTR;                   /* GET NEXT BLOCK ON NOTELIST QUE */
+   DO WHILE (NPTR<>0)&((NSTAT<>0)\(TRACK<>T#)); /* FIND NEXT BLOCK FOR HELD NOTE FROM THIS TRACK */
+      NPTR=NFPTR;                /* GET NEXT ONE */
+   END;
+
+   IF NPTR=0 THEN DO;            /* NOT FOUND - SEARCH LIST AGAIN FROM START */
+      NPTR=NOTELIST;             /* IF WE REACH END, START OVER */
+      DO WHILE (NPTR<>0)&((NSTAT<>0)\(TRACK<>T#)); /* FIND NEXT BLOCK FOR HELD NOTE FROM THIS TRACK */
+         NPTR=NFPTR;             /* GET NEXT ONE */
+      END;
+   END;
+
+   WRITE(MD)=NPTR;               /* STORE NEXT BLOCK,  OR A 0 IF NONE */
+
+   IF NPTR<>0 THEN DO;           /* BLOCK FOUND - SET UP SAVED RTIM, REMAIN */
+      RTIM=I; REMAIN=J;
+   END;
+
+END BACK.ARP.PTR;
+
+
+FIND.END.PTR: PROC(T#);          /* FIND ENDING BLOCK FOR THIS TRACK (USED IN CERTAIN ARPEGGIATE CASES) */
+   DCL (T#,NPTR) FIXED;                 /* NOTE : **** LOCAL NPTR **** */
+
+   WRITE(MAM)=TRK.HEAD;                 /* CALLED WHEN SWITCHING MODES */
+   WRITE(MAL)=T#;                       /* FROM ARPEGGIATE TO          */
+                                        /* REPEAT + ARPEGGIATE         */
+   IF READ(MD)=0 THEN RETURN;
+
+   WRITE(MAM)=READ(MD);
+   WRITE(MAL)=THD.ARP;
+
+   NPTR=NOTELIST;                       /* START AT FRONT OF QUE */
+   DO WHILE (NPTR<>0);                  /* GO THROUGH IT */
+      IF (TRACK=T#)&(NSTAT=0) THEN DO;
+         WRITE(MD)=NPTR;                /* SAVE LAST ONE THERE */
+      END;
+      NPTR=NFPTR;                       /* NEXT BLOCK */
+   END;
+
+   NPTR=READ(MD);                       /* SEE IF ONE FOUND */
+
+   IF NPTR<>0 THEN DO;                  /* SET UP CORRECT RTIM IF FOUND */
+      IF NORIG=0                        /* KEYBOARD NOTE */
+      THEN RTIM=SAMPLED.KBD.MILLISECONDS;     /* GET TIME OF KEYBOARD TRIGGER */
+      ELSE RTIM=SAMPLED.ACTUAL.PLAY.TIME.LSB; /* COMPUTE TIME OF REPEAT FOR SEQ NOTES */
+      REMAIN=0;                         /* INIT TO NO REMAINDER */
+      RRATE=RRATE & (NOT("020000"));    /* TRIGGER THIS NOTE NOW */
+   END;
+
+END FIND.END.PTR;
+
+/* $PAGE - SUBROUTINE TO RE-COMPUTE REPEAT/ARPEG INFO ON REAL TIME CHANGES */
+
+/* PASSED - NOTE BLOCK POINTER IN 'NPTR' */
+
+COMPUTE.RRATE: PROC;                 /* USED TO COMPUTE REP RATE ON RTE OR SPEED CHANGE */
+  DCL (TB,TBP,PTL,TRK,THP)  FIXED   EXTERNAL; 
+  DCL (A.VAL,I,J,MPT,BS,RR) FIXED;
+
+  I=0;                               /* ASSUME NO REPEAT/ARPEG - INITIALIZE */
+
+  IF NSTAT=0 THEN DO;                /* ONLY CHECK FURTHER FOR NON-DECAYING NOTES */
+
+     WRITE(MAM)=TBP;                 /* POINT TO TIMBRE HEAD          */
+     WRITE(MAL)=TIM.MISC.POINTER;
+     MPT       =READ(MD);            /* GET POINTER TO MISC           */
+
+     WRITE(MAL)=TIM.TOPTIONS;        /* GET TIMBRE REPEAT/ARPEG BITS  */
+     A.VAL=READ(MD);
+
+     WRITE(MAM)=THP;
+     WRITE(MAL)=THD.CTBITS;
+
+     A.VAL=(A.VAL XOR READ(MD))&(BIT.ARPEG\BIT.REPEAT); 
+
+     BS=SBITS;                                      /* LOOK UP BITS WORD FOR THIS NOTE */
+
+     IF (BS&B.GUI)=0 THEN DO;                       /* NON-GUITAR NOTE */
+        IF ((BS&B.ARP)<>0)                          /* ARPEG FOOT SW */
+        THEN A.VAL=A.VAL\BIT.ARPEG; 
+        IF ((BS&B.REP)<>0)                          /* REPEAT FOOT SW */
+        THEN A.VAL=A.VAL\BIT.REPEAT; 
+     END;
+
+     IF A.VAL<>0 THEN DO;                           /* REPEAT/ARPEG IS ACTIVE */
+
+        MPT=MPT+REP.LOC;                            /* LOOK UP REPEAT RATE */
+        WRITE(MAM)=PAR.PTR+SHR(MPT,8); WRITE(MAL)=MPT;
+
+        IF NORIG=0 THEN DO;                         /* KEYBOARD NOTE - SCALE FOR SPEED HERE SINCE MILLISECONDS ARE NOT */
+           LOAD SAMP.SPEED; MUL (READ(MD)&8191);
+           IF URES IGE 1000 THEN I="017777";        /* DETECT & HANDLE OVERFLOW - LIMIT TO 81.91 HZ */
+           ELSE DO;
+              DIV 1000; I=RES;                      /* SCALE REPEAT RATE FOR SPEED */
+              IF   I IGT "017777"
+              THEN I  =  "017777";
+           END;
+        END;
+        ELSE I=READ(MD)&8191;                       /* USE NORMAL REP/ARPEG FOR SEQUENCER NOTES */
+
+        WRITE(MAM)=TBP;                             /* CHECK FOR REPEAT RATE REAL TIME EFFECTS */
+        WRITE(MAL)=TIM.REPRATE.LOOK;
+        IF READ(MD)<>0 THEN DO;
+           I=SCALE(I);  
+           IF   I IGT "017777"
+           THEN I  =  "017777";
+        END;
+
+        RR=RRATE;                                  /* LOOOK UP PREVIOUS REPEAT/ARPEG STATE */
+        
+        IF (A.VAL&BIT.ARPEG )<>0 THEN I=I\"100000";  /* SET BITS */
+        IF (A.VAL&BIT.REPEAT)<>0 THEN I=I\"040000";  /* FOR MODE */
+        I=I\(RR&"020000");                         /* SAVE PREVIOUS TRIGGERED BIT */
+
+        /* PROCESS CHANGES IN REPEAT/ARPEG RATE: */
+
+        IF (I&"140000")=(RR&"140000") THEN DO;     /* SAME MODE - ACCURATELY CHECK FOR RATE CHANGE */
+
+           IF (I&"017777")>=4 THEN DO;             /* NEW RATE >= .04 HZ */
+              IF ((RR&"017777")<4)                 /* OLD RATE <  .04 HZ */
+              THEN DO;                             /* SET UP FOR IMMEDIATE TRIGGER */
+                 IF NORIG=0 THEN DO;               /* KEYBOARD NOTE */
+                    RTIM=SAMPLED.KBD.MILLISECONDS; /* KEYBARD   NOTE - NOW (MS) + REPSCAN */
+                 END;
+                 ELSE DO;                          /* SEQ NOTE */
+                    RTIM=SAMPLED.ACTUAL.PLAY.TIME.LSB; /* SEQUENCER NOTE - NOW + REPSCAN */
+                 END;
+                 REMAIN=0;                         /* INIT TO NO REMAINDER */
+              END;
+              ELSE DO;                             /* OLD RATE >= .04 HZ AS WELL */
+                 LOAD 34464; ULOAD 1;              /* LOAD 100,000          */
+                 DIV (I&"017777");                 /* COMPUTE 100,000/(HZ*100) - GIVES DELAY TIME IN MSEC */
+                 IF NORIG=0                        /* KEYBOARD NOTE */
+                 THEN J=SAMPLED.KBD.MILLISECONDS+RES;      /* GET TIME OF KEYBOARD TRIGGER */
+                 ELSE J=SAMPLED.ACTUAL.PLAY.TIME.LSB+RES;  /* COMPUTE TIME OF REPEAT FOR SEQ NOTES */
+                 IF J<RTIM THEN DO;                /* TIME WITH NEW RATE IS BEFORE - ADVANCE */
+                    RTIM=J;
+                    REMAIN=0;                      /* INIT REMAINDER TO AVOID BUGS */
+                 END;
+              END;
+           END;
+           ELSE DO;                                /* RATE IS ZERO - DISABLE ALREADY TIMED REPEATS/ARPEGGIATE */
+              IF (NORIG=0)                         /* KEYBOARD NOTE */
+              THEN RTIM=SAMPLED.KBD.MILLISECONDS+25000;      /* GET TIME OF KEYBOARD TRIGGER */
+              ELSE RTIM=SAMPLED.ACTUAL.PLAY.TIME.LSB+25000;  /* COMPUTE TIME OF REPEAT FOR SEQ NOTES */
+           END;        /* OF ZERO RATE */
+        END;           /* OF SAME MODE */
+
+        /* PROCESS CHANGES IN REPEAT/ARPEG MODES */
+
+        ELSE IF A.VAL=BIT.REPEAT THEN DO;          /* NEW MODE IS JUST REPEATING */
+           IF NORIG=0                              /* KEYBOARD NOTE */
+           THEN RTIM=SAMPLED.KBD.MILLISECONDS;     /* GET TIME OF KEYBOARD TRIGGER */
+           ELSE RTIM=SAMPLED.ACTUAL.PLAY.TIME.LSB; /* COMPUTE TIME OF REPEAT FOR SEQ NOTES */
+           REMAIN=0;                               /* INIT TO NO REMAINDER */
+           IF THP<>0 THEN DO;
+              WRITE(MAM)=THP;
+              WRITE(MAL)=THD.ARP;
+              WRITE(MD )=0;
+           END;
+        END;
+
+        ELSE DO;                                   /* MEANS NEW MODE INCLUDES ARPEGGIATING */
+           IF RR=0 THEN DO;                        /* NOTHING TO ARPEG OR REP+ARPEG */
+              IF NORIG=0                           /* KEYBOARD NOTE */
+              THEN RTIM=SAMPLED.KBD.MILLISECONDS;     /* GET TIME OF KEYBOARD TRIGGER */
+              ELSE RTIM=SAMPLED.ACTUAL.PLAY.TIME.LSB; /* COMPUTE TIME OF REPEAT FOR SEQ NOTES */
+              REMAIN=0;                               /* INIT TO NO REMAINDER */
+              IF THP<>0 THEN DO;
+                 WRITE(MAM)=THP;
+                 WRITE(MAL)=THD.ARP;
+                 WRITE(MD )=NPTR;
+              END;
+           END;
+           ELSE IF RR>0 THEN DO;                   /* REPEATING TO ARPEG OR REP+ARPEG */
+              IF THP<>0 THEN DO;
+                 WRITE(MAM)=THP;
+                 WRITE(MAL)=THD.ARP;
+                 WRITE(MD )=NPTR;
+              END;
+           END;
+           ELSE DO;                                /* PREVIOUS CASE WAS ARPEG */
+              WRITE(MAM)=THP;
+              WRITE(MAL)=THD.ARP;
+              IF  ((RR&"040000")=0)                /* PREVIOUS CONDITION WAS JUST ARPEG */
+              AND ((A.VAL&BIT.REPEAT)<>0)          /* AND NEW CONDITION IS REP+ARP - SPECIAL CHECK */
+              AND (READ(MD)=0)                     /* AND NO ONE IS COUNTING NOW */
+              THEN DO;
+                 CALL FIND.END.PTR(TRK);           /* PUT LAST BLOCK AS ARPEGGIATOR, WITH THIS TIME */
+              END;
+           END;
+        END;
+     END;
+     ELSE DO;                                      /* NEW STATE IS NO REP/ARP */
+        IF THP<>0 THEN DO;                         /* ZERO OUT ARP POINTER */
+           WRITE(MAM)=THP;
+           WRITE(MAL)=THD.ARP;
+           WRITE(MD )=0;
+        END;
+     END;
+  END;
+
+  RRATE=I;                                         /* STORE IN NOTE BLOCK */
+
+END COMPUTE.RRATE;                                 /* USED TO COMPUTE REP RATE ON RTE OR SPEED CHANGE */

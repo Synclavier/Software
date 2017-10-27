@@ -1,0 +1,881 @@
+/* TERMUTIL  $TITLE  Terminal Management Utilities */
+
+/* This Module contains routines for common terminal operations, such     
+.  as clearing of the screen, positioning the cursor, etc.
+.
+.  To use this module you need to INSERT ':-XPL:TERMUTIL'; (with interrupts)
+.  or INSERT ':-XPL:TERMUT'; (without interrupts).
+.
+.  DLM summary:
+.
+.  01/30/87 : KJC : added GSTRING
+.  06/30/86 : KJC : added GDEC, GUNS, GOCT, and GHEX; moved PEEK, TERM_IDLE, CLEAR_TYPEAHEAD to TTYIO
+.  03/27/86 : KJC : added LNUM and LONUM
+.  11/27/85 : KJC : removed minimum field widths from HNUM and ONUM
+.  07/10/85 : KJC : added CSTRING
+.  05/29/85 : KJC : removed SET_POS
+.  10/23/84 : KJC : added output redirection (based on SYSDEV)
+.  06/04/84 : KJC : added GETHEX and HNUM; changed PNUM, ONUM, and UNUM to accept field size
+.  06/02/84 : KJC : added GETNUM, GETUNS, and GETOCT to input numbers
+.  05/30/84 : KJC : added proper BREAK handling
+.  01/19/84 : KJC : removed terminated CRLFs from GET_STRING, GET_YN, & YESNO
+.  12/21/83 : KJC : added Clear_typeahead
+.  12/07/83 : ADT & KJC : Changed TERMUTIL into a stand-alone module and added SET_POS
+.  07/06/83 : JSR : added Fprint routine
+.  07/01/83 : JSR : added Get_string and user interaction routines
+.  06/28/83 : JSR : added signed and unsigned number print routines
+.  05/16/83 : JSW : added Set_scroll routine
+*/
+
+dcl cmdline fixed public; /* command line number of out of 0-23 lines on screen */
+cmdline=22; /* default value */
+
+dcl screen.cleared boolean; /* true if the screen was cleared */
+
+screen_size (24, 80); /* set up for a 24 line x 80 column terminal */
+
+if vt52 then do; /* initialize vt52 to shifted keypad */
+   control.seq=true;
+   wchar(a.esc);  wchar(l.x);  wchar(a.6); /* esc x 6: keypad shifted */
+   control.seq=false;
+end; /* initialize vt52 */
+
+/*  W A I T  */
+
+#wait:  proc(i) public; /* WAIT I clock ticks in "hang" mode */
+   dcl i fixed;
+
+   if read(3) /* if the clock has ticked */
+   then write(3)=0; /* synchronize with the clock (to within a clock tick - but don't pause here!) */
+
+   do i=1 to i; write(3)=0; end; /* wait I clock ticks */
+end #wait;
+dcl WAIT lit 'call #wait';
+
+/* $page */
+
+
+/*  O N U M  */
+
+#onum:  proc(n,field) public; /* output a number in octal */
+   dcl (n,i)      fixed; /* n:  value to print */
+   dcl (field,go) fixed; /* field:  field size */
+
+   do i = 1 to field - 6; /* output as many leading spaces as necessary */
+      wchar(a.sp);
+   end;
+
+   n = rot(n,1);
+   if (n or (field-6 >= 0)) then do; /* need leading digit */
+      if n then wchar(a.1); /* first digit */
+      else      wchar(a.0);
+      go=true; /* we've started */
+   end;
+   else go=false; /* suppress leading zeroes */
+   do i = 0 to 4; /* loop over 5 digits */
+      n = rot(n,3);
+      if (n & "7")<>0 then go=true; /* turn on printing */
+      if (go or (i=4)) then wchar(a.0 + (n & "7")); /* if okay to start printing or at end */
+      else if field-(4-i) > 0 then wchar(a.0); /* or print space */
+   end;
+end #onum;
+dcl ONUM lit 'call #onum';
+
+
+/*  L O N U M  */
+
+#lonum:  proc(ms,ls,field) public; /* output a long number in octal */
+   dcl (ms,ls,i,j) fixed; /* ms, ls:  value to print */
+   dcl (field,go)  fixed; /* field:  field size */
+
+   do i = 1 to field - 11; /* output as many leading spaces as necessary */
+      wchar(a.sp);
+   end;
+
+   j = rot(ms, 2);
+   ms = ((rot(ms, 2) and (not "3")) or (rot(ls, 2) and "3"));
+   ls = ((rot(ls, 2) and (not "3")) or (j and "3"));
+   if (((ls and "3") <> 0) or (field-11 >= 0)) then do; /* need leading digit */
+      wchar(a.0 + (ls and "3")); /* first digit */
+      go=true; /* we've started */
+   end;
+   else go=false; /* suppress leading zeroes */
+   do i = 0 to 9; /* loop over 10 digits */
+      j = rot(ms, 3);
+      ms = ((rot(ms, 3) and (not "7")) or (rot(ls, 3) and "7"));
+      ls = ((rot(ls, 3) and (not "7")) or (j and "7"));
+      if (ls and "7") <> 0 then go = true; /* turn on printing */
+      if (go or (i = 9)) then wchar(a.0 + (ls and "7")); /* if okay to start printing or at end */
+      else if field - (9 - i) > 0 then wchar(a.0); /* or print space */
+   end;
+end #lonum;
+dcl LONUM lit 'call #lonum';
+
+
+/*  H N U M  */
+
+#hnum:  proc(n,field) public; /* output a number in hexadecimal */
+   dcl (n,i)      fixed; /* n:  value to print */
+   dcl (field,go) fixed; /* field:  field size */
+
+   do i = 1 to field - 4; /* output as many leading spaces as necessary */
+      wchar(a.sp);
+   end;
+
+   go=false; /* suppress leading zeroes */
+   do i = 0 to 3; /* loop over 4 digits */
+      n = rot(n,4);
+      if (n & "HF")<>0 then go=true; /* turn on printing */
+      if (go or (i=3)) then do; /* if okay to start printing or at end */
+         if (n & "HF") >= "HA" /* see if alpha or digit */
+         then wchar(a.a + (n & "HF") - "HA"); /* output alpha */
+         else wchar(a.0 + (n & "HF")); /* output digit */
+      end;
+      else if field-(3-i) > 0 then wchar(a.0); /* or print space */
+   end;
+end #hnum;
+dcl HNUM lit 'call #hnum';
+
+/* $page */
+
+
+/*  U N U M  */
+
+#unum:  proc(n,field) public; /* output an unsigned number (0 to 65535) */
+   dcl (n,i,r)    fixed; /* n:  value to print */
+   dcl (field,go) fixed; /* field:  field size */
+   dcl #divisors  data (10000,1000,100,10,1); /* powers of ten */
+
+   do i=1 to field-5; /* print out any necessary leading spaces */
+      wchar(a.sp);
+   end;
+
+   go=false; /* suppress leading zeroes */
+   do i=0 to 4; /* loop over 5 digits */
+      r=0; /* assume digit is zero */
+      do while n IGE #divisors(i); n=n-#divisors(i); r=r+1; end; /* must simulate unsigned divide */
+      if r<>0 then go=true; /* turn on printing */
+      if (go) or (i=4)        then wchar(a.0+r); /* print digit */
+      else if field-(4-i) > 0 then wchar(a.sp); /* or print space */
+   end; /* of digits loop */
+end #unum;
+dcl UNUM lit 'call #unum';
+
+
+/*  L N U M  */
+
+#lnum:  proc(ms,ls,field) public; /* output an unsigned number (0 to 4,294,967,295) */
+   dcl (ms,ls,i,r) fixed; /* ms, ls:  value to print */
+   dcl (field,go)  fixed; /* field:  field size */
+   dcl #ms_divisors data (15258, 1525,  152,   15,    1,    0,   0,  0, 0,0); /* powers of ten */
+   dcl #ls_divisors data (51712,57600,38528,16960,34464,10000,1000,100,10,1);
+
+   do i=1 to field-10; /* print out any necessary leading spaces */
+      wchar(a.sp);
+   end;
+
+   go=false; /* suppress leading zeroes */
+   do i=0 to 9; /* loop over 10 digits */
+      r=0; /* assume digit is zero */
+      do while ((ms IGT #ms_divisors(i)) /* must simulate unsigned 32-bit divide */
+         or ((ms=#ms_divisors (i)) and (ls IGE #ls_divisors (i))));
+         ms=ms-#ms_divisors(i);
+         if ls ilt #ls_divisors(i) then ms=ms-1;
+         ls=ls-#ls_divisors(i);
+         r=r+1;
+      end;
+      if r<>0 then go=true; /* turn on printing */
+      if (go) or (i=9)        then wchar(a.0+r); /* print digit */
+      else if field-(9-i) > 0 then wchar(a.sp); /* or print space */
+   end; /* of digits loop */
+end #lnum;
+dcl LNUM lit 'call #lnum';
+
+/* $PAGE */
+
+/*  P N U M  -  print a signed number with optional leading spaces */
+
+#pnum:  proc(n,field) public; /* output a signed number (-32768 to 32767) */
+   dcl (n,i,r)    fixed; /* n:  value to print */
+   dcl (field,go) boolean; /* field:  field size */
+   dcl sign       fixed; /* true for negative numbers */
+   dcl #divisors  data (-10000,-1000,-100,-10,-1); /* powers of ten */
+
+   do i=1 to field-6; /* print out any necessary leading spaces */
+      wchar(a.sp);
+   end;
+
+   sign=0; /* assume no minus sign */
+   if n<0 then sign=1; /* input number is negative */
+   else do; /* input number is positive */
+      n=(-n); /* use negative number so that -32768 won't blow up */
+      if field-6 >= 0 then wchar(a.sp); /* print space */
+   end;
+
+   go=0; /* suppress leading zeroes */
+   do i=0 to 4; /* loop over 5 digits */
+      r=n/#divisors(i);
+      if r>0 then do; /* digit is non-zero */
+         if (not go) and (sign) then wchar(a.minus); /* print minus sign now */
+         go=true; /* turn on printing */
+         n=n-r*#divisors(i); /* reduce the number */
+      end;
+      if (go) or (i=4)               then wchar(a.0+r); /* print digit */
+      else if field-((4+sign)-i) > 0 then wchar(a.sp); /* or print space */
+   end; /* of digits loop */
+end #pnum;
+dcl PNUM lit 'call #pnum';
+
+/* $SUBTITLE  Floating Point Print Routine */
+
+/* FPRINT --  USED TO PRINT A FLOATING POINT NUMBER ON THE TERMINAL. 
+   IT IS PASSED THREE ARGUMENTS:
+     1.  THE FLOATING POINT NUMBER TO PRINT
+     2.  THE NUMBER OF DIGITS TO PRINT TO THE LEFT  OF THE DECIMAL POINT
+     3.  THE NUMBER OF DIGITS TO PRINT TO THE RIGHT OF THE DECIMAL POINT.
+  
+   FPRINT ALSO PRINTS A SPACE (IF POSITIVE) OR A MINUS SIGN (IF NEGATIVE)
+   BEFORE THE FIRST DIGIT.
+
+   ROUTINE WILL ALSO ROUND THE NUMBER */
+
+#fprint:  proc(num,left,right) public; /* floating point print */
+   dcl (num,a)      floating;
+   dcl (left,right) fixed;
+   dcl sign         fixed;
+   dcl (go,printed) boolean;
+   dcl (i,ch,r)     fixed;
+
+   sign=a.sp; /* assume positive number */
+   if num<0 then do; num=-num; sign=a.minus; end; /* if minus */
+
+   /* first - round the number up */
+
+   a=.5; /* start with .5 */
+   do i=1 to right; a=a/10.; end; /* get .5 to the right of last digit */
+   if num<a then do; num=0.; sign=a.sp; end; /* if zero, print positive zero */
+   else           num=num+a;
+
+   a=1; /* now find power of ten */
+   if left=0 then num=num*10.;
+   else           do i=2 to left; a=a*10.; end;
+
+   go=false; /* clear leading zero print flag */
+   printed=false; /* clear sign printed flag */
+
+   do i=0 to left+right; /* loop over positions */
+      ch=a.sp; /* assume space to be printed */
+      if i=(left-1) then go=true; /* print one zero before period */
+      if i=left then do;
+         ch=a.period; /* character to print is dot */
+         go=true; /* print zeroes after period */
+      end;
+      else do; /* print digit */
+         r=int(num/a); /* get digit to print */
+         if (r<0) or (r>9) then do; go=true; ch=a.star; end; /* out of range */
+         else do; /* digit in range - print it */
+            if r>0 then go=true; /* cancel zero suppression */
+            if (go) then ch=r+a.0; /* form digit value */
+            num=num-(r*a); num=num*10; /* reduce number */
+         end;
+      end;
+      if (go) and (not printed) then do; /* about to print first digit */
+         wchar(sign); /* print sign */
+         printed=true; /* indicate that it has been printed */
+      end;
+      wchar(ch); /* print character - space, period, or star or digit */
+   end; /* of loop over positions */
+end #fprint;
+dcl FPRINT lit 'call #fprint';
+
+/*  C R L F  */
+
+#crlf:  proc public; /* print a CR and then LF (new line) */
+   wchar(a.cr);
+   wchar(a.lf);
+end #crlf;
+dcl CRLF lit 'call #crlf';
+
+/* $PAGE */
+
+/*  P O S  -  move cursor to specified position */
+
+#pos:  proc(line,col) public; /* positions cursor at line (0 to lpp-1) and col (0 to cpl-1) */
+   dcl (line,col) fixed;
+
+   if      col >= cpl  then col=cpl-1; /* apply limits to col */
+   else if col <  0    then col=0;
+   if      line >= lpp then line=lpp-1; /* apply limits to line */
+   else if line <  0   then line=0;
+
+   control.seq=true;
+
+   if vt100 then do; /* vt100 */
+      wchar(a.esc); wchar(a.lbracket); /* esc [ */
+      pnum(line+1,false);
+      wchar(a.semicolon); /* ; */
+      pnum(col+1,false);
+      wchar(a.h); /* H */
+   end; /* vt100 */
+
+   if datamedia then do; /* datamedia */
+      wchar(a.rs); /* start x-y address */
+      wchar(a.sp+col); wchar(line); /* send col and line */
+   end; /* datamedia */
+
+   if adm3a then do; /* adm3a */
+      wchar(a.esc);     wchar(a.equals); /* ESC = */
+      wchar(line+a.sp); wchar(col+a.sp); /* line and col */
+   end; /* adm3a */
+
+   if hardc then crlf; /* hardcopy unit */
+
+   control.seq=false;
+   x.cur=col; y.cur=line; /* set position */
+end #pos;
+dcl POS lit 'call #pos';
+
+/*  R E V E R S E  */
+
+#reverse:  proc(state) public; /* reverse video if possible */
+   dcl state     boolean; /* true if to reverse,false if normal */
+   dcl cur.state fixed; /* state of the video */
+
+   if state=cur.state then return; /* nothing to do */
+   control.seq=true;
+
+   if vt100 then do; /* vt100 only */
+      wchar(a.esc); wchar(a.lbracket);
+      if state then wchar(a.7); /* on:  esc [ 7 m */
+      else          wchar(a.0); /* off: esc [ 0 m */
+      wchar(l.m);
+   end; /* vt100 */
+
+   control.seq=false;
+   cur.state=state;
+end #reverse;
+dcl REVERSE lit 'call #reverse';
+
+/* $PAGE */
+
+/*  C L E A R _ S C R E E N  */
+
+#clear_screen:  proc public; /* clear the screen */
+   dcl i fixed;
+
+   control.seq=true;
+
+   if vt100 then do; /* vt100 */
+      /* position cursor to top and erase rest of screen */
+      wchar(a.esc); wchar(a.lbracket); /* esc [ */
+      wchar(a.h); /* H */
+      wchar(a.esc); wchar(a.lbracket); /* esc [ */
+      wchar(a.j); /* J */
+   end; /* vt100 */
+
+   if datamedia then wchar(a.ff);
+
+   if adm3a then do;
+      wchar(a.sub); wait(1); /* wait for scope to respond */
+   end;
+
+   if hardc then do i = 1 to 10; /* just skip down the page for hardcopy */
+      crlf;
+   end;
+
+   do i=0 to lpp-1; lprint(i)=0; end; /* no printable characters */
+
+   x.cur=0; y.cur=0;
+   screen.cleared=true;
+   control.seq=false;
+
+end #clear_screen;
+dcl CLEAR_SCREEN lit 'call #clear_screen';
+
+
+/*  P S T R I N G  */
+
+#pstring:  proc(str) public; /* write a string to the terminal */
+   dcl str array; /* string to print */
+   dcl i   fixed;
+
+   do i=0 to str(0)-1; wchar(byte(str,i)); end;
+
+end #pstring;
+dcl PSTRING lit 'call #pstring';
+
+
+/*  P S T R I N G R  */
+
+#pstringr:  proc(str) public; /* does a pstring followed by a CRLF */
+   dcl str array;
+
+   pstring(str); /* print the string */
+   crlf;
+
+end #pstringr; 
+dcl PSTRINGR lit 'call #pstringr';
+
+/* $PAGE */
+
+/*  E R A S E _ L I N E  */
+
+#erase_line:  proc public; /* erase rest of line */
+   dcl (lx, ly, i) fixed;
+
+   if ((cpl <> 0 ) and (x.cur > lprint(y.cur))) then return; /* past end of text */
+
+   lx=x.cur; ly=y.cur; /* save values (from side-effects) */
+
+   if vt100 then do; /* vt100 */
+      control.seq=true;
+      wchar(a.esc); wchar(a.lbracket); /* esc [ */
+      wchar(a.k); /* K */
+      control.seq=false;
+   end; /* vt100 */
+
+   if datamedia then wchar(a.gs);
+
+   if adm3a then do; /* adm */
+      do i=lx to lprint(y.cur); wchar(a.sp); end; /* space fill to end */
+      pos(ly,lx); /* back to place we started at */
+   end; /* adm */
+
+   if hardc then crlf; /* hardcopy */
+
+   lprint(ly)=lx; /* last printable character */
+end #erase_line;
+dcl ERASE_LINE lit 'call #erase_line';
+
+
+/*  P C M D  */
+
+#pcmd:  proc(str) public; /* print a string on the command line (bottom line) */
+   dcl str array;
+
+   pos(cmdline,0); /* point to start of command line */
+   pstring(str); /* output the specified string */
+   erase_line; /* erase to the end */
+end #pcmd;
+dcl PCMD lit 'call #pcmd';
+
+/*  E R A S E _ C O M M A N D  */
+
+#era_cmd:  proc public; /* erase the command line */
+
+   pos(cmdline,0); /* point to start of command line */
+   erase_line; /* erase to the end */
+end #era_cmd; 
+dcl ERASE_COMMAND lit 'call #era_cmd';
+
+/*  P S K I P  */
+
+#pskip:  proc(i) public;
+   dcl i fixed;
+
+   do i = 1 to i; crlf; end;
+end #PSKIP;
+dcl PSKIP lit 'call #PSKIP';
+
+/*  S E T _ S C R O L L  */
+
+#set_scroll:  proc(top,bot) public;
+   dcl (top,bot) fixed; /* lines to scroll between */   
+
+   if top<0 then top=0; else if top>=lpp then top=lpp-1;
+   if bot<0 then bot=0; else if bot>=lpp then bot=lpp-1;
+
+   wchar(a.esc); wchar(a.lbracket);
+   if bot>top then do;
+      pnum(top+1,0);  wchar(a.semicolon);  pnum(bot+1,0);
+   end;
+   /* else scroll entire screen */
+   wchar(l.r);
+end #set_scroll;
+dcl SET_SCROLL lit 'call #set_scroll';
+
+/* $SUBTITLE  User Interaction and Prompting Routines */
+
+
+/* input terminator types */
+
+dcl g#return    lit '"000001"'; /* return on carriage return */
+dcl g#delete    lit '"000002"'; /* return on delete if nothing typed */
+dcl g#updown    lit '"000004"'; /* return on cursor up or cursor down */
+dcl g#leftright lit '"000010"'; /* return on cursor left or cursor right */
+dcl g#home      lit '"000020"'; /* return on cursor home */
+dcl g#tab       lit '"000040"'; /* return on tab */
+dcl g#pf        lit '"000100"'; /* return on PF keys */
+dcl g#kp        lit '"000200"'; /* return on KP keys */
+dcl g#slash     lit '"000400"'; /* return on slash */
+dcl g#rest      lit '"100000"'; /* return on anything else (except digits) */
+dcl g#anything  lit '"177777"'; /* return on anything other than a digit */
+
+exit_char: proc(c, mask, len) returns (boolean); /* see if character is in mask */
+   dcl c    fixed; /* character to check */
+   dcl mask fixed; /* mask to check against */
+   dcl len  fixed; /* number of characters already input */
+
+   if (((mask and g#return) <> 0) and (c = a.cr  )) then return (true);
+   if (((mask and g#return) <> 0) and (c = a.null)) then return (true);
+   if (((mask and g#delete) <> 0) and (len = 0)
+   and ((c = a.del) or (c = c.z))) then return (true);
+   if (((mask and g#updown) <> 0)
+   and ((c = cur.up) or (c = cur.down) or (c = a.vt) or (c = a.lf))) then return (true);
+   if (((mask and g#leftright) <> 0)
+   and ((c = cur.left) or (c = cur.right) or (c = a.bs) or (c = a.ff))) then return (true);
+   if (((mask and g#home) <> 0)
+   and ((c = cur.home) or (c = a.rs) or (c = c.r) or (c = c.y))) then return (true);
+   if (((mask and g#tab) <> 0) and (c = a.ht)) then return (true);
+   if (((mask and g#pf) <> 0) and (c >= pf.1) and (c <= pf.4)) then return (true);
+   if (((mask and g#kp) <> 0) and (c >= kp.1)) then return (true);
+   if (((mask and g#slash) <> 0) and (c = a.slash)) then return (true);
+   if (((mask and g#rest) <> 0) and ((c < a.0) or (c > a.9))
+   and (c <> a.del) and (c <> c.z) and (c <> c.x)) then return (true);
+   return (false);
+end exit_char;
+
+/* $page */
+
+
+/*  G O C T  */
+
+goct: proc(mask) returns (fixed) public; /* input an octal number */
+   dcl mask      fixed; /* character return mask */
+   dcl (n, i, c) fixed;
+
+   n = 0; /* initialize result */
+   i = 0; /* initialize digit count */
+   do while term_idle_wait; end; /* wait for a character */
+   c = peek; /* get first character */
+
+   do while (not exit_char (c, mask, i)); /* loop until we get an exit char */
+      call rchar; /* strip off character */
+
+      if ((c = a.del) or (c = c.z)) then do; /* delete last digit */
+         if i <> 0 then do; /* only delete if something's there */
+            wchar(a.bs); wchar(a.sp); wchar(a.bs); /* erase the digit */
+            n = shr(n, 3); /* remove it from the result */
+            i = i - 1; /* and decrease the digit count */
+         end;
+      end; /* of delete last digit */
+      else if c = c.x then do; /* delete entire number */
+         do i = 1 to i; /* delete the line */
+            wchar(a.bs); wchar(a.sp); wchar(a.bs); /* erase each digit */
+         end;
+         i = 0; n = 0; /* reset the counter and result */
+      end; /* of delete entire line */
+      else if ((c >= a.0) and (c <= a.7) /* only allow valid octal digits */
+      and ((i < 5) or ((i = 5) and (n <= "17777")))) then do; /* check length and range */
+         wchar(c); /* echo character */
+         n = (shl(n, 3) or (c - a.0));
+         i = i + 1; /* count digits */
+      end; /* of valid octal digit */
+
+      do while term_idle_wait; end; /* wait for next character */
+      c = peek; /* get it */
+   end; /* of waiting for an exit char */
+
+   return (n); /* return the result */
+end goct;
+
+/* $page */
+
+
+/*  G H E X  */
+
+ghex: proc(mask) returns (fixed) public; /* input an hexadecimal number */
+   dcl mask      fixed; /* character return mask */
+   dcl (n, i, c) fixed;
+
+   n = 0; /* initialize result */
+   i = 0; /* initialize digit count */
+   do while term_idle_wait; end; /* wait for a character */
+   c = peek; /* get first character */
+   if c - l.a ile (l.z - l.a) then c = c - (l.a - a.a); /* map lower to upper */
+
+   do while ((not exit_char (c, mask, i)) or ((c >= a.a) and (c <= a.f))); /* loop until we get an exit char */
+      call rchar; /* strip off character */
+
+      if ((c = a.del) or (c = c.z)) then do; /* delete last character */
+         if i <> 0 then do; /* only delete if something's there */
+            wchar(a.bs); wchar(a.sp); wchar(a.bs); /* erase the character */
+            n = shr(n, 4); /* remove it from the result */
+            i = i - 1; /* and decrease the digit count */
+         end;
+      end; /* of delete last digit */
+      else if c = c.x then do; /* delete entire number */
+         do i = 1 to i; /* delete the line */
+            wchar(a.bs); wchar(a.sp); wchar(a.bs); /* erase each character */
+         end;
+         i = 0; n = 0; /* reset the counter and result */
+      end; /* of delete entire line */
+      else if ((((c >= a.0) and (c <= a.9)) /* only allow valid hexadecimal digits */
+      or  ((c >= a.a) and (c <= a.f))) and (i < 4)) then do; /* and check length */
+         wchar(c); /* echo character */
+         n = shl(n, 4); /* make room for the new digit */
+         if c >= a.a then n = (n or (c - a.a)) + "HA"; /* map alpha character to binary */
+         else n = (n or (c - a.0)); /* map digit character to binary */
+         i = i + 1; /* count digits */
+      end; /* of valid hexadecimal digit */
+
+      do while term_idle_wait; end; /* wait for next character */
+      c = peek; /* get it */
+      if c - l.a ile (l.z - l.a) then c = c - (l.a - a.a); /* map lower to upper */
+   end; /* of waiting for an exit char */
+
+   return (n); /* return the result */
+end ghex;
+
+/* $page */
+
+
+/*  G U N S  */
+
+guns: proc(mask) returns (fixed) public; /* input an unsigned number */
+   dcl mask      fixed; /* character return mask */
+   dcl (n, c, i) fixed;
+
+   n = 0; /* initialize result */
+   i = 0; /* initialize digit count */
+   do while term_idle_wait; end; /* wait for a character */
+   c = peek; /* get first character */
+
+   do while (not exit_char (c, mask, i)); /* loop until we get an exit char */
+      call rchar; /* strip off character */
+
+      if ((c = a.del) or (c = c.z)) then do; /* delete last digit */
+         if i <> 0 then do; /* only delete if something's there */
+            wchar(a.bs); wchar(a.sp); wchar(a.bs); /* erase the digit */
+            if n >= 0 /* if < 32768 */
+            then n = n/10; /* remove it from the result */
+            else do; /* be careful with division (XPL does SIGNed division) */
+               if n ilt 40000 /* if below some random cutoff that is a multiple of ten */
+               then n = (n - 32760)/10 + 3276; /* divide part above 32767 ourselves */
+               else n = (n - 40000)/10 + 4000; /* need extra cutoff because 32768 isn't evenly divisible by 10 */
+            end;
+            i = i - 1; /* and decrease the digit count */
+         end;
+      end; /* of delete last digit */
+      else if c = c.x then do; /* delete entire number */
+         do i = 1 to i; /* delete the line */
+            wchar(a.bs); wchar(a.sp); wchar(a.bs); /* erase each digit */
+         end;
+         i = 0; n = 0; /* reset the counter and result */
+      end; /* of delete entire line */
+      else if ((c >= a.0) and (c <= a.9) /* only allow valid digits */
+      and ((i < 4) or ((i = 4) and ((n < 6553) or ((n = 6553) and (c < a.6)))))) then do; /* check length and range */
+         wchar(c); /* echo character */
+         n = n*10 + (c - a.0);
+         i = i + 1; /* count digits */
+      end; /* of valid digit */
+
+      do while term_idle_wait; end; /* wait for next character */
+      c = peek; /* get it */
+   end; /* of waiting for an exit char */
+
+   return (n); /* return the result */
+end guns;
+
+/* $page */
+
+
+/*  G D E C  */
+
+gdec: proc(mask) returns (fixed) public; /* input a number */
+   dcl mask      fixed; /* character return mask */
+   dcl (c, sign) fixed;
+   dcl (n, i, j) fixed; 
+
+   n = 0; /* initialize result */
+   i = 0; j = 0; /* initialize digit count and character count */
+   sign = 1; /* assume positive number */
+   do while term_idle_wait; end; /* wait for a character */
+   c = peek; /* get first character */
+
+   do while ((not exit_char (c, mask, j)) or ((j = 0) and ((c = a.plus) or (c = a.minus)))); /* loop until we get an exit char */
+      call rchar; /* strip off character */
+
+      if ((c = a.del) or (c = c.z)) then do; /* delete last character */
+         if j <> 0 then do; /* only delete if something's there */
+            wchar(a.bs); wchar(a.sp); wchar(a.bs); /* erase the character */
+            j = j - 1; /* decrease the character count */
+            if j = 0 then sign = 1; /* reset sign if necessary */
+            if i > 0 then do; /* if there's a number */
+               if n >= 0 /* if positive */
+               then n = n/10; /* remove it from the result */
+               else n = -(n + 9)/10; /* be careful if negative (make positive); XPL uses INT to resolve remainders (N < 0 only for 32768) */
+               i = i - 1; /* and decrease the digit count */
+            end;
+         end; /* of deleting whatever's there */
+      end; /* of delete last character */
+      else if c = c.x then do; /* delete entire number */
+         do i = 1 to j; /* delete the line */
+            wchar(a.bs); wchar(a.sp); wchar(a.bs); /* erase each character */
+         end;
+         i = 0; j = 0; n = 0; sign = 1; /* reset the counters and result */
+      end; /* of delete entire line */
+      else if ((c >= a.0) and (c <= a.9) /* only allow valid digits */
+      and ((i < 4) or ((i = 4) and ((n < 3276) /* check length and range */
+      or  ((n = 3276) and ((c < a.8) or ((sign = -1) and (c = a.8)))))))) then do;
+         wchar(c); /* echo character */
+         n = n*10 + (c - a.0);
+         i = i + 1; /* count digits */
+         j = j + 1; /* count characters */
+      end; /* of valid digit */
+      else if (((c = a.plus) or (c = a.minus)) and (j = 0)) then do; /* leading plus or minus? */
+         wchar(c); /* echo it */
+         if c = a.minus /* leading minus? */
+         then sign = -1; /* yessir */
+         else sign =  1; /* no sir */
+         j = 1; /* we now have one character */
+      end; /* of leading plus or minus */
+
+      do while term_idle_wait; end; /* wait for next character */
+      c = peek; /* get it */
+   end; /* of waiting for an exit char */
+
+   return (sign*n); /* return the result */
+end gdec;
+
+/* $page */
+
+
+/*  G E T O C T  */
+
+getoct: proc returns (fixed) public; /* input an octal number */
+   dcl n fixed;
+
+   n = goct (g#return); /* get it */
+   call rchar; /* get rid of return */
+
+   return (n);
+end getoct;
+
+
+/*  G E T H E X  */
+
+gethex: proc returns (fixed) public; /* input an hexadecimal number */
+   dcl n fixed;
+
+   n = ghex (g#return); /* get it */
+   call rchar; /* get rid of return */
+
+   return (n);
+end gethex;
+
+
+/*  G E T U N S  */
+
+getuns: proc fixed public; /* input an unsigned number */
+   dcl n fixed;
+
+   n = guns (g#return); /* get it */
+   call rchar; /* get rid of return */
+
+   return (n);
+end getuns;
+
+
+/*  G E T N U M  */
+
+getnum: proc fixed public; /* input a number */
+   dcl n fixed;
+
+   n = gdec (g#return); /* get it */
+   call rchar; /* get rid of return */
+
+   return (n);
+end getnum;
+
+/* $PAGE */
+
+/*  G S T R I N G  */
+
+#gstring:  proc(prompt, upcase, str, len, mask) public; /* string input routine */
+   dcl prompt fixed array; /* prompting string */
+   dcl upcase boolean; /* TRUE if string should be returned uppercased */
+   dcl str    fixed array; /* returned string buffer */
+   dcl len    fixed; /* max number of chars to accept */
+   dcl mask   fixed; /* character return mask */
+   dcl c      fixed;
+
+   pstring (prompt); /* put up prompting string */
+   erase_line; /* clear rest of line */
+   str (0) = 0; /* clear returned string */
+   #flush_term();
+
+   do while term_idle_wait; end; /* wait for a character */
+   c = peek; /* get first character */
+
+   do while (not exit_char (c, mask, str (0))); /* loop until we get an exit char */
+      call rchar; /* strip off character */
+
+      if ((c = a.del) or (c = c.z)) then do; /* delete last character */
+         if str (0) <> 0 then do; /* only delete if something's there */
+            str (0) = str (0) - 1; /* one less character */
+
+            if byte(str, str (0)) - a.sp ilt a.del then do; /* make sure it's a printing character */
+               wchar(a.bs); wchar(a.sp); wchar(a.bs); /* erase the character */
+            end;
+         end;
+      end; /* of delete last character */
+      else if c = c.x then do; /* delete entire string */
+         do c = str (0) - 1 to 0 by -1; /* delete the line */
+            if byte(str, c) - a.sp ilt a.del then do; /* make sure it's a printing character */
+               wchar(a.bs); wchar(a.sp); wchar(a.bs); /* erase each digit */
+            end;
+         end;
+         str (0) = 0; /* delete line */
+      end; /* of delete entire string */
+      else if str (0) < len then do; /* less than max chars in string */
+         if c ige a.sp then wchar(c); /* echo it only if it isn't a control */
+         if upcase then if c - l.a ile l.z - l.a then c = c - (l.a - a.a);
+         call pbyte(str, str (0), c); str (0) = str (0) + 1; /* store it */
+      end;
+
+      do while term_idle_wait; end; /* wait for next character */
+      c = peek; /* get it */
+   end; /* of waiting for an exit char */
+
+   if str (0) then call pbyte(str, str (0), a.nul); /* pad with null if odd length */
+end #gstring;
+dcl GSTRING lit 'call #gstring';
+
+/*  G E T _ S T R I N G  */
+
+#get_string:  proc(prompt, upcase, str, len) public; /* string input routine */
+   dcl prompt fixed array; /* prompting string */
+   dcl upcase boolean; /* TRUE if string should be returned uppercased */
+   dcl str    fixed array; /* returned string buffer */
+   dcl len    fixed; /* max number of chars to accept */
+
+   gstring (prompt, upcase, str, len, g#return); /* get the string */
+   call rchar; /* get rid of exit character */
+end #get_string;
+dcl GET_STRING lit 'call #get_string';
+
+
+/*  G E T _ Y N  */
+
+/* Print prompting string, return 1 if user hits Y, y, or 1, return 0 if
+   user hits N, n, 0, or CR */
+
+get_yn:  proc(msg) fixed public; /* print prompt, wait for Y or N char */
+   dcl msg fixed array; /* prompting string */
+   dcl ch  fixed;
+
+   pstring(msg); /* prompt user */
+   do forever; /* loop until valid response */
+      ch=rchar; /* get input char */
+
+      if (ch=a.y) or (ch=l.y) or (ch=a.1) then do; /* positive */
+         pstring('Yes');
+         return 1;
+      end;
+      else if (ch=a.n) or (ch=l.n) or (ch=a.0) or (ch=a.cr) then do; /* negative */
+         pstring('No ');
+         return 0;
+      end;
+   end; /* of do while */
+end get_yn;

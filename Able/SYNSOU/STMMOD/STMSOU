@@ -1,0 +1,123 @@
+/*	:SYNSOU:STMMOD:STMSOU  $TITLE  source for basic stm screen
+
+Modified:
+1999/10/14 - TY  - Modified the "input character received" case so that the function keys can be utilized.
+1988/10/14 - cj  - removed insert of stdtdcl (not needed) because it
+						 was bringing in all of Audio Event Editor
+1988/04/27 - MWH - Create STDTLIB since STEDLIB is too big
+*/
+
+Module STMMOD;
+
+	insert ':-xpl:intrprtr';
+	
+	insert ':synlits:comlits';		/*	compilation literals	*/
+	insert ':synlits:asciilit';	/*	ASCII literals	*/
+	insert ':synlits:globlits';	/*	good globals	*/
+
+	insert ':synmods:globdcl';
+	insert ':synmods:errdcl';		/*	for error handling	*/
+	insert ':synmods:moussdcl';	/*	mouse routines such as mouse.switch	*/
+	insert ':synmods:ttydcl';		/*	terminal	*/
+	insert ':synmods:getdcl';		/*	get event routines	*/
+	insert ':synmods:getvdcl';		/*	for new.poly.contents					*/
+	insert ':synmods:tprimdcl';	/*	general routines used by screens	*/
+
+	insert ':synauxs:stmlits';		/*	specific stm literals	*/
+
+	insert ':synmods:stutldcl';	/*	sample to memory utility routines	*/
+	insert ':synmods:steddcl';		/*	edit routines (i.e., UNLOCK.SOUND.FILE)	*/
+	insert ':synmods:strecdcl';	/*	sample.into.memory	*/
+	insert ':synmods:stindcl';		/*	input handling	*/
+	insert ':synmods:stdrdcl';		/*	drawing routines	*/
+
+	STM.SCREEN: PROC(arg) PUBLIC SWAPABLE;	/*	call to activate STM	*/
+		dcl arg		fixed;						/*	reserved for future use	*/
+		dcl (code)	fixed;
+
+		if inc.stm=0 then do;
+			call feature.not.available;
+			return (-1);
+		end;
+
+		if (vt640\dq640\mg600)=0 then do;
+			call no.graphics.terminal;	/*	graphics terminal required for this screen	*/
+			return (-1);					/*	screen not activated	*/
+		end;
+
+		call SET.TERMULATOR.CURSOR.STYLE(MOUSE_FINE_STYLE);
+
+		call STM.SOUND.EDITOR.DISP;	/*	draw sound editor screen frame	*/
+
+		EXIT.MY.SCREEN   = 0;
+		GOTO.THIS.SCREEN = 0;
+
+		call ENABLE_SEVERAL_GETS(get.in.char,			/*	get in.chars		*/
+										 get.mouse.button,	/*	get mouse buttons	*/
+										 get.poly.contents,	/*	poly changes		*/
+										 get.ertyp);			/*	errors				*/
+		call GET_ENABLE			(get.new.timbre.info);
+
+		do while exit.my.screen=0;
+
+			code = GET.NEXT.EVENT;			/*	get event			*/
+
+			do case (code-1);
+
+				do;								/*	input character received	*/
+					/*	if next.event.info ige asc.call.convert	*/
+					/*	SUBSTITUTE THE FOLLOWING LINE FOR THE ONE ABOVE TO MAKE USE OF THE FUNCTION KEYS	*/
+					if ((next.event.info ige asc.call.convert) and (next.event.info ilt asc.fkey1)) or (next.event.info igt asc.fkey16)
+					then call RETURN.TO.PREV.STATE;
+					else call STM.SOUND.EDITOR.INPUT(in.chin,next.event.info);
+				end;
+
+				if (abs(next.event.info)=2)	/*	look for press or release of middle button	*/
+				then do;								/*	position mouse	*/
+					call STM.SOUND.EDITOR.MOUSE.POS(mouse(release.x),mouse(release.y),1);	/*	if playing with landscape or mouse keep it up	*/
+				end;
+
+				;									/*	mouse movement	*/
+				call UPDATE.SOUND.EDITOR.DISP;	/*	new timbre info	*/
+				;									/*	psfree not displayed		*/
+				;									/*	new seq info not used	*/
+				;									/*	no play scrolling			*/
+				;									/*	entry writes no effect	*/
+				;									/*	tds update - nothing		*/
+				;									/*	dtd info - nothing		*/
+
+				do;								/*	poly change					*/
+					if (next.event.info&1) <> 0
+					then call UPDATE.SOUND.EDITOR.DISP;	/*	update sample-to-memory sound editor display	*/
+				end;
+
+				do;								/*	error message to display	*/
+					call Handle.System.Error.Codes(next.event.info);
+					call POS.STM.ALPHA.CURSOR;
+				end;
+
+				;									/*	nothing on ork/smpte		*/
+
+			end;	/*	of do case	*/
+		end;		/*	of loop		*/
+
+		call DISABLE_SEVERAL_GETS(get.in.char,
+										  get.mouse.button,
+										  get.poly.contents,
+										  get.ertyp);
+		call GET_DISABLE			 (get.new.timbre.info);
+
+		EXIT.MY.SCREEN = 0;				/*	clear flag after loop	*/
+
+		if locked<>0						/*	unlock sound file when leaving screen	*/
+		then call UNLOCK.SOUND.FILE;
+
+		call SET.TERMULATOR.CURSOR.STYLE(MOUSE_COURSE_STYLE);
+
+		if (stm.record.device == stm.record.device.dig)
+			interp_release_dig_stm();					// Free up digital STM hardware when leaving STM
+
+		return GOTO.THIS.SCREEN;
+
+	end STM.SCREEN;
+end STMMOD;

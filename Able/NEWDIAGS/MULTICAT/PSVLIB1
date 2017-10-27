@@ -1,0 +1,95 @@
+/*
+
+New England Digital Corporation
+Poly routines for Multi-channel testing program
+Written May 1986, WSL
+
+Modification history:
+  01/09/89     WSL : Removed from main program into this insert file  
+
+*/
+/*
+ Required for stand-alone compilation:
+insert ':-xpl:intrprtr';
+insert ':NEWDIAGS:sysinit';
+*/
+/***************************************************************************/
+/***********************  Global variables  ********************************/
+dcl ps_map((64*psmaxbins)-1)  fixed;        /* PS chans. mt input #'s    */
+
+/***************************************************************************/
+/*************************    Poly Routines    *****************************/
+dcl initialize_poly_wave lit 'call #initialize_poly_wave';
+#initialize_poly_wave: proc(wave_type);
+  dcl wave_type fixed;                     /* 0-dc low, 1-dc hi, 2-1K sine */
+  dcl (i,j,k) fixed;
+  dcl (bin#,bin_base)     fixed;
+  dcl (increment,modulus) fixed;
+  dcl number_of_samples   fixed;
+
+  increment = 99; modulus = 200;           /* sample rate of 50 KHz */
+  number_of_samples = 51;                  /* 1 KHz */
+
+  do bin# = 0 to #_poly_bins-1;
+    call pbmwrite(bin#,0,0);
+    do i = 0 to number_of_samples - 1; 
+      do case wave_type;
+        write(psd) =  32767;          /* 0 */
+        write(psd) = -32767;          /* 1 */
+        write(psd) = int((32767*sin(i*2*3.14159265/(number_of_samples-1)))); 
+      end;
+    end;
+  end;
+  bin# = 0;
+
+  do i = 0 to 64*(#_poly_bins-1) by 64;   /* do for each poly bin */
+    do j = 0 to 63;
+       write(psc) = i+j; write(psf) = pswl;
+       write(psd) =  -1; write(psd) = -(number_of_samples-1);
+       write(psd) =   0; write(psd) = 0;   
+       write(psd) =  -1; write(psd) = -(number_of_samples-1);
+       write(psd) =   0; write(psd) = 1; /* phase increment of 1 */
+       write(psd) = increment - 1; 
+       write(psd) = 256 - modulus; 
+       write(psd) =  0;                             /* off with no looping */
+    end;
+  end;
+
+end #initialize_poly_wave;
+
+/***************************************************************************/
+poly_turn_on:  proc(bin#,chan,pan,vol);          /* turn on poly channel   */
+   dcl (bin#,chan,pan,vol)	fixed;
+   dcl (bin_base,i,j)		fixed;
+
+   bin_base   = bin# * 64;
+   write(psc) = bin_base + chan;                 /* SELECT CHANNEL         */
+   write(psf) = pselim;                          /* SET UP FOR LIMIT, CVAL */
+   write(psd) = vol;    write(psd) = vol;        /* LIMIT, CVAL TO MAX     */
+   write(psf) = psrcvol; 
+   write(psd) = pan;    write(psd) = 4095-pan;   /* R,L CVOL               */
+   write(psd) = pan;    write(psd) = 4095-pan;   /* R,L DVOL               */
+   write(psf) = pson;   write(psd) = 3;          /* TURN CHANNEL ON        */
+   do i = 1 to 1000; interp_usleep(1); end;
+
+end poly_turn_on;
+
+/***************************************************************************/
+poly_turn_off:  proc(bin#,chan);                 /* turn off poly channel  */
+   dcl (bin#,chan) fixed;
+   dcl bin_base fixed;
+
+   bin_base = bin# * 64;
+   write(psc) = bin_base + chan;
+   write(psf) = pselim;                           /* SET UP FOR LIMIT, CVAL */
+   write(psd) = 0;         write(psd) = 0;        /* LIMIT, CVAL TO 0       */
+   write(psf) = psrcvol;                          /* RIGHT CUR VOL          */
+   write(psd) = 0;         write(psd) = 0;        /* R,L CVOL               */
+   write(psd) = 0;         write(psd) = 0;        /* R,L DVOL               */
+   write(psf) = pson;                             /* ON/OFF                 */
+   write(psd) = 0;                                /* TURN OFF               */
+
+end poly_turn_off;
+
+/***************************************************************************/
+

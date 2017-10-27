@@ -1,0 +1,773 @@
+/* TABLE  $TITLE  Routines to Fill and Scroll the Display Window
+
+   Modified:
+   02/09/92 - PF  - Increased poly cache file limit from 8k to 64k
+   05/02/89 - TSS - Merged changes for Optical disk to DTD transfer project
+   04/29/89 - TSS - "Literalized" use of GET.CURRENT.FILENAME.AND.INFO
+   12/21/87 - MWH - Update poly cache base to be a 32 bit pointer
+   
+*/
+
+Erase.DirTable: proc swapable; /* completely erase the Directory Table */
+   call Erase.Object(GID(DirTable));
+end Erase.DirTable;
+
+dcl Disable.Attr.Reset     fixed external;  /* non-zero to override resetting terminal to Normal mode after object updates */
+
+Deposit.DirTable: proc (Str,Row) swapable;
+   dcl Str     array;
+   dcl Row     fixed;
+   dcl NumCols fixed;
+   dcl MaxCols fixed;
+   dcl TStr (shr(CharsPerFile+1,1)+1) fixed; /* temp string */
+   dcl (I,J,Ptr) fixed;
+   dcl publish  fixed;
+
+   publish = (DirDevice == PolyMemDev) && ((ShowInfo & (INFO$Caption|INFO$Second|INFO$Mbyte|INFO$Sector|INFO$Loops|INFO$Bin|INFO$Names)) != 0);
+
+   if Str(0) then call PByte(Str,Str(0),SP); /* space fill last byte of odd byte length strings */
+
+   MaxCols=GID(DirTableCols)/CharsPerFile;
+   NumCols=(Str(0)+CharsPerFile-1)/CharsPerFile;
+
+   if NumCols IGT MaxCols then NumCols=MaxCols;
+
+   Disable.Deposits=true;
+
+   if (publish != 0)
+      Disable.Attr.Reset=Disable.Attr.Reset+1;
+
+   Ptr=1;
+   do I=0 to NumCols-1; /* store new string in table */
+      J=1;
+      do while (J ILE shr(CharsPerFile,1)) and (Ptr ILE shr(Str(0)+1,1));
+         TStr(J)=Str(Ptr);
+         J  =J  +1;
+         Ptr=Ptr+1;
+      end;
+      TStr(0)=shl(J-1,1);
+
+      call Fetch.Table  (GID(DirTable),I,Row);
+      call Deposit.Label(GID(DirTable.Type.Obj),TStr);
+      if (publish != 0)
+         call Publish.Table(GID(DirTable),I,Row);
+      else
+         call Deposit.Table(GID(DirTable),I,Row);
+   end;
+
+   I=NumCols;
+   do while I ILT MaxCols;      /* finish erasing old info from table */
+      call Fetch.Table(GID(DirTable),I,Row);
+      call Fetch.Label(GID(DirTable.Type.Obj),TStr);
+      if (TStr(0)<>0) then do;
+         TStr(0)=0;
+         call Deposit.Label(GID(DirTable.Type.Obj),TStr);
+         if (publish != 0)
+            call Publish.Table(GID(DirTable),I,Row);
+         else
+            call Deposit.Table(GID(DirTable),I,Row);
+         I=I+1;
+      end;
+      else I=MaxCols; /* quit */
+   end;
+
+   Disable.Deposits=false;
+   if (publish != 0) {
+      Disable.Attr.Reset=Disable.Attr.Reset-1;
+      if Disable.Attr.Reset=0 then call Set.Term.Attr(ATTR#Normal);
+   }
+
+   call Check.Next.Event; /* keeps mouse and Synclavier real-time code going */
+
+end Deposit.DirTable;
+
+/* $SUBTITLE */
+
+Fetch.DirTable.Item.Type: proc (Row,Col) fixed public swapable; /* determines what type of item is on specified line of current table */
+   dcl (Row,Col)     fixed; /* logical position in table */
+   dcl FirstItemType fixed;
+   dcl I             fixed;
+
+   call GetListPos(Row); /* set index ptrs to beginning of line */
+
+   FirstItemType=CurItemType;
+
+   if Col IGE MaxRowItems(CurItemType) /* limit to highest col */
+   then Col=MaxRowItems(CurItemType)-1;
+
+   if (CurItemType=ITEM$Filename) /* on a real item */
+   or (CurItemType=ITEM$Category) /* i.e., not at end of file */
+   then do;
+      I=0;
+      do while (I ILT Col)                 /* advance to desired column */
+      and      (CurItemType=FirstItemType) /* as long as item type matches */
+      and      (CurItemType<>ITEM$Eof);    /* or until we hit EOF */
+         call Advance.To.Next.Item;
+         I=I+1;
+      end;
+   end;
+
+   /* NOTE: routine exits all set up to call Append.Current.XXX.Item */
+
+   if CurItemType<>FirstItemType
+   then return ITEM$Eof;     /* means we stepped beyond valid info on this line */
+   else return CurItemType;  /* type of item we advanced to */
+
+end Fetch.DirTable.Item.Type;
+
+Fetch.DirTable.Item: proc (Row,Col,Str) fixed public swapable; /* computes category or filename at specified loc */
+   dcl (Row,Col)                      fixed; /* logical position in table */
+   dcl Str                            array; /* output string */
+   dcl TStr (shr(CharsPerFile+1,1)+1) fixed;
+   dcl ItemType                       fixed;
+   dcl (MaxCols,I)                    fixed;
+
+   MaxCols=GID(DirTableCols)/CharsPerFile;
+   call Fetch.Table(GID(DirTable),0,Row);
+   call Fetch.Label(GID(DirTable.Type.Obj),TStr);
+
+   Str(0)=0;
+
+   if (TStr(0)<>0) and Byte(TStr,0)<>SP then do; /* category line */
+      ItemType=ITEM$Category;
+      I=0;
+      do while (TStr(0)<>0) and (I ILT MaxCols);
+         call Append.To.Str(Str,TStr);
+         I=I+1;
+         if I ILT MaxCols then do;
+            call Fetch.Table(GID(DirTable),I,Row);
+            call Fetch.Label(GID(DirTable.Type.Obj),TStr);
+         end;
+      end;
+   end;
+   else do; /* filename item */
+      ItemType=ITEM$Filename;
+      if MaxRowItems(ITEM$Filename)=1 then Col=0; /* limit column */
+      if Col<>0 then do;
+         call Fetch.Table(GID(DirTable),Col,Row);
+         call Fetch.Label(GID(DirTable.Type.Obj),TStr);
+      end;
+      call Copy.String(TStr,Str);
+   end;
+
+   call Remove.Spaces.From.String(str,str);
+   call UpperCase.String         (str,str);
+
+   return ItemType;
+end Fetch.DirTable.Item;
+
+/* $SUBTITLE */
+
+Do.Selection.HighLighting: proc (Row,Col,On.Off) public swapable;
+   dcl (Row,Col) fixed; /* logical table position */
+   dcl On.Off    boolean; /* 1 for reverse video, 0 for normal */
+   dcl TableId   fixed;
+   dcl TypeObjId fixed;
+   dcl MaxCols   fixed;
+   dcl Str (40)  fixed; /* temp buffer */
+   dcl Attrs     fixed;
+   dcl X         fixed;
+
+   if (Row=(-1)) or (Col=(-1)) then return;
+
+   TableId  =GID(DirTable);
+   TypeObjId=GID(DirTable.Type.Obj);
+   MaxCols  =GID(DirTableCols)/CharsPerFile;
+
+   if On.Off=0
+   then Attrs=ATTR#Normal;
+   else Attrs=ATTR#Normal|ATTR#AltIntensity|ATTR#Reverse;
+
+   if ((Str(0)<>0) and (byte(Str,0)<>SP)) /* this is a category line */
+   or (MaxRowItems(ITEM$Filename)=1)      /* or only 1 file per line */
+   then do;
+      // If showing unicode file names, have to draw the whole line in one swoop
+      if ((DirDevice == PolyMemDev) && ((ShowInfo & (INFO$Caption|INFO$Second|INFO$Mbyte|INFO$Sector|INFO$Loops|INFO$Bin|INFO$Names)) != 0)) {
+         Disable.Attr.Reset=Disable.Attr.Reset+1;
+
+         call Fetch.Table(  TableId,0,Row); /* get first section of desired line */
+         call Fetch.Label(TypeObjId,Str);
+         
+         call Set.Table.Cell.Attr(TableId,0,Row,0,Attrs);
+         call Set.Table.Cell.Attr(TableId,0,Row,1,Attrs);
+         
+         do x = 0 to MaxCols-1;
+            call Fetch.Table  (TableId,x,Row);
+            call Fetch.Label(TypeObjId,Str);
+            call Publish.Table(TableId,x,Row);
+         end;
+            
+         Disable.Attr.Reset=Disable.Attr.Reset-1;
+         if Disable.Attr.Reset=0 then call Set.Term.Attr(ATTR#Normal);
+      }
+
+      else {
+         call Fetch.Table(  TableId,0,Row); /* get first section of desired line */
+         call Fetch.Label(TypeObjId,Str);
+         
+         X=0;
+         do while (X ILT MaxCols) & (Str(0)<>0);
+            call Set.Table.Cell.Attr(TableId,X,Row,0,Attrs);
+            call Set.Table.Cell.Attr(TableId,X,Row,1,Attrs);
+            X=X+1;
+            if (X ILT MaxCols) then do; /* fetch next label section */
+               call Fetch.Table(  TableId,X,Row);
+               call Fetch.Label(TypeObjId,Str);
+            end;
+         end;
+      }
+   end;
+   else do;                    /* this is a filelist line */
+      call Fetch.Table(  TableId,0,Row); /* get first section of desired line */
+      call Fetch.Label(TypeObjId,Str);
+
+      call Set.Table.Cell.Attr(TableId,Col,Row,0,Attrs);
+      call Set.Table.Cell.Attr(TableId,Col,Row,1,Attrs);
+   end;
+
+end Do.Selection.HighLighting;
+
+Set.DirTable.Position: proc (Row,Col) public swapable;
+   dcl (Row,Col)     fixed; /* logical table position */
+   dcl (PRow,PCol)   fixed; /* previous position      */
+   dcl MaxCols       fixed; /* max cols possible      */
+
+   PRow=GID(DirTableYPos);         /* look up prior position */
+   PCol=GID(DirTableXPos);
+
+   call Do.Selection.HighLighting(PRow,PCol,0); /* un-highlight last position */
+   call Do.Selection.HighLighting( Row, Col,1); /*    highlight new  position */
+
+   call PID(DirTableYPos,Row);     /* save new position */
+   call PID(DirTableXPos,Col);
+end Set.DirTable.Position;
+
+/* $SUBTITLE */
+
+dcl Reset.DC.Pointers  proc (fixed) recursive;
+
+Handle.Catalog.Select: proc (NameStr) returns (fixed) public swapable;
+   dcl NameStr      array; /* output name of catalog */
+   dcl ItemType     fixed;
+   dcl (i,j)        fixed;
+
+   Enter_FCB_Catalog: proc(FCB.Buf); /* make subcat in FCB the current catalog */
+      dcl FCB.Buf fixed array; /* FCB buffer */
+      dcl (i,j)   fixed;
+      dcl Dev     fixed;
+
+      /* error check */
+      Dev = shr(FCB.Buf(4),8);
+      if ((Dev < 0) or (Dev > 13)
+      or  (Find_Device(Dev)=0)) then return(false);
+
+      /* if cat name stored in FCB.Buf is device name, zero out core(loc.ccnm) */
+      if ((FCB.Buf(4)&255)|(FCB.Buf(5)))=0 then do;
+         do i = 0 to F#Name_Len; /* device name - fill with zeros */
+            core(loc.ccnm+i) = 0;
+         end;
+      end;
+      else do;
+         j = 0; /* no characters in name yet */
+         do i = 0 to shl(F#Name_Len,1) - 1; /* loop over characters in name */
+            if byte(loc(addr(FCB.Buf(0))-1),i) <> 0 /* non-zero character */
+            then j = j + 1; /* count it */
+         end;
+         core(loc.ccnm) = j; /* store length of name */
+         do i = 1 to F#Name_Len; /* copy over name */
+            core(loc.ccnm + i) = FCB.Buf(i - 1);
+         end;
+      end;
+
+      /* enter catalog */
+      core(loc.ucat + 1) = FCB.Buf(4); /* device and MS sector */
+      core(loc.ucat)     = FCB.Buf(5); /* LS sector */
+      core(loc.umax + 1) = (shr(FCB.Buf(7),4) and "HF"); /* MS sector length */
+      core(loc.umax)     = FCB.Buf(6); /* LS sector length */
+      if (FCB.Buf(7) and "HF") = t#subc
+      then i = 256; /* no. words in small directory */
+      else i = 1024; /* no. words in large directory */
+      core(loc.uctl)     = i; /* store directory size */
+
+      call set_curdev(shr(core(loc.ucat + 1),8)); /* set current device in configuration */
+      core(loc.ctab + c#curdev - c#offset) = core(c#contab + c#curdev); /* and copy to high memory */
+
+      c#ms_sector = core(loc.ucat + 1); /* set up catalog variables */
+      c#ls_sector = core(loc.ucat);
+      c#ms_length = core(loc.umax + 1);
+      c#ls_length = core(loc.umax);
+      c#dir_size =  core(loc.uctl);
+
+      return(true);
+   end Enter_FCB_Catalog;
+
+   if DirDevice = LaserDev then return(0);  /* silly wabbit, this proc is for catalogs, not categories */
+   if Find.Cache = 0 then return(0);        /* better be able to find the cache */
+   CListSector=1;
+
+   /* read catalog info from cache */
+   call psmread(Cache.Base,CListSector+shr(CListWord,5),shl(CListWord&"37",3));
+   do i=0 to 7; Copy.Buf(i)=read(psd); end;
+
+   if not Enter_FCB_Catalog(Copy.Buf)    /* make this the current catalog */
+   then return(0);
+
+   /* reset DC ptrs for each SORT format of Dev 1 */
+   call Reset.DC.Pointers(1);
+
+/* The caller should set DirDevice to 1 after returning from this proc ! */
+
+   do i = 0 to shl(F#Name_Len,1) - 1; /* loop over characters of name */
+      j = byte(loc(loc.ccnm),i);      /* get byte of current cat name */
+      if j = 0 then j = a.SP;         /* turn nulls into spaces       */
+      call pbyte(NameStr,i,j);        /* store character              */
+   end;
+   NameStr(0) = shl(F#Name_len,1);    /* all characters used */
+
+   return (true);
+
+end Handle.Catalog.Select;
+
+/* $SUBTITLE */
+
+Find.DirTable.Entry: proc (WindowId,SearchAddr) fixed public swapable;
+   dcl WindowId           fixed; /* which window to search */
+   dcl SearchAddr         array; /* address of file (for double-checking) */
+   dcl Display.Position   fixed;
+   dcl Row                fixed;
+   dcl Name(SFNAME#Arr_Len) fixed;
+   dcl Info(SFINFO#Arr_Len) fixed;
+
+   /* Proc returns line number in display at which the current file is, */
+   /* -1 if it is not currently being displayed.                        */
+   /* NOTE: Proc assumes display format is NOT names only               */
+
+   /* make sure we search the dirwindow display */
+   call Select.Active.Window(WindowId);
+
+   Display.Position = -1;
+   Row = 0;
+   do while ((Row ilt GID(DirTableRows)) and (Display.Position = -1));
+      call GetListPos(Row);
+      if CurItemType = ITEM$Filename then do;
+         call Get.Current.Filename.And.Info(Name,Info);
+         if ((Info(SFINFO#F_Base  ) = SearchAddr(0))   /* compare absolute addresses */
+         and (Info(SFINFO#F_Base+1) = SearchAddr(1))) then do;
+            Display.Position = Row;             /* we found it */
+         end;
+      end;
+      Row = Row + 1;
+   end;
+
+   return (Display.Position);
+
+end Find.DirTable.Entry;
+
+/* $SUBTITLE */
+
+Update.DirTable.Entry: proc(LineNumber) public swapable;
+   dcl LineNumber    fixed;
+   dcl Str(41)       fixed;
+   dcl FileType      fixed;
+
+   /* updates a single entry in the directory table */
+   if (LineNumber ilt DirTableRows) then do;
+      call GetListPos(LineNumber);
+      FileType = Get.Next.Line(Str);   /* get properly formatted string */
+      Disable.Deposits=true;
+      call Deposit.DirTable(Str,LineNumber); /* write to dir table */
+      Disable.Deposits=false;
+   end;
+
+end Update.DirTable.Entry;
+
+/* $SUBTITLE */
+
+Fill.DirTable:  proc (refresh) public swapable; /* refills Dir Table from current index file position */
+   dcl refresh       fixed;    /* 0 = no refresh; 1 = force a refresh */
+   dcl LinesUsed     fixed;
+   dcl FirstItemType fixed;
+   dcl MaxLines      fixed;
+   dcl MaxChars      fixed;
+   dcl Str (40)      fixed;
+   dcl (Sx,Sy)       fixed;
+   dcl NoUpdates     fixed;
+
+   Check.For.Update:proc(ptr);  /* pass ptr to NoUpdates */
+      dcl ptr fixed;
+
+      if  (core(ptr)=0)             /* if not suppressed already  */
+      and ((new.in.char       <>0)  /* and input character typed  */
+      or   (new.mouse.button  < 0)  /* or button is pressed       */
+      or   (m$Presses         <>0)) /* or released then pressed   */
+      then do;
+         core(ptr) = true;      /* keep unnecessary set.object.action calls from going on */
+         call Set.Object.Action(GID(DirTable),O#ACT.Update.On.Dep,false);
+      end;
+   end Check.For.Update;
+
+   call Check.For.Update(addr(NoUpdates));  /* can very first output if something pending */
+
+   MaxLines=GID(DirTableRows);
+
+   Sy=GID(DirTableYPos); Sx=GID(DirTableXPos);
+   call Set.DirTable.Position(-1,-1); /* un-highlight current position */
+
+   if (refresh <> 0) then
+      call Erase.DirTable; /* force refresh */
+
+   LinesUsed=0;
+   if TotalDisplayLines<>0 then do;
+      do while (LinesUsed ilt MaxLines) & (CurItemType<>ITEM$EOF);
+
+         call SaveListPos(LinesUsed);                /* save ptr to current display line */
+
+         FirstItemType=Get.Next.Line(Str);         /* build next line */
+
+         if FirstItemType<>ITEM$EOF then do;
+            call Deposit.DirTable(Str,LinesUsed); /* write to dir table */
+            call Check.For.Update(addr(NoUpdates));  
+            LinesUsed=LinesUsed+1;
+         end;
+
+      end;
+   end;
+   else do;                  /* just put up a dummy message */
+      call SaveListPos(0);   /* basically garbage           */
+      call SaveListPos(1);
+
+      MaxChars=(GID(DirTableCols)/CharsPerFile)*CharsPerFile;
+
+      call Check.For.Update(addr(NoUpdates));  
+
+      Str(0)=0;                     /* null string */
+      call Deposit.DirTable(Str,0); /* blank line  */
+      call Deposit.DirTable(Str,1); /* blank line  */
+
+      call Append.To.Str(Str,'  No Sound Files Available');
+
+      if MaxChars ILT 43 then do;
+         call Deposit.DirTable(Str,1);
+         Str(0)=1; Str(1)=SP;   /* 1 space character string */
+      end;
+
+      call Append.To.Str(Str,' from This Device.');
+      call Deposit.DirTable(Str,2);
+      LinesUsed=3;
+   end;
+
+   do while LinesUsed ile MaxLines; /* have hit end of file - clear out rest of table */
+
+      if LinesUsed ilt MaxLines then do;
+         Str(0)=0;                    /* cj - tried null string   */
+         call Deposit.DirTable(Str,LinesUsed); /* fill rest of table with blank lines */
+         call Check.For.Update(addr(NoUpdates));  
+      end;
+
+      call SaveListPos(LinesUsed); /* save ptr to next item beyond bottom of screen */
+
+      LinesUsed=LinesUsed+1;
+   end;
+
+   call Set.DirTable.Position(Sy,Sx); /* restore cursor */
+
+   if NoUpdates then do;
+      call Set.Object.Action(GID(DirTable),O#ACT.Update.On.Dep,True);
+   end;
+
+end Fill.DirTable;
+
+/* $SUBTITLE */
+
+Page.DirTable.Forward: proc public swapable;
+   dcl MaxLines      fixed;
+
+   MaxLines=GID(DirTableRows);
+
+   call GetListPos(MaxLines);     /* get ptrs to item just beyond screen end */
+
+   if CurItemType<>ITEM$EOF then do; /* not at end of file */
+
+      ScreenTopLine=ScreenTopLine+MaxLines;
+
+      call Fill.DirTable(1);            /* refill entire screen */
+
+   end;
+
+end Page.DirTable.Forward;
+
+Page.DirTable.Backward: proc public swapable;
+   dcl LinesBack fixed;
+   dcl ItemType  fixed;
+   dcl MaxLines      fixed;
+
+   MaxLines=GID(DirTableRows);
+
+   call GetListPos(0);      /* reset ptrs to start of first line on screen */
+
+   ItemType=CurItemType;
+   LinesBack=0;
+
+   do while (ItemType<>ITEM$BOF)
+      and   (LinesBack ilt MaxLines);
+
+      ItemType=BackUp.To.Prior.Line; /* back up to previous line */
+
+      if ItemType<>ITEM$BOF then LinesBack=LinesBack+1;
+
+   end;
+
+   if LinesBack<>0 then do;
+      ScreenTopLine=ScreenTopLine-LinesBack;
+      call Fill.DirTable(1);      /* refill entire screen */
+   end;
+
+end Page.DirTable.Backward;
+
+/* $SUBTITLE */
+
+Scroll.DirTable.Forward: proc (NumLines) public swapable;
+   dcl NumLines    fixed; /* number of lines to advance */
+   dcl Lines       fixed;
+   dcl MaxLines    fixed;
+   dcl StrBuf (40) fixed;
+   dcl (Sx,Sy)     fixed;
+   
+   MaxLines=GID(DirTableRows);
+
+   if ((ScreenTopLine+NumLines) ilt NumLines)          /* overflow */
+   or ((ScreenTopLine+NumLines) ige TotalDisplayLines) /* or beyond last display line */
+   then NumLines=TotalDisplayLines-ScreenTopLine-1;    /* limit scroll distance */
+
+   if NumLines=0 then return;
+
+   if NumLines=MaxLines then do;
+      call Page.DirTable.Forward;   /* advance by 1 whole page */
+      return;
+   end;
+
+   Lines=0;
+   call GetListPos(MaxLines);        /* get ptrs to item just beyond screen end */
+
+   call Shuffle.Memories(-NumLines);  /* shuffle memories down N lines */
+   Sy=GID(DirTableYPos); Sx=GID(DirTableXPos);
+   call Set.DirTable.Position(-1,-1); /* un-highlight current position */
+   call Insert.Table.Rows(GID(DirTable),MaxLines-1,0,NumLines); /* scroll table up N lines */
+
+   do while (Lines<>NumLines); /* & (CurItemType<>ITEM$EOF) ?? loop until we scroll ahead as far as specified */
+
+      if CurItemType<>ITEM$EOF then do;
+         call Get.Next.Line(StrBuf);  /* get the new line */
+
+         call Deposit.DirTable(StrBuf,MaxLines-NumLines+Lines); /* deposit new line in dir table */
+      end;
+      else do;
+         StrBuf(0)=0;
+         call Deposit.DirTable(StrBuf,MaxLines-NumLines+Lines); /* empty string */
+      end;
+
+      Lines=Lines+1;
+
+      call SaveListPos(MaxLines-NumLines+Lines); /* save new position */
+
+   end;
+
+   ScreenTopLine=ScreenTopLine+NumLines;
+   call Set.DirTable.Position(Sy,Sx);
+
+end Scroll.DirTable.Forward;
+
+/* $PAGE */
+
+Scroll.DirTable.Backward: proc (NumLines) public swapable;
+   dcl NumLines    fixed; /* number of lines to advance */
+   dcl ItemType    fixed;
+   dcl Lines       fixed;
+   dcl MaxLines    fixed;
+   dcl StrBuf (40) fixed;
+   dcl (Sx,Sy)     fixed;
+   
+   if NumLines igt ScreenTopLine then NumLines=ScreenTopLine; /* furthest we can go back */
+   if NumLines=0 then return;
+
+   MaxLines=GID(DirTableRows);
+
+   if NumLines=MaxLines then do;
+      call Page.DirTable.Backward;   /* backup by 1 whole page */
+      return;
+   end;
+
+   Lines=0;
+   call GetListPos(0);                   /* get ptr to start of display */
+   ItemType=CurItemType;
+
+   call Shuffle.Memories(+NumLines);     /* shuffle memories up N lines */
+   Sy=GID(DirTableYPos); Sx=GID(DirTableXPos);
+   call Set.DirTable.Position(-1,-1); /* un-highlight current position */
+   call Insert.Table.Rows(GID(DirTable),0,1,NumLines); /* scroll table down N lines */
+
+   do while (Lines<>NumLines) & (ItemType<>ITEM$BOF); /* loop until we scroll back as far as specified */
+      ItemType=Get.Prior.Line(StrBuf); /* back up a line - leave ptrs at start of prior line */
+
+      if ItemType<>ITEM$BOF then do;     /* not at start of file */
+
+         Lines=Lines+1;
+
+         call Deposit.DirTable(StrBuf,NumLines-Lines); /* deposit new line in dir table */
+
+         call SaveListPos(NumLines-Lines); /* save new position */
+
+      end;
+   end;
+
+   ScreenTopLine=ScreenTopLine-Lines;
+   call Set.DirTable.Position(Sy,Sx);
+
+end Scroll.DirTable.Backward;
+
+/* $SUBTITLE */
+
+Scroll.To.Line: proc (WhichLine) public swapable;
+   dcl WhichLine fixed;
+   dcl Dist      fixed;
+   dcl MaxLines  fixed;
+
+   if WhichLine ige TotalDisplayLines            /* beyond end of index file */
+   then WhichLine=TotalDisplayLines-1;           /* limit to last line       */
+
+   if WhichLine=ScreenTopLine then return;     /* already there */
+
+   MaxLines=GID(DirTableRows);
+
+   if ScreenTopLine igt WhichLine     /* want to scroll back */
+   then Dist=ScreenTopLine-WhichLine; /* lines to back up */
+   else Dist=WhichLine-ScreenTopLine; /* lines to advance */
+
+   if Dist IGT MaxLines then do;
+      call Seek.To.Line(WhichLine);   /* sets scroll.currentline and scrollmem# */
+      WhichLine=GID(Scroll.CurrentLine);
+      ScreenTopLine=WhichLine;        /* new current position */
+      call Fill.DirTable(1);          /* and refill display */
+   end;
+   else do;
+      if ScreenTopLine igt WhichLine
+      then call Scroll.DirTable.Backward(Dist);
+      else call Scroll.DirTable.Forward (Dist);
+   end;
+
+end Scroll.To.Line;
+
+dcl Fetch.DC.Top.Pointers proc (array,fixed,fixed) recursive;
+
+SetDisplayPos: proc (Device) fixed public swapable;
+   dcl Device       fixed;
+   dcl Index        fixed; /* either a FListIndex or a CListIndex */
+   dcl Offset       fixed; /* ignored if SortInfo = SORT$Filename */
+   dcl SearchLine   fixed;
+   dcl OldClistFiles fixed;
+
+   /* Proc sets pointers to line at which the file or category name would */
+   /* be displayed in window.  If not found (index value is funky), sets  */
+   /* pointers to top and returns -1, else returns absolute display line. */
+
+   SearchLine = 0;
+
+   call Fetch.DC.Top.Pointers(loc(addr(Index)),Device,Compute.SortFormat(SortInfo,ItemFilter));
+
+   /* restore old display position */
+   if SortInfo = SORT$Filename then do;
+      call SetFListPos(0);
+
+      if (Index >= TotalFileCount)   /* beyond end of index file  */
+      or (Offset <> -1) then         /* or DC ptrs not in SORT$Filename format */
+         return(-1);
+      else if ((Index = 0) and (Offset = -1))            /* already there (at top) */
+      or (TotalDisplayLines ile GID(DirTableRows)) then  /* or not enough entries  */
+         return(0);                                      /* then display top file  */
+
+      do while (FListIndex < Index)
+      and      (CurItemType<>ITEM$EOF);
+         call Advance.To.Next.Line;      /* try to step to next line */
+         SearchLine=SearchLine+1;
+      end;
+
+      if FListIndex > Index then do;
+         call BackUp.To.Prior.Line;
+         SearchLine = SearchLine-1;
+      end;
+      else if (CurItemType=ITEM$EOF) then do;
+         call SetFlistPos(0); /* Index never found */
+         return(-1);
+      end;
+   end;
+
+   else do;   /* SortInfo = SORT$Category */
+
+      call SetCListPos(0,-1);
+
+      if (Index >= TotalCatCount) then              /* beyond end of index file */
+         return(-1);
+      else if ((Index = 0)and(Offset = -1))         /* already there (at top)   */
+      or (TotalDisplayLines ile GID(DirTableRows))  /* or not enough entries    */
+      then return(0);                               /* display top file/cat     */
+
+      do while ((CListIndex < Index)
+      or ((CListIndex=Index) and (CListCurPos < Offset)))
+      and (CurItemType<>ITEM$EOF);
+         OldCListFiles = CListFiles;
+         call Advance.To.Next.Line;          /* try to step to next line */
+         SearchLine=SearchLine+1;
+      end;
+
+      if (CListIndex > Index) then do;
+         if (Offset < OldCListFiles) then do; /* Offset lies somewhere in last line */
+            call BackUp.To.Prior.Line;
+            SearchLine = SearchLine-1;          
+         end;
+         else do;     /* Offset does not exist in this cat anymore */
+            call SetCListPos(0,-1);
+            return(-1);
+         end;
+      end;
+
+      else if ((CListIndex=Index) 
+      and (CListCurPos > Offset)) then do;
+         if (Offset < CListFiles) then do; /* Offset lies somewhere in last line */
+            call BackUp.To.Prior.Line;
+            SearchLine = SearchLine-1;          
+         end;
+         else do;     /* Offset does not exist in this cat anymore */
+            call SetCListPos(0,-1);
+            return(-1);
+         end;
+      end;
+
+      else if (CurItemType=ITEM$EOF) then do; /* Index doesn't exist anymore */
+         call SetCListPos(0,-1);
+         return(-1);
+      end;
+   end;
+
+   return(SearchLine);
+
+end SetDisplayPos;
+
+/* $Subtitle - scroll table so current row is on top */
+
+Scroll.Current.Line.To.Top:proc swapable;
+   dcl Col         fixed;
+   dcl Row         fixed;
+
+   call FETCH.TABLE.CUR.CELL(GID(DirTable),loc(addr(col)));
+
+   call Set.DirTable.Position(-1,-1);    /* un-highlight current position */
+
+   if row<>0 then do;                    /* go to top by scrolling forward this many lines */
+      call Scroll.DirTable.Forward (row);
+   end;
+
+   call SET.TABLE.CUR.CELL (GID(DirTable),col,0);
+   call SELECT.NEW.CUR.OBJ(GID(DirTable),col,0); /* select table as current object after search (esp on archive screen). get.next.optical event will highlight it for us */
+
+end Scroll.Current.Line.To.Top;
+

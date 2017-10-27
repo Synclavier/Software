@@ -1,0 +1,618 @@
+/*	$Title  :SYNSOU:STMMOD:STUTLSOU  Sample-To-Memory Sound Editor Utility Routines
+
+Modified:
+1999/10/12 - TY  - Modified LOOK.UP.SF.INFO to look up the sound file pointed to by
+						 the I-page rather than the first one in the patch.
+1990/01/09 - MWH - Display the correct recording time with >32 meg
+1988/06/27 - MWH - Remove unused inserts
+1987/12/17 - MWH - Merge poly updates with N-Final plus AEE sources
+1987/08/11 - MWH - Update all to support max 4 poly bins, 512mb/bin
+1987/02/04 -     - separated STM into several modules
+*/
+
+Module STUTLMOD;
+	insert ':synlits:comlits';		/*	compilation literals	*/
+	insert ':synlits:asciilit';	/*	ASCII literals	*/
+	insert ':synlits:globlits';	/*	good globals	*/
+	insert ':synlits:samplits';	/*	sound file and sampling literals	*/
+	insert ':synlits:fcodlits';	/*	function code literals for FM and POLY synths (i.e., psd)*/
+	insert ':synlits:prmlits';		/*	literals for timbre data structure(i.e., mor )	*/
+	insert ':synlits:timlits';		/*	timbre head literal definitions (i.e., tim.synth.type)	*/
+	insert ':synauxs:stmlits';		/*	specific stm literals	*/
+
+	insert ':synmods:globdcl';		/*	globals such as token and FNBUF	*/
+	insert ':synmods:polydcl';		/*	for accessing poly memory	*/
+	insert ':synmods:mathdcl';		/*	for computations	*/
+	insert ':synmods:scrndcl';		/*	screen primitive routines (i.e., print.parm)	*/
+	insert ':synmods:errdcl';		/*	error handling routines	*/
+	insert ':synmods:ttydcl';		/*	terminal i/o routines	*/
+	insert ':synmods:getvdcl';		/*	for new.poly.contents	*/
+	insert ':synmods:tformdcl';	/*	for eqstr					*/
+
+	insert ':synrdcls:03-pdcls';
+	insert ':synrdcls:11-tdcls';
+
+	dcl stm.graphx					fixed public;	/*	sound editor graphics cursor x location	*/
+	dcl stm.select.mode			fixed public;	/*	selection mode where 0=display, 1=modify, 2=store	*/
+	dcl stm.last.select.mode	fixed public;	/*	last selected mode	*/
+	dcl stm.choice					fixed public;	/*	sound editor command menu choice	*/
+	dcl stm.cmd.line				fixed public;	/*	indicates if we are on (1) the command line or off (0)	*/
+
+	dcl sf.type						fixed public;	/*	1 -> if a sound file; 0 -> if not a sound file; -1 -> if name not available*/
+	dcl stm.hor.factor			fixed public;	/*	current number of samples per pixel - a power of 2	*/
+	dcl stm.vert.factor			fixed public;	/*	current vertical scaling factor - a power of 2	*/
+	dcl stm.hor.scale				fixed public;	/*	horizontal scale of sound display	*/
+	dcl stm.vert.scale			fixed public;	/*	vertical scale of sound display	*/
+
+	dcl stereo						fixed public;	/*	indicates if current sound file stereo or mono*/
+	dcl start.time(2)				fixed public;	/*	starting time of display	*/
+	dcl end.time(2)				fixed public;	/*	ending time of display	*/
+	dcl cursor.time(2)			fixed public;	/*	cursor time at cursor location (seconds,milliseconds,microseconds)	*/
+	dcl prev.cursor.time(2)		fixed public;	/*	previous cursor time seconds, milliseconds, microseconds	*/
+	dcl tot.time(2)				fixed public;	/*	total time of valid data	*/
+	dcl prev.tot.time(2)			fixed public;	/*	previous time of valid data	*/
+	dcl some.time	  (2)			fixed public;	/*	temp		*/
+	dcl some.other.time (2)		fixed public;	/*	temp		*/
+	dcl previous.char.time		fixed public;	/*	last time character was processed	*/
+	dcl stm.begin.time(2)		fixed public;	/*	beginning sample time of edit location*/
+	dcl stm.end.time(2)			fixed public;	/*	sample time of ending edit location	*/
+
+	dcl number_of_symbols		fixed public;	/*	number of symbols in the sound file symbol table	*/
+	dcl stm.sample.rate			fixed public;	/*	current sound file sample rate*/
+
+	dcl stm.left.voltage			fixed public;	/*	current left sample signal level	*/
+	dcl stm.right.voltage		fixed public;	/*	current right sample signal level	*/
+
+   dcl stm.record.device     	fixed public; 	/* d66, stm, digital stm */
+   dcl stm.record.stereo	 	fixed public; 	/* true if stereo desired */
+	dcl stm.record.rate			fixed public;	/*	sound file recording sample rate*/
+	dcl stm.record.notrigger	fixed public;	/*	threshold					*/
+	dcl stm.record.scale			fixed public;	/*	recording volume			*/
+	dcl stm.record.threshold	fixed public;	/*	user specifed recording threshold in volts	*/
+	dcl STM.THRESHOLD				fixed public;	/*	value for silence	*/
+
+	dcl stm.file.name(4)			fixed public;	/*	current sound file name	*/
+	dcl stm.caption(22)			fixed public;	/*	current sound file caption	*/
+	dcl caption(22)				fixed public;	/*	previous sound file caption	*/
+	dcl prev.hor.time(3)			fixed public;
+
+	dcl locked						fixed public;	/*	if a sound file is locked	*/
+	dcl lock.stereo				fixed public;	/*	if the locked sound file is mono or stereo	*/
+	dcl lock.sample.rate			fixed public;	/*	sample rate of locked sound file	*/
+	dcl lock.name(4)				fixed public;	/*	name of sound file that is locked in right channel display	*/
+	dcl lock.tot.time (3)		fixed public;	/*	length of locked sound file	*/
+
+	dcl hor.zoom.table  data public (1,2,3,4,6,8,12,16,24,32,48,64,96,128,192,256,384,512,768,1024,1536,2048,3072,4096,6144,8192,16384);	/*	horizontal scales, index is a power of 2	*/
+	dcl vert.zoom.table data public (512,384,256,192,128,96,64,48,32,24,16,12,8,6,4,3,2,1);	/*	vertical scale factors which are powers of two	*/
+
+	/*	$page	*/
+
+	STM.EXIT.CHECK: proc public;
+		if (new.timbre.info		  <> 0)	/*	if timbre called up		*/
+		or (new.poly.contents			)	/*	or poly memory changed	*/
+		or (num.of.d50.in.chars	  <> 0)	/*	or character typed		*/
+		or (new.ABLE.timbre.info  <> 0)	/*	or ABLE event pending	*/
+		or (new.ABLE.poly.contents		)
+		then return 1;
+		return 0;
+	end STM.EXIT.CHECK;
+
+	STM.EDIT.MODE: proc	fixed public swapable;	/*	determines if editing a sound file for mouse dotted line cursors; returns 1 if so	*/
+		if (stm.select.mode=stm.modify) and (stm.cmd.line<>0) then do;
+			if (stm.choice=stm.extract)
+			or (stm.choice=stm.delete)
+			or (stm.choice=stm.cut)
+			or (stm.choice=stm.copy)
+			or (stm.choice=stm.fill)
+			or (stm.choice=stm.loop)
+			or (stm.choice=stm.revloop)
+			then return 1;
+		end;
+		return 0;
+	end STM.EDIT.MODE;
+
+	/*	$Subtitle Symbol Utility Routines	*/
+
+	FIND_TIME: proc (base,time)	fixed public swapable;	/*	returns index to one beyond where symbol belongs in symbol table	*/
+		dcl base						fixed array;
+		dcl time						fixed array;	/*	symbol time to find	*/
+		dcl symbol_time(2)		fixed;			/*	time of symbol in symbol table		*/
+		dcl number_of_symbols	fixed;			/*	number of symbols in the sound file	*/
+		dcl (i,j)					fixed;
+
+		call psmread(base,SF.HDR,sf.number.of.symbols);	/*	find the number of symbols in the sound file	*/
+		number_of_symbols=read(psd);
+
+		do i=0 to number_of_symbols-1;			/*	loop over defined symbols	*/
+			call psmread(base,SF.SYM,i*symbol_length);
+			do j=0 to 2;
+				symbol_time(j)=read(psd);
+			end;
+			if compare_times(symbol_time,time,3)>=0 then return i;	/*	if time of symbol in symbol table is larger than time of symbol to be added	*/
+		end;
+		return number_of_symbols;
+	end FIND_TIME;
+
+	/*	$page	*/
+
+	COPY_OUT_STRING: proc (str) public;
+		dcl str	array;
+		dcl I		fixed;
+
+		do i=0 to shr(str(0) + 1,1);
+			write(psd) = str(i);
+		end;
+	end COPY_OUT_STRING;
+
+	FIND_NAME: proc(base,name)	fixed public swapable;		/*	determines if symbol exists and returns symbol index if found	*/
+		/*	returns -1 if name not found or index to symbol table if name is found	*/
+		dcl base						fixed array;
+		dcl name						fixed array;	/*	symbol name to find	*/
+		dcl symbol_name(4)		fixed;			/*	symbol name in table	*/
+		dcl number_of_symbols	fixed;			/*	number of symbols		*/
+		dcl (i,j)					fixed;
+
+		call psmread(base,SF.HDR,sf.number.of.symbols);	/*	find the number of symbols in the sound file	*/
+		number_of_symbols=read(psd);
+
+		do i=0 to number_of_symbols-1;			/*	loop over defined symbols	*/
+			call psmread(base,SF.SYM,i*symbol_length + name_entry);
+			do j=0 to 4;
+				symbol_name(j)=read(psd);
+			end;
+			if eqstr(symbol_name,name)=0 then return i;	/*	if name found then return pointer to it	*/
+		end;
+		return -1;								/*	name not found	*/
+	end FIND_NAME;
+
+	FIND_LABEL: proc(base,time)	fixed public swapable;	/*	determines if symbol exists and returns symbol index if found	*/
+		/*	returns -1 if name not found or index to symbol table if name is found	*/
+		/*	symbol at current cursor location is place in token array	*/
+		dcl base					fixed array;
+		dcl time					fixed array;		/*	time of label to be found	*/
+		dcl symbol_index		fixed;
+		dcl symbol_time(2)	fixed;				/*	symbol time associated with label	*/
+		dcl i						fixed;
+
+		symbol_index=FIND_TIME(base,time);
+		call psmread(base,SF.SYM,symbol_index * symbol_length);
+		do i=0 to 2;
+			symbol_time(i)=read(psd);
+		end;
+		if compare_times(symbol_time,time,3)=0 then do;	/*	if time of symbol in symbol table is equal to cursor time*/
+			call psmread(base,SF.SYM,symbol_index * symbol_length + name_entry);	/*	get symbol name	*/
+			do i=0 to 4;											/*	put in token array	*/
+				token(i)=read(psd);
+			end;
+			return symbol_index;
+		end;
+		else return -1;
+
+	end FIND_LABEL;
+
+	/*	$page	*/
+
+	SET.SYMBOL.TIME: proc(base,name,seconds,milliseconds,microseconds) public swapable;
+		dcl base				fixed array;	/*	sound file base address	*/
+		dcl name				fixed array;	/*	symbol name					*/
+		dcl seconds			fixed;			/*	new symbol time			*/
+		dcl milliseconds	fixed;			/*	new symbol time			*/
+		dcl microseconds	fixed;			/*	new symbol time			*/
+		dcl i					fixed;
+
+		i=FIND_NAME(base,name);
+		if i>0 then do;						/*	if name found	*/
+			call psmwrite(base,SF.SYM,i*symbol_length);	/*	point to the location in the symbol table	*/
+			write(psd)=seconds;
+			write(psd)=milliseconds;
+			write(psd)=microseconds;
+		end;
+
+	end SET.SYMBOL.TIME;
+
+	/*	$Subtitle Computation Routines	*/
+
+	COMPUTE_PIXEL_TIME:proc (pix#,time) public swapable;	/*	pass pixel # (in display area), and a time array	*/
+		dcl pix#	fixed;			/*	pixel number		*/
+		dcl time	fixed array;	/*	equivalent time	*/
+		dcl (i,j)	fixed;
+
+		call COPY_TIME(start.time,time);				/*	get left edge starting time	*/
+
+		/*	compute pix*scale*10/kHz	*/
+
+		load 10*pix#; mul stm.hor.scale;				/*	10 * pixel # * scale	*/
+
+		bitmsb=ures; bitlsb=res;
+		call ratio_multiply(1000,stm.sample.rate);	/*	32-bit # of microseconds,rounded	*/
+
+		load bitlsb; uload bitmsb;
+		div 50000;											/*	compute # of 50 msec periods	*/
+
+		i=res; j=rem;										/*	i= # of 50 msec periods; j=mcsec	*/
+
+		load i; div 20;									/*	get seconds, msec		*/
+		time(0)=time(0)+res;								/*	add to seconds			*/
+		time(1)=time(1)+rem*50;							/*	add to milliseconds	*/
+
+		load j; div 1000;									/*	get msec, mcsec		*/
+		time(1)=time(1)+res;								/*	add to milliseconds	*/
+		time(2)=time(2)+rem;								/*	add to mcseconds		*/
+
+		call TIME_NORMALIZE(time);						/*	normalize	*/
+
+	end COMPUTE_PIXEL_TIME;
+
+	/*	$page	*/
+
+	COMPUTE_PIXEL_NUMBER: proc (time)	fixed public swapable;	/*	returns a pixel number given a time	*/
+		dcl time			fixed array;	/*	time	*/
+		dcl ourtime(2)	fixed;
+		dcl x				fixed;			/*	equivalent pixel number	*/
+		dcl (i,j,k)		fixed;
+		dcl scale		fixed;			/*	2*stm.hor.scale	*/
+
+		/*
+			To calculate the pixel number from the given time use the following formula:
+
+			pixel#=mcsec*khz/stm.hor.scale/10000
+
+		*/
+
+		if compare_times(time,start.time,3)<0 then return (-1);
+		else do;
+
+			do i=0 to 2;
+				ourtime(i)=time(i)-start.time(i);		/*	find the time into the display from the starting time	*/
+			end;
+
+			call TIME_NORMALIZE(ourtime);					/*	normalize the time	*/
+
+			load ourtime(0); uload ourtime(1);			/*	secs*1000 + msec		*/
+			mul 1000;											/*	compute 32 bit # of msecs	*/
+			bitmsb=ures; bitlsb=res;
+			call multiply(1000,0,0,0);						/*	* 1000 = 32 BIT # OF MCSEC	*/
+
+			BITLSB=BITLSB+ourtime(2);						/*	add in mcsec					*/
+			if BITLSB ilt res then BITMSB=BITMSB+1;	/*	now, BITMSB,BITLSB = 32 bit # of msec into screeen	*/
+
+			scale=shl(stm.hor.scale,1);					/*	65536/scale will overflow if scale=1, so 1/2*scale	*/
+			call ratio_multiply(1,scale);					/*	get mcsecs/2*scale	*/
+			call unround;										/*	remove rounding from MULTIPLY	*/
+
+			call ratio_multiply(shl(stm.sample.rate,1),10000);	/*	multiply it by 2*stm.sample.rate/10000 to compensate	*/
+			call unround;
+
+			/*	round up time by 1/2 of a sample only (not 1/2 pixel).	*/
+			/*	this yields good results when scale=1, but truncates		*/
+			/*	the cursor movement when scale is > 1							*/
+
+			/*	compute fraction of a pixel in one half sample	*/
+
+			load 0; uload 1; div scale;
+			mul.llsb=mul.llsb+res;
+			if mul.llsb ilt res then do;
+				bitlsb=bitlsb+1;
+			end;
+
+			return BITLSB;
+		end;
+	end COMPUTE_PIXEL_NUMBER;
+
+	/*	$page	*/
+
+	COMPUTE.SAMPLE.VOLTAGE: proc(sample.value)	fixed public swapable;	/*	computes and returns voltage of given sample value	*/
+		dcl sample.value	fixed;
+		dcl voltage			fixed;
+		dcl sample.max		lit '32768';
+
+		load abs(sample.value); mul 5000;
+		voltage=res;
+		div sample.max;
+		voltage=res;
+		if rem IGE shr(sample.max,1) then voltage=voltage+1;	/*	round up	*/
+		if sample.value<0 then voltage=-voltage;
+		return (voltage);
+	end COMPUTE.SAMPLE.VOLTAGE;
+
+	COMPUTE_SIGNAL_LEVEL:proc(base) public swapable;	/*	computes the signal level (STM.VOLTAGE) of the current sample	*/
+		dcl base					fixed array;	/*	base address of current sound file	*/
+		dcl stm.left.sample	fixed;			/*	current left sample value	*/
+		dcl stm.right.sample	fixed;			/*	right sample value			*/
+
+		call TIME_TO_INDEX(cursor.time(0),cursor.time(1),cursor.time(2),stm.sample.rate,stereo);
+		if sf.type=1 then do;
+			call psmread(base,sector.numb+shr(bl.poly,8),sector.offset);	/*	point to sample given cursor position	*/
+			stm.left.sample=read(psd);
+			stm.left.voltage=COMPUTE.SAMPLE.VOLTAGE(stm.left.sample);
+			if stereo then do;
+				stm.right.sample=read(psd);
+				stm.right.voltage=COMPUTE.SAMPLE.VOLTAGE(stm.right.sample);
+			end;
+			else stm.right.voltage=0;
+		end;
+
+	end COMPUTE_SIGNAL_LEVEL;
+
+	/*	$page - compute recording time available	*/
+
+	FIND.RECORDING.BASE:PROC(base) public swapable;
+		dcl base			fixed array;
+		dcl (i,lw) (1)	fixed;
+		dcl j				fixed;
+
+		call set.cur.bin(0);				/*	look only in bin 0 when recording	*/
+		call copy32(pslast,base);
+
+		next1:;
+
+		call copy32(psfirst,i);
+
+		if com32(i,base) <> lw#ieq then do;		/*	look at sound files	*/
+
+			next2:;
+
+			call psmread(i,0,bl.len);	/*	read block length	*/
+			j=read(psd);
+			call copy32(i,lw);
+			call add16(j,lw);
+			if com32(lw,base) <> lw#ieq then do;	/*	see if this block is at end of poly memory	*/
+				call add16(j,i);			/*	if not - advance pointer	*/
+				goto next2;					/*	and look at next file		*/
+			end;
+
+			/*	this file is at the end of memory	*/
+
+			if read(psd)=0 then do;					/*	BL.USERS - if no users - see if we can free it up	*/
+				call psmread(i,0,bl.fname);		/*	check file name	*/
+				j=read(psd);							/*	get first word of file name	*/
+				if j=0 then do;						/*	empty block - trash it			*/
+					call copy32(i,base);
+					goto next1;
+				end;
+				if  (j=initial.fname(1))			/*	see if file is a NEWF file	*/
+				and (read(psd)=initial.fname(2))
+				then do;
+					call psmread(i,0,bl.saved);	/*	see if file is saved	*/
+					if read(psd)=0 then do;			/*	unsaved, unused newf file - trash it	*/
+						call copy32(i,base);
+						goto next1;
+					end;
+				end;
+			end;
+		end;
+
+	end FIND.RECORDING.BASE;
+
+	COMPUTE.RECORDING.TIME.AVAILABLE: proc public swapable;	/*	find available recording time	*/
+		dcl base (1)	fixed;
+
+		call set.cur.bin(0);
+		call find.recording.base(base);
+		call sub32(psmax,base,base);	/*	should now have <= 16 bits worth	*/
+
+		call dealloc(0);					/*	temporarily free up keyboard timbre		*/
+		call INDEX_TO_TIME(base(lw#msb),base(lw#lsb),0,stm.record.rate,stm.record.stereo);
+		if time.seconds igt 999 then do;
+			time.seconds=999; time.milliseconds=999; time.microseconds=999;
+		end;
+		call alloc.timbre(0);
+	end COMPUTE.RECORDING.TIME.AVAILABLE;
+
+	DISPLAY.RECORDING.TIME: proc public swapable;	/*	displays recording time available	*/
+		call COMPUTE.RECORDING.TIME.AVAILABLE;
+		call cpos(18,19);
+		call ps('Time available is ');
+		call print.parm(time.seconds,0,0,3,0);	/*	time available is printed in xxx.x seconds format	*/
+		call pc(dot);
+		call print.parm(time.milliseconds/100,0,0,1,0);
+		call ps(' seconds.');
+	end DISPLAY.RECORDING.TIME;
+
+	/*	$page	*/
+
+	LOOK.UP.SF.INFO: proc public swapable;	/*	Look up sound file information in the file header and set up global information*/
+		dcl (i,j)	fixed;
+
+		sf.type=0;								/*	assume not a sound file	*/
+
+		i=find.partial;						/*	find first selected partial	*/
+		if (TIM.HEAD.LOOKUP(0,tim.synth.typ+i) != TIM#POLY) return;	//	bail if not a poly patch list timbre
+
+		if (p.lookup(find.frame(i,1)) != MOR) return;	//	Point to the first timbre frame and test for failure
+
+		write("313") = count.timbre.frames(i);				//	Make sure we don't try to point past the last frame
+		if (TDS.LINE# ige read("313")) TDS.LINE# = read("313")-1;
+		j = find.frame(i,TDS.LINE#+1);						//	Now point to the desired timbre frame
+
+      GET.NAME.FROM.PARTIAL(j);        // Grab the full long name. This search will properly find the long-name file for this partial.
+
+		if FNBUF(1)=0 then do;				/*	if file name not there	*/
+			sf.type=(-1);						/*	use minus 1 for no name	*/
+			return;
+		end;
+
+		if ps.search=0 then return;		/*	file not found	*/
+
+		sf.type=1;								/*	found !!	*/
+
+		/*	look up information from file	*/
+
+		call psmread(SFILE.BASE,SF.HDR,sf.data.end);		/*	point to the time of the last valid sample	*/
+		do i=0 to 2;												/*	total time	*/
+			tot.time(i)=read(psd);
+		end;
+		call psmread(SFILE.BASE,SF.HDR,sf.sample.rate);	/*	sound file sample rate in kHz*10	*/
+		i=read(psd);
+		if i<>0														/*	if a sample rate value present use this*/
+		then stm.sample.rate=i;
+		else do;														/*	otherwise calculate the sample rate from the given period index	*/
+			call psmread(SFILE.BASE,SF.HDR,sf.period.index);	/*	period index	*/
+			i=read(psd);
+			load 300; mul 1000;	mwait;
+			div i; stm.sample.rate=res;						/*	compute khz*10-> sampling rate	*/
+			if read(4) ige shr(i,1)
+			then stm.sample.rate=stm.sample.rate+1;		/*	round up			*/
+		end;
+		call psmread(SFILE.BASE,SF.HDR,sf.number.of.symbols);
+		number_of_symbols=read(psd);								/*	set up number of symbols	*/
+		if number_of_symbols<0 then number_of_symbols=0;	/*	make sure number of symbols is within limits	*/
+		else if number_of_symbols>max.symbols then number_of_symbols=max.symbols;
+		call psmread(SFILE.BASE,SF.HDR,sf.stereo);			/*	stereo	*/
+		stereo=read(psd);
+
+		call psmread(SFILE.BASE,SF.HDR,sf.id.field.bytes);	/*	get byte count of sound file caption	*/
+		stm.caption(0)=read(psd);
+		if stm.caption(0)>42					/*	cannot display more than 43 characters across the screen	*/
+		then stm.caption(0)=42;
+		j=shr(stm.caption(0),1);									/*	convert to word count	*/
+		if stm.caption(0)												/*	account for odd number of characters	*/
+		then j=j+1;
+		do i=1 to j;
+			stm.caption(i)=read(psd);
+		end;
+
+		if (stm.hor.scale < hor.zoom.table(stm.hor.factor))		//	make sure hor scale is bounded
+			stm.hor.scale=hor.zoom.table(stm.hor.factor);			//	by zoom factor entries.  e.g. allow non-tabular
+																					//	values after landscdape adjust, as long
+		if (stm.hor.scale >= hor.zoom.table(stm.hor.factor+1))	//	as value is reasonable
+			stm.hor.scale=hor.zoom.table(stm.hor.factor);
+
+		stm.vert.scale=vert.zoom.table(stm.vert.factor);	/*	set the vertical scaling factor	*/
+		if compare_times(start.time,tot.time,3)>0				/*	start time > tot time	*/
+		then do i=0 to 2;												/*	reset start time to zero	*/
+			start.time(i)=0;											/*	when calling up a shorter sound file	*/
+		end;
+		else if (start.time(0)<0) or (start.time(1)<0) or (start.time(2)<0)
+		then do i=0 to 2;
+			start.time(i)=0;											/*	when calling up a shorter sound file	*/
+		end;
+		call COMPUTE_PIXEL_TIME(stm.graphx,cursor.time);	/*	reset cursor time	*/
+		call COMPUTE_SIGNAL_LEVEL(SFILE.BASE);					/*	reset sample signal level	*/
+
+	end LOOK.UP.SF.INFO;
+
+	/*	$Subtitle Converts Sample Time Value to a String and puts it in token array	*/
+
+	CONVERT.SECS.TO.STRING: proc (n,parm,parm.ptr)	fixed public swapable;	/*	converts an unsigned number between 0 and 999 and puts it in given string array*/
+		dcl n					fixed;			/*	number of seconds		*/
+		dcl parm				fixed array;	/*	array to put result	*/
+		dcl parm.ptr		fixed;			/*	result starts at this location	*/
+		dcl r					fixed;
+		dcl i					fixed;
+		dcl supress.zero	fixed;
+		dcl divisors data (100,10,1);
+
+		if n>999 then do;
+			call overflow.error;
+			return 0;
+		end;
+
+		supress.zero=0;
+		do i=0 to 2;			/*	do for five digits	*/
+			r=0;					/*	keep track of digit	*/
+			do while n ige divisors(i);
+				n=n-divisors(i);
+				r=r+1;
+			end;
+			if (r>0) or (i=2) then do;
+				call pbyte(parm,parm.ptr,asc.0+r);
+				supress.zero=1;
+				parm.ptr=parm.ptr+1;
+			end;
+			else if supress.zero<>0 then do;
+				call pbyte(parm,parm.ptr,asc.0);
+				parm.ptr=parm.ptr+1;
+			end;
+		end;
+		parm(0)=parm.ptr;
+		return 1;
+	end CONVERT.SECS.TO.STRING;
+
+	CONVERT.MSECS.TO.STRING: proc (n)	fixed swapable;	/*	converts an unsigned number between 0 and 999 to a string*/
+		dcl (n,r)				fixed;
+		dcl i						fixed;
+		dcl divisors data (100,10,1);
+
+		if n>999 then do;
+			call overflow.error;
+			return 0;
+		end;
+
+		do i=0 to 2;			/*	do for five digits	*/
+			r=0;					/*	keep track of digit	*/
+			do while n ige divisors(i);
+				n=n-divisors(i);
+				r=r+1;
+			end;
+			if (r>0) or (i=2)
+			then call pbyte(token,tok.ptr,asc.0+r);
+			else call pbyte(token,tok.ptr,asc.0);	/*	do not suppress leading zeroes	*/
+			tok.ptr=tok.ptr+1;
+		end;
+		token(0)=tok.ptr;
+		return 1;
+	end CONVERT.MSECS.TO.STRING;
+
+	CONVERT.SAMPLE.TIME.TO.STRING: proc (sample.time) public swapable;	/*	converts a sample time to a string and puts it in token array	*/
+		/*	Note: returns 1 if conversion sucessful	*/
+		dcl sample.time	fixed array;
+
+		if CONVERT.SECS.TO.STRING(sample.time(0),token,tok.ptr)<>0 then do;	/*	converts string to an unsigned number	*/
+			tok.ptr=token(0);
+			call pbyte(token,tok.ptr,dot);
+			token(0)=token(0)+1;
+			tok.ptr=tok.ptr+1;
+			if CONVERT.MSECS.TO.STRING(sample.time(1))<>0 then do;
+				call pbyte(token,tok.ptr,sp);
+				token(0)=token(0)+1;
+				tok.ptr=tok.ptr+1;
+				if CONVERT.MSECS.TO.STRING(sample.time(2))<>0
+				then return 1;
+			end;
+			else return 0;
+		end;
+		else return 0;
+	end CONVERT.SAMPLE.TIME.TO.STRING;
+
+	/*	$page	*/
+
+	CONVERT.HOR.TIME.TO.STRING: proc (hor.time)	fixed public swapable;
+		/*	Note: returns 1 if successful and 0 if not.
+			Squeezes horizontal time into a five character string where location of decimal point varies
+			Time is in token array.
+		*/
+		dcl hor.time	fixed array;
+		dcl (i,j,r)		fixed;
+		dcl num.digits	fixed;
+		dcl divisors	data (100,10,1);
+
+		if hor.time(2)>500 then hor.time(1)=hor.time(1)+1;	/*	round up the milliseconds before conversion	*/
+		if hor.time(1)>999 then do;
+			hor.time(0)=hor.time(0)+1;
+			hor.time(1)=hor.time(1)-1000;
+		end;
+
+		if (CONVERT.SECS.TO.STRING(hor.time(0),prev.hor.time,0)=0)
+		then return 0;
+
+		j=prev.hor.time(0);
+		call pbyte(prev.hor.time,j,dot);
+		j=j+1;
+
+		i=0;
+		do while (j<5) and (i<=2);
+			r=0;
+			do while hor.time(1) ige divisors(i);
+				hor.time(1)=hor.time(1)-divisors(i);
+				r=r+1;
+			end;
+			call pbyte(prev.hor.time,j,asc.0+r);
+			j=j+1;
+			i=i+1;
+		end;
+		prev.hor.time(0)=j;
+		return 1;
+	end CONVERT.HOR.TIME.TO.STRING;
+end STUTLMOD;
+

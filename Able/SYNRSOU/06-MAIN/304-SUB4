@@ -1,0 +1,434 @@
+/* 305-SUB5   $TITLE  PRECOMPUTATION OF KEYBOARD PARTIAL BLOCKS
+
+   Modified:
+   09/06/89 - MWH - Unsplit 06-MAIN now that the compiler can cope
+   10/18/88 - cj - fixed bug with partial chorus
+   10/14/88 - CJ - PRECOMPUTE PARTIAL BLOCK DIFFERENTLY TO START UP
+                   NOTE IN MIDDLE
+   01/12/88 - TS - SPLIT UP 06-MAIN MODULE INTO TWO PIECES
+   07/02/87 - MWH - kbd lookup table literals; restructured for 32 bit poly
+   01/14/87 - CJ - USED COPY.OUT
+   09/02/86 - CJ - FIXED OFF BY OCTAVE BUG WITH COMBINED MONO & STERO PARTIALS
+   07/28/86 - CJ - SET UCHN IF STEREO SOUND FILE FOR SETUP.FREQS
+   07/24/86 - KJC,CJ - KBDTAB CHANGES
+   07/13/86 - CJ - ADDED NORIG
+   05/15/86 - "official" creation of release-M modules
+*/
+
+/* INFORMATION FOR EACH POSSIBLE KEY IS PRE-COMPUTED IN ADVANCE
+   FOR KEYBOARD NOTES.  */
+
+COMPUTE.KBD.PRE: PROC SWAPABLE;
+   DCL (TB,TBP,PTL,TRK,THP)    FIXED   EXTERNAL; 
+   DCL (I,J,K,L,M,N,P)         FIXED   EXTERNAL;
+   DCL (SYNTYP,OPT,TOPT)   FIXED static;
+   DCL (PITCH)             FIXED static;
+
+   DCL (OUR.NPTR) FIXED static;
+   DCL (OUR.PPTR) FIXED static;
+   DCL (KCTR)     FIXED static;    /* KEY COUNTER     */
+
+   DCL SB DATA (0,B.POLY,B.POLY,B.MONO,0);
+
+   NPTR=OUR.NPTR;                  /* LOOK UP GLOBAL INFO */
+   PPTR=OUR.PPTR;                  /* FOR MOST CASES      */
+
+   IF NEW.KBD.PRE=3 THEN DO;       /* DONE WITH COMPUTATION - RELEASE BLOCKS, CLEAR FLAG */
+
+      CORE(NPTR)=NFREEP;           /* LINK US ON TO FRONT OF FREE QUE */
+      NFREEP    =NPTR  ;
+
+      CALL RELP;                   /* ZERO OUT & FREE UP PARTIAL BLOCK */
+
+      OUR.NPTR=0;                  /* FOR CONSISTENCY */
+      OUR.PPTR=0;
+      NEW.KBD.PRE=0;               /* START USING PRECOMPUTE AREA */
+      RETURN;
+
+   END;
+
+   IF NEW.KBD.PRE=2 THEN DO;       /* CONTINUE WITH */
+
+      TB=0;
+      TRK=0;
+
+      WRITE(MAM)=TIM.HEAD;
+      TBP=READ(MD);
+
+      WRITE(MAM)=TRK.HEAD;
+      THP=READ(MD);
+
+      DO PTL=0 TO NUM.PARTIALS-1;
+
+         WRITE(MAM)=TBP;
+         WRITE(MAL)=TIM.PARTIAL.POINTERS+PTL;
+         PTPTR=READ(MD);
+
+         TIMBRE= 0;                 /* FILL NOTE BLOCK */
+         TRACK = 0;
+         NORIG = 0;
+         KEYN  = KCTR;
+         SBITS = 0;
+         GDATA = 0;
+         OTIMM = 0;
+         OTIML = 0;
+
+         WRITE(MAL)=TIM.TOPTIONS;
+         TOPT  =READ(MD);          /* LOOK UP TIMBRE  OPTIONS */
+
+         WRITE(MAL)=TIM.OPTIONS+PTL;
+         OPT   =READ(MD);          /* LOOK UP PARTIAL OPTIONS */
+
+         WRITE(MAL)=TIM.SYNTH.TYP+PTL;
+         SYNTYP=READ(MD);          /* GET SYNTH TYPE TO USE */
+
+         PARTL =PTL;               /* SAVE IN PARTIAL BLOCK */
+         PLOG  =0;                 /* NO CHORUS YET         */
+         MCHN  =SB(SYNTYP)+1;      /* LOOK UP BIT           */
+
+         PITCH=COMPUTE.KBD.PITCH(KEYN); 
+
+         /* $PAGE - LOOK UP INFO FOR PATCH TIMBRE */
+
+         WRITE(MAM)=TBP;
+         WRITE(MAL)=TIM.KBDTAB.PTR+PTL;
+
+         IF  ((SYNTYP=TIM#POLY)    /* POLY TIMBRE - LOOK UP INFO      */
+         OR   (SYNTYP=TIM#MONO))   /* MONO TIMBRE - LOOK UP INFO      */
+         AND (READ(MD)<>0)         /* AND TABLE EXISTS                */
+         THEN DO;                  /* COMPUTE INFO FOR PATCH TIMBRE   */
+
+            /* READ PATCH FRAME POINTER */
+            /* READ SOUND F SECTOR #    */
+
+            WRITE(MAM)=TIM.PTR+READ(MD)-1; /* RESTORE MEMORY POINTERS AGAIN  */
+            WRITE(MAL)=SHL(KEYN,1)+KEYN+KLT.PATCH.TIM.PTR;  /* GET LOCATION WITHIN THE SECTOR */
+
+            IF  (INC.MONO  <>  0)              /* FOR MONO SAMPLING, SET UP */
+            AND (SYNTYP=TIM#MONO)              /* INFO                      */
+            THEN DO;
+               K=PTPTR+READ(MDI)+PT.SRATE;      /* POINT TO FRAME IN QUESTION, SRATE ENTRY-ADVANCE TO MEMORY SECTOR # */
+               WRITE("324")=READ(MDI);          /* SKIP BASE MSB INFO                */
+               SSTAT=READ(MD);                  /* SAVE EXTERNAL MEMORY SECTOR       */
+               UCHN =0;                         /* MONO SAMPLING MEANS NO STERO */
+            END;
+            ELSE DO;                            /* ELSE MUST BE POLY       */
+               K=PTPTR+READ(MDI)+PT.WTABL;      /* POINT TO PT.WTABL ENTRY */
+               M=READ(MDI);                     /* GET STEREO, BIN, PAGE  KLT.BASE.MSB */
+               L=READ(MD );                     /* GET BASE SECTOR        KLT.BASE.LSB */
+
+               ITMC = M;                        /* SAVE BIN & STEREO FOR CHANNEL ALLOCATION BELOW */
+
+               IF (M & BASE#STEREO_B) <> 0      /* CHECK FOR STEREO BIT */
+               THEN UCHN=MCHN;                  /* STEREO - MUST SET UCHN FOR CORRECT SETUP.FREQS OPERATION */
+               ELSE UCHN=0;
+
+               WRITE(MAM)=PAR.PTR+SHR(K,8);     /* POINT TO PT.WTABL INFO  */
+               WRITE(MAL)=K;                    /* COMPUTE IN PARTIAL AREA */
+               WRITE("300")=ADDR(MONU);         /* COPY TO PARTIAL BLOCK   */
+
+               RPC 7;                           /* PT.WTABL (2), PT.SOFS, PT.WOFS, */
+               WRITE("360")=READ(MDI);          /* PT.LOOPL (2), PT.ONLOOP   */
+                                                /* MONU, MNNM     = PT.WTABL */
+                                                /* MINC           = PT.SOFS  */
+                                                /* IATLIM         = PT.WOFS  */
+                                                /* IATINT, IIDLIM = PT.LOOPL */
+                                                /* IIDINT         = PT.ONLOOP*/
+
+               MINC = MINC + L;                 /* ADD BASE TO SECTOR OFFSET */
+               IF MINC ILT L                    /* IF CARRY ...              */
+               THEN M=(M&BASE#PAGE_B)+1;        /* THEN INCREMENT PAGE       */
+               ELSE M=(M&BASE#PAGE_B)  ;        /* ELSE EXTRACT   PAGE       */
+               IATLIM = IATLIM \ SHL(M,8);      /* STORE PAGE BITS IN UPPER  */
+               K=K+(PT.SRATE-PT.WTABL);         /* MOVE POINTER TO PT.SRATE FIELD NOW  */
+            END;
+
+            /* READ SAMPLE RATE FOR SF  */
+            /* READ SET OCT     FOR SF  */
+            /* READ FRACTIONAL SET OCT  */
+            /* READ SEMITONE CORRECTION */
+
+            WRITE(MAM)=PAR.PTR+SHR(K,8);   /* GET INFO FROM PATCH LIST FRAME */
+            WRITE(MAL)=K;                  /* READ INFO TO COMPUTE PITCH CORRECTLY */
+            L =READ(MDI);                  /* READ SAMPLING RATE FACTOR FOR FILE */
+            M =READ(MDI);                  /* READ SET OCTAVE FACTOR FOR FILE */
+            N =READ(MDI);                  /* READ FRACTIONAL PITCH OFFSET FOR TRANSPOSITION */
+
+            /* READ FILE VOLUME         */
+            /* READ TRANSPOSITION       */
+
+            K=(K+PT.VOL-PT.SRATE);         /* MOVE POINTER TO FILE VOL FIELD */
+            WRITE(MAM)=PAR.PTR+SHR(K,8);
+            WRITE(MAL)=K;                  /* READ INFO TO COMPUTE PITCH */
+            LOAD 0; ULOAD READ(MDI);       /* COMPUTE FMPTR FOR FRACTIONAL MULTIPLY */
+            DIV 1001;
+            FMPTR=RES;                     /* READ AND STORE FILE VOLUME IN TEMP, ADVANCE TO TRANSPOSITION FIELD */
+            IF (READ(MD)=0)                /* NO TRANSPOSITION - CORRECT TO SETOCTAVE VALUE */
+            THEN DO;
+               MRLCH=1024-M-L;             /* NO TRANSPOSITION - CORRECT TO SETOCTAVE VALUE */
+               WRITE("300")=READ(MDI);     /* POINT PAST TRANSPOSITION */
+            END;
+            ELSE DO;                       /* USER SPECIFIED TRANSPOSITION */
+               MRLCH=(2816+1024)-COMPUTE.PATCH.XPOS(READ(MDI)&255)+N-L;
+            END;
+            IF READ(MD)<>0 THEN DO;        /* ADD IN SEMITONE CORRECTION */
+               IF READ(MD)<0 THEN DO;      /* PERFORM FAST SIGNED 32 BIT MATH HERE */
+                  LOAD -READ(MD);          /* CONVERT TO FREQ INFO FROM SEMITONES * 100 */
+                  MUL  1024;
+                  WRITE("300")=RES;
+                  DIV  1200;
+                  MRLCH=MRLCH-RES;
+               END;
+               ELSE DO;
+                  LOAD  READ(MD);
+                  MUL  1024;
+                  WRITE("300")=RES;
+                  DIV  1200;
+                  MRLCH=MRLCH+RES;
+               END;
+            END;
+         END; 
+         ELSE DO;         /* NON-PATCH LIST TIMBRES */
+            WRITE("300")=ADDR(SSTAT);           /* ZERO OUT    */
+            WRITE("360")=0; WRITE("360")=0;     /* SSTAT ISTAT */
+            WRITE("360")=0; WRITE("360")=0;     /* FMPTR MRLCH */
+         END;
+         /* $PAGE - COMPUTE DECAY & HARMONIC ADJUST */
+
+         WRITE(MAM)=TBP;
+
+         IF (OPT&(ENV.DADJ\INX.HADJ))<>0        /* FIRST DO DECAY OR HARMONIC ADJUST */
+         THEN DO;                               /* SO THAT ENVELOPE INFO IS COMPUTED CORRECTLY */
+
+            IF (OPT&ENV.DADJ)<>0 THEN DO;       /* COMPUTE DECAY ADJUST */
+               WRITE(MAL)=(TIM.DEC.ADJ+4)+(PTL*TIM.DEC.ADJ.STR);
+               I=READ(MD)-1000;                 /* GET DIALED IN AMOUNT */
+               J=1000;                          /* ASSUME NORMAL DECAY USED */
+               IF KEYN<72 THEN DO;              /* COMPUTE DECAY ADJUST FACTOR FOR C0-B5 ONLY */
+                  LOAD KEYN; DIV 12; K=RES; L=URES;  /* GET OCTAVE & PITCH CLASS INFO */
+                  IF K<5 THEN DO;               /* LOOK UP STARTING DECAY ADJUST FACTOR */
+                     WRITE(MAL)=TIM.DEC.ADJ+K+(PTL*TIM.DEC.ADJ.STR);
+                     J=READ(MD);
+                  END;
+                  ELSE J=1000;                   /* START AT 1000 FOR TOP OCTAVE */
+                  LOAD 16000+I*DEC.ADJ.TAB(L);
+                  MUL J; MWAIT; DIV 16000; J=RES;/* SCALE RESULT */
+                  IF J IGT 30000 THEN J=30000;   /* LIMIT DECAYS TO 30X DIALED IN  NUMBER */
+               END;
+               DADJ=J;                           /* SAVE DECAY ADJUST PARAMETER */
+            END;
+            ELSE DADJ=0;                         /* NO DECAY ADJUST */
+
+            IF (OPT&INX.HADJ)<>0                 /* COMPUTE HARM ADJUST */
+            THEN CALL COMPUTE.HADJ;              /* COMPUTE HARMONIC ADJUST */
+            ELSE HADJ=0;                         /* NO HARM ADJUST */
+         END;
+         ELSE DO;  
+            DADJ=0;                              /* NO DECAY ADJUST */
+            HADJ=0;                              /* NO HARM  ADJUST */
+         END;
+
+         CURRF=PITCH;                            /* ASSUME NO GLIDE */
+         DESTF=PITCH;                            /* SET UP PITCH INFO */
+
+         IF (OPT&MIN.PTUNE)<>0 THEN DO;          /* USE CONSTANT PITCH IF DESIRED */
+            CURRF=2816;
+            DESTF=2816; 
+         END; 
+
+         PVIB=PTL&3;                             /* SPACE OUT VIBRATO PROCESSING - VARIABLES ARE INITIALIZED LATER */
+         VIBWD=(-1);                             /* QUICKLY INITIALIZE VIBRATO STUFF */
+
+         ETIMER=0;
+         ITIMER=0;
+
+         /* $PAGE - LOOK UP ENVELOPE INFO */
+
+         WRITE(MAM)=TBP;
+
+         WRITE(MAL)=(TIM.EATLIM+EATLIM.LOC)+(PTL*TIM.EATLIM.STR);
+         WRITE("300")=ADDR(EATLIM);
+         WRITE("360")=READ(MDI);                /* EATLIM */
+         WRITE("360")=READ(MDI);                /* EATINT */
+         WRITE("360")=READ(MDI);                /* EIDLIM */
+         WRITE("360")=READ(MDI);                /* EIDINT */
+         WRITE("360")=READ(MDI);                /* ETMC   */
+
+         IF DADJ<>0 THEN DO;                    /* APPLY DECAY ADJUST */
+            J=SHR(EIDINT,8);                    /* GET INITIAL DECAY ADDER */
+            K=ETMC;                             /* AND TIME CONSTANT */
+            LOAD J; MUL 1000; J=RES; DIV DADJ; J=RES;
+            LOAD (-K); MUL 1000; K=RES; DIV DADJ;
+            K=(-RES); IF RES=0 THEN K=(-1);
+            EIDINT=(EIDINT&255)\SHL(J,8);
+            ETMC=K;
+         END;
+
+         IF (OPT&ANY.FM)<>0                      /* IF ANY FM IN SOUND - COMPUTE STUFF */
+         THEN DO;                                /* SET UP FOR FM COMPUTATIONS */
+
+            DO.FM=1;
+
+            WRITE(MAL)=(TIM.IATLIM+IATLIM.LOC)+(PTL*TIM.IATLIM.STR);
+            WRITE("300")=ADDR(IATLIM);
+            WRITE("360")=READ(MDI);              /* IATLIM */
+            WRITE("360")=READ(MDI);              /* IATINT */
+            WRITE("360")=READ(MDI);              /* IIDLIM */
+            WRITE("360")=READ(MDI);              /* IIDINT */
+            WRITE("360")=READ(MDI);              /* ITMC   */
+
+            IF DADJ<>0 THEN DO;                  /* APPLY DECAY ADJUST TO HARMONIC ENVELOPE */
+               J=SHR(IIDINT,8);                  /* GET ADDER  */
+               L=ITMC;                           /* TIME CONST */
+               LOAD J; MUL 1000; J=RES; DIV DADJ; J=RES;   /* SCALE ADDER FOR DECAY ADJUST */
+               LOAD (-L); MUL 1000; L=RES; DIV DADJ; 
+               L=(-RES); IF RES=0 THEN L=(-1);
+               IIDINT=(IIDINT&255)\SHL(J,8);
+               ITMC=L;
+            END;
+
+            /* $PAGE - APPLY HARMONIC ADJUST */
+
+            IF HADJ<>0 THEN DO;               /* HARMONIC ADJUST */
+
+               L=IATLIM;                      /* SCALE ATTACK LIMIT & RATE */
+               I=IATINT&255;
+               J=SHR(IATINT,8);
+               LOAD L; MUL HADJ; L=RES; DIV 1000; L=RES;/* SCALE BY HARM ADJ FACTOR 1/8 TO 8 */
+               IF L>255 THEN L=255;                     /* LIMIT TO MAX */
+               LOAD J; MUL HADJ; J=RES; DIV 1000; J=RES;/* SCALE INDEX ADDER AS WELL - BY SAME FACTOR AS PEAK CHANGED - THIS CHANGES ATTACK/DECAY RATE */
+               DO WHILE (J>255);                        /* SCALE DOWN IF OUT OF BITS */
+                 I=256-SHR(256-I,1);                    /* SCALE DIVISOR TO KEEP RATE THE SAME WITH DIFFERENT J */
+                 IF I=256 THEN I=255;                   /* LIMIT TO DIVISOR OF 1 - MUST BE AT FAST RATE ALREADY */
+                 J=SHR(J+1,1);
+                 IF J<>0 THEN J=J-1;
+               END;
+               IATLIM =SHL(L,8)\L;
+               IATINT =I\SHL(J,8);
+
+               K=IIDLIM;                     /* LIMIT   */
+               I=IIDINT&255;                 /* DIVIDER */   
+               J=SHR(IIDINT,8);              /* ADDER   */
+               LOAD K; MUL HADJ; K=RES; DIV 1000; K=RES; /* SCALE PEAK BY HARM ADJ FACTOR 1/8 TO 8 */
+               IF K>255 THEN K=255;          /* LIMIT TO HARDWARE MAX */
+               LOAD J; MUL HADJ; J=RES; DIV 1000; J=RES; /* SCALE INDEX ADDER AS WELL - BY SAME FACTOR AS PEAK CHANGED - THIS CHANGES ATTACK/DECAY RATE */
+               DO WHILE (J>255);             /* SCALE DOWN UNTIL OUT OF BITS */
+                 I=256-SHR(256-I,1); 
+                 IF I=256 THEN I=255;    
+                 J=SHR(J+1,1); 
+                 IF J<>0 THEN J=J-1;
+               END;
+               IIDINT=I\SHL(J,8);         /* SAVE FOR USE BY INTERRUPT ROUTINE */
+               IIDLIM=K;                  /* SAVE LIMIT */
+            END;
+         END;
+         ELSE DO;                         /* NO FM IN SOUND */
+            ITIMER=ETIMER-1;              /* MAKE SURE DIFFERENT FROM ETIMER - SIMPLIFIES QUEING & INTERRUPT CODE */
+            DO.FM=0;                      /* NO FM NEEDED */
+         END;
+ 
+         WRITE(MAM)=THP;
+         WRITE(MAL)=THD.MRNPTR;
+         IF READ(MD)=NPTR 
+         THEN WRITE(MD)=0;            /* BUT DO NOT UPDATE LAST PITCH WITH OUR NOTE BLOCK!! */
+
+         /* $PAGE - COMPUTE FREQUENCIES, STORE INFO IN EXT MEM */
+
+         CALL SETUP.FRQS;                 /* PRE-COMPUTE FREQUENCY INFO, STORE IN NOTE BLOCK */
+
+         LOAD  PTL;                       /* D5 = PARTIAL # (0- 7) */
+         ULOAD KEYN;                      /* D4 = KEY     # (0-84) */
+         MUL NUM.KEYS;                    /* PARTIAL*NUM.KEYS+KEYN */
+         MWAIT;
+         MUL KBD.PRE.STR;                 /* MULT BY TABLE STRIDE  */
+         WRITE(MAM)=KBD.PRE+SHR(RES,8);
+         WRITE(MAL)=RES;
+         I=RES;                           /* SAVE IN CASE CHORUS BELOW */
+         CALL COPY.OUT(ADDR(SSTAT),KBD.PRE.STR1);
+
+         /* $PAGE - CHECK FOR CHORUS, PARTIAL CHORUS */
+
+         WRITE(MAM)=TBP;
+         WRITE(MAL)=TIM.LOG.NCH+PTL;
+         IF READ(MD)<>0 THEN DO;          /* PRECOMPUTE HZ FOR NEW CHORUS */
+            PLOG=TIM.LOG.NCH+PTL;         /* POINT TO VALUE               */
+            CALL SETUP.FRQS;              /* PRE-COMPUTE FREQUENCY INFO, STORE IN NOTE BLOCK */
+            WRITE(MAM)=KBD.PRE+SHR(I+(UONULOC-SSLOC),8);
+            WRITE(MAL)=I+(UONULOC-SSLOC); /* POINT TO ORIGINAL HZ INFO    */
+            WRITE("313")=ADDR(UONU);      /* R13 POINT TO PCHOR HZ INFO   */
+            IF (MCHN&(B.POLY\B.MONO)) = 0 /* FM - OR IN UONU, UNNM, UINC, DO.FM, MONU, MNNM, MINC */
+            THEN DO J=0 TO 6;
+               WRITE(MDI)=READ(MD)\SHL(READ("373"),8);
+            END;
+            ELSE DO J=0 TO 2;             /* OR PCHOR UONU, UNNM, UINC INTO UPPAER HALF */
+               WRITE(MDI)=READ(MD)\SHL(READ("373"),8);
+            END;
+         END;
+
+         WRITE(MAM)=TBP;
+         WRITE(MAL)=TIM.LOG.CH;
+         IF READ(MD)<>0 THEN DO;          /* COMPUTE CHORUS HZ */
+            PLOG=TIM.LOG.CH;              /* NOW FOR CHORUS    */
+            CALL SETUP.FRQS;              /* PRE-COMPUTE FREQUENCY INFO, STORE IN NOTE BLOCK */
+            WRITE(MAM)=KBD.PRE+SHR(I+KBD.PRE.STR1,8);
+            WRITE(MAL)=I+KBD.PRE.STR1;    /* POINT TO CHORUS   HZ INFO    */
+            WRITE("313")=ADDR(UONU);      /* R13 POINT TO PCHOR HZ INFO   */
+            DO J=0 TO 6;
+               WRITE(MDI)=READ("373");    /* STORE CHORUS HZ IN XMEM      */
+               IF J=2 THEN DO;            /* BUT SKIP DO.FM TO SAVE MEM   */
+                  J=3; WRITE("300")=READ("373");  /* INCR J TO 4 BELOW    */
+               END;
+            END;
+
+            WRITE(MAM)=TBP;
+            WRITE(MAL)=TIM.LOG.NCH+PTL;
+            IF READ(MD)<>0 THEN DO;          /* NEW CHORUS/CHORUS */
+               PLOG=TIM.LOG.NCHCH+PTL;       /* POINT TO VALUE    */
+               CALL SETUP.FRQS;              /* PRE-COMPUTE FREQUENCY INFO, STORE IN NOTE BLOCK */
+               WRITE(MAM)=KBD.PRE+SHR(I+KBD.PRE.STR1,8);
+               WRITE(MAL)=I+KBD.PRE.STR1;    /* POINT TO CHORUS   HZ INFO    */
+               WRITE("313")=ADDR(UONU);      /* R13 POINT TO PCHOR HZ INFO   */
+               IF (MCHN&(B.POLY\B.MONO)) = 0 /* FM - OR IN UONU, UNNM, UINC, DO.FM, MONU, MNNM, MINC */
+               THEN DO J=0 TO 6;
+                  WRITE(MDI)=READ(MD)\SHL(READ("373"),8);
+                  IF J=2 THEN DO;            /* SKIP DO.FM        */
+                     J=3; WRITE("300")=READ("373");
+                  END;
+               END;
+               ELSE DO J=0 TO 2;             /* OR PCHOR UONU, UNNM, UINC INTO UPPAER HALF */
+                  WRITE(MDI)=READ(MD)\SHL(READ("373"),8);
+               END;
+            END;
+
+         END;
+
+      END;                         /* OF LOOP OVER PARTIALS */
+
+      KCTR=KCTR+1;                 /* ADVANCE KEY COUNTER   */
+      IF KCTR=NUM.KEYS             /* CHECK FOR END         */
+      THEN NEW.KBD.PRE=3;          /* SET FLAG TO EXIT NEXT TIME WHEN DONE */
+      RETURN;
+
+   END;
+
+   /* $PAGE - START OF COMPUTE.KBD.PRE - GET BLOCKS, INITIALIZE */
+
+   IF NPTR=0 THEN DO;              /* MUST GET NOTE BLOCK (WATCH FOR RE-ENTRY) */
+      IF NFREEP=0 THEN RETURN;     /* JUST WAIT UNTIL A NOTE BLOCK IS AVAIL */
+      NPTR=NFREEP; 
+      NFREEP=CORE(NFREEP);
+   END;
+
+   OUR.NPTR=NPTR;                  /* SAVE FOR RE-ENTRY */
+
+   IF PPTR=0 THEN DO;              /* MUST GET PARTIAL BLOCK     */
+      IF PFREE=0 THEN RETURN;      /* NO FREE BLOCKS - JUST WAIT */
+      PPTR =PFREE; PFREE=CORE(PFREE);     
+   END;
+
+   OUR.PPTR=PPTR;                  /* SAVE FOR RE-ENTRY */
+
+   KCTR=0;                         /* START WITH KEY     0 */
+   NEW.KBD.PRE=2;                  /* AND START ABOVE CODE NEXT TIME */
+
+END COMPUTE.KBD.PRE;

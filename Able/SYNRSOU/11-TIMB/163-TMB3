@@ -1,0 +1,1091 @@
+/*	:SYNRSOU:11-TIMB:163-TMB3 - MORE ROUTINES FOR TIMBRES
+
+Modified:
+1999/10/15 - TY  - Added TDS.PATCH.STR and BUILD.TDS.PATCH.STR()
+1991/10/30 - PF  - Check for KBDTAB present in case placing events on empty track
+1991/10/30 - PF  - Pass Track# 0 to compute.poly.hz.info
+1991/08/29 - PF  - Made RAM Event time conversions work with different sampling rates
+1991/08/05 - PF  - optimizations/bug fixes for poly RAM event features
+1991/07/25 - PF  - Improved ADD.POLY.EVENT.TO.LIST placement algorithm
+1991/07/23 - PF  - Support looping RAM Events
+1991/07/11 - PF  - added calls to dealloc.timbre as needed
+1991/06/19 - PF  - Added ADD.POLY.EVENT.TO.LIST for RAM Event patch list management
+1989/04/24 - CJ  - MOVED CODE FROM 162-TMB2
+*/
+
+/*	THIS ROUTINE CURRENTLY EXPECTS THAT THE PASSED KEY# ACTUALLY		*/
+/*	POINTS TO A PATCH ENTRY IN THE CURRENT KEYBOARD TIMBRE WHICH IS	*/
+/*	TO BE USED AS THE "SOURCE" FOR THIS MERGE INTO THE PATCH LIST.		*/
+/*	THIS IMPLIES THAT THE CALLER OF THIS ROUTINE MUST BE SURE THAT		*/
+/*	THE CORRECT TIMBRE HAS BEEN RECALLED TO THE KEYBOARD OR THE			*/
+/*	RESULTS WILL BE UNPREDICTABLE.												*/
+
+ADD.POLY.EVENT.TO.LIST:PROC(TRACK#, KEY#, IN.TIME, OUT.TIME) PUBLIC SWAPABLE;
+	DCL TRACK#					FIXED;	/*	PASS ABSOLUTE TRACK #			*/
+	DCL KEY#						FIXED;	/*	KEY# TO								*/
+	DCL IN.TIME					ARRAY;	/*	RELATIVE OFFSET FOR IN TIME	*/
+	DCL OUT.TIME				ARRAY;	/*	RELATIVE OFFSET FOR OUT TIME	*/
+	DCL (I,J,K,L,M,N,P,Q)	FIXED;
+	DCL (R)						FIXED;
+	DCL (SSS,SSW,SES,SEW)	FIXED;
+	DCL (TLMSB,TLLSB)			FIXED;
+	DCL FOUND					FIXED;
+	DCL INSERT.FOUND			FIXED;
+   DCL NEW.KEY					FIXED;
+	DCL INSERT.PTR				FIXED;
+	DCL INSERT.LENGTH			FIXED;
+	DCL FILL.IN.PARTIAL		FIXED;
+	DCL START.FRAME.HERE		FIXED;
+	DCL FLEN						FIXED;
+	DCL TP.OFFSET				FIXED;
+	DCL (MIN,MAX)				FIXED;
+	DCL (SOFS,WOFS)			FIXED;
+	DCL REKEY					FIXED;
+	DCL REUSE					FIXED;
+
+	RANGE.USED: PROC (TRACK,RANGE);
+		DCL TRACK	FIXED;
+		DCL RANGE	ARRAY;
+		DCL K			FIXED;
+
+		write(mam) = TRK.HEAD;			/*	get abs ptrs to desired track	*/
+		write(mal) = TRACK;
+
+		#trk = TRACK;
+		#ptr = read(md);
+
+		#NMSB = 0;							/*	init variables for scan. But	*/
+		#NLSB = 0;							/*	note time may be wrong!			*/
+		#LMSB = 0;
+		#LLSB = 0;
+
+		write(mam) = #ptr;				/*	point to track head						*/
+		#SEC = read(md);					/*	point to first nls (if any)			*/
+		if #SEC = 0 then return;		/*	only look further if nls is there	*/
+
+		write(mam)=NAH.PTR+#SEC;
+		write(mal)=NLS.FP;
+		#WRD = read(md);					/*	point to actual first note	*/
+		#ANYF = 1;							/*	assume note will be there	*/
+		#ANYR = 0;							/*	but none behind us now.		*/
+
+		write(mal) = #wrd;				/*	see if it as eos				*/
+		if read(md) = NLS.EOS			/*	if so, get next real thing	*/
+		then call ADVANCE.TO.NEXT.NOTE;
+
+		/*	else pointers are all set up, but note #NMSB,	*/
+		/*	#NLSB are wrong because we don't have the first	*/
+		/*	delta time in #NLSB										*/
+
+		do while (#ANYF <> 0);			/*	until end of track			*/
+			call look.up.note.info;		/*	get #W1 - #w4					*/
+
+			if (isa.rest.note)			/*	skip over rest notes,		*/
+			or (isa.rte.note )			/*	rtes								*/
+			or (isa.ilp.note )			/*	and ilps							*/
+			then do; end;
+
+			ELSE DO;
+				K = (#W2&"77")+12;							/*	GET KEY #	*/
+				IF (#W4&(RAISE.KEY\LOWER.KEY))<>0 THEN DO;
+					IF (#W4&RAISE.KEY)<>0 THEN	K=K+12;
+					ELSE								K=K-12;
+				END;
+
+				IF K<RANGE(0)
+				THEN RANGE(0)=K;
+				IF K>RANGE(1)
+				THEN RANGE(1)=K;
+			END;
+
+			call ADVANCE.TO.NEXT.NOTE;		/*	goto next note on track		*/
+		end;
+
+		RETURN;
+	END;
+
+	ANY.USES: PROC (TRACK,SKEY,EKEY);	/*	ANY OCCURRENCES OF KEY ON TRACK	*/
+		DCL TRACK	FIXED;
+		DCL SKEY		FIXED;
+		DCL EKEY		FIXED;
+		DCL K			FIXED;
+
+		write(mam) = TRK.HEAD;		/*	get abs ptrs to desired track	*/
+		write(mal) = TRACK;
+
+		#trk = TRACK;
+		#ptr = read(md);
+
+		#NMSB = 0;						/*	init variables for scan. But	*/
+		#NLSB = 0;						/*	note time may be wrong!			*/
+		#LMSB = 0;
+		#LLSB = 0;
+
+		write(mam) = #ptr;			/*	point to track head						*/
+		#SEC = read(md);				/*	point to first nls (if any)			*/
+		if #SEC = 0 then return;	/*	only look further if nls is there	*/
+
+		write(mam)=NAH.PTR+#SEC;
+		write(mal)=NLS.FP;
+		#WRD = read(md);				/*	point to actual first note	*/
+		#ANYF = 1;						/*	assume note will be there	*/
+		#ANYR = 0;						/*	but none behind us now.		*/
+
+		write(mal) = #wrd;			/*	see if it as eos				*/
+		if read(md) = NLS.EOS		/*	if so, get next real thing	*/
+		then call ADVANCE.TO.NEXT.NOTE;
+
+		/*	else pointers are all set up, but note #NMSB,	*/
+		/*	#NLSB are wrong because we don't have the first	*/
+		/*	delta time in #NLSB										*/
+
+		do while (#ANYF <> 0);		/*	until end of track				*/
+			call look.up.note.info;	/*	get #W1 - #w4						*/
+
+			if (isa.rest.note)		/*	skip over rest notes,			*/
+			or (isa.rte.note )		/*	rtes									*/
+			or (isa.ilp.note )		/*	and ilps								*/
+			then do; end;
+
+			ELSE DO;
+				K = (#W2&"77")+12;				/*	GET KEY #	*/
+				IF (#W4&(RAISE.KEY\LOWER.KEY))<>0 THEN DO;
+					IF (#W4&RAISE.KEY)<>0 THEN	K=K+12;
+					ELSE								K=K-12;
+				END;
+
+				IF ((K>=SKEY) AND (K<=EKEY))	/*	key falls within passed range	*/
+				THEN RETURN 1;
+			END;
+
+			call ADVANCE.TO.NEXT.NOTE;			/*	goto next note on track		*/
+		end;
+
+		RETURN 0;						/*	no occurrences of key range on this track	*/
+	END;
+
+	P.MATCH: PROC (PTR,TP.OFFSET,CODE);
+		DCL PTR			FIXED;
+		DCL TP.OFFSET	FIXED;
+		DCL CODE			FIXED;
+		DCL K				FIXED;
+
+		IF (P.LOOKUP(PTR+PT.VOL   )<>MISC.BUF(PT.VOL   ))
+		OR (P.LOOKUP(PTR+PT.TUN   )<>MISC.BUF(PT.TUN   ))
+		OR (P.LOOKUP(PTR+PT.TLEN  )<>MISC.BUF(PT.TLEN  ))
+		OR (P.LOOKUP(PTR+PT.TLEN+1)<>MISC.BUF(PT.TLEN+1))
+		OR (P.LOOKUP(PTR+PT.LLEN  )<>MISC.BUF(PT.LLEN  ))
+		OR (P.LOOKUP(PTR+PT.LLEN+1)<>MISC.BUF(PT.LLEN+1))
+		OR (P.LOOKUP(PTR+PT.ONLOOP)<>MISC.BUF(PT.ONLOOP))
+		THEN RETURN 0;
+
+		IF (P.LOOKUP(PTR+PT.EVENT)=0) THEN DO;
+			IF (P.LOOKUP(PTR+PT.SOFS  )<>MISC.BUF(PT.INSOFS))
+			OR (P.LOOKUP(PTR+PT.WOFS  )<>MISC.BUF(PT.INWOFS))
+			THEN RETURN 0;
+		END;
+		ELSE DO;
+			IF (P.LOOKUP(PTR+PT.INSOFS)<>MISC.BUF(PT.INSOFS))
+			OR (P.LOOKUP(PTR+PT.INWOFS)<>MISC.BUF(PT.INWOFS))
+			THEN RETURN 0;
+		END;
+
+		IF (CODE=1) THEN DO;
+			K = P.LOOKUP(PTR+PT.TRA);
+			IF K = 0 THEN K=45;
+			K = (K&255) - TP.OFFSET;
+
+			IF (K < P.LOOKUP(PTR+PT.SKEY))
+			OR (K > P.LOOKUP(PTR+PT.EKEY))
+			THEN RETURN 0;
+		END;
+		ELSE DO;
+			IF (P.LOOKUP(PTR+PT.TRA)<>MISC.BUF(PT.TRA))
+			THEN RETURN 0;
+		END;
+
+		RETURN 1;
+	END;
+
+	call STOP.SEQUENCER;			/*	stop sequencer in case we have to call track scan routines above	*/
+
+	/*	Create a system event when adding an event to a timbre since	*/
+	/*	the timbre name of a track may change.  This occurs				*/
+	/*	because the timbre name of a track defaults to the name			*/
+	/*	of the first cue on that track if there is no other name			*/
+	/*	explicitly assigned.															*/
+
+	interp_seq_dirtyness(1);
+
+	NEW.SEQ.INFO = NEW.SEQ.INFO \ 2;	/*	REDRAW INSTRUMENT NAMES ANY TIME	*/
+												/*	EVENT IS ADDED TO LIST.				*/
+	WRITE(MAM) = D115D.NOTE.CHANGE.TRACKS;
+	WRITE(MAL) = TRACK#;					/*	REMEMBER TRACK # ON NEW.SEQ.INFO	*/
+	WRITE(MD) = "177777";				/*		"NEW NOTES" OR "NEW TIMBRE"	*/
+
+	WRITE(MAM)=TRK.HEAD;							/*	SEE IF TRACK HEAD		*/
+	WRITE(MAL)=TRACK#;							/*	EXISTS					*/
+
+	IF READ(MD)=0 THEN DO;						/*	IF NO TRACK HEADER	*/
+		IF ALLOCATE.TRK.HEADER(TRACK#)=0		/*	THEN GET ONE			*/
+		THEN DO;
+			CALL MAXIMIZE.MEMORY.FOR.RECORD;	/*	DO A GOOD JOB IN THE	*/
+			IF ALLOCATE.TRK.HEADER(TRACK#)=0	/*	EFFORT DEPT ANYWAY	*/
+			THEN RETURN (-1);
+		END;
+	END;
+
+	I = TRK.HEAD.LOOKUP(TRACK#,THD.CTIMB);	/*	GET CUR TIMB #			*/
+
+	IF I<>0 THEN DO;								/*	IF ONE, CHECK IT		*/
+		IF (TIM.HEAD.LOOKUP(I,TIM.SYNTH.TYP)&TIM#POLY)=0
+		THEN RETURN (-3);							/*	NOT A POLY TRACK		*/
+	END;
+
+	IF I=0 THEN DO;								/*	NO TIMBRE ON DEST		*/
+		IF COPY.TIMBRE(-3,TRACK#)=0			/*	JUST COPY NULL TIMBRE	*/
+		THEN RETURN (-1);							/*	NO MEMORY				*/
+	END;
+
+	/*	NOW LOOKUP SOURCE PATCH LIST INFO FROM KEYBOARD TIMBRE	*/
+	WRITE(MAM)=TIM.HEAD;
+	WRITE(MAM)=READ(MD);
+	WRITE(MAL)=TIM.PARTIAL.POINTERS;
+	I			 =READ(MD);							/*	SAVE POINTER TO OUR PARTIAL	*/
+	WRITE(MAL)=TIM.KBDTAB.PTR;					/*	POINT TO KBDTAB	*/
+	WRITE(MAM)=TIM.PTR+READ(MD)-1;			/*	POINT TO KBD LOOKUP TABLE	*/
+	WRITE(MAL)=(KEY#*KLT.SIZE)+KLT.PATCH.TIM.PTR;
+	IF (READ(MD)=0)								/*	NO ENTRY FOR THIS KEY?	*/
+	THEN DO;											/*	WE ARE REALLY HOSED	*/
+		RETURN (-4);								/*	UNKNOWN ERROR CONDITION	*/
+	END;
+
+	J=I+READ(MD);									/*	SAVE POINTER TO PATCH FRAME	*/
+
+	CALL P.LOOKUP(J+PT.NAME);					/*	COPY INFO INTO MISC.BUF	*/
+	DO L=PT.NAME TO PT.COPYL-1;
+		MISC.BUF(L)=READ(MDI);
+	END;
+
+	TP.OFFSET = 0;									/*	INIT TRANSPOSE OFFSET TO NULL	*/
+	MIN = 0;MAX = MAX.KEY#;						/*	INIT VALID RANGE TO ENTIRE KBD	*/
+
+	IF   (MISC.BUF(PT.TRA)=0)					/*	CHECK FOR NO USER TRANSPOSE OFFSET	*/
+	THEN  MISC.BUF(PT.TRA)=45\256;			/*	SET TO DEFAULT VALUE	*/
+
+	TP.OFFSET = (MISC.BUF(PT.TRA)&255) - KEY#;	/*	COMPUTE SIGNED XPOS OFFSET AMOUNT	*/
+	IF (TP.OFFSET < 0)									/*	COMPUTE NEW VALID MIN/MAX	*/
+	THEN MIN = ABS(TP.OFFSET);
+	ELSE MAX = MAX - TP.OFFSET;
+
+	/*	NOW CONVERT PASSED IN/OUT TIMES TO 24 BIT SAMPLE FORMAT	*/
+
+	call COMPUTE.POLY.HZ.INFO(0,KEY#,0);			/*	stuff global freq vars	*/
+	NOTEADD=shl(NOTEADD,MISC.BUF(PT.STEREO));		/*	account for stereo files	*/
+
+	/*	compute in time	*/
+	call COPY32(IN.TIME, BitMsbArray);				/*	copy to global		*/
+	call ratio_multiply(1000, SAMP.SPEED);			/*	get clock msecs	*/
+	call ratio_multiply(10000, 99);
+	call ratio_multiply(NOTEINC*NOTEADD, NOTENUM);
+
+	sss=shl(bitmsb,8)\shr(bitlsb,8);					/*	convert 32 bit sample to sec/wrd	*/
+	ssw=bitlsb&254;
+	sss=sss+shr(bl.poly,8);								/*	add in sample hdr offset	*/
+
+	/*	compute out time	*/
+	call COPY32(OUT.TIME, BitMsbArray);				/*	copy to global		*/
+	call ratio_multiply(1000, SAMP.SPEED);			/*	get clock msecs	*/
+	call ratio_multiply(10000, 99);
+	call ratio_multiply(NOTEINC*NOTEADD, NOTENUM);
+
+	ses=shl(bitmsb,8)\shr(bitlsb,8);					/*	convert 32 bit sample to sec/wrd	*/
+	sew=bitlsb&254;
+	ses=ses+shr(bl.poly,8);								/*	add in sample hdr offset	*/
+
+	if ((ses ilt sss))									//	see if mark.start before mark.end
+	or ((ses  =  sss)
+	and (sew ilt ssw))
+	then do;													//	switch mark.start and mark.end positions
+		i=ses; ses=sss; sss=i;
+		i=sew; sew=ssw; ssw=i;
+	end;
+
+	TLMSB=MISC.BUF(PT.TLEN	);							//	INIT NEW TOTAL LENGTH VARIABLES
+	TLLSB=MISC.BUF(PT.TLEN+1);
+
+	IF MISC.BUF(PT.ONLOOP)<>3							//	no loop
+	THEN DO;
+		tlmsb=ses-sss;										//	compute new total length based on in/out times
+		tllsb=sew-ssw;
+		if tllsb<0 then do;
+			tlmsb=tlmsb-1;
+			tllsb=tllsb+256;
+		end;
+		tllsb=tllsb+shl(tlmsb,8);						//	convert to 32-bit format
+		tlmsb=shr(tlmsb,8);
+	END;
+
+	ELSE IF (SSS<>MISC.BUF(PT.SOFS))					//	looping and new mark start offset
+	OR		  (SSW<>MISC.BUF(PT.WOFS))
+	THEN DO;													//	try to maintain current loop end point
+		K=SSS;												//	ASSIGN NEW IN TIME TO K,L
+		L=SSW;
+		M=MISC.BUF(PT.SOFS);								//	OLD IN TIME TO M,N
+		N=MISC.BUF(PT.WOFS);
+
+		//	IF LOOP IS FROM SOUND FILE, COPY IT TO PARTIAL AREA HERE
+		//	SO WE CAN CAN KEEP CONTROL OF OVERALL LENGTH EASIER.
+		IF (MISC.BUF(PT.TLEN)\MISC.BUF(PT.TLEN+1))=0
+		THEN DO;
+			MISC.BUF(PT.TLEN	)=MISC.BUF(PT.SFTL  );
+			MISC.BUF(PT.TLEN+1)=MISC.BUF(PT.SFTL+1);
+			MISC.BUF(PT.LLEN	)=MISC.BUF(PT.SFLL  );
+			MISC.BUF(PT.LLEN+1)=MISC.BUF(PT.SFLL+1);
+		END;
+
+		IF (K ILT M)										//	NEW IN TIME BEFORE OLD IN TIME
+		OR ((K  =  M)
+		AND (L ILT N))
+		THEN DO;
+			SOFS=M-K;										//	COMPUTE OFFSET BETWEEN OLD AND NEW
+			WOFS=N-L;
+			IF WOFS<0										//	CHECK FOR BORROW
+			THEN DO;
+				SOFS=SOFS-1;
+				WOFS=WOFS+256;
+			END;
+			L=WOFS\SHL(SOFS,8);							//	GET OFFSET INTO 32 BIT FORMAT
+			K=SHR(SOFS,8);
+
+			TLMSB=MISC.BUF(PT.TLEN	)+K;				//	NOW COMPUTE NEW TOTAL LENGTH
+			TLLSB=MISC.BUF(PT.TLEN+1)+L;
+			IF (TLLSB ILT MISC.BUF(PT.TLEN+1))
+			THEN TLMSB=TLMSB+1;
+		END;
+		ELSE IF (K IGT M)									//	NEW IN TIME IS LATER THAN OLD IN TIME
+		OR		 ((K	=	M)
+		AND	  (L IGT N))
+		THEN DO;
+			SOFS=K-M;										//	COMPUTE OFFSET BETWEEN OLD AND NEW
+			WOFS=L-N;
+			IF WOFS<0
+			THEN DO;
+				SOFS=SOFS-1;
+				WOFS=WOFS+256;
+			END;
+			IF  (SOFS IGT MISC.BUF(PT.MAX  ))		/*	DO SOME LIMIT CHECKING HERE	*/
+			OR ((SOFS  =  MISC.BUF(PT.MAX  ))
+			AND (WOFS IGT MISC.BUF(PT.MAX+1)))
+			THEN DO;
+				TLMSB=0;										/*	TRYING TO SET MARK BEYOND END OF SOUND FILE	*/
+				TLLSB=0;										/*	LIMIT LENGTH TO ZERO	*/
+			END;
+			ELSE DO;											/*	MUST ADJUST TOTAL LENGTH HERE	*/
+				L=WOFS\SHL(SOFS,8);						/*	GET OFFSET INTO 32 BIT FORMAT	*/
+				K=SHR(SOFS,8);
+
+				TLMSB=MISC.BUF(PT.TLEN	)-K;			/*	NOW COMPUTE NEW TOTAL LENGTH	*/
+				TLLSB=MISC.BUF(PT.TLEN+1)-L;
+				IF (TLLSB IGT MISC.BUF(PT.TLEN+1))
+				THEN TLMSB=TLMSB-1;
+			END;
+		END;
+	END;
+
+	/*	NOW STUFF NEW TIMES INTO MISC.BUF FOR CALL TO SETUP.POLY.INFO	*/
+	MISC.BUF(PT.TLEN	)=TLMSB;
+	MISC.BUF(PT.TLEN+1)=TLLSB;
+	MISC.BUF(PT.INSOFS)=SSS;
+	MISC.BUF(PT.INWOFS)=SSW;
+	MISC.BUF(PT.EVENT )=1;						/*	SET TYPE TO POLY EVENT	*/
+
+	CALL SETUP.POLY.INFO;						/*	CHECK LIMITS, COMPUTE INFO	*/
+
+	/*	NOW WE HAVE PATCH FRAME INFO COMPUTED...	*/
+	/*	LOOK FOR A PLACE TO PUT IT IN THE DESTINATION TRACKS PATCH LIST.	*/
+
+	FOUND			 = 0;								/*	INIT LOOP VARS	*/
+	INSERT.FOUND = 0;
+	NEW.KEY		 = MIN;
+	REKEY			 = 0;
+
+	I=TRK.HEAD.LOOKUP(TRACK#,THD.CTIMB);	/*	LOOK UP TIMBRE #	*/
+
+	WRITE(MAM)=TIM.HEAD;
+	WRITE(MAL)=I;
+	WRITE(MAM)=READ(MD);
+	WRITE(MAL)=TIM.PARTIAL.POINTERS;
+	P			 =READ(MD);							/*	SAVE POINTER TO OUR PARTIAL	*/
+	WRITE(MAL)=TIM.KBDTAB.PTR;					/*	POINT TO KBDTAB	*/
+	K			 =TIM.PTR+READ(MD)-1;			/*	SAVE POINTER TO KBD LOOKUP TABLE	*/
+
+	/*	FIRST CHECK TO SEE IF WE CAN REUSE THE KEY# PASSED IN	*/
+	WRITE(MAM)=K;									/*	POINT TO KBD LOOKUP TABLE	*/
+	WRITE(MAL)=(KEY#*KLT.SIZE)+KLT.PATCH.TIM.PTR;
+	IF (K<TIM.PTR)
+	OR (READ(MD)=0)								/*	NO ENTRY FOR THIS KEY?	*/
+	THEN DO;											/*	USE THIS KEY	*/
+		NEW.KEY=KEY#;								/*	WE CAN REUSE THIS KEY	*/
+		INSERT.FOUND=1;							/*	BUT WE WILL HAVE TO INSERT A NEW PATCH FRAME	*/
+	END;
+	ELSE DO;											/*	DEST KEY IS BEING USED	*/
+		J=P+READ(MD);								/*	GET POINTER TO PATCH FRAME	*/
+
+		CALL P.LOOKUP(J+PT.SKEY);				/*	LOOKUP STARTING/ENDING KEY	*/
+		M=READ(MDI);
+		N=READ(MD );
+
+		/*	NOW SEE IF WE CAN REUSE THIS FRAME	*/
+		CALL P.LOOKUP(J+PT.NAME);				/*	SOUND FILE NAME MUST MATCH	*/
+		L=0;
+		DO WHILE	(L<4)
+		AND		(READ(MDI)=MISC.BUF(PT.NAME+L));
+			L=L+1;
+		END;
+		IF  (L=4)								/*	NAME MATCHES	*/
+		AND ((ANY.USES(TRACK#,M,N)=0)		/*	NO OCCURRENCES OF THE RANGE WE ARE CONTEMPLATING	*/
+		OR   (P.MATCH(J,0,0)=1))			/*	ALL PERTINANT INFO MATCHES	*/
+		THEN DO;									/*	WE CAN USE IT!	*/
+			REKEY=KEY#;							/*	SAVE KEY#	*/
+			REUSE=1;								/*	SET REUSE STATUS FLAG	*/
+		END;
+	END;
+
+	IF ((INSERT.FOUND=0) AND (REUSE=0))	/*	CAN'T REUSE SAME KEY-LOOK FOR INSERT OR ANOTHER ENTRY TO REUSE	*/
+	THEN DO;
+
+		CALL P.LOOKUP(J+PT.SKEY);
+		M=READ(MDI);							/*	SAVE STARTING KEY	*/
+		N=READ(MD);								/*	AND ENDING KEY OF THIS FRAME	*/
+
+		IF  (M = 0)								/*	CHECK FOR SIMPLE TIMBRE	*/
+		AND (N = MAX.KEY#)					/*	ONE SOUND FILE ACROSS ENTIRE KBD	*/
+		THEN DO;									/*	FREE UP UNUSED RANGES	*/
+			M = MAX.KEY#;N = 0;				/*	PRIME RANGE VARS	*/
+			CALL RANGE.USED(TRACK#,LOC(ADDR(M)));	/*	SCAN TRACK FOR OTHER USES	*/
+			CALL P.LOOKUP(J+PT.SKEY);		/*	POINT BACK TO STARTING KEY IN PATCH ENTRY	*/
+			WRITE(MDI)=M;						/*	WRITE IN NEW RANGE	*/
+			WRITE(MD )=N;
+
+			WRITE(MAM)=K;						/*	POINT TO KBD LOOKUP TABLE	*/
+			DO Q=0 TO MAX.KEY#;				/*	LOOP OVER ALL KEYS	*/
+				IF (Q<M) OR (Q>N)				/*	IF WE HAVE JUST ZAPPED THIS KEY	*/
+				THEN DO;							/*	ZERO IT IN KBDTAB FOR CHECKS BELOW	*/
+					WRITE(MAL)=(Q*KLT.SIZE)+KLT.PATCH.TIM.PTR;
+					WRITE(MD)=0;
+				END;
+			END;
+		END;
+
+		DO Q=MIN TO MAX;								/*	SCAN ALL KEYS IN OUR RANGE	*/
+			WRITE(MAM)=K;								/*	POINT TO KBD LOOKUP TABLE	*/
+			WRITE(MAL)=(Q*KLT.SIZE)+KLT.PATCH.TIM.PTR;
+			IF (READ(MD)=0)							/*	NO PATCH ON THIS KEY	*/
+			THEN DO;										/*	POSSIBLE INSERT POSITION	*/
+				IF (Q<KEY#)								/*	THIS KEY IS BELOW OUR OPTIMUM KEY	*/
+				OR (NEW.KEY<KEY#)						/*	OR BEST KEY SO FAR IS STILL BELOW BEST CHOICE	*/
+				THEN NEW.KEY=Q;						/*	THIS IS NEW BEST CHOICE	*/
+				INSERT.FOUND=1;						/*	NEW.KEY POINTS TO INSERT POSITION	*/
+			END;
+			ELSE DO;										/*	THERE IS A PATCH ENTRY FOR THIS KEY	*/
+
+				J=P+READ(MD);							/*	GET POINTER TO PATCH FRAME	*/
+
+				CALL P.LOOKUP(J+PT.SKEY);			/*	LOOKUP KEY RANGE	*/
+				M=READ(MDI);
+				N=READ(MD );
+
+				/*	NOW LOOK TO SEE IF WE CAN REUSE THIS PATCH ENTRY	*/
+				CALL P.LOOKUP(J+PT.NAME);			/*	SOUND FILE NAME MUST MATCH	*/
+				L=0;
+				DO WHILE	(L<4)
+				AND		(READ(MDI)=MISC.BUF(PT.NAME+L));
+					L=L+1;
+				END;
+				IF  (L=4)								/*	NAME MATCHES	*/
+				AND ((ANY.USES(TRACK#,M,N)=0)		/*	IF THERE ARE NO OCCURRENCES OF THE RANGE WE ARE CONTEMPLATING	*/
+				OR   (P.MATCH(J,TP.OFFSET,1)=1))	/*	ALL PERTINANT INFO MATCHES	*/
+				THEN DO;									/*	WE CAN USE IT!	*/
+
+					/*	IF P.MATCH RETURNS TRUE, THEN WE KNOW THAT THE NEW KEY#	*/
+					/*	CALCULATED ON THE DEST TRA OFFSET WILL BE WITHIN THE	*/
+					/*	RANGE OF THIS PATCH ENTRY.										*/
+					R = P.LOOKUP(J+PT.TRA);			/*	CALCULATE NEW KEY# OFF PT.TRA	*/
+					IF R = 0 THEN R=45;				/*	IF NO VALID DEFAULT TO A3	*/
+					M = (R&255) - TP.OFFSET;		/*	GET NEW KEY#	*/
+					IF (M<KEY#) OR (REKEY<KEY#)	/*	LOOK FOR CLOSEST TO TARGET	*/
+					THEN REKEY=M;						/*	BEST NEW CHOICE FOR REUSE	*/
+					REUSE=1;								/*	REKEY POINTS TO BEST RESUE CHOICE	*/
+				END;
+			END;											/*	CHECK FOR REUSE	*/
+		END;												/*	OF LOOPING THRU VALID KEY RANGE	*/
+	END;													/*	OF LOOKING FOR BEST INSERT AND/OR REUSE POSITIONS	*/
+
+	IF ((INSERT.FOUND=0) AND (REUSE=0))			/*	NO POSSIBLE INSERT OR REUSE FOUND	*/
+	THEN RETURN (-3);									/*	PATCH LIST IS FULL	*/
+
+	IF  (INSERT.FOUND=1)								/*	FOUND A POSSIBLE INSERT POSITION	*/
+	AND (REKEY<>KEY#)									/*	BUT A DIRECT REPLACEMENT GET FIRST PRIORITY	*/
+	THEN DO;												/*	WE WILL INSERT A PATCH FRAME	*/
+
+		J=TIM.HEAD.LOOKUP(I,TIM.PARTIAL.POINTERS);	/*	GET POINTER TO PARTIAL AGAIN	*/
+
+		/*	CHECK FOR SUPPRESSED PARTIAL	*/
+		IF P.LOOKUP(J) = SUP THEN DO;				/*	EXPAND SUPPRESSED PARTIAL	*/
+			INSERT.PTR = J + 1;						/*	INSERT AFTER SUP			*/
+			INSERT.LENGTH = NUM.PARAMS - 1 + PT.LEN;
+			FILL.IN.PARTIAL = 1;						/*	DO FILL IN BASIC INFO	*/
+			START.FRAME.HERE = J + NUM.PARAMS;	/*	PUT FRAME HERE		*/
+		END;
+
+		ELSE DO;											/*	SEARCH FOR BEST INSERT ADDRESS	*/
+
+			WRITE(MAM)=K;								/*	POINT TO KBDTAB	*/
+
+			DO L=0 TO MAX.KEY#;						/*	LOOP THRU ALL ENTRIES	*/
+				WRITE(MAL)=(L*KLT.SIZE)+KLT.PATCH.TIM.PTR;
+				IF (READ(MD)<>0) THEN DO;			/*	LOOK FOR ALL FRAME POINTERS	*/
+					IF L<NEW.KEY THEN J=P+READ(MD);
+					ELSE IF INSERT.PTR=0
+					THEN INSERT.PTR=P+READ(MD);
+				END;
+			END;
+			IF INSERT.PTR=0
+			THEN INSERT.PTR=J+PT.LEN;
+			INSERT.LENGTH = PT.LEN;					/*	ENOUGH FOR WHOLE FRAME	*/
+			FILL.IN.PARTIAL = 0;						/*	NO BASIC PARAMS TO FILL	*/
+			START.FRAME.HERE = INSERT.PTR;		/*	START FRAME HERE			*/
+		END;
+	END;
+	ELSE DO;				/*	REUSING	*/
+
+		WRITE(MAM)=K;						/*	POINT TO KBD LOOKUP TABLE	*/
+		WRITE(MAL)=(REKEY*KLT.SIZE)+KLT.PATCH.TIM.PTR;
+		J=P+READ(MD);						/*	GET POINTER TO PATCH FRAME	*/
+
+		CALL P.LOOKUP(J+PT.TRA);		/*	LOOKUP XPOS OFFSET FROM DEST PATCH FRAME	*/
+		MISC.BUF(PT.TRA)=READ(MD);
+
+		CALL P.LOOKUP(J+PT.VOL);		/*	WRITE COMPUTED PARTIAL INFO OVER THIS FRAME	*/
+		DO L=PT.VOL TO PT.COPYL-1;
+			WRITE(MDI)=MISC.BUF(L);
+		END;
+
+		WRITE(MAM)=TIM.HEAD;
+		WRITE(MAL)=I;
+		WRITE(MAM)=READ(MD);
+		WRITE(MAL)=TIM.POLY.EVENT;		/*	POINT TO POLY EVENT STATUS	*/
+		WRITE(MD )=1;						/*	JUST DO A HARD SET HERE	*/
+
+		RETURN REKEY;						/*	RETURN KEY TO CALLER	*/
+	END;
+
+	CALL DEALLOC(I);
+
+	IF EX.ROOMFOR(INSERT.LENGTH) = 0	/*	CHECK MEMORY	*/
+	THEN DO;
+		CALL ALLOC.TIMBRE(I);
+		RETURN (-1);
+	END;
+
+	CALL COPY.EXT.MEM(PAR.PTR, INSERT.PTR,	/*	COPY EXISTING PARAMS UP	*/
+							PAR.PTR, INSERT.PTR+INSERT.LENGTH,
+							PAR.TOP-INSERT.PTR);
+
+	/*	FILL IN BASIC PARTIAL IF NEEDED	*/
+
+	IF FILL.IN.PARTIAL THEN DO;			/*	EXPANDING A SUPPRESSED PARTIAL	*/
+		CALL P.LOOKUP(INSERT.PTR - 1);	/*	SET UP MAM AND MAL					*/
+		DO L=0 TO NUM.PARAMS-1;				/*	ZERO OUT FRAME							*/
+			WRITE(MDI)=0;
+		END;
+		CALL P.STORE(INSERT.PTR+(P.EPEAKL	 -1),1000);	/*	WRITE DEFAULTS	*/
+		CALL P.STORE(INSERT.PTR+(P.ESUSTL	 -1),1000);
+		CALL P.STORE(INSERT.PTR+(P.NEW.CHORUS-1),1000);
+		CALL P.STORE(INSERT.PTR+(P.PTUNING	 -1),4400);
+		CALL P.STORE(INSERT.PTR+(P.COEF.LOC	 -1),1000);
+		CALL P.STORE(INSERT.PTR+(P.RATIO		 -1),1000);
+	END;
+
+	/*	FILL UP FRAME IN QUESTION	*/
+
+	MISC.BUF(PT.SKEY)=NEW.KEY;						/*	DROP IN NEW KEY	*/
+	MISC.BUF(PT.EKEY)=NEW.KEY;
+	MISC.BUF(PT.TRA) =(NEW.KEY+TP.OFFSET)\256;	/*	WRITE IN NEW PT.TRA VALUE	*/
+
+	CALL P.STORE(START.FRAME.HERE, MOR);		/*	SET UP POINTERS & STORE FIRST WORD	*/
+	WRITE(MDI) = PT.TYPE;
+	WRITE(MDI) = PT.LEN;
+	DO K=PT.NAME TO PT.COPYL-1;					/*	WRITE REST OF FRAME	*/
+		WRITE(MDI)=MISC.BUF(K);
+	END;
+   DO K=PT.COPYL TO PT.LEN-1;                /*	CLEAR REST OF FRAME	*/
+      WRITE(MDI)=0;
+   END;
+
+	CALL COMPACT.TIMBRES(PAR.PTR,PAR.NUMT);	/*	SET UP NEW POINTERS	*/
+
+	NEW.PRM.INFO=NEW.PRM.INFO\1;
+
+	CALL TIM.HEAD.LOOKUP(I,TIM.CSEM);
+	INITIALCSEM=INITIALCSEM+1;
+	WRITE(MD)=INITIALCSEM;
+
+	CALL ALLOC.TIMBRE(I);
+
+	CALL COMPUTE.USAGE.KEY#(I);	/*	GET NEW USAGE KEY #						*/
+	CALL COMPUTE.ENV.PARAMS(I);	/*	COMPUTE ENVELOPE PARAMETERS			*/
+	CALL COMPUTE.LOGS		  (I);	/*	COMPUTE LOGS OF RATIO, CHORUS, ETC.	*/
+	CALL COMPUTE.RBITS	  (I);	/*	RECOMPUTE REAL TIME EFFECTS BITS - ALWAYS CALL AFTER COMPUTE.ENV.PARAMS SO TOPTIONS IS SET UP	*/
+	CALL COMPUTE.MISC.INFO;			/*	COMPUTE RIBBON & PRESSURE FILTERS	*/
+	CALL CHECK.MEMORY.FOR.RECORD;	/*	MAKE SURE WE STILL HAVE ENOUGH ROOM	*/
+
+	RETURN NEW.KEY;
+
+END ADD.POLY.EVENT.TO.LIST;
+
+DCL TDS.LINE#			FIXED PUBLIC;	/*	LINE # FROM ASSIGN SCREEN	*/
+DCL TDS.PATCH.STR(7)	FIXED PUBLIC;	//	Array to hold the 14-character patch assignment string
+
+//	The procedure BUILD.TDS.PATCH.STR builds the 14-character patch assignment message
+//	available for VK window and screen use from any module
+BUILD.TDS.PATCH.STR: proc PUBLIC SWAPABLE;
+	dcl partial	fixed;
+	dcl str(2)	fixed;
+	dcl string.index	lit 'partial';	//	We'll be done with "partial" by the time we need this
+
+	dcl srscale	proc(fixed,fixed,fixed) returns(fixed) external;
+
+	//	Let's forego all the careful stuff since the only places that call this procedure have already been careful
+	#if (false)
+		partial = find.partial;															//	Find first selected partial
+		if (TIM.HEAD.LOOKUP(0,tim.synth.typ+partial) != TIM#POLY) return;	//	Bail if not a poly patch list timbre
+		if (p.lookup(find.frame(partial,1)) != MOR)					 return;	//	Point to the first timbre frame and test for failure
+
+		write("313") = count.timbre.frames(partial);				//	Make sure we don't try to point past the last frame
+		if (TDS.LINE# ige read("313")) TDS.LINE# = read("313")-1;
+		partial = find.frame(partial,TDS.LINE#+1);				//	Now point to the desired timbre frame
+	#else
+		partial = find.frame(find.partial,TDS.LINE#+1);			//	Point to the desired timbre frame
+	#endif
+
+	TDS.PATCH.STR(0) = 0;	//	Clear the string
+
+	//	ÉÉÉÉÉÉsÉtÉaÉrÉtÉiÉnÉgÉÉÉkÉeÉyÉÉÉÉÉÉ
+	//	CONV.KEY#.TO.STR(p.lookup(partial+pt.skey),str);
+	p.lookup(partial+pt.skey);			//	point md to the starting key
+	CONV.KEY#.TO.STR(read(mdi),str);
+	//	If the ending key was only two characters (i.e., no sharp), nuke the trailing space
+	if (byte(str,2) == a.space) str(0) = 2;
+	append.to.str(TDS.PATCH.STR,str);
+	appendc(TDS.PATCH.STR,a.minus);
+
+	//	ÉÉÉÉÉÉÉÉeÉnÉdÉiÉnÉgÉÉÉkÉeÉyÉÉÉÉÉÉÉÉ
+	//	CONV.KEY#.TO.STR(p.lookup(partial+pt.ekey),str);
+	CONV.KEY#.TO.STR(read(mdi),str);
+	//	If the ending key was only two characters (i.e., no sharp), nuke the trailing space
+	if (byte(str,2) == a.space) str(0) = 2;
+	append.to.str(TDS.PATCH.STR,str);
+	appendc(TDS.PATCH.STR,a.comma);
+
+	//	ÉÉÉÉÉtÉrÉaÉnÉsÉpÉoÉsÉeÉÉÉkÉeÉyÉÉÉÉÉ
+	write(cond|never) = read(mdi);	//	skip past pt.vol
+	//	p.lookup(partial+pt.tra);
+	if (read(md) != 0) {
+		appendc(TDS.PATCH.STR,a.space);
+		CONV.KEY#.TO.STR(read(md)&255,str);
+		append.to.str(TDS.PATCH.STR,str);
+	}
+	else {
+		//	Let's not be pussies.  If there is no user-specified transpose key, then
+		//	we'll display the "effective" transpose key based on the SFM Ocatve Base.
+		//	Enclose the pitch in partenthesis to let the user know this is the effective pitch but is not yet defined
+		appendc(TDS.PATCH.STR,a.lparen);
+		CONV.KEY#.TO.STR(sync.middle.c+9+srscale(p.lookup(partial+pt.pitch),3,256),str);
+		//	If the ending key was only two characters (i.e., no sharp), nuke the trailing space
+		if (byte(str,2) == a.space) str(0) = 2;
+		append.to.str(TDS.PATCH.STR,str);
+		appendc(TDS.PATCH.STR,a.rparen);
+	}
+
+	//	Pad to the end with spaces.
+	do string.index = TDS.PATCH.STR(0) to 13;
+		pbyte(TDS.PATCH.STR,string.index,a.space);
+	end;
+	TDS.PATCH.STR(0) = 14;
+end BUILD.TDS.PATCH.STR;
+
+GET.NAME.FROM.PARTIAL:PROC(WHERE) PUBLIC SWAPABLE;
+   DCL WHERE FIXED;
+   DCL I     FIXED;
+
+   // Provide a clean lnbuf in all cases; zero out length word and all bytes
+   DO I=0 TO sf.file.handle.wl;
+      LNBUF(I)=0;
+   END;
+
+   CALL P.LOOKUP(WHERE+PT.NAME);				/*	GET FILE NAME	*/
+   DO I=0 TO 3;
+      FNBUF(I+1)=READ(MDI);
+   END;
+
+   // Set length here, although not all software did so. Note FNBUF is zero filled at this point to a length of 8.
+   FNBUF(0) = 8;
+
+   // GRAB LONG NAME FROM PARTIAL IF IT EXISTS AND WILL FIT INTO LNBUF
+   // We had limited the length of the long name (when it is assigned, althrough we check it here)
+   // so that in 128 bytes it can be stored in a C-string with a trailing null.
+   // This check is redundant - when the handle was constructed unicode characters were chopped
+   // off the end until it fit into a 128-byte buffer including the trailing null
+   IF ((P.LOOKUP(WHERE+CLEN  ) >  PT.LEN)                      // More data in the frame
+   &&  (P.LOOKUP(WHERE+PT.LEN) != 0     )                      // String length word is > 0
+   &&  (P.LOOKUP(WHERE+PT.LEN) < sf.file.handle.bl)) {         // And in range
+      DO I=0 TO SHR(READ(MD)+3,1)-1;                           // Read in sound file handle from partial
+         LNBUF(I)=READ(MDI);
+      END;
+      
+      // Always keep the upper half of the last work clean, although it should be so already...
+      if ((lnbuf(0) & 1) != 0)
+         pbyte(lnbuf, lnbuf(0), 0);
+   }
+
+   // Else fabricate legitimate lnbuf equal to valid characters in fnbug
+   else {
+      // Set LNBUF to be actual name
+      i = 0;
+      
+      while ((i < 8) && (byte(fnbuf, i) != 0)) {
+         pbyte(lnbuf, i, byte(fnbuf, i));
+         i = i + 1;
+      }
+      
+      lnbuf(0) = i;
+   }
+
+END GET.NAME.FROM.PARTIAL;
+
+LOOP.SEARCH:PROC(TP) PUBLIC SWAPABLE;			/*	PASS 0=COMPLETE SEARCH, 1=SHORT SEARCH	*/
+	DCL (TP,I,J,K,L,M)	FIXED;
+	DCL (BAM,BAL)			FIXED;
+	DCL (R,S,X,Y,Z)		FIXED;
+	DCL (MXM,MXL)			FIXED;
+	DCL (FM, FL)			FIXED;
+	DCL (ACM,ACL)			FIXED;
+	DCL (IX)					FIXED;
+	DCL (LIMM,LIML)		FIXED;
+	DCL (CTR)				FIXED;
+	DCL (INITWOFS)			FIXED;
+	DCL (INITSOFS)			FIXED;
+	DCL (CORR)				FIXED;
+	DCL (OUR.POINTS)		FIXED;
+	DCL (OUR.INC)			FIXED;
+
+	PTPTR=FIND.FRAME(FIND.PARTIAL,TDS.LINE#+1);	/*	FIND DESIRED PARTIAL	*/
+	IF (P.LOOKUP(PTPTR)<>MOR)							/*	MAKE SURE PATCH LIST	*/
+	OR (P.LOOKUP(PTPTR+TYPE)<>PT.TYPE)				/*	OF DESIRED TYPE		*/
+	THEN DO;
+		CALL DISPLAY.ERR(19);							/*	NOT AVAILABLE			*/
+		RETURN;
+	END;
+
+	IF (MODC=0) THEN DO;							/*	MODEL C REQUIRED		*/
+		CALL DISPLAY.ERR(37);
+		RETURN;
+	END;
+
+   GET.NAME.FROM.PARTIAL(PTPTR);
+
+   IF FNBUF(1)=0 THEN DO;						/*	NO FILE NAME?	*/
+		FNBUF(0)=0;									/*	NO NAME		*/
+      LNBUF(0)=0;
+		CALL DISPLAY.ERR(4);
+		CALL MISSING.ERROR;
+		RETURN;
+	END;
+	I=PS.SEARCH;									/*	SEARCH FOR FILE	*/
+	IF I=0 THEN DO;
+		FNBUF(0)=8;									/*	ERROR				*/
+      LNBUF(0)=0;                         /* don't know what's in lnbuf at this point */
+		CALL DISPLAY.ERR(4);
+		CALL MISSING.ERROR;
+		RETURN;
+	END;
+
+	CALL P.LOOKUP(PTPTR+PT.TLEN);				/*	READ TOTAL LENGTH, LOOP LENGTH SO FAR	*/
+	J=READ(MDI); K=READ(MDI);					/*	TOT  LEN MSB, LSB (32-BIT)	*/
+	L=READ(MDI); M=READ(MDI);					/*	LOOP LEN MSB, LSB (32-BIT)	*/
+
+	OUR.POINTS=NUMPOINTS;
+	OUR.INC=1;
+
+	IF P.LOOKUP(PTPTR+PT.STEREO)<>0 THEN DO;
+		IF OUR.POINTS THEN OUR.POINTS=OUR.POINTS+1;
+		OUR.INC=2;
+		K=K&"177776";								/*	SET START AND LENGTH TO	*/
+		M=M&"177776";								/*	EVEN WORD BOUNDARY		*/
+	END;
+
+	J=SHL(J,8)\SHR(K,8); K=K&255;				/*	GET 24-BIT TOT  LEN	*/
+	L=SHL(L,8)\SHR(M,8); M=M&255;				/*	GET 24-BIT LOOP LEN	*/
+
+	IF ((J=0))										/*	MUST SET TOT LEN>256 BEFORE SEARCH	*/
+	OR ((TP<>0)&(L=0))							/*	OR TYPE 1 (SHORT SEARCH) WITH NO LOOP SET	*/
+	THEN DO;
+		CALL DISPLAY.ERR(38);
+		RETURN;
+	END;
+
+	/*	$PAGE - EXTRACT SAMPLE POINTS FOR COMPARISON	*/
+
+	IF NEW.PAN THEN DO;
+		CALL CLEAR.DISPLAY;
+		CALL EMIT.STRING(0,'SEARCHING...');
+
+		/*	Force an immediate update to the VK display on remote devices	*/
+		/*	to provide an immediate update of the VK window display while	*/
+		/*	we are searching for loop points.										*/
+
+		call Flush.VK.Display.To.Termulators;
+	END;
+
+	BAM=P.LOOKUP(PTPTR+PT.SOFS);				/*	BASE ADDRESS MSB	*/
+	BAL=P.LOOKUP(PTPTR+PT.WOFS);				/*	BASE ADDRESS LSB	*/
+	INITSOFS=BAM;									/*	SAVE FOR COMPARE	*/
+	INITWOFS=BAL;
+
+	X=BAM+J; Y=BAL+K-OUR.POINTS;				/*	GET POINTER TO SAMPLES	*/
+	IF Y<0	THEN DO; Y=Y+256; X=X-1; END;	/*	COMPUTE POINTER TO TOTAL.LENGTH LOCATION-NUMPOINTS	*/
+	IF Y>255	THEN DO; Y=Y-256; X=X+1; END;
+
+	LIMM=X-1; LIML=Y+OUR.POINTS;				/*	INITIALIZE LIMIT FOR FULL SEARCH (TOTAL LENGTH-256)	*/
+	IF LIML>255 THEN DO;
+		LIML=LIML-256; LIMM=LIMM+1;
+	END;
+	MXM=(-1); MXL=(-1);							/*	INIT MAX						*/
+	IF TP<>0 THEN DO;								/*	SHORT SEARCH - SPECIAL	*/
+		BAM=X-L; BAL=Y-M;							/*	END POINT MINUS NUMPOINTS MINUS LENGTH	*/
+		IF BAL<0 THEN DO;
+			BAL=BAL+256; BAM=BAM-1;
+		END;
+		IF BAM IGE 4 THEN BAM=BAM-4;			/*	REDUCE BY ADDITIONAL 1024 POINTS WITHOUT OVERFLOW	*/
+		ELSE					BAM=0;
+		IF ((BAM ILT INITSOFS)						  )		/*	CHECK LIMIT	*/
+		OR ((BAM  =  INITSOFS)&(BAL ILT INITWOFS))
+		THEN DO;
+			BAM=INITSOFS; BAL=INITWOFS;		/*	LIMIT TO DATA START	*/
+		END;
+		IF (L IGT 8)								/*	IF LONG LOOP DIALED IN	*/
+		THEN LIMM=BAM+8;							/*	THEN STOP AT +1024 POINTS	*/
+	END;
+
+	FM =BAM; FL =BAL;								/*	INITIALIZE FOUND TO AVOID BUGS	*/
+
+	CALL PSMREAD(SFILE.BASE,X,Y);				/*	GET SAMPLES TO LOOK FOR MATCH	*/
+	DO I=0 TO OUR.POINTS-1;
+		MISC.BUF(I)=READ(PSD);
+	END;
+
+	/*	$PAGE - PERFORM SEARCH FOR LOOP POINT	*/
+
+	CTR=0;											/*	FOR STOP CHECK	*/
+	DO I=0 TO OUR.POINTS-1 BY OUR.INC;		/*	SEARCH N TIMES				*/
+		R=BAM; S=BAL+I;							/*	SEARCH HERE FOR MATCH	*/
+		IF S>255 THEN DO; S=S-256; R=R+1; END;
+		CALL PSMREAD(SFILE.BASE,R,S);
+		DO WHILE	((R ILT LIMM))					/*	SEARCH UP TO LIMIT	*/
+		OR			((R  =  LIMM)&(S ILT LIML));
+			timeshare_with_host();
+			ACM=0; ACL=0;							/*	ACCUMULATE ABS OF DIFFS	*/
+			WRITE("313")=ADDR(MISC.BUF(0));	/*	USE MEM PTR FOR SPEED	*/
+			DO IX=0 TO OUR.POINTS-1;
+				Z=READ(PSD);						/*	GET POINT	*/
+				IF (Z XOR (READ("353")))<0		/*	IF DIFFERENT SIGN	*/
+				THEN DO;
+					IF Z<0 THEN	Z=READ("373")-Z;	/*	COMPUTE POS INTEGER OF ABS(DIFF), 0-65535	*/
+					ELSE			Z=Z-READ("373");
+				END;
+				ELSE DO;								/*	SAME SIGN	*/
+					IF Z<(READ("353"))			/*	CAN USE SIGNED COMPARISON	*/
+					THEN Z=READ("373")-Z;		/*	GET ABS OF DIFFERENCE	*/
+					ELSE Z=Z-READ("373");
+				END;
+				ACL=ACL+Z;							/*	SUM INTO 32 BIT WORD	*/
+				IF ACL ILT Z THEN ACM=ACM+1;	/*	CARRY						*/
+			END;
+			IF ((ACM ILT MXM))					/*	SMALLER ACCUMULATED DIFFERENCE	*/
+			OR ((ACM  =  MXM)&(ACL ILT MXL))
+			THEN DO;
+				MXM=ACM; MXL=ACL;
+				FM=R; FL=S;
+			END;
+
+			S=S+OUR.POINTS;
+			IF S>255 THEN DO;						/*	GET ADDRESS OF NEXT READ	*/
+				S=S-256; R=R+1;
+			END;
+
+			CTR=CTR+1;
+			IF CTR=100 THEN DO;
+				CTR=0;
+				IF STOP.HELD<>0 THEN DO;
+					R=LIMM; S=LIML;
+					I=OUR.POINTS-OUR.INC;
+				END;
+			END;
+		END;				/*	OF LOOP OVER SAMPLES WITH STRIDE NUMPOINTS	*/
+	END;					/*	OF LOOP OVER I	*/
+
+	/*	FM, FL = POINT OF BEST NUMPOINTS MATCH	*/
+
+	/*	$PAGE - COMPUTE CORRELATION FOR DISPLAY	*/
+
+	ACM=0; ACL=0;
+	DO I=0 TO OUR.POINTS-1;						/*	FIRST TOTAL UP MAGNITUDE	*/
+		Z=MISC.BUF(I);								/*	GET VALUE						*/
+		IF Z<0 THEN Z=(-Z);						/*	POS ONLY	*/
+		ACL=ACL+Z;
+		IF ACL ILT Z THEN ACM=ACM+1;
+	END;
+
+	IF ((MXM IGT ACM))							/*	LIMIT DIFFERENCE		*/
+	OR ((MXM  =  ACM)&(MXL IGT ACL))
+	THEN DO;
+		MXM=ACM; MXL=ACL;
+	END;
+
+	DO WHILE ACM<>0;								/*	SHIFT RIGHT TO SCALE FOR DIVIDE	*/
+		ACL=SHR(ACL,1)\SHL(ACM,15);
+		ACM=SHR(ACM,1);
+		MXL=SHR(MXL,1)\SHL(MXM,15);
+		MXM=SHR(MXM,1);
+	END;
+
+	IF ACL=0 THEN ACL=1;							/*	AVOID DIVISION OVERFOW	*/
+
+	LOAD MXL; MUL 10000; CORR=RES;
+	DIV  ACL; CORR=RES;
+
+	IF (READ(4)) IGT (SHR(ACL,1))				/*	PERFORM ROUNDING		*/
+	THEN CORR=CORR+1;
+
+	CORR=10000-CORR;								/*	THIS IS CORR %, 0-100.00	*/
+
+	MXM=(-1);										/*	INIT MAX					*/
+	R=OUR.POINTS-OUR.INC;						/*	INIT BEST FOUND		*/
+	S=OUR.POINTS-OUR.INC;
+
+	CALL PSMREAD(SFILE.BASE,FM,FL);			/*	FIND CLOSEST VALUE	*/
+	DO I=0 TO OUR.POINTS-1 BY OUR.INC;		/*	SEARCH N POINTS		*/
+		CTR=READ(PSD);								/*	GET POINT				*/
+		DO IX=0 TO OUR.POINTS-1 BY OUR.INC;	/*	LOOK FOR BEST MATCH	*/
+			IF (CTR XOR MISC.BUF(IX))<0		/*	DIFFERENT SIGN			*/
+			THEN DO;
+				IF CTR<0 THEN Z=MISC.BUF(IX)-CTR;
+				ELSE			  Z=CTR-MISC.BUF(IX);
+			END;
+			ELSE DO;									/*	SAME SIGN				*/
+				IF CTR<MISC.BUF(IX)
+				THEN Z=MISC.BUF(IX)-CTR;		/*	GET ABS OF DIFFERENCE	*/
+				ELSE Z=CTR-MISC.BUF(IX);
+			END;
+			IF OUR.INC=2 THEN DO;				/*	STEREO					*/
+				CTR=READ(PSD);						/*	GET POINT				*/
+				IF (CTR XOR MISC.BUF(IX+1))<0	/*	DIFFERENT SIGN			*/
+				THEN DO;
+					IF CTR<0 THEN Z=SHR(Z,1)+SHR(MISC.BUF(IX+1)-CTR,1);
+					ELSE			  Z=SHR(Z,1)+SHR(CTR-MISC.BUF(IX+1),1);
+				END;
+				ELSE DO;								/*	SAME SIGN				*/
+					IF CTR<MISC.BUF(IX+1)
+					THEN Z=SHR(Z,1)+SHR(MISC.BUF(IX+1)-CTR,1);		/*	GET ABS OF DIFFERENCE	*/
+					ELSE Z=SHR(Z,1)+SHR(CTR-MISC.BUF(IX+1),1);
+				END;
+			END;
+			IF Z ILT MXM THEN DO;				/*	CLOSER IN VALUE	*/
+				MXM=Z; R=I; S=IX;
+			END;
+		END;
+	END;
+
+	/*	$PAGE - COMPUTE TOTAL & LOOP LENGTHS	*/
+
+	/*	BEST POINTS THAT MATCH:		*/
+	/*		TOT LENGTH-NUMPOINTS+S	*/
+	/*	TO (FM,FL)+R					*/
+
+	L=X-FM; M=Y-FL;								/*	GET LENGTH FROM (TOTLENGTH-NUMPOINTS) BACK TO (FM,FL)	*/
+	IF M<0 THEN DO;
+		M=M+256; L=L-1;
+	END;
+	M=M+S;											/*	OFFSET INTO SAMPLES	*/
+	IF M>255 THEN DO;
+		M=M-256; L=L+1;
+	END;
+	M=M-R;
+	IF M<0 THEN DO;
+		M=M+256; L=L-1;
+	END;
+
+	I=(OUR.POINTS-S);								/*	BACK UP TOTAL LENGTH THIS MUCH		*/
+	K=K-I;											/*	SO SPLICE OCCURS AT CLOSEST POINT	*/
+	IF K<0 THEN DO;
+		K=K+256; J=J-1;
+	END;
+
+	/*	GET 32-BIT FORMATS NOW	*/
+
+	K=K\SHL(J,8); J=SHR(J,8);
+	M=M\SHL(L,8); L=SHR(L,8);
+
+	CALL P.LOOKUP(PTPTR+PT.TLEN);				/*	LOOK UP EARLIER INFO	*/
+	DO I=PT.TLEN TO PT.COPYL-1;				/*	LOOK UP ALL		 INFO	*/
+		MISC.BUF(I)=READ(MDI);
+	END;
+
+	MISC.BUF(PT.TLEN	)=J;						/*	STORE IN NEW TOTAL LENGTH OR LOOP LENGTH	*/
+	MISC.BUF(PT.TLEN+1)=K;
+	MISC.BUF(PT.LLEN	)=L;
+	MISC.BUF(PT.LLEN+1)=M;
+
+	CALL SETUP.POLY.INFO;						/*	COMPUTE LOOP INFO			*/
+
+	CALL P.LOOKUP(PTPTR+PT.WTABL);			/*	STORE WAVE TABLE LENGTH	*/
+	DO I=PT.WTABL TO PT.ONLOOP;				/*	TO USE BY NOTE START		*/
+		WRITE(MDI)=MISC.BUF(I);
+	END;
+	CALL P.LOOKUP(PTPTR+PT.TLEN);				/*	STORE POSSIBLY ALTERED	*/
+	DO I=PT.TLEN TO PT.LLEN+1;					/*	USER SETTINGS				*/
+		WRITE(MDI)=MISC.BUF(I);
+	END;
+
+	NEW.PRM.INFO=NEW.PRM.INFO\32;				/*	REDRAW ON SCREEN			*/
+	RESET.BITS=RESET.BITS\R.LOOPL;			/*	RESET NOTES					*/
+
+	IF (NEW.PAN<>0) THEN DO;					/*	DONE	*/
+		CALL CLEAR.DISPLAY;
+		CALL EMIT.STRING( 0,'DONE WITH SEARCH');
+		CALL EMIT.STRING(16,'MATCH:');
+		CALL EMIT.NUMBER(25,CORR,2,RIGHT.JUST);
+		CALL EMIT.STRING(31,'%');
+		BOTH.DISPLAY=1;
+	END;
+
+END LOOP.SEARCH;
+
+/*	Routine to Recall a Timbre to a track	*/
+RECALL.TIMBRE.TO.TRACK: proc(bank,entry,dest.trk) public swapable;
+	dcl (bank,entry)	fixed;	/*	BANK and ENTRY of desired timbre	*/
+	dcl dest.trk		fixed;	/*	abs. track # to place timbre on	*/
+
+	our.bank=bank; our.timbre=entry;
+	call DISPLAY.BANK.BUTTONS;				/*	set up lights	*/
+	call DISPLAY.TIMBRE.RECALL.BUTTONS;
+	call PANEL.RESCAN;
+
+	if FIND.NEW.BANK(our.bank) != 0 then do;	/*	if timbre bank was found	*/
+		call READ.IN.BANK;							/*	load bank from disk	*/
+		call COPY.TIMBRE(-1, Dest.Trk);			/*	place timbre on track	*/
+	end;
+
+end RECALL.TIMBRE.TO.TRACK;

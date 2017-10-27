@@ -1,0 +1,294 @@
+/* PRINT  $TITLE  Routines to Print Contents of Device in screen format
+
+   Modified:
+   07/14/88 - SGS - Created.
+   
+*/
+
+Unum: proc(number,width) swapable;
+   dcl number  fixed;
+   dcl width   fixed; /* decimal point position */
+   dcl Str(4)  fixed;
+
+   call Conv.Fixed.To.Str(number,0,width,cf#unsigned|cf#append|cf#right|cf#spfill,Str);
+   call send_string(Str);
+end Unum;
+
+Append_Num: proc(Buf,number) swapable; /* append a 2-digit number padded with leading zeros to Buf */
+   dcl Buf    array; /* string to append to */
+   dcl number fixed; /* number to append */
+   dcl Str(4)  fixed;
+
+   if number < 10 then call AppendC(Buf,a.0); /* leading zero */
+   call Conv.Fixed.To.Str(number,0,0,cf#unsigned|cf#append|cf#right|cf#spfill,Str);
+   call Append.To.Str(Buf,Str);
+end Append_Num;
+
+Print_Date: proc(Date) swapable; /* print date */
+   dcl Date    fixed; /* date to print */
+   dcl (i,j)   fixed;
+   dcl Str(10) fixed;
+   dcl Months data ('JANFEBMARAPRMAYJUNJULAUGSEPOCTNOVDEC'); /* month names */
+
+   call Append_Num(Str,Date and "H1F"); /* print day */
+
+   call AppendC(Str,a.minus);
+   j = (shr(Date,5) and "HF")*3; /* get index into month name array */
+   do i = 0 to 2;
+      call AppendC(Str,byte(Months,j + i)); /* print character */
+   end;
+
+   call AppendC(Str,a.minus);
+   call Append_Num(Str,shr(Date,9)); /* print year */
+   call send_string(Str);
+end Print_Date;
+
+Print_Time: proc(Time) swapable; /* print time */
+   dcl Time        fixed; /* Time to print */
+   dcl Str(10)     fixed;
+
+   Str(0)=0; /* initialize */
+   call Append_Num(Str,shr(Time,11) and "HF"); /* hours */
+   call AppendC   (Str,a.colon);
+   call Append_Num(Str,shr(Time,5) and "H3F"); /* minutes */
+   call AppendC   (Str,a.colon);
+   call Append_Num(Str,shl(Time and "H1F",1)); /* seconds */
+
+   if Time < 0 then call Append.To.Str(Str,' PM'); /* AM/PM */
+   else call Append.To.Str(Str,' AM');          
+
+   call send_string(Str);
+end Print_Time;
+
+Print.Directory: proc (UserTitle) public swapable;
+   dcl UserTitle      array;    /* user entered title for header page */
+   dcl PageMax        lit '62';
+   dcl PageWidth      lit '80';
+   dcl PageHeight     lit '66';
+
+   dcl Buf  (shr(PageWidth+1,1))   fixed;
+   dcl Title(shr(PageWidth+1,1))   fixed;
+   dcl Line (shr(PageWidth+1,1))   fixed; /* line of dashes */
+
+   dcl PageInfo(42)   fixed;
+   dcl LineCount      lit '0'; /* number of lines printed on cur page so far */
+   dcl PageCount      lit '1'; /* number of paged printed so far */
+   dcl CurHeader      lit '2'; /* current header */
+
+   dcl AbortPrint     boolean;   /* flag to signal user abort  */
+   dcl StoreNewHeader boolean; /* flag to update page header */
+   dcl (i,j,k)        fixed;
+
+   dcl FormFeed       data (1,a.ff);
+
+   Check.For.Update:proc(ptr);  /* pass ptr to NoUpdates */
+      dcl ptr fixed;
+
+      if  (core(ptr)=0)             /* if not suppressed already  */
+      and ((new.mouse.button  < 0)  /* and button is pressed      */
+      or   (m$Presses         <>0)) /* or released then pressed   */
+      then do;
+         core(ptr) = true;          /* stop search */
+      end;
+   end Check.For.Update;
+
+   newline: proc(Info); /* generate a new line, and header if needed */
+      dcl Info       array; /* line, page, and header info */
+      dcl i          fixed;
+      dcl Title (40) fixed;
+      dcl Str (40)   fixed;
+      dcl Line(shr(PageWidth+1,1))   fixed;  /* line of dashes */
+      dcl car_return data (2,shl(10,8)|13);  /* carriage return string */
+      dcl crlf       lit 'call send_string(car_return)';
+
+      crlf;
+      Info(LineCount) = Info(LineCount) + 1;
+
+      if Info(LineCount) ige PageMax then do; /* print page header */
+         call send_string(FormFeed);
+         Info(PageCount) = Info(PageCount) + 1;
+
+         crlf;
+         call Get.Device.Name(dirdevice,Title); /* get the device name */
+         if DirDevice=LaserDev then do;
+            do i = 7 to Title(0)-1;  /* parse off "Volume " */
+               call pbyte(Title,i-7,byte(Title,i));
+            end;
+            Title(0) = Title(0)-7;
+            if Title(0) igt PageWidth-20 then Title(0) = PageWidth-20;
+            call send_string(' Opt Disk: ');
+            call send_string(Title);
+         end;
+         else do;
+            call send_string('   Device: ');
+            call send_string(Title);
+         end;
+
+         /* right justify "Page ###" */
+         Str(0) = (PageWidth-9)-(Title(0)+11);
+         do i = 0 to Str(0)-1;
+            call pbyte(Str,i,a.sp);
+         end;
+         call send_string(Str);
+         call send_string('Page '); call unum(Info(PageCount),3);
+
+         crlf;
+         if (SortInfo=ITEM$Category) and (DirDevice=LaserDev)
+         then call send_string(' Category: ');
+         else if (SortInfo=ITEM$Category) and (DirDevice=PolyCacheDev)
+         then call send_string('  Catalog: ');
+         else call send_string('     File: ');
+         call send_string(loc(addr(Info(CurHeader))));
+
+         if ((ShowInfo)&(INFO$Caption|INFO$Second|INFO$Mbyte|INFO$Sector|INFO$Bin|INFO$Names))<>0 /* if any of these INFO options are currently selected */
+         then call Build.Window.Title(ShowInfo,Title); /* show the INFO labels in the title area */
+         else Title(0) = 0;
+
+         crlf;
+         if Title(0)<>0 then do;
+            Line(0) = PageWidth;
+            do i = 1 to shr(Line(0)+1,1);
+               Line(i) = (shl(a.minus,8)|a.minus);
+            end;
+            crlf; call send_string(Line);
+            crlf; call send_string(Title);
+            crlf; call send_string(Line);
+            Info(LineCount) = 7;
+         end;
+         else Info(LineCount) = 4;
+         crlf;
+      end;
+
+   end newline;
+
+   if D40_PRESENT=0 then return;     /* if not available then quit */
+   call enable_d40;                  /* turn on D40 interrupts */
+
+   /* save ptrs to current top line of screen display */
+   call GetListPos(0);
+   call PushPos;
+
+   /* set ptrs to top of directory */
+   call Rezero.Index.File.Ptrs;
+
+   /* check for abortions */
+   AbortPrint = false;
+
+   call Check.For.Update(addr(AbortPrint));
+   if AbortPrint then goto FINISH.PRINTING;
+
+   /* build line of dashes string */
+   Line(0) = PageWidth;
+   do i = 1 to shr(Line(0)+1,1);
+      Line(i) = (shl(a.minus,8)|a.minus);
+   end;
+
+   /* HEADER PAGE */
+   call newline(PageInfo);
+   call newline(PageInfo);
+   call send_string(Line); call newline(PageInfo);
+   call send_string('                         SOUND FILE DIRECTORY'); call newline(PageInfo);
+   call send_string(Line); call newline(PageInfo);
+   call newline(PageInfo);
+   call newline(PageInfo);
+   call send_string(UserTitle); call newline(PageInfo);
+   call newline(PageInfo);
+   call newline(PageInfo);
+   call Get.Device.Name(dirdevice,Title); /* get the device name */
+   if DirDevice=LaserDev then do;
+      /* Extract "Volume " from title */
+      do i = 7 to Title(0)-1;
+         call pbyte(Title,i-7,byte(Title,i));
+      end;
+      Title(0) = Title(0)-7;
+      call send_string('Device: Opt Disk: '); call send_string(Title); call newline(PageInfo);
+      call newline(PageInfo);
+      call send_string('Creation Date:    '); call Print_Date(GBuf(H$Date)); call newline(PageInfo);
+      call send_string('Creation Time:    '); call Print_Time(GBuf(H$Time)); call newline(PageInfo);
+
+      if GBuf(H$Caption) igt PageWidth-16 then Buf(0) = PageWidth-16;
+      else Buf(0) = GBuf(H$Caption);
+      do i = 1 to shr(Buf(0)+1,1);
+         Buf(i) = GBuf(H$Caption+i);
+      end;
+      call send_string('Caption:          '); call send_string(Buf); call newline(PageInfo);
+   end;
+
+   else if (DirDevice=PolyCacheDev)
+   or      (DirDevice=PolyMemDev)
+   then do;
+      call send_string('Device:           '); call send_string(Title); call newline(PageInfo);
+   end;
+
+   else do;
+      /* delete ":" from "W0:" or "W1:" titles */
+      if Title(0)=3 then Title(0) = Title(0)-1;
+      call send_string('Device:           '); call send_string(Title); call newline(PageInfo);
+   end;
+
+   call newline(PageInfo);
+   call send_string('No. Files:        '); call unum(TotalFileCount,0); call newline(PageInfo);
+
+   if DirDevice=LaserDev then do;
+      call send_string('No. Categories:   '); call unum(TotalCatCount,0); call newline(PageInfo);
+   end;
+   else if DirDevice=PolyCacheDev then do;
+      call send_string('No. Catalogs:     '); call unum(TotalCatCount,0); call newline(PageInfo);
+   end;
+
+   call newline(PageInfo);
+
+   /* force new page */
+   PageInfo(LineCount) = PageMax; 
+
+   call Check.For.Update(addr(AbortPrint));
+
+   StoreNewHeader = true;
+
+   /* print directory contents */
+   do while (CurItemType <> ITEM$EOF) and (not AbortPrint);
+      if Get.Next.Line(Buf)<>ITEM$EOF then do;
+         if (SortInfo=ITEM$Category) then do;
+            /* store category/catalog name in static header buffer */
+            if StoreNewHeader then do;
+               j=0;  
+               do while (byte(Buf,j)=a.colon); /* parse off preceding ":"s */
+                  j = j+1;
+               end;
+               do k = j to Buf(0)-1;
+                  call pbyte(loc(addr(PageInfo(CurHeader))),k-j,byte(Buf,k));
+               end;
+               /* account for  " Category: " label */
+               if PageInfo(CurHeader) igt PageWidth-19
+               then PageInfo(CurHeader) = PageWidth-19;
+               else PageInfo(CurHeader) = Buf(0)-j;
+               StoreNewHeader = false;
+            end;
+            if CurItemType = ITEM$Category then StoreNewHeader = true;
+         end;
+         else do;
+            /* store first filename on line in static header buffer */
+            do i = 2 to 9;
+               call pbyte(loc(addr(PageInfo(CurHeader))),i-2,byte(Buf,i));
+            end;
+            PageInfo(CurHeader)=8;
+         end;   
+         call newline(PageInfo);
+         call send_string(Buf);
+      end;
+      call Check.For.Update(addr(AbortPrint));
+   end;
+
+   call send_string(FormFeed);
+   call d40_wait;
+
+   FINISH.PRINTING:
+   call disable_d40;                 /* turn off D40 interrupts */
+
+   /* restore ptrs to screen position */
+   call PopPos;
+
+   if AbortPrint<>0 then return false;
+   else return true;
+
+end Print.Directory;

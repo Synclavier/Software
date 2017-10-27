@@ -1,0 +1,148 @@
+/* ERASE  $TITLE  ROUTINE TO COMPLETELY ERASE AN ENTIRE SEQUENCER TRACK
+
+   Modified:
+   01/30/91 - MWH - Report which tracks have had new notes
+   11/17/87 - CJ - CALLED COMPUTE.NUMB.LEFT ON ERASE OF EMPTY TRACK TO GET DISPLAY CORRECT
+   4/29/87 - TSS - CLEANED UP ERASE.TRACK A LITTLE AFTER MOVING CODE TO 12-EDIT
+*/
+
+/* ERASE.TRACK IS CALLED TO ERASE ALL THE DATA FOR */
+/* A GIVEN TRACK FROM THE SEQUENCER MEMORY         */
+
+ERASE.TRACK.BUT.PRESERVE.GROUP: PROC (T) PUBLIC SWAPABLE;
+	DCL (T)           					FIXED;
+	DCL ERASE.TRACK   					PROC(FIXED) EXTERNAL;
+	DCL DELETE.NOTELIST.FROM.TRK     PROC(FIXED) EXTERNAL;
+	
+	if (Trk.Head.Lookup(T, THD.GROUPLIST) != 0)
+		DELETE.NOTELIST.FROM.TRK(T);
+	ELSE
+		ERASE.TRACK(T);
+END ERASE.TRACK.BUT.PRESERVE.GROUP;
+
+ERASE.TRACK: PROC (T) PUBLIC SWAPABLE; /* ERASE ONE TRACK       */
+  DCL (T,THP,I,J,K) FIXED;             /* PASS ABS TRACK NUMBER */
+
+  interp_seq_dirtyness(1);
+
+  NEW.SEQ.INFO = NEW.SEQ.INFO \ 6;     /* NEW SEQ NOTES; NEW SEQ NAMES */
+  WRITE(MAM) = D115D.NOTE.CHANGE.TRACKS;
+  WRITE(MAL) = T;                     /* REMEMBER TRACK # ON NEW.SEQ.INFO */
+  WRITE(MD) = "177777";               /*   "NEW NOTES" OR "NEW TIMBRE"    */
+
+  /* FREE UP TIMBRES, CLOBBER THEM */
+
+  WRITE(MAM)=TRK.HEAD;
+  WRITE(MAL)=T;
+  IF READ(MD)=0 THEN DO;
+     CALL COMPUTE.NUMB.LEFT;  /* FOR DISPLAY */
+     RETURN;
+  END;
+
+  IF KEYBOARD.TIMBRE.CONTROL=T THEN DO;      /* KEYBOARD IS SHARING TIMBRE */
+     KEYBOARD.TIMBRE.CONTROL=0;              /* RECLAIM TIMBRE - DO NOT COPY TO TRACK */
+     CALL DISPLAY.SMT.SKT.BUTTONS;           /* TURN OFF SKT BUTTON */
+  END;
+
+  CALL DEALLOC.TIMBRE.USES(T);         		/* FREE UP USES FOR TIMBRES ON THIS TRACK */
+
+  WRITE(MAM)=TRK.HEAD;      		  				/* RESET TRK HEAD PTR SINCE NO LONGER USED */
+  WRITE(MAL)=T;
+  WRITE(MD )=0;
+
+  WRITE(MAM)=NAH.PTR;          					/* RESET TRK HEAD PTR SINCE NO LONGER USED */
+  WRITE(MAL)=T;
+  THP=READ(MD);                					/* SAVE FOR CLEANUP BELOW */
+  WRITE(MD )=0;
+
+  IF UPLIST0=THP THEN DO;     					/* WE AE FIRST ON UPLIST0 */
+     WRITE(MAM)=NAH.PTR+THP;
+     WRITE(MAL)=THD.UPD.LINK;
+     UPLIST0=READ(MD);
+  END;
+  ELSE IF UPLIST0<>0 THEN DO;             /* SEE IF WE ARE ON QUE     */
+
+     /* CODE APPROVED BY: EDDIE JOBSON: */
+     /* I = PTR TO PREV TRK HEAD        */
+     /* J = PTR TO CURR TRK HEAD        */
+     /* K = PTR TO NEXT TRK HEAD        */
+
+     I=UPLIST0;
+     WRITE(MAM)=NAH.PTR+I;
+     WRITE(MAL)=THD.UPD.LINK;
+     J=READ(MD);                   /* GET FORWARD PTR     */
+
+     DO WHILE J<>0;                /* PROCESS EACH ONE    */
+        WRITE(MAM)=NAH.PTR+J;      /* GET OUR FP          */
+        WRITE(MAL)=THD.UPD.LINK;
+        K=READ(MD);                /* SAVE NEXT FP        */
+        IF J=THP THEN DO;          /* IF THIS BLOCK IS US */
+           WRITE(MAM)=NAH.PTR+I;   /* BACK UP             */
+           WRITE(MAL)=THD.UPD.LINK;
+           WRITE(MD) =K;
+        END;
+        ELSE I=J;
+        J=K;
+     END;
+
+  END;
+
+  /* FREE UP ANY GROUP LIST OR AUX INFO STORAGE BLOCKS */
+  
+   DO I = 0 TO THD.NUMGRPAUX-1;
+		WRITE(MAM) = NAH.PTR + THP;
+		WRITE(MAL) = THD.GROUPLIST + I;
+		J = READ(MD);
+		WRITE(MD) = 0;
+		
+		IF (J != 0)								/* IF THIS GROUP AUX LIST EXISTS	   */
+		{
+			WHILE (J != 0)						/* FREE UP POSSIBLY LINKED BLOCKS	*/
+			{
+     			WRITE(MAM) = NAH.PTR + J;  /* THD.FOR OR NLS.FOR OR GRPAUX.FOR */
+				K = J;							/* SAVE FOR LINK TO NAH.FREE			*/
+				J = READ(MD);					/* GET (POSSIBLE) NEXT BLOCK			*/
+				
+				WRITE(MDI)=NAH.FREE;     	/* LINK ON TO FREE LIST      			*/
+				WRITE(MDI)=(-1);         	/* STORE (-1) IN NLS.REV AND 			*/
+				WRITE(MD )=(-1);         	/* NLS.TRK TO CATCH BUGS 				*/
+				NAH.FREE  =K;
+				NAH.#FREE =NAH.#FREE+1;
+			}
+		}
+   END;
+  
+  /* NOW FREE UP THE TRACK HEAD AND IT'S LIST OF NOTES */
+  
+  DO WHILE THP<>0;
+     WRITE(MAM)=NAH.PTR+THP;  /* THD.FOR OR NLS.FOR */
+     I=THP;                   /* SAVE POINTER FOR LINK */
+     THP=READ(MD);            /* GET NEXT BLOCK        */
+     WRITE(MDI)=NAH.FREE;     /* LINK ON TO FREE LIST      */
+     WRITE(MDI)=(-1);         /* STORE (-1) IN NLS.REV AND */
+     WRITE(MD )=(-1);         /* NLS.TRK TO CATCH PROGRAMMING BUGS */
+     NAH.FREE=I;
+     NAH.#FREE=NAH.#FREE+1;
+  END;
+
+  CALL COMPUTE.NUMB.LEFT;                       /* FOR DISPLAY */
+  CALL CHECK.MEMORY.FOR.RECORD;
+
+
+  /* $PAGE */
+
+
+  NPTR=NOTELIST;               /* GO THROUGH NOTELIST AND      */
+  DO WHILE NPTR<>0;            /* SET NACT/NDEC SO NOT         */
+     IF TRACK=T THEN DO;
+        STEALOK=(-2);
+        RECS=0; RECW=0;
+     END;
+     NPTR=NFPTR;
+  END;
+
+  CALL COMPUTE.MISC.INFO;      /* COMPUTE ARLIST, CPLIST */
+  CALL REBUILD.EVENT.QUEUE;
+
+END ERASE.TRACK;
+

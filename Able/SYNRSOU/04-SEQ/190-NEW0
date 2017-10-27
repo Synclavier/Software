@@ -1,0 +1,801 @@
+/* :SYNRSOU:04-SEQ:190-NEW0  $TITLE  ROUTINES TO SET UP NEW KEYBOARD, SEQUENCER NOTES */
+
+/*
+Modified:
+2007/02/02 - CJ  - Change NUM.MIDI.TRACKS to MAX.INPUTS = 202
+2002/09/24 - TY  - Keyboard octave shift feature
+1998/06/22 - TY  - Added code to TRANSPOSE.TRACKS and SCANKBD to accommodate
+						 the new Transpose Lock (blinking) feature.
+1998/05/18 - TY  - Modified TRANSPOSE.TRACKS and TRANSPOSE.SEQUENCER.TRACKS
+						 to create a "global parameter change" system event.
+						 Also require them to loop only through sequencer tracks
+						 (2-201 rather than 2-255).
+1991/12/15 - PF  - Only record sustain records if MIDISUST.MODE=1
+1991/09/04 - PF  - record sustain records at correct sequence time
+1991/08/24 - PF  - Fixed double MIDI output on VK sustain release
+1991/08/05 - PF  - come out of sustain in stop record
+1990/11/06 - PF  - Support for new sustain update records
+1990/05/04 - PF  - ADDED FROMMIDI
+1990/03/21 - PF  - Compressed CLAV.PTR to 43 sectors
+1990/03/09 - PF  - Increase MAX.INPUTS to 128
+1989/06/14 - TSS - Added code for Pressure Calibration
+1989/01/13 - PF  - MIDI bug fixes
+1988/04/11 - PF  - ADDED CLEAR.POLY.TIMBRE.NOTES
+1988/04/11 - PF  - CODE FOR POLY.TIMBRE SWITCHES AND NOTES
+1988/04/11 - PF  - ADDED CHORIG
+1988/01/19 - MWH - FIX SUSTAIN BUG
+1987/10/13 - LPG - ALTERED POWER ON/OFF STATUS CODES -- ADDED TRANSITION STATE
+1987/09/03 - MWH - FIX MIDI BUG: NOTES NOW SOUND EVEN IF KEYBOARD UNPLUGGED
+1986/10/29 - TS  - ALLOW MIDI ECHO TO HAPPEN
+1986/10/22 -CJ,EG- ADDED MUTE OF TRACK VOLUME/ROUTING BUTTON HELD NOTES
+1986/10/09 -CJ,TS- FIXED SYNC.DELAY BUG
+1986/08/24 - TS  - PUT THD.ACTIVE.MIDI.RTES CODE IN
+1986/08/06 - TS  - FIXED BUG IN PITCH CLASS SETTING FEATURE
+1986/07/15 - CJ  - CHANGED MIDI.CONTROL.CHANGE CALLS
+1986/07/13 - CJ  - ADDED NORIG
+1986/05/15 - "official" creation of release-M modules
+*/
+
+/* SUBROUTINES: */
+
+/* ROUTINE TO CONVERT INTERNAL PITCH NOTATION TO LOGARITHMIC FORMAT: */
+
+/* NOTE: COMPUTE.KBD.PITCH MUST PRESERVE EXT MEM POINTERS */
+/*       SEE CALL FROM START CODE                         */
+
+
+COMPUTE.KBD.PITCH:PROC(K#) PUBLIC; /* COMPUTE PITCH VALUE FROM KEY NUMBER 0-127 */
+	DCL (K#,P) FIXED;
+
+	P=0;
+	DO WHILE K#<0; 
+		K#=K#+12; 
+		P=P-1024; 
+	END; 
+
+	LOAD K#; DIV 12;					/* GET OCTAVE, KEY WITHIN OCTAVE */
+	WRITE(MAM)=BAS.PTR;
+	WRITE(MAL)=URES;					/* LOOK UP SCALE                 */
+
+	P=P+SHL(READ(5),10)+READ(MD)-3840;	/* COMPUTE FROM A-440 */
+
+	P=P*OCTRATIO/1000;				/* CORRECT FOR KEYBOARD OCTAVE RATIO (SIGNED MULTIPLY/DIVIDE) */
+
+	if (READ(4) ige 500) then P = P+1;	/* PERFORM ROUNDING */				
+
+	RETURN P+2816;						/* RESTORE IT + BRING DOWN 1 OCTAVE (C0=(-1024), C1=0) */
+
+END COMPUTE.KBD.PITCH;
+
+COMPUTE.PATCH.XPOS:PROC(K#) PUBLIC;	/* COMPUTE PITCH TRANSPOSITION VALUE FROM KEY# FOR SOUND FILE PATCHES */
+	DCL (K#,P) FIXED;
+
+	P=0;
+	DO WHILE K#<0; K#=K#+12; P=P-1024; END;	/* PUT INTO VALID RANGE */
+
+	LOAD K#; DIV 12;						/* GET OCTAVE, NOTE WITHIN OCTAVE */
+	P=P+SHL(READ(5),10)+WESTERN.SCALE(READ(4))-3840;	/* COMPUTE FROM A-440 */
+	IF READ(4) ige 500 THEN P=P+1;	/* PERFORM ROUNDING */
+	RETURN P+2816;							/* RESTORE IT + BRING DOWN 1 OCTAVE (C0=(-1024), C1=0) */
+END COMPUTE.PATCH.XPOS;
+
+TRANSPOSE.TRACKS:  PROC(KEY#) PUBLIC SWAPABLE;	/* PASS KEY# TRANSPOSITION - PERFORMS TRANSPOSE */
+   DCL (I,J,KEY#) FIXED;
+
+	/* New feature: synthesize a beat sync clock pulse whenever the sequence is */
+	/* transposed.  This allows the keyboardist to manually provide beat sync	 */
+	/* pulses by pressing middle c....														 */
+
+	IF  (XPOS.TRIGGER.DISABLED=0)
+	AND (EXT.CLOCK.CASE=5)
+	THEN DO;									/* 5: BEAT SYNC         */
+		DISABLE;
+		CLOCK.RECEIVED=1;					/* CLOCK PULSE RECEIVED */
+		CLOCK.DELAY.TIME=KBD.MILLISECONDS+SYNC.DELAY;
+		ENABLE;
+	END;
+
+	I=KEY#-SYNC.MIDDLE.C;						/* DIST FROM MIDDLE C -- APPLIED TO NEW NOTES */
+
+	DO J=NUM.KBD.TRACKS TO (FIRST.LOD.TRACK-1);	/* ASSIGN TO ACTIVE TRACKS */
+
+		WRITE(MAM)=TRK.HEAD;						/* SEE IF TRACK HEAD       */
+		WRITE(MAL)=J;
+
+		IF READ(MD)<>0 THEN DO;
+			WRITE(MAM)=READ(MD);					/* POINT TO IT             */
+			WRITE(MAL)=THD.ACTIVE;				/* XPOS ACTIVE TRACKS      */
+			IF READ(MD)<>0 THEN DO;
+				RESET.BITS=RESET.BITS\R.FREQS;
+				WRITE(MAL)=THD.CXPOS;			/* SAVE IN CURRENT XPOS    */
+				WRITE(MD )=I;
+				WRITE(MAL)=THD.SXPOS;			/* AND IN STARTING XPOS    */
+				WRITE(MD )=I;
+				WRITE(MAL)=THD.LP.CXPOS;		/* FOR NOW                 */
+				WRITE(MD )=I;
+				WRITE(MAL)=THD.ILS.CXPOS;
+				WRITE(MD )=I;
+				WRITE(MAL)=THD.ILE.CXPOS;
+				WRITE(MD )=I;
+			END;
+		END;
+
+	END;
+	/* AUTO-DISABLE TRANSPOSE UNLESS TRANSPOSE BUTTON IS LOCKED (BLINKING) */
+	IF XPOS=1 THEN DO;
+		CALL OFF(TRANSP.L);
+		XPOS=0;
+	END;
+	/* NOTIFY SCREENS THAT A SEQUENCE-ALTERING PARAMETER HAS BEEN USED */
+	new.prm.info=new.prm.info\16;
+END TRANSPOSE.TRACKS;
+
+/* TRANSPOSE SEQUENCER TRACKS PERFORMS THE RECORDED TRANSPOSITION FUNCTION.  IT IS PASSED  */
+/* A TRACK#, AND A KEY#.  IT TRANSPOSES EITHER ALL TRACKS, OR JUST THE GROUP MEMBER TRACKS */
+/* AS NEEDED																										 */
+
+TRANSPOSE.SEQUENCER.TRACKS:  PROC(TRACK#, KEY#, TIME_MSB, TIME_LSB) PUBLIC SWAPABLE;
+	DCL (TRACK#, KEY#, TIME_MSB, TIME_LSB, I,J) FIXED;
+	DCL clear.grp.sel.bits PROC        EXTERNAL;
+	DCL recurs.track.group PROC(FIXED) EXTERNAL;
+
+	/* IF TRACK IS A GROUP TRACK, IDENTIFY IT'S MEMBER TRACKS. */
+	
+	IF (TRK.HEAD.LOOKUP(TRACK#, THD.GROUPLIST) != 0)		/* IF GROUP, SELECT ITS MEMBERS			*/
+	{
+		clear.grp.sel.bits();
+		recurs.track.group(track#);
+	}
+	
+	ELSE																	/* ELSE SELECT ALL							*/
+	{
+		write(mam) = tbut.ptr;
+		write(mal) = NUM.KBD.TRACKS;
+		
+		do i = NUM.KBD.TRACKS to (MAX.TRACKS-1);
+			write(mdi) = read(md) | b.grpsel.trk;
+		end;
+	}
+	
+	IF (TRK.HEAD.LOOKUP(TRACK#, THD.XPOSBASE) == 0)			/* OOPS - CANNOT HANDLE IF XPOS BASE	*/
+	RETURN;																/* NOT SET UP									*/
+	
+	I = KEY# - READ(MD);                    /* DIST FROM THD.XPOSBASE C -- APPLIED TO NEW NOTES	*/
+	
+	DO J=NUM.KBD.TRACKS TO (FIRST.LOD.TRACK-1);  /* ASSIGN TO ACTIVE TRACKS */
+	 
+	 	WRITE(MAM) = TBUT.PTR;
+		WRITE(MAL) = J;
+		
+		IF ((READ(MD) & b.grpsel.trk) != 0)
+		{
+			WRITE(MAM)=TRK.HEAD;                 /* SEE IF TRACK HEAD       */
+			WRITE(MAL)=J;
+		
+			IF (READ(MD) != 0)
+			{
+		 		WRITE(MAM)=READ(MD);              /* POINT TO IT             */
+				
+				IF (TIME.BASE.MODE != 0)
+				{
+					RESET.BITS      = RESET.BITS\R.XPOS;
+					RESET.XPOS.TIME = TIME_LSB;
+				}
+				
+				WRITE(MAL)=THD.CXPOS;          /* SAVE IN CURRENT XPOS    */
+				WRITE(MD )=I;
+			}
+		}
+	
+	END;
+	new.prm.info=new.prm.info\16;	/* NOTIFY SCREENS THAT A SEQUENCE-ALTERING PARAMETER HAS BEEN USED */
+END TRANSPOSE.SEQUENCER.TRACKS;
+
+/* $SUBTITLE  ROUTINE TO CHECK SPECIAL FUNCTIONS WHEN KEY IS PRESSED */
+
+KBD.SPECIAL.CHECK:PROC(I,J) PUBLIC SWAPABLE;
+   DCL (I)   FIXED;         /* PASS KEY NUMBER 0-84 */
+   DCL (J)   FIXED;         /* J=0 IF FROM OUR KBD, 1 IF FROM MIDI */
+   DCL (K,L) FIXED;
+
+   IF (RECALL.STATE=1) OR (RECALL.STATE=2) THEN SPLIT.KBD.LOC=I; /* DEFINE SPLIT KEYBOARD LOC */
+
+   IF  (HELD.KBD.ENV.BUTTONS<>0)
+   AND ((NEW.PAN<>0)\(IN.BLINK.MODE<>0)) THEN DO; /* ASSIGN KBD ENVELOPE LIMIT */
+      PRESET.KBD.ENVELOPE=HELD.KBD.ENV.BUTTONS; AMOUNT="100000"; /* SET INFO FOR 'UPDATE' */
+      IF (NEW.PAN<>0)&(NEW.KBD.ENV<>0)
+      THEN DO;          /* NEW PANEL, SECOND TIME THROUGH - SMARTS REQUIRED */
+         DO L=1 TO ACTIVE.PARMS(0);   /* CHECK PARAMETER #S */
+            K=SHR(ACTIVE.PARMS(L),8); /* GET PARAMETER # */
+            IF      K=51 THEN K=53; ELSE IF K=52 THEN K=54;
+            ELSE IF K=53 THEN K=51; ELSE IF K=54 THEN K=52;
+            ACTIVE.PARMS(L)=(ACTIVE.PARMS(L)&255)\SHL(K,8);  /* STORE ON STACK */
+         END;
+         PRESET.KBD.ENVELOPE=PRESET.KBD.ENVELOPE\SHL(PRESET.KBD.ENVELOPE,2);
+      END;
+      NEW.KBD.ENV=1;         /* SET FLAG FOR DIFFERENT EFFECT NEXT TIME */
+      KBD.VAL=I+1;           /* SET INFO FOR 'UPDATE' - REDUCE BY 1 OCTAVE TO MATCH OLD CLAVIER */
+      CALL MAJOR.UPDATE;     /* CHANGE PARAMETER RIGHT NOW SO THAT NEW VALUES WILL BE EFFECTIVE FOR THIS NOTE */
+   END;
+                    
+   IF HELD.SCALE.ADJUST.BUTTONS<>0 THEN DO;   /* PRESSING KEY & POSSIBLY HOLDING SCALE ADJUST BUTTON */
+      IF (SCALE.ADJUST.IS.ACTIVE)<>0 THEN DO; /* IN SCALE ADJUST MODE */
+         LOAD I; DIV 12; K=REM;               /* GET KEY# IN OCTAVE 0-11 */
+         DO L=0 TO 11;                        /* CHECK EACH BIT */
+            IF (HELD.SCALE.ADJUST.BUTTONS&BITS(L))<>0
+            THEN DO;                          /* COEF BUTTON IS HELD */
+               WRITE(MAM)=BAS.PTR;            /* SET MAM TO OVERALL SEQ INFO AREA */
+               WRITE(MAL)=SEQ.SCALE+L;        /* ACCESS KEYBOARD SCALE INFO */
+               WRITE(MD )=WESTERN.SCALE(K);   /* STORE FREQUENCY FOR THIS KEY */
+               CALL DISPLAY.PAR;              /* PRESENT TO USER */
+               RESET.BITS=RESET.BITS\R.FREQS; /* NEW SYNTH DATA REQD */
+               NEW.KBD.PRE=1;                 /* PRECOMPUTE TABLE    */
+            END;
+         END;
+      END;
+   END;
+
+   IF (HELD.KCV.BUTTON)<>0 THEN DO;      /* SET KCV LIMITS */
+      WRITE(MAM)=TIM.HEAD;               /* POINT TO TIMBRE LOOK UP TABLE */
+      WRITE(MAM)=READ(MD);               /* POINT TO TIMBRE HEAD FOR KBD  */
+      WRITE(MAL)=TIM.TINFO.POINTER;      /* GET TINFO.POINTERS            */
+      K=READ(MD);                        /* SEE IF TINFO BLOCK */
+      IF K<>0 THEN DO;                   /* SET LIMITS */
+         IF HELD.KCV.BUTTON=1 THEN DO;   /* FIRST KEY */
+            CALL P.STORE(K+TI.KCVL,I);   /* STORE KEY */
+            IF P.LOOKUP(K+TI.KCVR)<I     /* SEE IF RIGHT LIMIT NEEDS CORRECTING */
+            THEN WRITE(MD)=I;            /* STORE THERE AS WELL */
+            HELD.KCV.BUTTON=2;
+         END;
+         ELSE DO;                        /* CHECK UPPER/LOWER */
+            IF P.LOOKUP(K+TI.KCVL)<=I    /* WE MUST BE RIGHT */
+            THEN CALL P.STORE(K+TI.KCVR,I);  /* SAVE HIGHER KEY */
+            ELSE DO;                         /* SWAP */
+               CALL P.STORE(K+TI.KCVR,P.LOOKUP(K+TI.KCVL));
+               CALL P.STORE(K+TI.KCVL,I);    /* SAVE LOWER ONE AS LEFT KEY */
+            END;
+         END;
+      END;
+   END;
+
+   IF  (HELD.MIDI.BUTTON<>0)              /* MIDI BUTTON IS HELD */
+   AND (J=0) THEN DO;                     /* AND THIS NOTE IS FROM OUR KBD */
+      CALL CLEAR.DISPLAY;
+      CALL EMIT.STRING(0,'MIDI Note#');   /* DISPLAY MIDI NOTE NUMBER */
+      CALL EMIT.NUMBER(11,I-(SYNC.MIDDLE.C-MIDI.MIDDLE.C),0,LEFT.JUST);
+   END;
+
+   IF (PRESSURE.CALIBRATION.MODE<>0)
+   THEN DO;
+      IF J=0                   /* NOTE IS FROM SYNCLAVIER KBD (NOT MIDI) */
+      THEN PRESSURE.CALIBRATION.KEY = I; /* CHANGE CALIBRATION KEY# */
+
+      CALL PRESSURE.CALIBRATION.DISPLAY(PRESSURE.CALIBRATION.KEY,0);
+   END;
+
+   IF HELD.TRINF.BUTTON<>0 THEN DO;          /* SELECT KEYBOARD ROUTING/VOLUME */
+      IF (SPLIT.KEYBOARD<>0) AND (I<SPLIT.KBD.LOC) THEN TROUT.TRK#=(-1);
+      ELSE                                              TROUT.TRK#=(-1);
+      CALL DISPLAY.PAR;                      /* PRESENT KEYBOARD ROUTING/VOLUME */
+      RETURN 0;                              /* DISABLE  KEYBOARD NOTE */
+   END;
+   
+   ELSE RETURN 1;                            /* ELSE ALLOW KEYBOARED NOTE */
+
+END KBD.SPECIAL.CHECK;
+
+/* $PAGE */ 
+
+/* CLEAR NOTES TRIGGERED FROM EXTERNAL SYNC */
+
+CLEAR.TRIGGERED.NOTES:  PROC PUBLIC SWAPABLE;
+   DCL I FIXED;
+
+   KEY.IS.TRIGGERED=0;                   /* NO LONGER TRIGGERED (UNLESS WE GET INTERRUPTED RIGHT HERE!) */
+
+   WRITE(MAM)=CLAV.PTR;                  /* SET UP PTR TO KEY STATE XMEM ARRAY */
+
+   DO I=1 TO EXT.TRIG.STAK(0);           /* CLEAR CLAV.PTR INFO TO TERMINATE NOTES */
+      WRITE(MAL)=EXT.TRIG.STAK(I)&255;   /* GET KEY# AND POINT TO IT      */
+      WRITE(MD)=READ(MD) AND (NOT DOWN); /* TURN OFF THE KEY DOWN BIT     */
+      IF (READ(MD)&(HELD\SUSTD))=0       /* IF KEY NOT HELD OR SUSTAINED  */
+      THEN DO;
+         WRITE(MD)=0;                    /* OK TO TERMINATE NOTE          */
+      END;
+   END;
+
+END CLEAR.TRIGGERED.NOTES;
+
+
+/* CLEAR ALL NOTES FROM THE CLAV.PTR ARRAY(CHANNEL 0)     */
+/* SO NO SYNCLAVIER KEYBOARD NOTES WILL CONTINUE TO SOUND */
+
+CLEAR.ALL.NOTES:  PROC PUBLIC SWAPABLE;
+   DCL I FIXED;
+
+   WRITE(MAM)=CLAV.PTR;    /* SET UP PTR TO XMEM KEY STATE ARRAY */
+   DO I=0 TO (NUM.KEYS-1); 
+      WRITE(MDI)=0;        /* TURN OFF ALL KEYBOARD NOTES */
+   END;
+
+   NEW.NOTE.STAK(0)=0;     /* CLEAR PENDING NOTE STACK */
+   NUM.HELD.KEYS=0;        /* NO KEYS HELD */
+   NEWKEY=0;               /* NO NEW KEYS EITHER */
+	
+	interp_newkey_pending(false);
+
+   RETURN;
+END CLEAR.ALL.NOTES;
+
+
+/* CLEAR ALL NOTES FROM THE CLAV.PTR ARRAY(PASSED MIDI CHAN)         */
+/* SO NO MIDI KEYBOARD NOTES FOR THAT CHANNEL WILL CONTINUE TO SOUND */
+
+CLEAR.POLY.TIMBRE.NOTES:PROC(MIDI.TRK) PUBLIC SWAPABLE;
+   DCL MIDI.TRK FIXED;
+   DCL I        FIXED;
+
+	LOAD MIDI.TRK; MUL NUM.KEYS;
+   WRITE(MAM)=CLAV.PTR+SHR(RES,8);    /* SET UP PTR TO XMEM KEY STATE ARRAY */
+   WRITE(MAL)=RES;
+   DO I=0 TO (NUM.KEYS-1); 
+      WRITE(MDI)=0;                 /* TURN OFF ALL NOTES ON THIS CHANNEL */
+   END;
+
+   DISABLE;
+   DO I=1 TO NEW.NOTE.STAK(0);
+      IF (SHR(NEW.NOTE.STAK(I),8)=MIDI.TRK)
+      THEN NEW.NOTE.STAK(I)=0;      /* CLEAR PENDING NOTES FOR THIS TIMBRE */
+   END;
+   ENABLE;
+
+   RETURN;
+END CLEAR.POLY.TIMBRE.NOTES;
+
+/* $SUBTITLE  KEYBOARD SCAN ROUTINE - ALLOCATE BLOCK AND SET UP FOR KEYBOARD NOTE */
+
+DCL RETRY.QUE       FIXED PUBLIC;     /* HOLDS QUE FOR NOTES TO RETRY NOW (FAILED LAST TIME FOR NO CHANNELS) */
+DCL MIDI.TO.GTR     FIXED PUBLIC;     /* KLUDGE CONVERSION FOR MUSIC PRINTING */
+
+SCANKBD:PROC PUBLIC;           /* KEYBOARD SCANNING ROUTINE */
+  DCL PHOLDSWITCH       FIXED; /* HOLDS PREVIOUS HOLD   SWITCH */
+  DCL PSUSTSWITCH       FIXED; /* HOLDS PREVIOUS SUST   SWITCH */
+  DCL PPUNCHSWITCH      FIXED; /* HOLDS PREVIOUS PUNCH  SWITCH */
+  DCL PPHRASESWITCH     FIXED; /* HOLDS PREVIOUS PHRASE SWITCH */
+  DCL (H,I,J,K,L)       FIXED;
+  DCL (SW.UPD)          FIXED;
+  DCL (OUR.PTR)         FIXED;
+  DCL CHANGEBITS        FIXED;
+  DCL CHANGETABLE       FIXED;
+  DCL CHAN.BIT          FIXED;
+  DCL CHAN              FIXED;
+  DCL (MSB,LSB)         FIXED;
+  DCL MSC               FIXED; /* LOCAL COPY OF MIDI.SWITCH.CHANGES */
+
+  DCL (TRK,THP)         FIXED EXTERNAL;  /* FROM 300-MAIN */
+
+  /*** LPG "Mark" bug fix of 10/13/87.  Begin inclusion here ***/
+
+  IF (POWER.OFF <> 0) AND (POWER.OFF <> 1000) THEN DO;    /* POWER IS IN TRANSITION */
+     RETURN;                   /* DON'T PROCESS ANYTHING THIS TIME AROUND */
+  END;
+
+  /*** LPG "Mark" bug fix of 10/13/87.  end inclusion here ***/
+
+  IF SW2.CHANGES<>0 THEN DO;   /* HAVE SOME CHANGES IN THE SWITCH STATES */
+     SW2.CHANGES=0;            /* RESET */
+
+     IF HOLDSWITCH<>PHOLDSWITCH THEN DO;   /* CHANGE IN HOLD SWITCH */
+        PHOLDSWITCH=HOLDSWITCH;            /* UPDATE PREV VALUE */
+        SW.UPD=SW.UPD\B.HOLD.SW;           /* SET BIT TO DENOTE CHANGE */
+		  
+		  DISABLE;
+        MIDI.SWITCH.CHANGETABLE(0)=MIDI.SWITCH.CHANGETABLE(0)\1;  /* SET BIT FOR CHANNEL ZERO TO ENSURE ENTRY BELOW */
+		  MIDI.SWiTCH.CHANGEBITS    =MIDI.SWiTCH.CHANGEBITS    \1;
+		  ENABLE;
+		  
+        WRITE(MAM)=TRK.HEAD;               /* POINT TO LOOK UP TABLE   */
+        WRITE(MAM)=READ(MD);               /* TRACK HD FOR KBD         */
+        WRITE(MAL)=THD.SYN.SROUT+R.HOLD.SW;
+        IF READ(MD)<>0 THEN DO;        /* SWITCH IS ROUTED TO MIDI CONTROL # */
+           IF HOLDSWITCH<>0 THEN CALL MIDI.CONTROL.CHANGE(0,RTE.MAX);
+           ELSE                  CALL MIDI.CONTROL.CHANGE(0,0);
+        END;
+     END;
+
+     IF SUSTSWITCH<>PSUSTSWITCH THEN DO;   /* CHANGE IN SUSTAIN SWITCH */
+        PSUSTSWITCH=SUSTSWITCH;            /* UPDATE PREV VALUE */
+        SW.UPD=SW.UPD\B.SUST.SW;           /* SET BIT TO DENOTE CHANGE */
+		  
+		  DISABLE;
+        MIDI.SWITCH.CHANGETABLE(0)=MIDI.SWITCH.CHANGETABLE(0)\1;  /* SET BIT FOR CHANNEL ZERO TO ENSURE ENTRY BELOW */
+		  MIDI.SWiTCH.CHANGEBITS    =MIDI.SWiTCH.CHANGEBITS    \1;
+		  ENABLE;
+		  
+        WRITE(MAM)=TRK.HEAD;               /* POINT TO LOOK UP TABLE   */
+        WRITE(MAM)=READ(MD);               /* TRACK HD FOR KBD         */
+        WRITE(MAL)=THD.SYN.SROUT+R.SUST.SW;
+        IF READ(MD)<>0 THEN DO;        /* SWITCH IS ROUTED TO MIDI CONTROL # */
+           IF SUSTSWITCH<>0 THEN CALL MIDI.CONTROL.CHANGE(0,RTE.MAX);
+           ELSE                  CALL MIDI.CONTROL.CHANGE(0,0);
+        END;
+     END;
+
+     IF PHRASESWITCH<>PPHRASESWITCH THEN DO; /* CHANGE IN PHRASE SWITCH */
+        PPHRASESWITCH=PHRASESWITCH;          /* UPDATE PREV VALUE */
+        WRITE(MAM)=TRK.HEAD;               /* POINT TO LOOK UP TABLE   */
+        WRITE(MAM)=READ(MD);               /* TRACK HD FOR KBD         */
+        WRITE(MAL)=THD.SYN.SROUT+R.PHRASE.SW;
+        IF READ(MD)<>0 THEN DO;        /* SWITCH IS ROUTED TO MIDI CONTROL # */
+           IF PHRASESWITCH<>0 THEN CALL MIDI.CONTROL.CHANGE(0,RTE.MAX);
+           ELSE                    CALL MIDI.CONTROL.CHANGE(0,0);
+        END;
+     END;
+
+     IF PUNCHSWITCH<>PPUNCHSWITCH THEN DO;  /* CHANGE IN PUNCH IN/OUT SWITCH */
+        PPUNCHSWITCH=PUNCHSWITCH;           /* UPDATE PREV VALUE */
+        WRITE(MAM)=TRK.HEAD;               /* POINT TO LOOK UP TABLE   */
+        WRITE(MAM)=READ(MD);               /* TRACK HD FOR KBD         */
+        WRITE(MAL)=THD.SYN.SROUT+R.PUNCH.SW;
+        IF READ(MD)<>0 THEN DO;            /* SWITCH IS ROUTED TO MIDI CONTROL # */
+           IF PUNCHSWITCH<>0 THEN CALL MIDI.CONTROL.CHANGE(0,RTE.MAX);
+           ELSE                   CALL MIDI.CONTROL.CHANGE(0,0);
+        END;
+     END;
+  END; /* OF HAVE SOME CHANGES IN SWITCH STATES */
+
+  /* $SUBTITLE  SCAN MIDI AND UPDATE GLOBAL INFO FOR SWITCHES WHICH HAVE CHANGED */
+
+  DISABLE;
+  CHANGEBITS = MIDI.SWITCH.CHANGEBITS;
+  MIDI.SWITCH.CHANGEBITS = 0;
+  ENABLE;
+  
+  WHILE (CHANGEBITS != 0)
+  {
+  	  DISABLE;
+	  WRITE("2")  = CHANGEBITS;
+	  H           = SHR(READ("2"), 1);
+	  CHANGETABLE = MIDI.SWITCH.CHANGETABLE(H);  /* COPY INTO LOCAL VAR */
+     MIDI.SWITCH.CHANGETABLE(H)=0;              /* ZERO GLOBAL */
+     ENABLE;
+     
+	  CHANGEBITS=CHANGEBITS & (NOT BITS(H));     /* ZERO THIS BIT IN CHANGES WORD */
+
+     DO WHILE CHANGETABLE<>0;                   /* PROCESS ALL CHANNELS IN THIS GROUP */
+        DISABLE;
+           WRITE("2")=CHANGETABLE;           
+           CHAN.BIT=SHR(READ("2"),1);            /* RETURNS BIT POSITION (TIMES 2) OF HIGHEST SET BIT */
+        ENABLE;
+
+        CHAN=SHL(H,4)+CHAN.BIT;                  /* COMPUTE INPUT CHANNEL NUMBER */
+        CHANGETABLE=CHANGETABLE & (NOT BITS(CHAN.BIT));  /* ZERO THIS BIT IN CHANGES WORD */
+
+        MSC=0;                                   /* CLEAR LOCAL MIDI.SWITCH.CHANGES-USED BELOW TO DETECT IF FROM MIDI */
+
+        IF (MIDI.SWITCH.CHANGES(CHAN)&(B.HOLD.SW\B.SUST.SW))<>0
+        THEN DO;                                 /* HAVE SOME CHANGES IN SWITCH STATES */
+           DISABLE;
+              MSC=MIDI.SWITCH.CHANGES(CHAN);
+              MIDI.SWITCH.CHANGES(CHAN)=MIDI.SWITCH.CHANGES(CHAN)&(NOT(B.HOLD.SW\B.SUST.SW));
+           ENABLE;
+
+           IF (MSC&B.HOLD.SW)<>0                 /* HOLD SWITCH HAS CHANGED STATE */
+           THEN SW.UPD=SW.UPD\B.HOLD.SW;
+           IF (MSC&B.SUST.SW)<>0                 /* SUSTAIN SWITCH HAS CHANGED STATE */
+           THEN SW.UPD=SW.UPD\B.SUST.SW;
+        END;
+
+        IF SW.UPD<>0 THEN DO;                          /* HAVE SOME SWITCH UPDATES TO DO */
+           IF (SW.UPD&B.HOLD.SW)<>0 THEN DO;           /* PROCESS CHANGE IN HOLD SWITCH */
+              WRITE(MAM)=MIDI.SWITCHDATA+SHR(SHL(CHAN,3)+R.HOLD.SW,8); /* POINT TO SWITCHDATA ARRAY */
+              WRITE(MAL)=SHL(CHAN,3)+R.HOLD.SW;        /* OFFSET FOR CHANNEL AND SWITCH */
+              L         =READ(MD);                     /* GET DATA                      */
+				  LOAD CHAN; MUL NUM.KEYS;
+              WRITE(MAM)=CLAV.PTR+SHR(RES,8);/* SET UP PTR TO XMEM KEY STATE ARRAY */
+              WRITE(MAL)=RES;
+              IF  ((CHAN=0)                            /* PROCESSING OUR KEYBOARD */
+              AND (PHOLDSWITCH<>0))                    /* OUR HOLD SWITCH IS DOWN */
+              OR  (L<>0)                               /* MIDI HOLD SWITCH IS DOWN */
+              THEN DO;                                 /* COMPOSITE OF SWITCHES IS ACTIVE */
+                 DO I=0 TO (NUM.KEYS-1);               /* COMPUTE HELD KEYS */
+                    IF READ(MD)<>0                     /* IF KEY IS ACTIVE NOW */
+                    THEN WRITE(MDI)=READ(MD)\HELD;     /* SET BIT FOR HELD NOTES IN ALL ACTIVE NOTES */
+                    ELSE WRITE("324")=READ(MDI);       /* ELSE JUST SKIP OVER IT */
+                 END;
+              END;
+              ELSE DO;
+                 DO I=0 TO (NUM.KEYS-1);               /* RELEASE HELD KEYS */
+                    IF READ(MD)<>0 THEN DO;            /* QUICKLY SEE IF EVEN THERE */
+                       IF (READ(MD)&HELD)<>0 THEN DO;  /* KEY WAS HELD WITH HOLD SWITCH */
+                          WRITE(MD)=READ(MD) XOR HELD; /* TURN OFF HELD BIT IN CLAV.PTR ARRAY */
+                          IF (READ(MD)&(DOWN\SUSTD))=0 /* IF KEY NEITHER DOWN NOR SUSTAINED */
+                          THEN DO;
+                             WRITE(MD)=0;              /* THEN OK TO STOP NOTE - note we provide no time stamp information for the ending of a note by the release of the hold switch */
+                          END;
+                       END;
+                    END;
+                    WRITE("324")=READ(MDI);            /* ADVANCE TO NEXT NOTE */
+                 END;                                  /* OF RELEASE HELD KEYS */
+              END;
+           END;                                        /* OF PROCESS CHANGE IN HOLD SWITCH */
+              
+           IF (SW.UPD&B.SUST.SW)<>0 THEN DO;           /* PROCESS CHANGE IN SUSTAIN SWITCH */
+              WRITE(MAM)=MIDI.SWITCHDATA+SHR(SHL(CHAN,3)+R.SUST.SW,8); /* SET UP PTR TO XMEM SWITCHDATA ARRAY */
+              WRITE(MAL)=SHL(CHAN,3)+R.SUST.SW;        /* OFFSET FOR CHANNEL AND SWITCH */
+              L         =READ(MD);
+				  LOAD CHAN; MUL NUM.KEYS;
+              WRITE(MAM)=CLAV.PTR+SHR(RES,8);			 /* SET UP PTR TO XMEM KEY STATE ARRAY */
+              WRITE(MAL)=RES;
+              IF  ((CHAN=0)                            /* PROCESSING OUR KBD */
+              AND (PSUSTSWITCH<>0))                    /* OUR SUST SWITCH IS DOWN */
+              OR  (L<>0)                               /* MIDI SUST SWITCH IS DOWN */
+              THEN DO;
+                 DO I=0 TO (NUM.KEYS-1);               /* COMPUTE SUSTAINING KEYS */
+                    IF READ(MD)<>0                     /* IF KEY IS ACTIVE NOW */
+                    THEN WRITE(MDI)=READ(MD)\SUSTD;    /* SET BIT FOR SUSTAINED NOTES IN ALL ACTIVE NOTES */
+                    ELSE WRITE("324")=READ(MDI);       /* ELSE JUST SKIP OVER IT */
+                 END;
+                 L=127;                                /* SET TO MIDI RTE MAX FOR POSSIBLE RECORD BELOW */
+              END;
+              ELSE DO;
+                 DO I=0 TO (NUM.KEYS-1);               /* RELEASE SUSTAINED KEYS */
+                    IF READ(MD)<>0 THEN DO;            /* QUICKLY SEE IF EVEN THERE */
+                       IF (READ(MD)&SUSTD)<>0 THEN DO; /* KEY WAS SUSTAINING */
+                          WRITE(MD)=READ(MD) XOR SUSTD;/* TURN OFF SUSTD BIT IN CLAV.PTR ARRAY */
+                          IF (READ(MD)&(DOWN\HELD))=0  /* IF KEY NEITHER DOWN NOR HELD */
+                          THEN DO;
+                             WRITE(MD)=0;              /* THEN OK TO STOP NOTE - note we provide no time stamp information for the ending of a note by the release of the sustain switch */
+                          END;
+                       END;
+                    END;
+                    WRITE("324")=READ(MDI);            /* POINT TO NEXT NOTE */
+                 END;                                  /* OF RELEASE SUSTAINING KEYS */
+                 L=0;                                  /* SET CORRECT VALUE FOR POSSIBLE RECORD BELOW */
+              END;
+
+              IF  ((MSC&B.SUST.SW)<>0)                 /* CAME FROM MIDI */
+              AND (MIDI.ECHO.DISABLED=0) THEN DO;      /* MIDI ECHO IS ON */
+                 WRITE(MAM)=TRK.HEAD;                  /* MUST SET UP MAM BEFORE CALL */
+                 WRITE(MAL)=CHAN;			 				 // was midi  mapped
+                 WRITE(MAM)=READ(MD);
+                 CALL REAL.MIDI.CONTROL.CHANGE(64,L);  /* OUTPUT MIDI CONTROL CHANGE */
+              END;
+
+              /* NOW CHECK FOR RECORDING */
+
+              IF MIDISUST.MODE THEN DO;                /* BUT ONLY IF IN "MIDI" SUSTAIN MODE */
+                 TRK=CHAN;               					 /* GET TRACK */			// was midi  mapped
+                 IF TRK=0 THEN TRK=RECD.TRK;           /* IN CASE WE ARE RECORDING */
+
+                 WRITE(MAM)=TBUT.PTR;
+                 WRITE(MAL)=TRK;
+
+                 IF  (RECD<>0)                         /* RECORDING */
+                 AND (RECD.TRK<>0)                     /* SYNCLAVIER RECORDING */
+                 AND ((READ(MD)&B.READY.TRK)<>0)       /* THIS TRACK IS ENABLED FOR RECORD */
+                 THEN DO;
+
+                    WRITE(MAM)=TRK.HEAD;               /* LOOKUP THP */
+                    WRITE(MAL)=TRK;
+                    THP=READ(MD);
+
+                    WRITE(MAM)=THP;                    /* LOOKUP CURRENT VALUE */
+                    WRITE(MAL)=THD.SUSTAIN;
+                    IF (READ(MD)&B.CURRENT.SUSTAIN)<>0
+                    THEN J=127;                        /* MIDI RTE MAX */
+                    ELSE J=0;
+
+                    IF (L<>0)                          /* KEEP CURRENT STATE CORRECT */
+                    THEN WRITE(MD)=READ(MD)\B.CURRENT.SUSTAIN;
+                    ELSE WRITE(MD)=READ(MD)&(NOT B.CURRENT.SUSTAIN);
+                    
+                    DISABLE;                           /* LATCH TIME FOR RECORD */
+                       MSB=PLAY.TIME.MSB;
+                       LSB=PLAY.TIME.LSB;
+                    ENABLE;
+
+                    LSB=LSB+PRESCAN;                   /* ADD PRESCAN AMOUNT TO RECORD TIME */
+                    IF LSB ILT PRESCAN
+                    THEN MSB=MSB+1;
+
+                    CALL MAP.REAL.TIME.TO.SEQUENCE.TIME(LOC(ADDR(MSB)),LOC(ADDR(MSB)));
+
+                    IF STORE.DATA.RECORD  (MSB,   LSB,         /* TIME       */
+                                           24,    11,          /* KEY, SUSTAIN CODE */
+                                           L&255, B.UPD,       /* NEW, B.UPD */
+                                           J&255         )=0   /* OLD        */
+                    THEN CALL KBD.ERROR(17); 
+
+                 END;
+              END;
+           END;                                        /* OF PROCESS CHANGE IN SUSTAIN SWITCH */
+           SW.UPD=0;                                   /* RESET */
+        END;                                           /* OF HAVE SOME SWITCH CHANGES */
+     END;                                              /* OF CHANNELS IN THIS GROUP */
+  }                                                 	 /* OF LOOP THRU KBD AND MIDI SWITCHES */
+
+  /* $SUBTITLE  PROCESS NEW NOTES FROM KEYBOARD STACK */
+
+  OUR.PTR=1;
+  
+  DISABLE;                                   /* FOR STACK CHECK */
+  DO WHILE OUR.PTR<=NEW.NOTE.STAK(0);
+
+     ENABLE;                                 /* ALLOW MORE NOTES NOW */
+
+     K=SHR(NEW.NOTE.STAK(OUR.PTR),8);        /* GET MIDI CHANNEL ORIGIN */
+     I=NEW.NOTE.KEY#(OUR.PTR);               /* GET KEY # C0-C7      */
+     J=NEW.NOTE.VEL (OUR.PTR);               /* GET VELOCITY - 0 TO RTE.MAX */
+
+     IF (I ilt NUM.KEYS) THEN DO;				/* IGNORE ANY OUT OF RANGE KEYS	*/
+	  		//	Note the use of "ilt" instead of "<".
+			//	This is because the new Keyboard Octave Shift feature allows key numbers less than 0 to get onto the stack.
+			//	"ilt" will interpret negative numbers as positive numbers greater than NUM.KEYS and thus filter them out.
+
+		  LOAD K; ULOAD I; MUL NUM.KEYS;
+        WRITE(MAM)=CLAV.PTR+SHR(RES,8); 		/* SET UP PTR TO DESIRED CHANNEL AND KEY */
+        WRITE(MAL)=RES;                 		/* STATUS WORD IN XMEM ARRAY */
+
+        IF (NEW.NOTE.STAK(OUR.PTR)&7)=2
+        THEN DO;                                		/* KEY IS BEING RELEASED */
+           WRITE(MD)=READ(MD) AND (NOT DOWN);   		/* TURN OFF KEY DOWN AND MIDI BITS */
+           IF (READ(MD)&(HELD\SUSTD))=0         		/* IF NOTE NOT HELD OR SUSTAINED */
+           THEN WRITE(MD)=NEW.NOTE.TIME(OUR.PTR);     /* THEN OK TO TERMINATE NOTE - possible time stamp in upper half - clear all bits in lower half - e.g. turn off active bit */
+
+           IF K=0 THEN DO;                      /* FROM OUR KBD (OR MIDI ROUTED TO OUR KBD) */
+              NUM.HELD.KEYS=NUM.HELD.KEYS-1;            /* ONE LESS HELD KEY (PRESUMABLY) */
+              IF NUM.HELD.KEYS<0 THEN NUM.HELD.KEYS=0;  /* LIMIT IN CASE EXTRA MIDI NOTE OFFS */
+              IF (NUM.HELD.KEYS=0) AND (K=0) THEN DO;   /* LAST RELEASE FROM OUR KEYBOARD */
+                 KEY.REL.TIME=KBD.MILLISECONDS;         /* SAVE RELEASE TIME OF LAST RELEASE IN CASE OF EXTERNAL TRIGGER */
+              END;
+           END;
+
+        END;
+        ELSE IF (NEW.NOTE.STAK(OUR.PTR)<>0)     /* IF ZERO IT WAS ABORTED BY CLEAR.POLY.TIMBRE.NOTES */
+        THEN DO;                                /* MEANS NEW NOTE PRESS */
+
+           WRITE(MD)=READ(MD)\DOWN;             /* TURN ON KEY DOWN BIT */
+
+           IF ((NEW.NOTE.STAK(OUR.PTR)&"20")=0) /* IF NOT A EXT TRIGGER NOTE */
+           AND (K=0)                            /* FROM OUR KEYBOARD */
+           THEN DO;                             /* THEN STORE ON STACK */
+              IF NUM.HELD.KEYS=0 THEN DO;       /* FIRST ONE - CLEAR STACK AND SAVE TIME */
+                 IF KEY.IS.TRIGGERED<>0         /* IF SOME ARE PLAYING - MUST CLEAR STACK BEFORE ERASING IT TO AVOID STUCK NOTES */
+                 THEN CALL CLEAR.TRIGGERED.NOTES;   /* SHOULD NEVER HAPPEN - ONLY IF PLAYING ON KEYBOARD WHILE EXTERNALLY TRIGGERING NOTES */
+                 EXT.TRIG.STAK(0)=0;            /* NO NOTES ON STACK */
+                 KEY.TRIG.TIME=KBD.MILLISECONDS;/* MEASURE TIME FOR DURATION CALCULATION */
+              END;
+              NUM.HELD.KEYS=NUM.HELD.KEYS+1;    			/* ONE MORE HELD */
+              IF EXT.TRIG.STAK(0)<EXT.TRIG.LIST.SIZE     /* IF ENOUGH ROOM ON EXT TRIG STACK */
+              THEN DO;
+                 EXT.TRIG.STAK(0)=EXT.TRIG.STAK(0)+1;
+                 EXT.TRIG.STAK(EXT.TRIG.STAK(0))=I\SHL(J,8); /* STORE KEY # AND VELOCITY */
+              END;
+           END;
+
+           IF KBD.SPECIAL<>0 THEN DO;           /* IF SPECIAL CHECK IS REQUIRED */
+              IF KBD.SPECIAL.CHECK(I,((NEW.NOTE.STAK(OUR.PTR)&"10")<>0))=0  /* THEN SLOW THINGS DOWN WITH A SWAP PROCEDURE TO CHECK OUR SPECIAL ITEMS(PASS KEY# AND FROM MIDI) */
+              THEN NPTR=0;                      /* SOMETIMES DISABLE NOTE */
+              ELSE NPTR=NFREEP;                 /* LOOK AT BLOCK          */
+				  LOAD K; ULOAD I; MUL NUM.KEYS;
+              WRITE(MAM)=CLAV.PTR+SHR(RES,8); 	/* RESTORE POINTER */
+              WRITE(MAL)=RES;                 	/* STATUS WORD IN XMEM ARRAY */
+           END;
+
+           ELSE IF XPOS<>0 THEN DO;					/* PERFORM KEYBOARD TRANSPOSE */
+			  	  /* This is where the entire sequence is transposed when a single key	*/
+				  /* is pressed on the clavier when it is in transpose mode					*/
+				  
+              CALL TRANSPOSE.TRACKS(I);			/* SET XPOS         */
+              
+				  NPTR=0;									/* DO NOT PLAY NOTE */
+				  LOAD K; ULOAD I; MUL NUM.KEYS;
+              WRITE(MAM)=CLAV.PTR+SHR(RES,8);   /* RESTORE POINTER  */
+              WRITE(MAL)=RES;                   /* STATUS WORD IN XMEM ARRAY */
+           END;
+
+           ELSE DO; /* ALLOCATE BLOCK */
+
+             NPTR=NFREEP; 
+
+           END;
+
+             /* $SUBTITLE  SET UP ALLOCATED NOTE BLOCK FOR NEW NOTE */
+
+           IF NPTR<>0 THEN DO;               /* NOTE BLOCK AVAILABLE - START NOTE */
+
+             NFREEP=CORE(NFREEP);            /* UNLINK FREE BLOCK */
+
+             IF (READ(MD)&(HELD\SUSTD\ACTIVE))<>0 THEN DO;  /* OOPS - RETRIGGER OF HELD/SUSTAINED NOTE */
+                WRITE(MD)=READ(MD)&(NOT ACTIVE); /* TURN OFF ACTIVE BIT SO FINAL DECAY STARTS ON DELAYED PARTIALS */
+             END;
+
+             WRITE("313")=NPTR;              /* USE R13 FOR SPEED */
+
+             WRITE("373")=KBDLIST;           /* NFPTR = KBDLIST   */
+             KBDLIST=NPTR;                   /* KEYBOARD NOTES CAN GO IN ANY ORDER */
+             IF (RECD<>0) THEN DO;           /* RECORDING         */
+                WRITE("373")=0;              /* TIMBRE =          */
+                WRITE("373")=RECD.TRK;       /* TRACK  =          */
+             END;
+             ELSE DO;                        /* NOT RECORDING     */
+                IF  (SPLIT.KEYBOARD<>0)      /* SPLIT KEYBOARD    */
+                AND (I<SPLIT.KBD.LOC  )      /* LOWER HALF        */
+                THEN WRITE("373")=1;         /* USE SPLIT TB      */
+                ELSE WRITE("373")=0;
+                WRITE("373")=0;              /* TRACK  =          */
+             END;
+
+             WRITE("373")=0;                 /* NORIG  =          */
+             WRITE("373")=I;                 /* KEYN   =          */
+             WRITE("373")=SWITCHBITS(0);     /* SBITS  =          */
+             CHORIG      =0;                 /* ALWAYS 0 FOR KBD  */
+
+             IF ((NEW.NOTE.STAK(OUR.PTR)&"10")<>0)  /* FROM MIDI  */
+             THEN DO;
+                WRITE("373")=J;              /* VELD   =          */
+                IF MIDI.ECHO.DISABLED<>0
+                THEN QME=1;                  /* SET FLAG IF ECHO DISABLED */
+                ELSE QME=0;                  /* ALLOW MIDI TO GET ECHOED  */
+                IF  (MIDI.INPUT.ENABLED<>0)
+                THEN DO;                     /* POLY TIMBRES              */
+                   TRACK=K;    					/* CHAN # TO ABS TRACK #     */		// was midi  mapped
+                   IF  (TRACK=0)             /* MAKE SURE DURING RECORDING */
+                   AND (RECD<>0)             /* THAT KEYBOARD NOTES GET ROUTED */
+                   THEN TRACK=RECD.TRK;      /* TO THE PROPER RECORDING TRACK */
+                   WRITE(MAM)=TRK.HEAD;      /* LOOK UP TRACK HEAD        */
+                   WRITE(MAL)=TRACK;
+                   WRITE(MAM)=READ(MD);      /* PTR TO TRK HEAD           */
+                   WRITE(MAL)=THD.CTIMB;     /* GET CURRENT TIMBRE #      */
+                   TIMBRE=READ(MD);          /* USE THAT TIMBRE FOR MIDI NOTE */
+                   CHORIG=K;                 /* SAVE CHANNEL ORIGIN       */
+                   SBITS =SWITCHBITS(K);     /* SWITCHBITS FOR THIS MIDI CHANNEL */
+                   FROMMIDI=1;               /* THIS IS AN ACTUAL MIDI NOTE */
+
+                   IF MIDI.TO.GTR<>0 THEN DO;            /* MAKING GUITAR NOTE RECORDS FOR MUSIC PRINTING */
+                      K=K-2;IF K>5 THEN K=5;             /* GET MIDI CHANNEL AND LIMIT TO 0-5 (STRING NUMBER) */
+                      SBITS=(B.GUI\B.VOL\SHL(255,8))\K;  /* SETUP GUITAR INFO */
+                   END;
+
+                END;
+             END;
+
+             ELSE DO;                        /* SYNCL KBD OR TRIG */
+                WRITE(MAM)=TRK.HEAD;         /* POINT TO LOOK UP TABLE */
+                WRITE(MAM)=READ(MD);         /* FOR KEYBOARD           */
+                WRITE(MAL)=THD.ACTIVE.MIDI.RTES; /* CHECK FOR VELOCITY ENABLED */
+
+                IF ((READ(MD)&B.VELOCITY)<>0)/* IF MIDI VELOCITY ENABLED */
+                OR (MEMORIZE.RTE<>0)         /* OR VELOCITY RTES USED  */
+                THEN WRITE("373")=J;         /* VELD=                  */
+                ELSE WRITE("373")=RTE.MAX;   /* ELSE MAX               */
+
+                QME=0;                       /* NOTE WAS FROM SYNCLAVIER KEYBOARD */
+                                             /* OR       FROM EXT CLOCK  TRIGGER  */
+             END;
+             
+             OTIML=NEW.NOTE.TIME(OUR.PTR);	// Move kbd.milliseconds time to start note to note block (otiml)
+
+             IF INC.AXE<>0 THEN GDATA=0;     /* NOT A GUITAR NOTE */
+
+             IF (PHRASESWITCH /* \MIDI.SWITCHDATA(R.PHRASE.SW) */ )<>0 /* PHRASE SWITCH HELD */
+             THEN SBITS=SBITS\B.TIE;         /* PHRASE IT IF DESIRED */
+
+           END;        /* OF ACTUAL NOTE (VS. TRANSPOSING) */
+        END;           /* OF NOTE START (VS. DECAY         */
+     END;              /* OF VALID KEY (0-84)              */
+
+     OUR.PTR=OUR.PTR+1;/* ADVANCE TO NEXT NOTE (IF ONE)    */
+
+     DISABLE;          /* FOR NEXT STACK CHECK             */
+  END;                 /* OF STACK LOOP                    */
+
+  NEW.NOTE.STAK(0)=0;  /* STACK IS NOW EMPTY               */
+  NEWKEY=0;            /* NO NEW KEYS YET EITHER           */
+
+  interp_newkey_pending(false);
+
+  ENABLE;              /* AFTER STACK CHECK                */
+
+END SCANKBD;

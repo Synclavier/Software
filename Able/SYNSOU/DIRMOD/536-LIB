@@ -1,0 +1,227 @@
+/* 536-LIB  $TITLE  Routines to Run Timbre Library Display */
+
+/*
+   8/18/86 - BSW -fixed missing sound file display bug because it was not listing missing sound files
+   5/22/86 - MPB - Input Command Structure Added
+   5/19/86 - eg - made procedures and some variables public.
+   5/15/86 - "official" creation of release-M modules
+*/
+
+dcl forced.startup   fixed ; /* set to 1 if screen was activated by user */
+dcl library.cnt      fixed ; /* number of sounds currently missing */
+dcl prev.library.cnt fixed ; /* previous value of LIBRARY.CNT */
+
+dcl max.missing      lit '(15*8)'; /* max number of missing sounds displayable */
+
+DRAW.LIBRARY.FRAME:  proc swapable;
+   call clear.term;
+   call PRINT.SCREEN.FRAME(21,'MISSING SOUND FILE DISPLAY');
+
+   call cpos(6,0);
+   if vt100<>0 then call DRAW.TEE(t.left); else call pc("174");
+   call DRAW.HOR(78);
+   if vt100<>0 then do; call DRAW.TEE(t.right); call CH.SET(norm); end;
+
+   if d44_present then call plot.mouse.hole(mouse.hole.lowerx,mouse.hole.lowery);
+
+   call cpos(1,4);
+   call ps('1. Sound Files used in the current Sequence or Keyboard Timbre which ');
+   if      inc.poly then call ps('are');
+   else if inc.mono then call ps('were');
+   call cpos(2,7);
+   if inc.poly then do;
+      call ps('missing from Polyphonic Sampling Memory are identified below.');
+      call cpos(3,4);
+      call ps('2. Insert diskettes containing some or all of these files into Drive F0:');
+      call cpos(4,7);
+      call ps('and press <RETURN> to load them into Polyphonic Sampling Memory.');
+   end;
+   else if inc.mono then do;
+      call ps('not found on your Winchester Disk Drive are identified below.');
+      call cpos(3,4);
+      call ps('2. Exit the Real-Time Performance system and use FORMCOPY to load');
+      call cpos(4,7);
+      call ps('these files onto your Winchester Disk.');
+   end;
+   call cpos(5,4);
+   call ps('3. '); call PRINT.EXIT.SCREEN.PROMPT;
+   call cpos(5,55);
+   call ps('-->');
+
+   call PRINT.CCAT; /* print current catalog name */
+
+   prev.library.cnt=0;
+end DRAW.LIBRARY.FRAME;   
+
+LIBRARY.SNAP.SHOT:  proc swapable; /* displays the sounds needed for all 18 timbres */
+   dcl (i,j,k,l)   fixed;
+
+   // Don't know whether we have room for long file names in the 'snapshot' or not...
+   FIND.MATCH:  proc fixed;        /* compares FNBUF to names in snap shot area */
+      dcl (i,j,k) fixed;
+
+      write(mam)=trd.ptr;          /* load ptr to snap shot area */
+
+      do i=0 to library.cnt-1;     /* loop over sounds already in snap shot */
+         k=1;                      /* assume names match */
+         do j=1 to 4;              /* loop over 4 words of name */
+            if read(mdi)<>fnbuf(j) then k=0; /* names differ */
+         end;
+         if k<>0 then return 1;    /* names were the same - have a match */
+      end;
+      return 0;                    /* name is not already in snap shot area */
+   end FIND.MATCH;
+
+   library.cnt=0;                       /* keep count of sound files currently used */
+
+   do i=0 to (max.timbres-1); /* loop over all the timbres */
+      write(mam)=TIM.HEAD;
+      write(mal)=i;
+      if read(md)<>0 then do;   /* if there is a timbre head */
+         do k=0 to num.partials-1; /* loop over all the partials */
+            j=TIM.HEAD.LOOKUP(i,tim.partial.pointers+k);   /* set pointer to this partial */
+
+            if (p.lookup(j)<>sup) then do;       /* partial is active */
+
+               if (((p.lookup(j+p.epeakl)\p.lookup(j+p.esustl))&1023)<>0) /* non-zero level */
+               and  (p.lookup(j+num.params     )=mor)     /* have some frames */
+               and  (p.lookup(j+num.params+type)=pt.type)  /* patch frame type */
+               then do;
+
+                  j=j+num.params;                 /* skip over regular parms */
+
+                  do while (p.lookup(j     )=mor) /* step through patch frames */
+                  and      (p.lookup(j+type)=pt.type);
+                     GET.NAME.FROM.PARTIAL(j);
+
+                     if ((inc.poly) and (PS.SEARCH=0)) /* poly but not found */
+                     or ((inc.mono) and (MS.SEARCH=0)) /* mono but not found */
+                     then do;     /* see if file is missing or not */
+                        if  (FIND.MATCH=0)        /* see if already accounted for */
+                        and (library.cnt<max.missing) /* and more room in snap shot for filename */
+                        then do;
+
+                           write(mam)=trd.ptr+shr(library.cnt,6); /* load ptr to snap shot */
+                           write(mal)=shl(library.cnt,2);
+
+                           do l=1 to 4; write(mdi)=fnbuf(l); end; /* copy to snap shot area */
+
+                           library.cnt=library.cnt+1; /* increment count of sounds missing */
+                        end;
+                     end;
+
+                     j=j+p.lookup(j+clen);  /* advance to next patch list entry */
+                  end;                      /* of step through patch frames */
+               end;                         /* of loop over patch frames */
+            end;                            /* of if partial is active */
+         end;                               /* of loop over partials */
+      end;                                  /* of if there is a timbre head */
+   end;
+
+end LIBRARY.SNAP.SHOT;
+
+/* $SUBTITLE  Routine to Print Names of Missing Sound Files */
+
+DRAW.LIBRARY.DISPLAY:  proc  swapable; /* fills in names of missing sound files */
+   dcl (i,j,k) fixed;
+
+   do i=0 to library.cnt-1; /* loop through sounds used */
+
+      /* load sound file name from snap shot area into temp array */
+      // Don't think we can store a long sound file name in the snapshot area
+      write(mam)=trd.ptr+shr(i,6);
+      write(mal)=shl(i,2);
+
+      fnbuf(0)=0;
+      do j=1 to 4;
+         k=read(mdi);
+
+         if shr(k,8)<>0
+         then fnbuf(0)=fnbuf(0)+2;
+         else if (k&255)<>0
+         then fnbuf(0)=fnbuf(0)+1;
+
+         fnbuf(j)=k;
+      end;
+
+      call cpos(7+shr(i,3),4+(i&7)*9); /* just print the name out for now */
+      call ps(fnbuf);
+      do j=fnbuf(0) to 7; call pc(sp); end; /* fill field with spaces */
+   end;
+
+   do i=library.cnt to prev.library.cnt-1; /* erase previous entries */
+      call cpos(7+shr(i,3),4+(i&7)*9);
+      do j=0 to 7; call pc(sp); end;
+   end;
+   prev.library.cnt=library.cnt;
+end DRAW.LIBRARY.DISPLAY;
+
+POS.LIBRARY.CURSOR:  proc  swapable;
+   call cpos(5,58);
+end POS.LIBRARY.CURSOR;
+
+UPDATE.LIBRARY.DISPLAY:  proc  swapable; /* refreshes library screen to reflect current missing sound files */
+   call LIBRARY.SNAP.SHOT;    /* see which sound files are missing */
+   call DRAW.LIBRARY.DISPLAY; /* redraw new missing files */
+   call POS.LIBRARY.CURSOR;   /* reposition cursor */
+   sound.file.missing=0;      /* turn flag off */
+end UPDATE.LIBRARY.DISPLAY;
+
+/* $SUBTITLE  Routine to Process Chars on Timbre Library Display */
+
+TIMBRE.LIBRARY.INPUT: proc(in.cmd,in.arg)  swapable;
+   dcl (in.cmd,in.arg) fixed;
+
+   if (in.arg>=lower.a) and (in.arg<=lower.z) then in.arg=in.arg-"40"; /* convert to uppercase */
+
+   if (in.arg="20")                   /* CTRL-P */
+   or (in.arg=asc.p)                  /* normal P */
+   then do;                           /* print hardcopy of screen */
+      if D40_PRESENT<>0               /* if device available */
+      then call SCREEN_DUMP;             
+      else call no.printer;
+      call POS.LIBRARY.CURSOR;
+      return;
+   end;
+
+   if (in.arg<>esc) and (err.displayed<>0) then do;
+      call remove.err;
+      call PRINT.CCAT;          /* reprint current cat name */
+   end;
+
+   if in.arg=esc then do;       /* <ENTER>: return to prev screen*/
+      forced.startup=0;         /* reset some flags */
+      sound.file.missing=0;
+      call RETURN.TO.PREV.STATE; /* go back to last screen */
+   end;
+   else if in.arg=cret then do;      /* <RETURN>: try to load new files */
+      if inc.poly then do;
+         call DEALLOC.ALL;          /* 1. free up all the timbres */
+         call PRESS.DSEL.BUTTON;    /* 2. press DRIVE SELECT to load from F0: */
+         call ALLOC.ALL.TIMBRES;    /* 3. call allocate again */
+         call RELEASE.DRIVE.SELECT; /* 4. release DRIVE SELECT */
+
+         if  (sound.file.missing=0) /* no sounds missing any more */
+         then do;
+            call UPDATE.LIBRARY.DISPLAY; /* stay here but bring display up to date */
+         end;
+      end;
+      else call POS.LIBRARY.CURSOR;
+   end;
+   else call POS.LIBRARY.CURSOR;
+
+end TIMBRE.LIBRARY.INPUT;
+
+/* 536-LIB */
+
+TIMBRE.LIBRARY.MOUSE.POS:  proc(x,y) public swapable;    /* Timbre Library Screen Mouse Positioner */
+   dcl (x,y) fixed;  /* mouse position in row/col coordinates */
+
+   if mouse.hole(x,y) then do;
+      EXIT.MY.SCREEN=1;
+      return;
+   end;
+
+   call POS.LIBRARY.CURSOR;
+end TIMBRE.LIBRARY.MOUSE.POS;
+

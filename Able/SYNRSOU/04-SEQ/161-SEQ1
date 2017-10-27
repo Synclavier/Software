@@ -1,0 +1,1657 @@
+/* :SYNRSOU:04-SEQ:161-SEQ1  $TITLE  MORE SEQUENCER ROUTINES - TRACK.CLICK.CHECK & SCAN.SEQUENCER.NOTES */
+
+/*
+Modified:
+2007/02/02 - CJ  - Change NUM.MIDI.TRACKS to MAX.INPUTS = 202
+1998/07/09 - TY  - Commented out Pseudo-log function used for RTE inversion,
+						 and replaced it with linear inversion.
+1998/06/24 - TY  - Updated expressions containing (CLICK.TRACK.MODE & 511) to account for
+						 the independence of CLICK.TRACK.MODE from CLICKON.
+1991/02/06 - PF  - Moved code that sets D115D.NOTE.CHANGE.TRACKS to avoid MAM glom
+1991/01/30 - MWH - Report which tracks have had new notes
+1990/10/11 - CJ  - fixed rte update problem(s) in check.for.copy.note
+1990/09/05 - CJ  - FIXED BUG IN CHECK.FOR.COPY.NOTE THAT LOST RTE MOVEMENTS
+1990/08/27 - PF  - Support all MIDI controllers
+1990/03/09 - PF  - Increase MAX.INPUTS to 128
+1989/09/23 - CJ  - Converted to sequence time in scan.sequencer.notes
+1989/04/26 - cj  - added important comments at start of scan.sequencer.notes
+1988/04/11 - PF  - ADDED CODE FOR MULTI RECORD, SYSTEM EXCLUSIVE RECORDS,
+1988/04/11 - PF  - PROGRAM CHANGE TRIGGERS NEW MIDI MAP
+1988/03/14 - cj  - send track # to dtd during cue trigger
+1988/01/27 - eg  - added ignore.loops variable and check to scan.sequencer.notes
+1987/07/17 -cj,eg- fixed mark start punch in bug
+1986/10/09 - TS  - CHANGE DECR OF THD.NN.MSB/LSB TO PROC CALL
+1986/09/22 -TS,EG- MAKE SCAN.SEQUENCER PROCESS GUITAR UPDATE RECORDS
+1986/09/16 - TS  - ZERO OUT UNUSED WORDS IN NLS WHEN ALLOCATING
+1986/08/23 - TS  - PUT IN CODE FOR THD.ACTIVE.MIDI.RTES
+1986/08/19 - TS  - MOVED TIME.DELTA DCL TO HERE FROM 162-SEQ2
+1986/08/18 - TS  - ADDED CODE TO RESET TIME.DELTA WHEN NECESSARY
+1986/08/06 - TS  - ADDED OVERWRITE BUTTON CODE
+1986/07/28 - TS  - SET THD.ILS.SCANNED IN SCAN.SEQUENCER.NOTES
+1986/07/25 - TS  - WHEN FREEING UP NLS, PUT (-1) IN NLS.REV, NLS.TRK
+1986/07/24 -ts,cj- fixed some bugs in SCAN.SEQUENCER.NOTES
+1986/07/21 - TS  - BUG IN PUNCH/OVERWRITE CODE IN SCAN.SEQUENCER
+1986/07/15 -CJ,TS- PERFORMED MIDI OUTPUT IN SCAN SEQUENCER.  MOVED OTHER ROUTINES TO 160-SEQ0, 161SEQ1B
+1986/07/14 - CJ  - MODIFIED TRACK.CLICK.CHECK TO TRY TO GET FIRST CLICK AT LOOP POINT
+1986/07/13 -CJ,TS- ADDED TRACK CLICK CHECK.  ADDED NORIG.  IMPROVED NEXT.CLICK IF RECORDED/EXTERNAL CLICK TRACK
+1986/07/10 - CJ  - FIXED MARK BUTTON BUG IN ADVANCE.SEQUENCER
+*/
+
+/* $SUBTITLE - REAL-TIME ROUTINE TO ADVANCE THROUGH SEQUENCE AND PROCESS NOTES */
+
+
+DCL TIME.DELTA				  FIXED PUBLIC;	/* USED TO JUSTIFY REAL TIME EFFECTS TO JUSTIFIED NOTE */
+DCL CONT.HELD				  FIXED PUBLIC;	/* TRUE WHEN CONTINUE BUTTON BEING HELD */
+DCL IGNORE.LOOPS			  BOOLEAN PUBLIC;	/* IF TRUE, ILP'S ARE IGNORED IN SCAN.SEQUENCER.NOTES */
+
+DCL ALLOCATE.NAH.BLOCK	  PROC;
+DCL CHANGE.THD.INFO		  PROC (FIXED,FIXED);
+DCL ALLOCATE.NEXT.NLS	  PROC (FIXED) RECURSIVE;
+DCL ADJUST.SEQUENCER.PTRS PROC (FIXED,FIXED);
+
+/* NOTE: PASS A SEQUENCE TIME HERE! */
+
+DCL TRANSPOSE.SEQUENCER.TRACKS PROC(FIXED, FIXED, FIXED, FIXED) RECURSIVE;
+
+SCAN.SEQUENCER.NOTES: PROC (TIME.MSB,TIME.LSB) PUBLIC;	/* PROCESS NOTES FROM SEQUENCER */
+	DCL (TIME.MSB, TIME.LSB)  FIXED;
+	DCL (MSB     , LSB)		  FIXED;	/* NOTE: must declare in this order */
+	DCL (W1,W2,W3,W4,I,J,K,L) FIXED;	/* NOTE: must declare in this order */
+	DCL (II,JJ)					  FIXED;
+	DCL (NLS,RP,FP)			  FIXED;
+	DCL (AMSB,ALSB)			  FIXED;
+	DCL (RLEN)					  FIXED;
+	DCL (UPDATES)				  FIXED;
+	DCL (LEN)					  FIXED;
+	DCL (KBDBITS)				  FIXED;
+
+	/* HANDY ROUTINE TO SET UP FOR COMPLICATED CALL TO CHECK.EFFECTS */
+
+	LOCAL.EFFECTS.UPDATE: PROC(RTEBITS, SOURCE);
+		DCL (RTEBITS, SOURCE) FIXED;
+		DCL (TRK,THP,TB,TBP)	 FIXED EXTERNAL;	/* FROM 300-MAIN */
+		DCL (I,J)				 FIXED;
+
+		TRK			= #TRK;						/* SET UP VARIABLES FOR  */
+		THP			= #PTR;						/* CALL TO CHECK.EFFECTS */
+		WRITE(MAM)	= THP;
+		WRITE(MAL)	= THD.CTIMB;
+		TB				= READ(MD);
+		WRITE(MAM)	= TIM.HEAD;
+		WRITE(MAL)	= TB;
+		TBP			= READ(MD);
+
+		WRITE(MAM)=TBP;
+		WRITE(MAL)=TIM.USED.RTES;
+
+		I = READ(MD);			/* RTES ARE USED BY THIS TIMBRE - SAMPLED IN LOWER HALF, CONT IN UPPER HALF */
+		I = (I\ROT(I,8));		/* (SAMPLED OR CONTINUOUS) IN BOTH HALVES */
+
+		WRITE(MAM)=THP;
+		WRITE(MAL)=THD.MIDI;
+
+		IF READ(MD)<>0 THEN DO;		/* TRACK IS ROUTED TO MIDI OUTPUT */
+			WRITE(MAL) = THD.ACTIVE.MIDI.RTES;
+			DO J=0 TO 5;				/* INCLUDE ANY RTES WHICH ARE ENABLED FOR MIDI OUTPUT */
+				IF (READ(MD) & BITS(J)) <> 0 THEN I=I \ R.LOOK(J);
+			END;
+		END;
+
+		I = I & RTEBITS;				/* ONLY UPDATE RTES WHICH HAVE ACTUALLY CHANGED */
+
+		IF (I\((TRK=RECD.TRK) AND (NEW.TOGGLES<>0)))<>0
+		THEN DO;							/* ONLY CHECK THOSE ACTUALLY USED BY THIS TIMBRE */
+			/* UPDATE ACTIVE NOTES UNLESS THE ONE STARTING IS THE ONLY NOTE PLAYING */
+			WRITE(MAM)=THP;
+			WRITE(MAL)=THD.NACT;
+			/* RECORD THOSE RTE'S IN NOTELIST USING THE NOTE'S STARTING TIME */
+			CALL CHECK.EFFECTS(#NMSB,#NLSB,I,(READ(MDI)+READ(MDI))<>0,SOURCE);
+
+			WRITE(MAM)=#PTR;					/* AND TRACK HEAD POINTER */
+			CALL LOAD.#.INFO(THD.NMSB);	/* RESTORE # INFO */
+
+			WRITE(MAM)=NAH.PTR+#SEC;		/* THD.SEC                   */
+			WRITE(MAL)=#WRD;					/* THEN POINT AT NOTE RECORD */
+
+			W1=READ(MDI);						/* GET POSSIBLE NEW DELTA FLD */
+		END;
+	END LOCAL.EFFECTS.UPDATE;
+
+	DO WHILE (NEXT.EVENT.QUEUE<>0)			/* LOOP WHILE NOTES IN QUEUE */
+		AND (((TIME.MSB IGT NEXT.EVENT.MSB))
+		OR   ((TIME.MSB  =  NEXT.EVENT.MSB)
+		AND   (TIME.LSB IGE NEXT.EVENT.LSB)));
+
+		/* CHECK FOR RECORDING ON THIS TRACK */
+		/* CHECK FOR PUNCH IN/OUT OR         */
+		/* GARBAGE COLLECT IF SO:            */
+
+		WRITE(MAM)=NEXT.EVENT.QUEUE+NAH.PTR;	/* POINT TO TRK HEAD */
+		WRITE(MAL)=THD.TRK;
+		#TRK      =READ(MD);						/* SAVE TRACK #          */
+		#PTR      =READ(MAM);					/* AND TRACK HEAD POINTER    */
+
+		WRITE(MAM)=TBUT.PTR;						/* POINT TO MULTI RECORD INFO */
+		WRITE(MAL)=#TRK;							/* FOR THIS TRACK */
+
+		IF  (RECD<>0)								/* SEE IF RECORDING     */
+		AND ((#TRK=RECD.TRK)						/* ON THIS TRACK        */
+		OR  ((RECD.TRK<>0)						/* SYNCLAVIER RECORDING */
+		AND ((READ(MD)&B.READY.TRK)<>0)))	/* THIS TRACK IS READY  */
+		THEN DO;
+
+			WRITE(MAM) = #PTR;			/* RESTORE MAM TO TRK HEAD */
+			CALL LOAD.#.INFO(THD.NMSB);
+
+			WRITE(MAL)=THD.LP.WRD;		/* SEE IF LOOP POINTERS      */
+			IF  (READ(MDI)=#WRD)			/* POINT HERE AS WELL        */
+			AND (READ(MD )=#SEC)
+			THEN DO;
+				WRITE(MAL)=THD.CXPOS;
+				CALL COPY.IN(ADDR(MISC.BUF(0)),THD.RTES+8-THD.CXPOS);
+				WRITE(MAL)=THD.LP.CXPOS;
+				CALL COPY.OUT(ADDR(MISC.BUF(0)),THD.LP.RTES+8-THD.LP.CXPOS);
+			END;
+
+			WRITE(MAM)=NAH.PTR+#SEC;	/* THD.SEC                   */
+			WRITE(MAL)=#WRD;				/* THEN POINT AT NOTE RECORD */
+
+			W1=READ(MDI);					/* READ THE NOTE RECORD      */
+			W2=READ(MDI);					/* INTO TEMPORARY VARS       */
+			IF W1 THEN DO;					/* THIS IS A 4-WRD RECORD    */
+				W3=READ(MDI);
+				W4=READ(MDI);
+			END;
+			ELSE DO;
+				W3=RTE.MAX;
+				W4=VEL.NOTE;
+			END;
+
+			/* $PAGE - CHECK FOR PUNCH IN */
+
+			IF (PNCH<>0) THEN DO;			/* PUNCH IN/OUT ACTIVE      */
+
+				IF W1<0 THEN DO;				/* IF ALTERNATE FORMAT RECD */
+					IF ((W1&"174001")="104001")	/* ILS */
+					OR ((W1&"174001")="110001")	/* ILE */
+					THEN GOTO CHECK.FOR.COPY.NOTE;
+				END;
+
+				/* CHECK TO SEE IF THIS NOTE HAS JUST BEEN RECORDED */
+
+				ELSE DO;								/* CHECK FOR JUST-RECORDED NOTE */
+					IF  ((W2&"177700")=0)		/* SEE IF DURATION FIELD IS 0 */
+					AND ((W1&"074000")=0)
+					AND ((W3&SHL(B.UPD,8))=0)	/* AND NOT AN UPDATE RECORD   */
+					THEN DO;							/* CHECK NOTELIST FOR RECS/RECW */
+
+						NPTR=NOTELIST;				/* PICK UP FIRST NOTE BLOCK    */
+						DO WHILE NPTR<>0;			/* PROCESS EACH ONE            */
+
+							IF  (#SEC=RECS)		/* SECTOR MATCHES - CHECK WORD PTR */
+							AND (#WRD=RECW)
+							THEN DO;
+								GOTO CHECK.FOR.COPY.NOTE;
+							END;
+
+							NPTR=NFPTR;				/* PICK UP POINTER TO NEXT NOTE */
+						END;							/* OF NOTE LOOP */
+					END;
+				END;
+
+				GOTO PUNCH.OUT;					/* PUNCH OUT ALL OTHER NOTES */
+
+			END;
+
+			IF ((W3&SHL(B.UPD,8))<>0) THEN DO;						/* CHECK UPDATE RECORDS */
+				IF  ((W3&SHL(B.GUI,8))=0)								/* IF NOT GUITAR UPD    */
+				AND ((W2&"300")=0)										/* NORMAL RTE UPDATE (VS TOGGLES, MIDI, PRESSURE */
+				AND (((RTE.OVERWRITE.BITS&BITS(SHR(W2,8)))<>0)	/* OVERWRITE ENABLED ON THIS RTE   */
+				AND ((W2&"100000")=0))									/* THIS IS NOT A MIDI FORMAT UPDATE RECORD */
+				THEN DO;
+
+					PUNCH.OUT:;
+
+					/* Create a system event when a note is added or removed */
+					/* from the sequencer:                                   */
+
+					NEW.SEQ.INFO = NEW.SEQ.INFO \ 4;
+					WRITE(MAM) = D115D.NOTE.CHANGE.TRACKS;
+					WRITE(MAL) = #TRK;			/* REMEMBER TRACK # ON NEW.SEQ.INFO */
+					WRITE(MD) = "177777";		/*   "NEW NOTES" OR "NEW TIMBRE"    */
+
+					/* $PAGE - PERFORM PUNCH IN */
+
+					IF  ((W1&"100000")=0)		/* NOT AN ALTERNATE FORMAT NOTE  */
+					AND ((W2&"77")<>REST.NOTE)	/* OR A REST NOTE                */
+					THEN DO;							/* DECREMENT NUMBER OF NOTES CTR */
+						CALL DECREMENT.NUM.NOTES;
+					END;
+
+					AMSB=0;						/* EXTRACT NOTE DELTA OF NOTE      */
+					ALSB=SHR(W1,1)&1023;		/* WE ARE TO PUNCH OUT             */
+
+					WRITE(MAM)=NAH.PTR+#SEC;				/* POINT AT NOTE RECORD */
+					WRITE(MAL)=#WRD;
+
+					IF W1 THEN DO;								/* THIS IS A 4-WORD RECORD    */
+						IF (W1&"174001")<>"100001"			/* NOT ALREADY A REST */
+						THEN DO;									/* TURN IT INTO ONE   */
+							W1=W1&SHL(1023,1)\"100001";	/* TURN INTO REST NOTE */
+							W2=0;
+							W3=0;
+							W4=VEL.NOTE;
+
+							WRITE(MDI)=W1;						/* AND SAVE INFO IN NLS */
+							WRITE(MDI)=0;
+							WRITE(MDI)=0;
+							WRITE(MD )=VEL.NOTE;
+						END;
+						ELSE DO;									/* ELSE GET TOTAL TIME */
+							AMSB=AMSB+W2;						/* OF WHAT IS ALREADY  */
+							ALSB=ALSB+W3;						/* A REST RECORD       */
+							IF ALSB ILT W3 THEN AMSB=AMSB+1;
+						END;
+						RLEN=4;
+					END;
+					ELSE DO;										/* THIS IS A 2-WORD RECORD */
+						W1=W1&SHL(1023,1);					/* TURN INTO REST RECORD */
+						W2=REST.NOTE;
+						WRITE(MDI)=W1;							/* AND SAVE IN NLS */
+						WRITE(MD )=REST.NOTE;
+						RLEN=2;
+					END;
+
+					/* $PAGE - SPLIT NLS DURING PUNCH IN */
+
+					IF #ANYR<>0 THEN DO;						/* CHECK FOR REST NOTE BEFORE US */
+
+						WRITE(MAL)=NLS.FP;					/* SEE IF WE ARE ON FRONT OF NLS */
+
+						IF READ(MD)<>#WRD THEN DO;			/* NOTE IS NOT AT FRONT OF NLS */
+
+							/* SPLIT UP THE NLS AND BEGIN COPYING DATA OVER */
+							/* FOR BEST OPTIMIZATION                        */
+
+							I=#SEC; J=#WRD;					/* SAVE POINTER TO NOTE WE JUST PUNCHED */
+
+							IF ALLOCATE.NEXT.NLS(1)=0		/* ALLOCATE NLS; MOVE POINTERS TO NEXT SECTOR  */
+							THEN GOTO NOCOPY;					/* JUST PLAY THE NEW REST NOTE */
+
+							WRITE(MAM)=NAH.PTR+I;			/* POINT BACK TO SECTOR CONTAINING NOTE WE PUNCHED */
+							WRITE(MAL)=NLS.LP;				/* LOOK UP LP            */
+							LEN=READ(MD)-J;					/* TO COMPUTE LEN        */
+
+							WRITE(MAL)=J;						/* POINT TO DATA TO COPY */
+
+							IF (INC.POLY) OR (MODC<>0)		/* READ IN OLD INFO      */
+							THEN DO;
+								WRITE("300")=ADDR(MISC.BUF(0));
+								RPC LEN;
+								WRITE("360")=READ(MDI);
+							END;
+							ELSE CALL COPY.IN(ADDR(MISC.BUF(0)),LEN);
+
+							WRITE(MAL)=NLS.LP;				/* UPDATE LP            */
+							WRITE(MD )=J;						/* UPDATE NLS.LP        */
+							WRITE(MAL)=J;						/* STORE NLS.EOS HERE   */
+							WRITE(MD )=NLS.EOS;
+
+							WRITE(MAM)=NAH.PTR+#SEC;		/* POINT TO WHERE WE PUT NEW INFO */
+							WRITE(MAL)=#WRD;
+
+							IF (INC.POLY) OR (MODC<>0)
+							THEN DO;
+								WRITE("300")=ADDR(MISC.BUF(0));
+								RPC LEN;
+								WRITE(MDI)=READ("360");
+							END;
+							ELSE CALL COPY.OUT(ADDR(MISC.BUF(0)),LEN);
+
+							WRITE(MD )=NLS.EOS;				/* PUT AN EOS AT END OF SECTOR  */
+							WRITE(MAL)=NLS.LP;				/* UPDATE LP;  MAY OVERWRITE LP */
+							WRITE(MD )=#WRD+LEN;				/* WRITTEN ABOVE IF SAME SECTOR */
+
+							MSB=#SEC; LSB=#WRD;			/* DATA WAS WRITTEN OUT TO THIS SECTOR */
+							#SEC=I;   #WRD=J;				/* RESTORE POINTERS TO ORIGINAL WORD   */
+
+							CALL ADJUST.SEQUENCER.PTRS(MSB,LSB-J);
+
+							#SEC=MSB; #WRD=LSB;			/* POINT TO NEW PLACE FOR NOTE */
+
+							WRITE(MAM)=NAH.PTR+#SEC;	/* POINT TO NEW SECTOR */
+						END;									/* WILL MEET ALL OF FOLLOWING TESTS */
+
+						/* $PAGE - TOSS NOTE IF POSSIBLE DURING PUNCH IN */
+
+						WRITE(MAL)=NLS.REV;				/* IF SO, CHECK PRIOR BLOCK */
+						IF READ(MD)=NEXT.EVENT.QUEUE
+						THEN DO;								/* BACK PTR IS TO THD */
+							GOTO NOCOPY;					/* JUST PLAY NOTE     */
+						END;
+
+						WRITE(MAM)=NAH.PTR+READ(MD);	/* POINT TO PRIOR NLS */
+						WRITE(MAL)=NLS.FP;				/* SOME FUNNY ERROR   */
+						IF READ(MDI)=READ(MDI)			/* MEANS EMPTY NOTE   */
+						THEN DO;								/* SEGMENT BEHIND     */
+							GOTO CHECK.FOR.COPY.NOTE;	/* US??               */
+						END;
+
+						WRITE(MAL)=NLS.LP;				/* SEE IF LAST NOTE   */
+						WRITE(MAL)=READ(MD)-1;			/* IN PRIOR NLS IS A  */
+																/* REST NOTE          */
+						IF ((READ(MD)&"77")=REST.NOTE)
+						THEN DO;								/* CONVERT TO 4 WORD  */
+							WRITE(MAL)=READ(MAL)-1;		/* REST RECORD        */
+							WRITE(MDI)=(READ(MD)&SHL(1023,1))\"100001";	/* TURN 2 WORD REST INTO */
+							WRITE(MDI)=0;											/* A 4 WORD REST AT SAME */
+							WRITE(MDI)=0;											/* LOCATION              */
+							WRITE(MDI)=VEL.NOTE;
+							WRITE(MD )=NLS.EOS;
+							WRITE(MAL)=NLS.LP;
+							WRITE(MD )=READ(MD)+2;		/* 2 MORE DATA WORDS  */
+							WRITE(MAL)=READ(MD)-3;		/* LEAVE MAL POINTING */
+						END;									/* TO DELTA FIELD     */
+
+						ELSE DO;
+							IF ((READ(MD)&"77")<>VEL.NOTE)
+							THEN DO;
+								GOTO CHECK.FOR.COPY.NOTE;
+							END;
+
+							WRITE(MAL)=READ(MAL)-3;
+							IF ((READ(MDI)&"174001")<>"100001")
+							THEN DO;
+								GOTO CHECK.FOR.COPY.NOTE;
+							END;
+						END;
+
+						/* ADD DELTA TIME FOR THIS PUNCHED OUT */
+						/* NOTE INTO PREVIOUS REST RECORD      */
+
+						WRITE(MDI)=READ(MD)+AMSB;		/* ADD IN DELTA */
+						WRITE(MD )=READ(MD)+ALSB;
+						IF READ(MD) ILT ALSB THEN DO;
+							WRITE(MAL)=READ(MAL)-1;
+							WRITE(MD )=READ(MD )+1;
+						END;
+
+						/* NOW PUNCH OUT THE UNNEEDED */
+						/* REST THAT IS LEFT OVER     */
+						/* FROM THE PUNCHED-OUT       */
+						/* NOTE:                      */
+
+						I=#SEC; J=#WRD;	/* SAVE POINTERS TO NOTE WE PUNCHED (NOT THE REST NOTE WE JUST ADDED TIMES TO) */
+
+						/* NOW COMPUTE THE #NMSB,#NLSB FOR AFTER THE NOTE */
+						/* WE PUNCHED OUT.                                */
+
+						IF ((W1&"174001")="100001")	/* THIS IS DONE BY ADDING IN */
+						THEN DO;								/* A LONG REST AMOUNT TO     */
+							#NMSB=#NMSB+W2;				/* WHAT WAS OTHERWISE A      */
+							#NLSB=#NLSB+W3;				/* CORRECT TIME              */
+							IF #NLSB ILT W3 THEN #NMSB=#NMSB+1;
+						END;
+
+						#WRD=#WRD+RLEN;					/* ADVANCE WRD OVER PUNCHED OUT NOTE */
+
+						WRITE(MAM)=NAH.PTR+#SEC;		/* LOOK AT IT TO SEE IF */
+						WRITE(MAL)=#WRD;					/* WE ARE AT END OF SEG */
+
+						/* $PAGE - CHECK FOR EMPTY NLS */
+
+						LSB = READ(MD);					/* SAVE POSSIBLE DELTA  */
+
+						IF READ(MD)=NLS.EOS				/* PUNCHED OUT NOTE WAS */
+						THEN DO;								/* LAST NOTE IN NLS     */
+
+							WRITE(MAM)=#PTR;				/* FREE UP NLS          */
+							WRITE(MAL)=THD.NUM.NLS;		/* ONE FEWER            */
+							WRITE(MD )=READ(MD)-1;
+
+							WRITE(MAM)=NAH.PTR+#SEC;	/* GET FORWARD AND REV */
+							FP=READ(MDI);					/* POINTERS FROM NOW   */
+							RP=READ(MD );					/* EMPTY BLOCK         */
+
+							WRITE(MAL)=NLS.FOR;
+							WRITE(MDI)=NAH.FREE;			/* LINK ON TO FREE LIST      */
+							WRITE(MDI)=(-1);				/* STORE (-1) IN NLS.REV AND */
+							WRITE(MD )=(-1);				/* NLS.TRK TO CATCH PROGRAMMING BUGS */
+							NAH.FREE  =#SEC;
+							NAH.#FREE =NAH.#FREE+1;
+
+							WRITE(MAM)=NAH.PTR+RP;		/* BACK UP TO NLS.REV - MAY POINT TO TRACK HEAD */
+							WRITE(MD )=FP;					/* NEW FP (MAY BE 0)  (MAY BE STORING IN THD HERE) */
+
+							IF FP<>0 THEN DO;				/* UPDATE BACK POINTER */
+								WRITE(MAM)=NAH.PTR+FP;
+								WRITE(MAL)=NLS.REV;
+								WRITE(MD )=RP;				/* RP MAY  POINT TO THD        */
+								#SEC=FP;						/* MOVE #SEC,#WRD TO           */
+								WRITE(MAL)=NLS.FP;		/* FIRST WORD OF FOLLOWING NLS */
+								#WRD=READ(MD);
+								WRITE(MAL)=#WRD;			/* POINT TO NOTE RECORD */
+								LSB = READ(MD);			/* SAVE POSSIBLE DELTA      */
+							END;
+							ELSE DO;							/* END OF TRACK            */
+								WRITE(MAM)=#PTR;				/* POINT TO TRACK          */
+								WRITE(MAL)=THD.LP.WRD;		/* SEE IF LOOP POINTER     */
+								IF  (READ(MDI)=#WRD)			/* POINTED TO END OF TRACK */
+								AND (READ(MD )=#SEC)			/* IF SO,  MEST SET IT     */
+								THEN DO;							/* TO POINT POINT BACK     */
+									WRITE(MAL)=THD.LP.WRD;	/* TO WHERE END OF TRACK   */
+									WRITE(MD)=J;				/* IS NOW                  */
+								END;								/* THIS JOB IS COMPLETED   */
+								#SEC=RP;							/* BELOW                   */
+								WRITE(MAM)=NAH.PTR+#SEC;	/* NOW SET #SEC,#WRD TO    */
+								WRITE(MAL)=NLS.LP;			/* POINT TO NEW END OF     */
+								#WRD=READ(MD);					/* TRACK                   */
+							END;
+						END;
+						ELSE DO;								/* STORE NEW FP AFTER      */
+							WRITE(MAL)=NLS.FP;			/* PUNCHED OUT NOTE        */
+							WRITE(MD )=#WRD;
+						END;
+
+						WRITE(MAM)=#PTR;					/* SEE IF LOOP POINTER     */
+						WRITE(MAL)=THD.LP.WRD;			/* POINTED TO ORIGINAL     */
+						IF  (READ(MDI)=J)					/* RECORD THAT HAS NOW     */
+						AND (READ(MD )=I)					/* BEEN PUNCHED OUT.       */
+						THEN DO;								/* IF SO,  MOVE PTRS TO    */
+							WRITE(MAL)=THD.LP.NMSB;		/* POINT TO JUST AFTER     */
+							WRITE(MDI)=#NMSB;				/* THE NOTE WE PUNCHED OUT.*/
+							WRITE(MD )=#NLSB;				/* SET UP NEW TIME FIRST   */
+							IF LSB<>NLS.EOS THEN DO;	/* GET DELT FROM FOLLOWING */
+								LEN = SHR(LSB,1)&1023;	/* NOTE                    */
+								WRITE(MD) = READ(MD)+LEN;
+								IF READ(MD) ILT LEN
+								THEN DO;
+									WRITE(MAL)=THD.LP.NMSB;
+									WRITE(MD )=READ(MD)+1;
+								END;
+							END;
+							ELSE DO;								/* MUST MEAN THERE IS NO */
+								WRITE(MAL)=THD.LP.ANY.FOR;	/* NOTE AFTER US         */
+								WRITE(MD )=0;
+							END;
+							WRITE(MAL)=THD.LP.WRD;		/* POINT TO JUST AFTER     */
+							WRITE(MDI)=#WRD;				/* THE PUNCHED OUT NOTE.   */
+							WRITE(MD )=#SEC;				/* TIMES WILL BE UPDATED   */
+						END;									/* BELOW                   */
+
+						WRITE(MAL)=THD.LP.WRD;			/* NOW SEE IF LOOP POINTER */
+						IF  (READ(MDI)=#WRD)				/* POINTS TO NOTE AFTER    */
+						AND (READ(MD )=#SEC)				/* THE ONE WE PUNCHED.     */
+						THEN DO;								/* LAST TIME MUST BE       */
+							WRITE(MAL) = THD.LP.LMSB;
+							WRITE(MDI) = #LMSB;
+							WRITE(MDI) = #LLSB;
+
+							WRITE(MAL) = THD.LP.ANY.REV;
+							WRITE(MD ) = #ANYR;
+						END;
+
+						MSB=#SEC; LSB=#WRD;				/* SET UP FOR ENTRY INTO NEXT SECTOR */
+
+						WRITE(MAL)=THD.NMSB;				/* STORE UPDATED TIMES IN THD.           */
+						WRITE(MDI)=#NMSB;					/* WILL ADD IN FOLLOWING START DELTA     */
+						WRITE(MD )=#NLSB;					/* AND CLEAR ANYF OR PUT TRK BACK ON QUE */
+
+						GOTO NEXT.SECTOR;					/* COMPUTE #NMSB.  LINK UP IF NOT AT END OF TRACK */
+
+					END;
+				END;
+			END;
+			ELSE IF W1>=0 THEN TIME.DELTA=0;			/* RESET FOR CORRECT RTE RECORDING */
+
+			/* $PAGE - CHECK FOR GARBAGE COLLECT */
+
+			/* NOTE IS TO BE PLAYED     */
+			/* SEE IF WE SHOULD GARBAGE */
+			/* COLLECT BY COPYING NOTE  */
+			/* OVER:                    */
+
+			CHECK.FOR.COPY.NOTE:;
+
+			/* Record any updated RTE values in the sequence before */
+			/* this note.                                           */
+
+			IF  (W1>=0)							/* NORMAL NOTE RECORD       */
+			AND ((W2&"77")<>REST.NOTE)		/* NOT A REST RECORD        */
+			AND ((W3&SHL(B.UPD,8))=0)		/* AND NOT AN UPDATE RECORD */
+			THEN DO;
+
+				KBDBITS = 0;					/* ASSUME NO UPDATES FROM VK */
+
+				/* QUICKLY SEE IF ANY RTE INPUTS HAVE CHANGES.  EXAMINE THOSE */
+				/* CLOSER TO SEE IF THEY ARE ROUTED TO THIS TRACK.  STORE     */
+				/* THEM IN THE SEQUENCE IF WE NEED TO.                        */
+
+				II = RTE.CHANGEBITS;								// Latch changebits.
+				
+				while (ii != 0)									// While any changebits.
+				{
+					DISABLE;
+						WRITE("2")=ii;
+						i=SHR(READ("2"),1);
+					ENABLE;
+					
+					ii = ii XOR bits(i);
+					
+					// Note: We look at RTE.CHANGETABLE to record any changed RTES in front of any notes
+					// that we are copying.  The purpose of this is to overdub RTE movements on top of a track
+					// that has notes recorded on it.
+					// We leave RTE.CHANGETABLE bits set so that all rte changes will be processed 
+					// in 360-rrec as normal so that updates for other tracks won't be lost.
+					jj = RTE.CHANGETABLE(I);					// Latch changetable.
+					
+					while (jj != 0)								// While any changetable.
+					{
+						DISABLE;
+							WRITE("2")=jj;
+							j=SHR(READ("2"),1);
+						ENABLE;
+						
+						jj = jj XOR bits(j);
+					
+						K = SHL(I,4) + J;				/* GET ORIGIN */
+
+						/* IF THIS MIDI INPUT IS ROUTED TO THE KEYBOARD */
+						/* AND WE ARE RECORDING THE KEYBOARD ON THIS    */
+						/* TRACK, THEN GET ALL REAL TIME EFFECTS FOR    */
+						/* THE KEYBOARD AND STORE THEM ON THIS TRACK:   */
+
+						IF  (K == 0)					/* MIDI IN TO KBD  */		// was midi  mapped
+						AND (#TRK = RECD.TRK)		/* KBD TO RECD.TRK */
+						THEN DO;
+							KBDBITS = KBDBITS \ RTE.CHANGES(K);
+							RTE.CHANGES (K) = 0;
+							RTE.CHANGETABLE(I) = (RTE.CHANGETABLE(I) xor BITS(J));
+						END;
+
+						/* ELSE IF MIDI INPUT IS MAPPED DIRECTLY TO     */
+						/* THIS SEQUENCER TRACK, STORE UPDATES DIRECTLY */
+						/* IN SEQUENCER, BUT GIVE PRIORITY TO VK IF     */
+						/* BOTH VK AND MIDI IN ARE ROUTED DIRECTLY TO   */
+						/* THE RECD.TRK:                                */
+
+						ELSE IF (K == #TRK)												// was midi  mapped
+						AND     (#TRK <> RECD.TRK)
+						THEN DO;
+							L = RTE.CHANGES(K);
+							RTE.CHANGES (K) = 0;
+							RTE.CHANGETABLE(I) = (RTE.CHANGETABLE(I) xor BITS(J));
+							IF L <> 0	/* IF ANY ACTUAL RTE CHANGES */
+							THEN CALL LOCAL.EFFECTS.UPDATE(L, K);
+						END;
+					}
+				}
+
+				IF (#TRK = RECD.TRK)			/* RECORD TRACK - GET INFO */
+				&  ((NEW.TOGGLES \ KBDBITS) <> 0)
+				THEN CALL LOCAL.EFFECTS.UPDATE(KBDBITS, 0);
+
+			END;
+
+			WRITE(MAM)=NAH.PTR+#SEC;	/* RESTORE PTR              */
+			WRITE(MAL)=NLS.FP;			/* SEE IF THIS NOTE IS      */
+
+			IF READ(MD)=#WRD THEN DO;	/* AT THE FRONT OF AN NLS   */
+
+				WRITE(MAL)=NLS.REV;		/* LOOK UP OUR BACK POINTER */
+
+				IF (READ(MD)=NEXT.EVENT.QUEUE)	/* SEE IF PRIOR BLOCK IS THD */
+				THEN DO;									/* IF SO - CHECK NLS.FIRSTL  */
+					IF #WRD=NLS.FIRSTL THEN DO;
+						GOTO NOCOPY;				/* NO COPY IF WE ARE AT NLS.FIRSTL */
+					END;
+					GOTO ALLOCATE.PRIOR;			/* ELSE ALLOCATE BLOCK & COPY */
+				END;
+
+				WRITE(MAM)=NAH.PTR+READ(MD);	/* POINT TO PRIOR BLOCK */
+				WRITE(MAL)=NLS.LP;
+
+				IF (READ(MD)>NLS.LAST)			/* PRIOR NLS IS FULL    */
+				THEN DO;
+
+					IF #WRD=NLS.FIRSTL THEN DO;
+						GOTO NOCOPY;				/* NO COPY IF WE ARE AT NLS.FIRSTL ALREADY */
+					END;
+
+					ALLOCATE.PRIOR:;
+
+					NLS=ALLOCATE.NAH.BLOCK;		/* GET ANOTHER NLS BLOCK    */
+					IF NLS=0 THEN DO;
+						GOTO NOCOPY;				/* OUT OF ROOM              */
+					END;
+
+					WRITE(MAM)=#PTR;				/* POINT TO TRACK HEAD      */
+					WRITE(MAL)=THD.NUM.NLS;		/* COUNT NLS'S              */
+					WRITE(MD )=READ(MD)+1;
+
+					WRITE(MAM)=NAH.PTR+#SEC;	/* RESTORE MAM TO NLS       */
+					WRITE(MAL)=NLS.REV;			/* ACCESS REVERSE           */
+					RP=READ(MD);					/* GET CURRENT REV P        */
+					WRITE(MD)=NLS;					/* PTR POINTS TO NEW NLS    */
+
+					WRITE(MAM)=NAH.PTR+RP;		/* POINT TO PRIOR NLS       */
+					WRITE(MAL)=NLS.FOR;			/* OR MAY BE THD.FOR        */
+					WRITE(MD )=NLS;				/* HE POINTS TO NEW NLS     */
+
+					WRITE(MAM)=NAH.PTR+NLS;		/* FILL OUT NEW NLS         */
+					WRITE(MDI)=#SEC;				/* NLS.FOR                  */
+					WRITE(MDI)=RP;					/* NLS.REV                  */
+					WRITE(MDI)=#TRK;				/* NLS.TRK                  */
+					WRITE(MDI)=NLS.FIRSTL;		/* NLS.FP                   */
+					WRITE(MDI)=NLS.FIRSTL;		/* NLS.LP                   */
+					WRITE(MDI)=0;					/* ZERO RESERVED LOC 5      */
+					WRITE(MDI)=0;					/* ZERO RESERVED LOC 6      */
+					WRITE(MD )=0;					/* ZERO RESERVED LOC 7      */
+					WRITE(MAL)=NLS.FIRSTL;		/* STORE NLS.EOS            */
+					WRITE(MD )=NLS.EOS;			/* AT END OF BLOCK          */
+					WRITE(MAL)=NLS.LP;			/* SET MAL TO NLS.LP NOW    */
+
+					/* LEAVE MAM POINTINT TO NEW NLS, MAL TO NLS.LP */
+
+				END;
+
+				/* $PAGE - PERFORM GARBAGE COLLECT */
+
+				/* PERFORM GARBAGE COLLECTION BY */
+				/* COPYING THIS NOTE OVER INTO   */
+				/* PRIOR NLS:                    */
+
+				I=READ(MAM)-NAH.PTR;			/* SAVE POINTER TO SECTOR AND WORD */
+				J=READ(MD);						/* WHERE NOTE RECORD IS GOING      */
+
+				WRITE(MAL)=NLS.FP;
+				IF J<>READ(MD) THEN DO;		/* NOTE IN FRONT OF US IN THIS NLS */
+					WRITE(MAL)=J-1;
+					IF (READ(MD)&"77")=REST.NOTE
+					THEN DO;
+						K=J-2;					/* TWO WORD REST - CHECK IT        */
+						WRITE(MAL)=K;
+						AMSB=0; ALSB=SHR(READ(MD),1)&1023;
+						GOTO CHECK.DELTA;
+					END;
+					ELSE IF (READ(MD)&"77")=VEL.NOTE
+					THEN DO;
+						K=J-4;
+						WRITE(MAL)=K;
+						IF (READ(MD)&"174001")="100001"
+						THEN DO;
+							AMSB=0; ALSB=SHR(READ(MDI),1)&1023;	/* DELTA OF NOTE */
+							AMSB=AMSB+READ(MDI);						/* PLUS INTERNAL */
+							ALSB=ALSB+READ(MD);						/* DELTA         */
+							IF ALSB ILT READ(MD) THEN AMSB=AMSB+1;
+
+							CHECK.DELTA:;
+
+							MSB=AMSB; LSB=(SHR(W1,1)&1023);
+							LSB=LSB+ALSB;
+							IF LSB ILT ALSB THEN MSB=MSB+1;
+							IF (MSB=0)&(LSB ILE 1023)
+							THEN DO;						/* CAN TOSS PRIOR REST NOTE */
+								J=K;						/* WRITE NOTE OUT HERE */
+								W1=W1+SHL(ALSB,1);	/* WITH LONGER DELTA   */
+								WRITE(MAL)=NLS.LP;	/* NEW LAST POINTER    */
+								WRITE(MD )=J;
+								WRITE(MAM)=NAH.PTR+#SEC;
+								WRITE(MAL)=#WRD;
+								WRITE(MD )=W1;
+								WRITE(MAM)=#PTR;		/* NOW MUST CHECK LOOP */
+								WRITE(MAL)=THD.LP.WRD;	/* POINTERS/TIMES   */
+								IF  (READ(MDI)=#WRD)
+								AND (READ(MD )=#SEC)
+								THEN DO;
+									CALL ADVANCE.TO.NEXT.NOTE;
+									CALL BACKUP.TO.PRIOR.NOTE;		/* TO GET #LMSB,#LLSB CORRECT */
+									CALL STORE.#.INFO(THD.LP.NMSB);	/* SET NEW LAST TIME */
+								END;
+								ELSE DO;
+									WRITE(MAL)=THD.LP.WRD;	/* POINTERS/TIMES   */
+									IF  (READ(MDI)=J)
+									AND (READ(MD )=I)
+									THEN DO;
+										WRITE(MAL)=THD.LP.NMSB;
+										WRITE(MDI)=#NMSB;
+										WRITE(MD )=#NLSB;
+									END;
+								END;
+								WRITE(MAM)=NAH.PTR+I;
+							END;
+						END;
+					END;
+				END;
+
+				WRITE(MAL)=J;					/* POINT TO WORD DESTINATION */
+
+				WRITE(MDI)=W1;					/* WRITE OUT NOTE RECORD     */
+				WRITE(MDI)=W2;
+				IF W1 THEN DO;
+					WRITE(MDI)=W3;
+					WRITE(MDI)=W4;
+				END;
+				WRITE(MD)=NLS.EOS;			/* STORE AN NLS.EOS          */
+
+				WRITE("313")=READ(MAL);		/* STORE NEW NLS IN TEMP     */
+				WRITE(MAL)=NLS.LP;
+				WRITE(MD )=READ("313");		/* WRITE INTO NLS            */
+
+				/* Create a system event when a note is added or removed */
+				/* from the sequencer:                                   */
+
+				NEW.SEQ.INFO = NEW.SEQ.INFO \ 4;
+				WRITE(MAM) = D115D.NOTE.CHANGE.TRACKS;
+				WRITE(MAL) = #TRK;			/* REMEMBER TRACK # ON NEW.SEQ.INFO */
+				WRITE(MD) = "177777";		/*   "NEW NOTES" OR "NEW TIMBRE"    */
+
+				/* UPDATE POINTERS IN TRACK HEAD AND NOTE BLOCKS */
+				/* TO REFLECT MOVEMENT OF NOTE RECORD.   TIMES   */
+				/* AND SO FORTH DO NOT CHANGE                    */
+
+				WRITE(MAM)=#PTR;		/* POINT TO TRACK HEAD      */
+
+				WRITE(MAL)=THD.WRD;	/* WE KNOW PLAY POINTER     */
+				WRITE(MDI)=J;			/* SHOULD POINT TO NOTE     */
+				WRITE(MD )=I;			/* JUST COPIED.             */
+
+				IF W1<0 THEN DO;		/* CHECK FOR ILS/ILE */
+					IF ((W1&"174001")="104001") THEN DO;	/* ILS */
+						WRITE(MAL)=THD.ILS.WRD;
+						WRITE(MDI)=J;
+						WRITE(MD )=I;
+					END;
+					ELSE IF ((W1&"174001")="110001") THEN DO;	/* ILE */
+						WRITE(MAL)=THD.ILE.WRD;
+						WRITE(MDI)=J;
+						WRITE(MD )=I;
+					END;
+				END;
+
+				/* $PAGE */
+
+				ELSE DO;								/* NORMAL NOTE RECORD          */
+
+					IF  ((W2&"177700")=0)		/* SEE IF DURATION FIELD IS 0  */
+					AND ((W1&"074000")=0)
+					AND ((W3&SHL(B.UPD,8))=0)	/* AND NOT AN UPDATE RECORD    */
+					THEN DO;							/* CHECK NOTELIST FOR RECS/RECW */
+
+						NPTR=NOTELIST;				/* PICK UP FIRST NOTE BLOCK    */
+						DO WHILE NPTR<>0;			/* PROCESS EACH ONE            */
+
+							IF  (#SEC=RECS)		/* SECTOR MATCHES - CHECK WORD PTR */
+							AND (#WRD=RECW)
+							THEN DO;
+								RECW=J;
+								RECS=I;
+							END;
+
+							NPTR=NFPTR;				/* PICK UP POINTER TO NEXT NOTE */
+						END;							/* OF NOTE LOOP */
+					END;
+				END;
+
+				WRITE(MAL)=THD.LP.WRD;			/* CHECK LOOP POINTER           */
+				IF  (READ(MDI)=#WRD)
+				AND (READ(MD )=#SEC)
+				THEN DO;
+					WRITE(MAL)=THD.LP.WRD;
+					WRITE(MDI)=J;
+					WRITE(MD )=I;
+				END;
+
+				/* NOW TOSS OUT OLD COPY OF NOTE DATA */
+
+				WRITE(MAM)=NAH.PTR+#SEC;
+				WRITE(MAL)=NLS.FP;
+				IF W1 THEN WRITE(MD)=READ(MD)+4;
+				ELSE       WRITE(MD)=READ(MD)+2;
+
+				IF READ(MDI)=READ(MDI)	/* CHECK NLS.FP, NLS.LP  */
+				THEN DO;						/* THIS NLS IS NOW EMPTY */
+
+					WRITE(MAM)=#PTR;
+					WRITE(MAL)=THD.NUM.NLS;
+					WRITE(MD )=READ(MD)-1;
+
+					WRITE(MAL)=THD.LP.SEC;	/* SEE IF LOOP POINTER */
+					IF (READ(MD)=#SEC)		/* POINTED TO NLS.EOS  */
+					THEN DO;						/* OF THIS SECTOR      */
+						WRITE(MAL)=THD.LP.WRD;		/* SET POINTING */
+						IF W1 THEN WRITE(MDI)=J+4;	/* TO NLS.EOS   */
+						ELSE       WRITE(MDI)=J+2;	/* OF PRIOR     */
+						WRITE(MD)=I;					/* SECTOR       */
+					END;
+
+					WRITE(MAM)=NAH.PTR+#SEC;	/* GET FORWARD AND REV */
+					FP=READ(MDI);					/* POINTERS FROM NOW   */
+					RP=READ(MD );					/* EMPTY BLOCK         */
+
+					WRITE(MAM)=NAH.PTR+RP;		/* BACK UP TO NLS.REV - MAY POINT TO TRACK HEAD */
+					WRITE(MD )=FP;					/* NEW FP (MAY BE 0)  (MAY BE STORING IN THD HERE) */
+					IF FP<>0 THEN DO;				/* UPDATE BACK POINTER */
+						WRITE(MAM)=NAH.PTR+FP;
+						WRITE(MAL)=NLS.REV;
+						WRITE(MD )=RP;				/* RP MAY  POINT TO THD      */
+					END;
+
+					WRITE(MAM)=NAH.PTR+#SEC;	/* POINT TO NLS.FOR IN #SEC  */
+					WRITE(MDI)=NAH.FREE;			/* LINK ON TO FREE LIST      */
+					WRITE(MDI)=(-1);				/* STORE (-1) IN NLS.REV AND */
+					WRITE(MD )=(-1);				/* NLS.TRK TO CATCH PROGRAMMING BUGS */
+					NAH.FREE  =#SEC;
+					NAH.#FREE =NAH.#FREE+1;
+				END;
+			END;
+
+		END;
+
+		/* $PAGE - CONTINUE PLAYING NOTE */
+
+		ELSE DO;								/* LOOK UP ITEMS QUICKLY */
+
+			/* NOT RECORDING ON TRACK */
+			/* LOOK UP NOTE WORDS     */
+			/* QUICKLY:               */
+
+			WRITE(MAM)=#PTR;					/* MAKE SURE WE ARE LOOKING AT TRK HEAD */
+			WRITE(MAL)=THD.WRD;
+			W1=READ(MDI);						/* THD.WRD                   */
+			WRITE(MAM)=READ(MD)+NAH.PTR;	/* THD.SEC                   */
+			WRITE(MAL)=W1;						/* THEN POINT AT NOTE RECORD */
+
+			W1=READ(MDI);						/* READ THE NOTE RECORD      */
+			W2=READ(MDI);						/* INTO TEMPORARY VARS       */
+			IF W1 THEN DO;						/* THIS IS A 4-WRD RECORD    */
+				W3=READ(MDI); W4=READ(MDI);
+			END;
+			ELSE DO;
+				W3=RTE.MAX; W4=VEL.NOTE;
+			END;
+		END;
+
+		NOCOPY:;							/* PLAY NOTE */
+
+		WRITE(MAM)=NAH.PTR+NEXT.EVENT.QUEUE;
+
+		WRITE(MAL)=THD.NMSB;			/* COPY NEXT EVENT TIME OVER LAST TIME */
+		WRITE("300")=READ(MDI);		/* PUT THD.NMSB IN TEMP */
+		WRITE("301")=READ(MDI);		/* PUT THD.NLSB IN TEMP */
+		WRITE(MDI)=READ("300");		/* STORE INTO THD.LMSB  */
+		WRITE(MDI)=READ("301");		/* STORE INTO THD.LLSB  */
+
+		IF W1<0 THEN DO;			/* PROCESS ALTERNATE FORMAT RECORD */
+
+			I=ROT(W1,5)&"17";		/* EXTRACT ALT FORMAT TYPE CODE */
+
+			IF I=0 THEN DO;		/* SPECIAL EXTENDED REST NOTE RECORD */
+
+				/* ADVANCE NEXT EVENT TIME BY ADDITIONAL AMOUNT */
+
+				WRITE(MAL)=THD.NMSB;				/* PT AT NEXT EVENT TIME    */
+				WRITE(MDI)=READ(MD)+W2;			/* ADD REST MSB TO THD.NMSB */
+				WRITE(MD )=READ(MD)+W3;			/* ADD REST LSB TO THD.NLSB */
+				IF READ(MD) ILT W3 THEN DO;	/* HAD A CARRY              */
+					WRITE(MAL)=THD.NMSB;			/* INCREMENT THD.NMSB BY    */
+					WRITE(MD )=READ(MD)+1;		/* ONE MORE                 */
+				END;
+
+			END;						/* OF SPECIAL EXTENDED REST RECORD */
+
+			ELSE IF I=1 THEN DO;	/* INDEPENDENT LOOP START RECORD   */
+
+				WRITE(MAL)=THD.ILS.SCANNED;		/* SET FLAG WHICH SAYS WE    */
+				WRITE(MD )=1;							/* HAVE SCANNED START OF ILP */
+
+				/* SAMPLE CURRENT PLAY VARIABLES INTO */
+				/* THE ILP START PLAY VARIABLES       */
+
+				CALL SAMPLE.INFO.FOR.LOOP(READ(MAM),THD.ILS.WRD);
+
+			END;						/* OF ILP START RECORD             */
+
+			ELSE IF (I = 2) AND (IGNORE.LOOPS=FALSE) THEN DO;	/* INDEPENDENT LOOP END RECORD */
+
+				/* COMPARE CURRENT PLAY VARS TO THOSE AT START */
+				/* OF LOOP AND DO NECESSARY RTE UPDATES, AND   */
+				/* SET PTRS BACK TO START OF ILP.              */
+
+				CALL HANDLE.LOOP.JUMP(READ(MAM),THD.ILS.WRD);
+
+			END;						/* OF ILP END RECORD */
+
+		END;							/* OF ALTERNATE FORMAT RECORD */
+
+
+		/* $PAGE - PROCESS UPDATE RECORDS */
+
+
+		ELSE DO;							/* PROCESS NORMAL FORMAT RECORD */
+
+			IF (W3&SHL(B.UPD,8))<>0	/* UPDATE RECORD */
+			THEN DO;						/* PROCESS TO KEEP RTE INFO CORRECT */
+
+				IF (W3&SHL(B.GUI,8))<>0	/* GUITAR UPDATE RECORD  */
+				THEN DO;						/* PROCESS IT */
+					IF TIME.BASE.MODE<>0 THEN DO;	/* PROCESS GUITAR UPDATE RECORD */
+
+						/*	1.	FIRST FIND A GUITAR NOTE WHICH GOES WITH */
+						/*		THIS UPDATE RECORD.							  */
+						/*	2.	CHANGE NUPDT IN THE NOTE BLOCK FOUND	  */
+						/*	3.	CAUSE PITCH/VOLUME UPDATE TO OCCUR ON	  */
+						/*		EACH AFFECTED PARTIAL.						  */
+
+						INSERT 'GUITUPDS';	/* TEMPORARY KLUDGE */
+
+					END;							/* SKIP IF NOT PLAYING */
+				END;
+				ELSE DO;							/* KEYBOARD UPDATE RECORD */
+
+					DO CASE (SHR(W2,6)&3);	/* BRANCH ON UPDATE TYPE */
+
+						DO;										/* NORMAL UPDATE RECORD */
+
+							IF (W2&"100000")<>0				/* THIS IS A TRUE MIDI UPDATE RECORD */
+							THEN DO;
+								I=SHR(W2,8)&"177";			/* EXTRACT MIDI CONTROLLER NUMBER (0-127) */
+								K=W3&"177";						/* GET VALUE */
+
+								WRITE(MAL)=THD.MIDI;			/* POINT AT MIDI ROUTING WORD */
+
+								IF  (READ(MD)<>0)				/* ROUTED TO MIDI */
+								AND (TIME.BASE.MODE<>0)		/* ACTUALLY PLAYING (NOT FF OR REWIND) */
+								THEN DO;	/* SEND OUT */
+									WRITE(MAL)=THD.ACTIVE;	/* MAKE SURE TRACK IS SOUNDING */
+									
+									// Timing test CJ 2009-02-24-10-30-46PM
+									//if (NEXT.EVENT.LSB != ADVANCED.PLAY.TIME.LSB)
+										//send 'NEXT.EVENT.LSB != ADVANCED.PLAY.TIME.LSB', NEXT.EVENT.LSB, ADVANCED.PLAY.TIME.LSB, play.time.lsb + prescan;
+									
+									IF READ(MD)<>0
+									THEN CALL REAL.MIDI.CONTROL.CHANGE(I,K);	/* REAL MIDI CONTROL CHANGE OUTPUT */
+								END;
+
+								WRITE(MAL)=THD.TRK;
+								J=READ(MD);
+
+								WRITE(MAM)=MIDI.TRACK.RTES+J;
+								WRITE(MAL)=I;						/* INDEX INTO RTE DATA ARRAY */
+
+								IF (READ(MD)&255)<>SHR(W4,8)	/* BACKWARDS INFO   */
+								THEN DO;								/* IS INCORRECT     */
+									MSB=READ(MD)&255;				/* SAVE CORRECT REWIND VALUE */
+									WRITE(MD)=K\(READ(MD)&"177400");
+									WRITE(MAM)=NEXT.EVENT.QUEUE+NAH.PTR;
+									WRITE(MAL)=THD.WRD;
+									J=READ(MDI);						/* THD.WRD                   */
+									WRITE(MAM)=READ(MD)+NAH.PTR;	/* THD.SEC                   */
+									WRITE(MAL)=J+3;					/* THEN POINT AT NOTE RECORD */
+									WRITE(MD)=(READ(MD)&255)\SHL(MSB,8);
+								END;
+								ELSE WRITE(MD)=K\(READ(MD)&"177400");
+
+								WRITE(MAM)=NEXT.EVENT.QUEUE+NAH.PTR;
+							END;									/* OF TRUE MIDI UPDATE FORMAT */
+
+							ELSE DO;								/* STANDARD SYNCLAV FORMAT */
+								I=SHR(W2,8)&"17";				/* EXTRACT RTE DATA CODE (0-5) */
+								K=W3&255;						/* GET RTE VALUE */
+
+								IF I<R.PWHEEL THEN DO;
+									/* INVERT LINEARLY */
+									K=K\SHL(RTE.MAX-K,8);
+									/*	************************ B E G I N   D E L E T I O N ************************	*\
+									\* INVERT USING PSEUDO-LOG FUNCTION *\
+									LOAD (RTE.MAX*20+400); DIV (K+20);
+									K=K\SHL(RES-20,8);			\* USE LOG-LIKE FUNCTION FOR BEST INVERSION *\
+									\*	************************** E N D   D E L E T I O N **************************	*/
+								END;
+								ELSE IF I=R.PWHEEL THEN DO;	/* NEGATE FOR PWHEEL.  LEAVE RIBBON ALONE FOR NOW */
+									K=(K&255)\SHL((-K)&255,8);	/* STORE - TWO 8-BIT TWOS COMPLEMENT NUMBERS */
+								END;
+
+								WRITE(MAL)=THD.ACTIVE.MIDI.RTES;
+
+								IF (READ(MD)&BITS(I))<>0		/* THIS MIDI RTE IS ENABLED */
+								THEN DO;								/* DO SOME OUTPUT IF NEEDED */
+
+									WRITE(MAL)=THD.SYN.CROUT+I;
+
+									IF  (READ(MD)<>0)
+									AND (TIME.BASE.MODE<>0)
+									THEN DO;
+										WRITE(MAL)=THD.ACTIVE;	/* MAKE SURE TRACK IS SOUNDING */
+										IF READ(MD)<>0 THEN DO;
+											IF I<R.PWHEEL THEN DO;
+												WRITE(MAL)=THD.SYN.CROUT+I;	/* RESET MAL PTR FOR FOLLOWING CALL */
+												CALL MIDI.CONTROL.CHANGE(0,K&255);
+											END;
+											ELSE IF I=R.PWHEEL THEN DO;
+												CALL MIDI.PITCH.WHEEL(K&255);
+											END;
+											ELSE DO;
+												WRITE(MAL)=THD.SYN.CROUT+I;	/* RESET MAL PTR FOR FOLLOWING CALL */
+												CALL MIDI.CONTROL.CHANGE(1,K);
+											END;
+											WRITE(MAL)=THD.MIDI.RTES+I;
+											WRITE(MD)=K;
+										END;
+									END;
+
+								END;								/* OF MIDI RTE IS ENABLED */
+
+								WRITE(MAL)=THD.RTES+I;	/* INDEX INTO RTE DATA ARRAY */
+
+								IF (READ(MD)&255)<>SHR(W4,8)	/* BACKWARDS INFO   */
+								THEN DO;								/* IS INCORRECT     */
+									MSB=READ(MD);					/* SAVE CORRECT REWIND VALUE */
+									WRITE(MD)=K;
+									WRITE(MAL)=THD.WRD;
+									J=READ(MDI);						/* THD.WRD                   */
+									WRITE(MAM)=READ(MD)+NAH.PTR;	/* THD.SEC                   */
+									WRITE(MAL)=J+3;					/* THEN POINT AT NOTE RECORD */
+									WRITE(MD)=(READ(MD)&255)\SHL(MSB,8);
+									WRITE(MAM)=NEXT.EVENT.QUEUE+NAH.PTR;
+								END;
+								ELSE WRITE(MD)=K;					/* STORE RTE AND INVERTED RTE */
+
+								WRITE(MAL)  =THD.CTIMB;			/* LOOK UP CURRENT TIMBRE NUMBER */
+								WRITE("300")=READ(MD);			/* SAVE IN R0 SPEED */
+								WRITE(MAM)  =TIM.HEAD;			/* POINT TO TIMBRE HEADER FOR    */
+								WRITE(MAL)  =READ("300");		/* THIS TRACK'S CURRENT TIMBRE   */
+								WRITE(MAM)  =READ(MD);			/* THEN POINT TO THE TIMBRE INFO */
+								WRITE(MAL)  =TIM.ACT.PARS+I;	/* AND LOOK UP ITS ACTIVE RTE PARMS */
+
+								UPDATES=UPDATES\READ(MD);		/* SAVE IN TEMP FOR ONE UPDATE BELOW */
+
+								WRITE(MAM)=NAH.PTR+NEXT.EVENT.QUEUE;	/* RESTORE PTR TO TRK HEAD */
+							END;					/* OF SYNCLAV FORMAT UPDATE RECORD */
+						END;						/* OF NORMAL UPDATE RECORD */
+
+						DO;							/* TOGGLE BITS UPDATE RECORD */
+
+							WRITE(MAL)=THD.CTBITS;	/* SAVE NEW TOGGLE BITS */
+							IF (READ(MD)&15)<>SHR(W2,12)	/* BACKWARDS INFO */
+							THEN DO;								/* IS INCORRECT   */
+								MSB=READ(MD);					/* TEMPORARILY SAVE CORRECT REWIND VALUE */
+								WRITE(MD )=SHR(W2,8)&"17";	/* STORE NEW FORWARD VALUE */
+								WRITE(MAL)=THD.WRD;
+								J=READ(MDI);						/* THD.WRD                   */
+								WRITE(MAM)=READ(MD)+NAH.PTR;	/* THD.SEC                   */
+								WRITE(MAL)=J+1;					/* THEN POINT AT NOTE RECORD */
+								WRITE(MD)=(READ(MD)&"7777")\SHL(MSB,12);
+								WRITE(MAM)=NEXT.EVENT.QUEUE+NAH.PTR;
+							END;
+							ELSE WRITE(MD)=SHR(W2,8)&"17";	/* IN TRACK HEADER */
+
+							UPDATES=UPDATES\N.REPRATE;	/* UPDATE REPEAT/ARPEGGIATE */
+
+						END;							/* OF TOGGLE BITS UPDATE RECORD */
+
+						DO;							/* PRESSURE UPDATE RECORD */
+
+							IF TIME.BASE.MODE<>0 THEN DO;	/* ONLY PROCESS WHILE ACTUALLY PLAYING */
+								I = (W2&"77")+12;				/* GET KEY # */
+								IF (W4&(RAISE.KEY\LOWER.KEY))<>0 THEN DO;
+									IF (W4&RAISE.KEY)<>0 THEN I=I+12;
+									ELSE                      I=I-12;
+								END;
+
+								WRITE(MAL)=THD.TRK;
+
+								NPTR=NOTELIST;			/* SEARCH THRU LIST FOR NOTE TO UPDATE */
+								DO WHILE (NPTR<>0)&((TRACK<>READ(MD))\(KEYN<>I));	/* LOOK FOR NOTE FROM SAME KEY */
+									NPTR=NFPTR;
+								END;
+
+								IF NPTR<>0 THEN DO;							/* NOTE FOUND - UPDATE PRESSURE */
+									RPRED=(RPRED&"177400")\(W3&255);		/* STORE AS RAW PRESSURE - LET FILTER DO UPDATES */
+									WRITE(MAL)=THD.MIDI;						/* SEE IF MIDI OUTPUT    */
+									IF ((READ(MD)&THD.MIDI.INDIVP)<>0)	/* INDIV PRESSURE ACTIVE */
+									THEN DO;										/* SEND OUT INDIV PRESSURE HERE */
+										WRITE(MAL)=THD.ACTIVE.MIDI.RTES;
+										IF (READ(MD)&B.PRESSURE)<>0
+										THEN DO;									/* MIDI PRESSURE ENABLED */
+											WRITE(MAL)=THD.CXPOS;			/* ADD IN TRANSPOSITION  */
+                                 I = I + READ(MD);
+											WRITE(MAL)=THD.MIDX;			   /* ADD IN TRANSPOSITION  */
+                                 I = I + READ(MD);
+											CALL MIDI.INDIVIDUAL.PRESSURE(MIDI.MAP.KEY(I),W3&255);	/* SEND NEW VALUE */
+										END;
+									END;
+									NEW.INFO=1;									/* SET FLAG TO UPDATE INFO DIRECTLY */
+								END;
+							END;
+						END;
+
+						DO;		/* MIDI UPDATE RECORD INFO */
+
+							IF SHR(W2,8)=0		/* MIDI UPDATE RECORD TYPE */
+							THEN DO;				/* IS A PROGRAM CHANGE RECORD */
+								WRITE(MAL)=THD.CPROGRAM;		/* SAVE NEW VALUE */
+								IF (READ(MD)&255)<>SHR(W4,8)	/* BACKWARDS INFO   */
+								THEN DO;								/* IS INCORRECT     */
+									MSB=READ(MD);					/* SAVE CORRECT REWIND VALUE */
+									WRITE(MD )=(W3&255)\128;	/* IN PLAY INFO */
+									WRITE(MAL)=THD.WRD;
+									J=READ(MDI);						/* THD.WRD                   */
+									WRITE(MAM)=READ(MD)+NAH.PTR;	/* THD.SEC                   */
+									WRITE(MAL)=J+3;					/* THEN POINT AT NOTE RECORD */
+									WRITE(MD)=(READ(MD)&255)\SHL(MSB,8);
+									WRITE(MAM)=NEXT.EVENT.QUEUE+NAH.PTR;
+								END;
+								ELSE WRITE(MD )=(W3&255)\128;	/* IN PLAY INFO */
+
+								WRITE(MAL)=THD.MIDI;
+
+								IF  (READ(MD)<>0)				/* ROUTED TO MIDI */
+								AND (TIME.BASE.MODE<>0)		/* ACTUALLY PLAYING (NOT FF OR REWIND) */
+								THEN DO;	/* SEND OUT */
+									WRITE(MAL)=THD.ACTIVE;	/* MAKE SURE TRACK IS SOUNDING */
+									IF READ(MD)<>0 THEN DO;
+										CALL MIDI.PROGRAM.CHANGE(W3&127);
+										WRITE(MAL)=THD.MIDI.CPROGRAM;
+										WRITE(MD )=(W3&255)\128;
+									END;
+								END;
+							END;
+
+							ELSE IF (SHR(W2,8)=1) THEN DO;		/*SYSTEM EXCLUSIVE */
+								WRITE(MAL)=THD.MIDI;
+
+								IF  (READ(MD)<>0)
+								AND (TIME.BASE.MODE<>0)
+								THEN DO;									/* SEND OUT */
+									WRITE(MAL)=THD.ACTIVE;			/* MAKE SURE TRACK IS SOUNDING */
+									IF READ(MD)<>0 THEN DO;
+										CALL SEND.SYSEX(W3&255);	/* SEND THIS BYTE OUT */
+									END;
+								END;
+							END;
+
+							ELSE IF (SHR(W2,8)=2) THEN DO;		/* SUSTAIN SWITCH RECORD */
+								K=W3&255;								/* GET NEW SUSTAIN VALUE */
+
+								WRITE(MAL)=THD.SUSTAIN;				/* LOOKUP OLD VALUE */
+								IF (READ(MD)&B.CURRENT.SUSTAIN)<>0
+								THEN I=127;								/* MIDI RTE MAX */
+								ELSE I=0;								/* SUSTAIN PEDAL OFF */
+
+								WRITE(MAL)=THD.ACTIVE;				/* SET UP TO CHECK FOR ACTIVE TRACK */
+
+								IF  (READ(MD)<>0)						/* TRACK IS SOUNDING */
+								AND (TIME.BASE.MODE<>0)				/* WE ARE MOVING */
+								THEN DO;
+									IF (K=0)								/* NEW VALUE IS ZERO */
+									THEN CALL REAL.MIDI.CONTROL.CHANGE(64,0);
+									ELSE CALL REAL.MIDI.CONTROL.CHANGE(64,127);
+								END;
+
+								IF (I<>SHR(W4,8))						/* BACKWARDS INFO   */
+								THEN DO;									/* IS INCORRECT     */
+									WRITE(MAL)=THD.WRD;
+									J=READ(MDI);						/* THD.WRD                   */
+									WRITE(MAM)=READ(MD)+NAH.PTR;	/* THD.SEC                   */
+									WRITE(MAL)=J+3;					/* THEN POINT AT NOTE RECORD */
+									WRITE(MD)=(READ(MD)&255)\SHL(I,8);
+									WRITE(MAM)=NEXT.EVENT.QUEUE+NAH.PTR;
+								END;
+
+								/* NOW STORE THE NEW STATE IN TRACK HEAD */
+								WRITE(MAL)=THD.SUSTAIN;
+								IF   (K=0)
+								THEN WRITE(MD)=(READ(MD)&(NOT B.CURRENT.SUSTAIN));
+								ELSE WRITE(MD)=(READ(MD)\B.CURRENT.SUSTAIN);
+
+							END;	/* OF SUSTAIN SWITCH UPDATE RECORD */
+						END;	/* MIDI UPDATE RECORD */
+					END;	/* OF BRANCH ON UPDATE TYPE */
+
+
+					IF UPDATES<>0		/* HAVE SOME RTE UPDATES TO DO */
+					THEN DO;				/* LINK TRK ONTO UPDATE QUEUE */
+						WRITE(MAL)=THD.UPD.PARS;		/* POINT AT UPD.PARS WORD       */
+						WRITE(MDI)=READ(MD)\UPDATES;	/* OR IN BITS FOR RTES AFFECTED */
+
+						IF  (READ(MD)=0)					/* CHECK THD.UPD.QUED          */
+						THEN DO;								/* NOT IN LIST SO PUT IT THERE */
+							WRITE(MDI)=1;					/* THD.UPD.QUED TO NONZERO     */
+							WRITE(MD)=UPLIST0;			/* STORE REL. FORWARD PTR      */
+							UPLIST0=NEXT.EVENT.QUEUE;	/* IN THD.UPD.LINK             */
+						END;
+
+						UPDATES=0;						/* THEN RESET LOCAL FLAG       */
+						NEW.INFO=1;						/* SET FLAG TO DO UPDATES ASAP */
+					END;
+
+				END;						/* OF KEYBOARD UPDATE RECORD (NOT GUITAR) */
+
+			END;							/* OF CASE FOR UPDATE RECORD */
+
+			/* $PAGE */
+
+			ELSE DO;						/* NORMAL "REAL" NOTE */
+
+				IF (W2&"77")<>REST.NOTE				/* NOT A REST RECORD  */
+				THEN DO;
+
+					IF CLICK.TRACK.MODE ige 4 THEN DO;	/* CHECK QUICKLY   */
+
+						WRITE(MAL)=THD.TRK;				/* LOOK UP OUR TRK # */
+
+						IF CLICK.TRACK.MODE = (4-NUM.KBD.TRACKS+READ(MD))	/* USING LIVE CLICK TRACK */
+						THEN DO;								/* ADVANCE CLICK/BEAT NUMBER HERE */
+							CALL TRACK.CLICK.CHECK;		/* SET UP INFO FOR CLICK, LAST CLICK, EST.RATE */
+							WRITE(MAM)=NAH.PTR+NEXT.EVENT.QUEUE;	/* RESTORE PTR TO TRK HEAD */
+						END;
+					END;
+
+					WRITE(MAL)=THD.ACTIVE;
+
+					IF  (READ(MD)       <> 0)	/* TRACK IS ACTIVE      */
+					AND (TIME.BASE.MODE <> 0)	/* PLAYING - START NOTE */
+					THEN DO;							/* MAKE MUSIC           */
+
+						/* GET DURATION FIELD HANDY: */
+
+						MSB=W1&"074000";				/* UPPER DURATION BITS     */
+						LSB=SHR(W2,6);					/* LOWER DURATION BITS     */
+
+						/* IF THIS IS A CUELIST TRACK,  THEN SEND THE INFO      */
+						/* TO THE DIRECT-TO-DISK INSTEAD OF STARTING THE NOTE.  */
+
+						WRITE(MAL) = THD.CUE.TRACK;
+						IF READ(MD)<>0 THEN DO;		/* THIS IS A CUELIST       */
+
+							i = (W2&"77")\SHR(MSB,6);	/* get 9-bit "key" no.    */
+							WRITE(MAL)=THD.NMSB;			/* get actual next event  */
+							msb = read(mdi);				/* time to send to lod.   */
+							lsb = read(md );
+							WRITE(MAL)=THD.TRK;			/* and get syncl track #  */
+							j = read(md);					/* for track volume info. */
+
+							/* Look up cue id (for cue triggers), or pointer */
+							/* to event record (if event info)               */
+
+							WRITE(MAL)  = THD.CTIMB;	/* LOOK UP CURRENT TIMBRE NUMBER */
+							WRITE("313")= READ(MD);		/* GET CUR TIMBRE #              */
+							WRITE(MAM)  = TIM.HEAD;		/* POINT TO TIMBRE HEAD LIST     */
+							WRITE(MAL)  = READ("313");	/* INDEX TO TIMBRE HEAD          */
+							WRITE(MAM)  = READ(MD);		/* POINT TO CORRECT TIMBRE HEAD  */
+							WRITE(MAL)  = (TIM.PARTIAL.POINTERS + SHR(I,8));
+							K           = READ(MD);		/* GET POINTER TO PARTIAL HANDY  */
+							WRITE(MAL)  = (TIM.KBDTAB.PTR       + SHR(I,8));
+
+							/* IF KEYBOARD LOOKUP TABLE EXISTS, THEN IT HOLDS */
+							/* THE CUE ID (IF A CUE TRIGGER), OR A NEGATIVE   */
+							/* RELATIVE POINTER TO THE EVENT FRAME (IF A      */
+							/* COMPLEX EVENT.  LOOK UP CUE ID/POINTER AND     */
+							/* SEND THE CORRECT INFO TO THE LOD.              */
+
+							IF READ(MD)<>0 THEN DO;		/* MAKE SURE KBDTAB EXISTS */
+								WRITE(MAM) = TIM.PTR + READ(MD) - 1;
+								WRITE(MAL) = I;			/* INDEX BY EXPANDED KEY # */
+								L          = READ(MD);	/* GET CUE ID # OR PTR     */
+
+								/* if this is an event,  we must look deeper for */
+								/* the cue id,  and also get event info.         */
+
+								if l < 0 then do;	/* means this is event trigger */
+									call p.lookup(k-l+ev.in.msb);		/* copy event */
+									write("300") = addr(copy.buf(0));/* info to    */
+									rpc (ev.name - ev.in.msb);			/* copy buf   */
+									write("360") = read(mdi);			/* here.      */
+									call p.lookup(k-l+ev.cue.id);		/* Also get   */
+									l = read(md);							/* actual     */
+									k = addr(copy.buf(0));				/* cue id.    */
+								end;
+								else k = 0;			/* no event info for cue trigs */
+
+								/* map the cue trigger time to a real time to */
+								/* trigger the cue at:                        */
+
+								if l <> 0			/* if id exists, then send it  */
+								then do;
+
+									if tempo.map.ptr <> 0
+									then call Map.Sequence.Time.To.Real.Time(loc(addr(msb)), loc(addr(msb)));
+
+									call Store.Real.Time.Event.Info
+										(l, loc(addr(MSB)),	/* cue id,  time    */
+										 1, loc(addr(W1 )),	/* bits, w1-w4      */
+										 32768 \ j, loc(k));	/* trk, event info  */
+								end;
+							END;
+						END;
+
+						ELSE IF   ((MSB\LSB)<>0)	/* NOTE HAS SOME DURATION - START NOTE */
+						AND       (NFREEP   <>0)	/* BUT ONLY IF BLOCK IS AVAILABLE      */
+						THEN DO;
+
+							IF MSB<>0 THEN DO;		/* INFO IN UPPER BITS   */
+								LSB=LSB\SHR(MSB&"014000",1);
+								MSB=MSB&"060000";
+								IF MSB<>0 THEN DO;	/* LONG SHIFT     */
+									LOAD LSB;
+									MUL DUR.MUL.DATA(ROT(MSB,3)&3);
+									MSB=URES; LSB=RES;
+								END;
+							END;
+
+							NPTR=NFREEP;
+							NFREEP=CORE(NFREEP);
+
+							WRITE("313")=NPTR;				/* USE R13 FOR SPEED */
+
+							WRITE("373")=0;					/* NFPTR - ALWAYS 0  */
+
+
+							WRITE(MAL)=THD.CTIMB;			/* GET CURRENT TIMBRE # */
+							WRITE("373")=READ(MD);			/* TIMBRE =             */
+
+							WRITE(MAL)=THD.TRK;
+							WRITE("373")=READ(MD);			/* TRACK  =             */
+
+							WRITE("373")=1;					/* NORIG  =             */
+
+							WRITE("373")=(W2&"77")+12;		/* KEYN   =             */
+							WRITE("373")=SHR(W3,8);			/* SBITS  =             */
+
+							WRITE("373")=W3&255;				/* VELD   =             */
+
+							/* $PAGE */
+
+							IF INC.AXE<>0 THEN GDATA=0;	/* NOT A GUITAR NOTE */
+
+							IF W4<>VEL.NOTE THEN DO;		/* PROCESS INFO      */
+								SBITS=SBITS\(W4&"177400");
+								IF (W4&(LOWER.KEY\RAISE.KEY))<>0
+								THEN DO;
+									IF (W4&LOWER.KEY)<>0 THEN KEYN=KEYN-12;
+									IF (W4&RAISE.KEY)<>0 THEN KEYN=KEYN+12;
+								END;
+							END;
+
+							IF INC.MONO<>0 THEN DO;
+								WRITE(MAL)=THD.WRD;			/* SAVE POINTER TO */
+								TFLAG     =READ(MDI);		/* NOTE RECORD IN  */
+								REMAIN    =READ(MD );		/* CASE OVERLAY    */
+							END;									/* MODE            */
+
+							QME=0;								/* NON-MIDI        */
+
+							/* NOW CHECK TO SEE IF THIS IS ACTUALLY A    */
+							/* RAM EVENT TRIGGER IN WHICH CASE WE WILL   */
+							/* EXTRACT THE DURATION FOR THIS "NOTE" FROM */
+							/* THE PATCH LIST.                           */
+
+							WRITE(MAM)=TIM.HEAD;						/* POINT TO TIMBRE HEAD */
+							WRITE(MAL)=TIMBRE;
+							WRITE(MAM)=READ(MD);
+							WRITE(MAL)=TIM.POLY.EVENT;
+							IF (READ(MD)<>0) THEN DO;				/* POLY EVENTS USED IN THIS TIMBRE */
+								WRITE(MAL)=TIM.PARTIAL.POINTERS;
+								I         =READ(MD);						/* SAVE POINTER TO OUR PARTIAL */
+								WRITE(MAL)=TIM.KBDTAB.PTR;				/* POINT TO KBD LOOKUP TABLE */
+								WRITE(MAM)=TIM.PTR+READ(MD)-1;
+								WRITE(MAL)=(KEYN*KLT.SIZE)+KLT.PATCH.TIM.PTR;
+								IF READ(MD)<>0 THEN DO;					/* MAKE SURE KBDTAB EXISTS */
+									K=I+READ(MD)+PT.TLEN;
+									CALL P.LOOKUP(K);
+									DO J=PT.TLEN TO PT.KHZ;				/* COPY INFO WE NEED INTO MISC.BUF */
+										MISC.BUF(J)=READ(MDI);
+									END;
+									IF  (MISC.BUF(PT.EVENT)<>0)		/* ONLY IF THIS IS A NON-LOOPING POLY "EVENT" */
+									AND (MISC.BUF(PT.ONLOOP)<>3)
+									THEN DO;
+
+										/* PT.TLEN (TOTAL LENGTH) IS STORED IN THE  */
+										/* PARTIAL AREA IN 32 BIT FORMAT.  CHANGE   */
+										/* TO 24 BIT FORMAT FOR CONVERSION ROUTINES */
+
+										MSB=SHL(MISC.BUF(PT.TLEN),8)\SHR(MISC.BUF(PT.TLEN+1),8);
+										LSB=MISC.BUF(PT.TLEN+1)&255;
+
+										CALL INDEX_TO_TIME(0,MSB,LSB,MISC.BUF(PT.KHZ),MISC.BUF(PT.STEREO));
+
+										/* NOW CONVERT RESULT TO 32 BIT MSEC DURATION */
+										LOAD TIME.SECONDS;
+										MUL  1000;
+										MSB = URES;
+										LSB = RES;
+										LSB = LSB + TIME.MILLISECONDS;
+										IF LSB ILT TIME.MILLISECONDS
+										THEN MSB = MSB + 1;
+
+										/* AND FINALLY, MAP THIS DURATION TO SEQUENCER */
+										/* UNITS FOR COMPUTATIONS BELOW.               */
+										call Map.Real.Duration.To.Sequence.Duration(loc(addr(NEXT.EVENT.MSB)),loc(addr(MSB)),loc(addr(MSB)));
+									END;
+								END;
+							END;
+
+							/* compute actual start & end time of note: */
+
+							FENDM=NEXT.EVENT.MSB+MSB;	/* compute end time    */
+							FENDL=NEXT.EVENT.LSB+LSB;	/* in sequencer units. */
+							IF FENDL ILT LSB THEN DO;	/* watch for carry.    */
+								FENDM=FENDM+1;
+							END;
+
+							if (tempo.map.ptr == 0)
+							{	//	no tempo map
+								OTIMM	= NEXT.EVENT.MSB;	/*	use next.event.msb,lsb here for convenience	*/
+								OTIML	= NEXT.EVENT.LSB;	/*	will match thd.nmsb for non-cue tracks			*/
+							}
+							else
+							{	//	tempo map, get actual times
+								Map.Sequence.Time.To.Real.Time(loc(addr(next.event.msb)), loc(addr(otimm)));
+								Map.Sequence.Time.To.Real.Time(loc(addr(fendm)), loc(addr(fendm)));
+							}
+
+
+							IF  (CONTINUE.BUTTON.ACTIVE<>0)
+							AND (CONT.HELD             <>0)
+							THEN DO;	/* SETUP NEW LOOP START TIME PARAMETER */
+								CALL SET.LOOP.START.TIME(NEXT.EVENT.MSB,NEXT.EVENT.LSB);
+							END;
+
+							/* NOTE: MAM PTR TRASHED HERE */
+
+							IF (W3&(SHL(B.TIE\B.ART,8)))=SHL(B.TIE,8)
+							THEN DO;								/* UNARTICULATED TIED NOTE */
+								IF TIELIST=0					/* IF QUE IS EMPTY, */
+								THEN TIELIST      =NPTR;	/* THEN STORE ON FRONT */
+								ELSE CORE(TIELAST)=NPTR;	/* ELSE STORE ON END OF QUE */
+								TIELAST=NPTR;					/* NOW WE ARE ON END OF QUE        */
+							END;
+							ELSE DO;								/* PUT ON SEQLIST       */
+								IF SEQLIST=0					/* IF QUE IS EMPTY, */
+								THEN SEQLIST      =NPTR;	/* THEN STORE ON FRONT */
+								ELSE CORE(SEQLAST)=NPTR;	/* ELSE STORE ON END OF QUE	*/
+								SEQLAST=NPTR;					/* NOW WE ARE ON END OF QUE	*/
+							END;
+						END;				/* OF NOTE WITH NON-ZERO DURATION */
+					END;					/* OF START THE NOTE  */
+
+					/* ELSE HANDLE CASE OF TRACK IS NOT ACTIVE, OR IF WE ARE NOT ACTUALLY */
+					/* PLAYING (E.G. MUST BE FF OR REW).											 */
+
+					/* CHECK FOR A TRANSPOSE TRACK & UPDATE ACCORDINGLY						 */
+
+					ELSE
+					{
+						WRITE(MAL)=THD.IGNORE;
+
+						/* SEE IF THIS IS A TRANPOSE TRACK.  HANDLE IF SO */
+
+						IF ((READ(MD) & THD.IGNORE.XPOS) != 0)
+						{
+							I = (W2 & "77") + 12;						/* KEYN   =         */
+
+							IF ((W1 & 1) != 0)							/* IF 4 WORD RECORD */
+							{
+								IF ((W4&(LOWER.KEY\RAISE.KEY)) != 0)
+								{
+									IF (W4&LOWER.KEY)<>0 THEN I=I-12;
+									IF (W4&RAISE.KEY)<>0 THEN I=I+12;
+								}
+							}
+
+							TRANSPOSE.SEQUENCER.TRACKS	(#TRK, I, NEXT.EVENT.MSB, NEXT.EVENT.LSB);
+						}
+					}
+
+				END;						/* OF NOT A REST NOTE */
+
+			END;							/* OF PROCESS NORMAL "REAL" NOTE */
+
+		END;								/* OF NORMAL FORMAT NOTE RECORD PROCESSING */
+
+
+		/* $PAGE */
+
+
+		/* ADVANCE THE PLAY PTRS FOR THIS TRK */
+		/* AND COMPUTE A NEW NEXT EVENT TIME  */
+
+		WRITE(MAM)=NEXT.EVENT.QUEUE+NAH.PTR;	/* RESTORE PTR TO TRK HEAD */
+		WRITE(MAL)=THD.ANY.REV;		/* SET FLAG SINCE WE WILL   */
+		WRITE(MD )=1;					/* HAVE NOTE BEHIND US      */
+
+		WRITE(MAL)=THD.WRD;			/* GET AT PLAY PTRS         */
+
+		LSB=READ(MDI);					/* SAVE THD.WRD AND THD.SEC */
+		MSB=READ(MD);					/* FOR THIS TRK             */
+
+		IF W1								/* ODD MEANS 4-WORD RECORD  */
+		THEN LSB=LSB+4;				/* ADVANCE PTR OVER NOTE    */
+		ELSE LSB=LSB+2;				/* WE JUST PROCESSED        */
+
+
+		NEXT.SECTOR:
+
+		WRITE(MAM)=MSB+NAH.PTR;		/* POINT TO NLS  */
+		WRITE(MAL)=LSB;				/* AND NEXT NOTE */
+
+		/* MAKE SURE WE ARE POINTING AT A   */
+		/* REAL NOTE. IF NOT, THEN TRY TO   */
+		/* FIND ONE IN SUBSEQUENT NOTE LIST */
+		/* SEGMENTS.                        */
+
+		IF READ(MD)=NLS.EOS			/* NO MORE NOTES IN THIS NLS */
+		THEN DO;							/* TRY TO GET NEXT ONE */
+			WRITE(MAL)=NLS.FOR;		/* GET THE FORWARD PTR */
+
+			IF READ(MD)=0				/* NO MORE NOTE SEGMENTS */
+			THEN DO;
+
+				/* SAVE THE NEW PLAY POINTERS BACK IN */
+				/* OUR TRACK HEADER.                  */
+
+				WRITE(MAM)=NAH.PTR+NEXT.EVENT.QUEUE;	/* POINT TO TRK HEAD  */
+				WRITE(MAL)=THD.WRD;							/* SAVE NEW PLAY PTRS */
+				WRITE(MDI)=LSB;								/* THD.WRD            */
+				WRITE(MD )=MSB;								/* THD.SEC            */
+
+				WRITE(MAL)=THD.ANY.FOR;						/* NO MORE NOTES IN   */
+				WRITE(MD )=0;									/* IN FORWARD DIRECTION */
+
+				/* AT THIS POINT WE NEED TO REMOVE  */
+				/* THIS TRACK FROM THE EVENT QUEUE  */
+				/* SINCE WE HAVE PROCESSED THE NOTE */
+				/* RECORD IT CONTAINED              */
+
+				WRITE(MAL)=THD.NEVF;								/* LOOK UP FORWARD PTR */
+				NEXT.EVENT.QUEUE=READ(MD);						/* IT BECOMES HEAD OF LIST */
+				IF READ(MD)<>0 THEN DO;							/* ADJUST NEW HEAD */
+					WRITE(MAM)=NAH.PTR+NEXT.EVENT.QUEUE;	/* NOW LOOK AT NEXT TRK IN LIST */
+					WRITE(MAL)=THD.NEVR;							/* NEED TO ZERO ITS BACK PTR */
+					WRITE(MD )=0;									/* SINCE NOW AT FRONT OF LIST */
+					WRITE(MAL)=THD.NEV.MSB;						/* RESET NEXT EVENT TIME */
+					NEXT.EVENT.MSB=READ(MDI);					/* TO TIME OF FIRST TRK */
+					NEXT.EVENT.LSB=READ(MD );					/* IN EVENT QUEUE */
+				END;
+
+				GOTO DONE.WITH.NOTE;								/* ALL DONE */
+			END;
+
+			MSB=READ(MD);				/* SAVE PTR TO NEW NLS */
+			WRITE(MAM)=NAH.PTR+MSB;
+			WRITE(MAL)=NLS.FP;
+			LSB=READ(MD);				/* RESET WORD PTR      */
+
+			GOTO NEXT.SECTOR;			/* TRY AGAIN           */
+		END;
+
+
+		/* $PAGE */
+
+
+		/* UPDATE NEXT EVENT TIME VARIABLES (THD.NMSB, THD.NLSB) */
+
+		W1=SHR(READ(MD),1)&1023;	/* START TIME DELTA FOR NEXT NOTE */
+
+		WRITE(MAM)=NAH.PTR+NEXT.EVENT.QUEUE;	/* POINT TO TRK HEAD */
+		WRITE(MAL)=THD.NLSB;			/* COMPUTE NEW NEXT EVENT TIME */
+		WRITE(MD)=READ(MD)+W1;		/* ADD DELTA FOR NEXT NOTE     */
+		IF READ(MD) ILT W1			/* HAD A CARRY                 */
+		THEN DO;							/* NEED TO INCREMENT THD.NMSB  */
+			WRITE(MAL)=THD.NMSB;
+			WRITE(MD )=READ(MD)+1;
+		END;
+
+
+		/* SAVE THE NEW PLAY POINTERS BACK IN */
+		/* OUR TRACK HEADER.                  */
+
+		WRITE(MAL)=THD.WRD;						/* SAVE NEW PLAY PTRS */
+		WRITE(MDI)=LSB;							/* THD.WRD            */
+		WRITE(MD )=MSB;							/* THD.SEC            */
+
+
+		/* AT THIS POINT WE NEED TO REMOVE  */
+		/* THIS TRACK FROM THE EVENT QUEUE  */
+		/* SINCE WE HAVE PROCESSED THE NOTE */
+		/* RECORD IT CONTAINED              */
+
+		W1=READ(MAM);										/* SAVE ABS PTR TO OUR TRK FOR MERGE BELOW */
+		WRITE(MAL)=THD.NEVF;								/* LOOK UP FORWARD PTR */
+		NEXT.EVENT.QUEUE=READ(MD);						/* IT BECOMES HEAD OF LIST */
+		IF READ(MD)<>0 THEN DO;							/* ADJUST NEW HEAD */
+			WRITE(MAM)=NAH.PTR+NEXT.EVENT.QUEUE;	/* NOW LOOK AT NEXT TRK IN LIST */
+			WRITE(MAL)=THD.NEVR;							/* NEED TO ZERO ITS BACK PTR */
+			WRITE(MD )=0;									/* SINCE NOW AT FRONT OF LIST */
+			WRITE(MAL)=THD.NEV.MSB;						/* RESET NEXT EVENT TIME */
+			NEXT.EVENT.MSB=READ(MDI);					/* TO TIME OF FIRST TRK */
+			NEXT.EVENT.LSB=READ(MD );					/* IN EVENT QUEUE */
+		END;
+
+		CALL FORWARD.MERGE.INTO.EVENT.QUEUE(W1);	/* PUT TRK BACK INTO LIST */
+
+		DONE.WITH.NOTE:				/* ALL DONE WITH CURRENT NOTE */
+
+	END;									/* OF LOOP WHILE NOTES TO PROCESS NOW */
+	
+	// Publish time of next note
+	if (NEXT.EVENT.QUEUE<>0)
+	{
+		if tempo.map.ptr <> 0
+		{
+			call Map.Sequence.Time.To.Real.Time(loc(addr(NEXT.EVENT.MSB)), loc(addr(msb)));
+			next.seq.event = lsb - prescan;
+		}
+		
+		else
+			next.seq.event = NEXT.EVENT.LSB - prescan;
+	}
+	
+	else
+		next.seq.event = play.time.lsb + 5000;
+
+END SCAN.SEQUENCER.NOTES;
+
+INSERT '161SEQ1B';
+INSERT '161SEQ1C';

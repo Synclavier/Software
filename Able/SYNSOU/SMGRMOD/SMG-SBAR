@@ -1,0 +1,935 @@
+/* SMG-SBAR  $TITLE  Screen Manager Scroll bar routines
+
+   Modified:
+   05/24/88 - TSS - Modified MOUSE.SWITCH calls to save and restore MOUSE.CURSOR.TYPE
+   04/04/88 - MWH - Add scroll bar bit to suppress arrows
+   03/18/88 - MWH - Add scroll bar bit for transparent mode
+   11/17/87 - MWH - Split into 2 libraries; SMGR is too big
+   11/10/87 - MWH - Don't update scroll bars immediately on activate
+   11/04/87 - MWH - Combine Cameron's major scroll-bar changes with my edits
+   10/20/87 - MWH - Screen.Changed, Update, Exhibit, Enable USED CONSISTENTLY
+   10/20/87 - MWH - Keep screen updated while waiting for events
+   10/01/87 - MWH - Make unreferenced procedures NON-public
+   09/25/87 - MWH - Use literals for suffix lengths
+   
+*/
+
+dcl SB.HWidth     fixed public;  /* Width of bar */
+dcl SB.VWidth     fixed public;
+dcl SB.HArrowpix  fixed public;  /* Space for arrows at each end of bar */
+dcl SB.VArrowpix  fixed public;
+
+dcl bargap lit '3';					/* gap between border and box boundary... */
+
+DEFINE.SCROLL.BAR: proc (id,orient,just,edge,left.top,right.bot) public swapable;
+   dcl id        fixed;   /* Id of scroll bar to define */
+   dcl orient    fixed;   /* Orientation: 0 = Horizontal  1 = Vertical */
+   dcl just      fixed;   /* Justification: 0 = top or left  1 = bottom or right */
+   dcl edge      fixed;   /* Justified edge of bar */
+   dcl left.top  fixed;   /* Left X or Top Y coordinate */
+   dcl right.bot fixed;   /* Right X or Bottom Y coordinate */
+
+   Id = Allocate.Id(Id);   /* keep system info up to date, possibly auto allocate id */
+
+   if Allocate.New.Object(O#Hlen+O#SBAR.Size) then do;
+      call Write.Object(Object.Ptr+O#Type,  O$Scroll.Bar);
+      call Write.Object(Object.Ptr+O#Status,O#STAT.Update);
+      call Write.Object(Object.Ptr+O#Type,  O$Scroll.Bar);
+      call Write.Object(Object.Ptr+O#ID,    Id);
+      call Write.Object(Object.Ptr+O#Action,O#ACT.Prev.Obj
+                                          \ O#ACT.Animate.Disabled
+                                          \ Default.Action);
+      call Write.Object(Object.Ptr+O#ObjectGets,  Get#In.Char
+                                                \ Get#Mouse.Button);
+      call Write.Object(Object.Ptr+O#UserGets,Get#Mouse.Movement);
+
+      if orient = 0 then do;  /* Horizontal orientation */
+         call Write.Object(Object.Ptr+O#ULX, left.top);
+         call Write.Object(Object.Ptr+O#LRX, right.bot);
+         if just = 0 then do; /* Top justification */
+            call Write.Object(Object.Ptr+O#ULY, edge);
+            call Write.Object(Object.Ptr+O#LRY, edge - SB.HWidth);
+         end;
+         else do;             /* Bottom justification */
+            call Write.Object(Object.Ptr+O#LRY, edge);
+            call Write.Object(Object.Ptr+O#ULY, edge+SB.VWidth);
+         end;
+      end;
+      else do;                /* Vertical orientation */
+         call Write.Object(Object.Ptr+O#ULY, left.top);
+         call Write.Object(Object.Ptr+O#LRY, right.bot);
+         if just = 0 then do;  /* Left justification */
+            call Write.Object(Object.Ptr+O#ULX, edge);
+            call Write.Object(Object.Ptr+O#LRX, edge+SB.HWidth);
+         end;
+         else do;              /* Right justification */
+            call Write.Object(Object.Ptr+O#LRX, edge);
+            call Write.Object(Object.Ptr+O#ULX, edge-SB.VWidth);
+         end;
+      end;
+
+      call Write.Object(Object.Ptr+O#SBAR.Bits,(orient&1)\shl(just&1,1));
+      Screen.Changed = true;
+      return Id;
+   end;
+   else return 0;
+end DEFINE.SCROLL.BAR;
+
+DRAW.SCROLL.BAR.SHELL: proc(Barbits,ulx,uly,lrx,lry,datalevel) swapable;
+   dcl Barbits   fixed;
+   dcl (ulx,uly) fixed;
+   dcl (lrx,lry) fixed;
+   dcl datalevel fixed;
+
+   dcl i$up.arrow   (12) fixed;
+   dcl i$dn.arrow   (12) fixed;
+   dcl i$left.arrow (12) fixed;
+   dcl i$right.arrow(12) fixed;
+
+   /* local copies to reduce swapping: */
+
+   gpix.x: proc (chars) returns (fixed);
+      dcl chars fixed;  /* hundredths of chars to compute graphic pixels for */
+
+      load abs(chars);
+      mul  tchar.width;
+      mwait;
+      div  1000;
+      if chars < 0
+      then return -(res + (rem >= 500));
+      else return   res + (rem >= 500);
+   end gpix.x;
+
+   gpix.y: proc (chars) returns (fixed);
+      dcl chars fixed;  /* hundredths of chars to compute graphic pixels for */
+
+      load abs(chars);
+      mul  tchar.height;
+      mwait;
+      div  1000;
+      if chars < 0
+      then return -(res + (rem >= 500));
+      else return   res + (rem >= 500);
+   end gpix.y;
+
+   i$up.arrow(0) = 6;
+      i$up.arrow(1) = +gpix.x(84);       i$up.arrow(2) = -gpix.y(50);
+      i$up.arrow(3) = +gpix.x(42);       i$up.arrow(4) = -gpix.y(50); 
+      i$up.arrow(5) = +gpix.x(42);       i$up.arrow(6) = -gpix.y(66); 
+      i$up.arrow(7) = -gpix.x(42);       i$up.arrow(8) = -gpix.y(66);
+      i$up.arrow(9) = -gpix.x(42);       i$up.arrow(10)= -gpix.y(50); 
+      i$up.arrow(11)= -gpix.x(84);       i$up.arrow(12)= -gpix.y(50);
+
+   i$dn.arrow(0) = 6;
+      i$dn.arrow(1) = +gpix.x(84);       i$dn.arrow(2) = +gpix.y(50);
+      i$dn.arrow(3) = +gpix.x(42);       i$dn.arrow(4) = +gpix.y(50); 
+      i$dn.arrow(5) = +gpix.x(42);       i$dn.arrow(6) = +gpix.y(66); 
+      i$dn.arrow(7) = -gpix.x(42);       i$dn.arrow(8) = +gpix.y(66);
+      i$dn.arrow(9) = -gpix.x(42);       i$dn.arrow(10)= +gpix.y(50); 
+      i$dn.arrow(11)= -gpix.x(84);       i$dn.arrow(12)= +gpix.y(50);
+
+   i$left.arrow(0) = 6;
+      i$left.arrow(2) = +gpix.y(34);     i$left.arrow(1) = +gpix.x(125);
+      i$left.arrow(4) = +gpix.y(17);     i$left.arrow(3) = +gpix.x(125); 
+      i$left.arrow(6) = +gpix.y(17);     i$left.arrow(5) = +gpix.x(167); 
+      i$left.arrow(8) = -gpix.y(17);     i$left.arrow(7) = +gpix.x(167);
+      i$left.arrow(10)= -gpix.y(17);     i$left.arrow(9) = +gpix.x(125); 
+      i$left.arrow(12)= -gpix.y(34);     i$left.arrow(11)= +gpix.x(125);
+
+   i$right.arrow(0) = 6;
+      i$right.arrow(2) = +gpix.y(34);    i$right.arrow(1) = -gpix.x(125);
+      i$right.arrow(4) = +gpix.y(17);    i$right.arrow(3) = -gpix.x(125); 
+      i$right.arrow(6) = +gpix.y(17);    i$right.arrow(5) = -gpix.x(167); 
+      i$right.arrow(8) = -gpix.y(17);    i$right.arrow(7) = -gpix.x(167);
+      i$right.arrow(10)= -gpix.y(17);    i$right.arrow(9) = -gpix.x(125); 
+      i$right.arrow(12)= -gpix.y(34);    i$right.arrow(11)= -gpix.x(125);
+
+   if gtype=0 then return;
+
+   vector_mode;
+
+   alias.lines.off();
+
+   call data_level(datalevel);
+   call gbox(ulx,uly,lrx,lry,0);      /* Simple box around bar */
+   if (barbits&O#SBAR.Bits.Orient) = 0 then do;  /* Hor orient */
+      call connect(ulx+SB.HArrowpix,uly,ulx+SB.HArrowpix,lry);
+      call connect(lrx-SB.HArrowpix,uly,lrx-SB.HArrowpix,lry);
+      if (barbits & O#SBAR.Bits.NoArrows) = 0 then do;
+         call draw.icon(i$left.arrow,ulx+gpix.x(67),lry+shr(uly-lry,1));
+         call draw.icon(i$right.arrow,lrx-gpix.x(67),lry+shr(uly-lry,1));
+      end;
+   end;   
+   else do;   /* Vert orient */
+      call connect(ulx,uly-SB.VArrowpix,lrx,uly-SB.VArrowpix);
+      call connect(ulx,lry+SB.VArrowpix,lrx,lry+SB.VArrowpix);
+      if (barbits & O#SBAR.Bits.NoArrows) = 0 then do;
+         call draw.icon(i$up.arrow,ulx+shr(lrx-ulx,1),uly-gpix.y(27));
+         call draw.icon(i$dn.arrow,ulx+shr(lrx-ulx,1),lry+gpix.y(27));
+      end;
+   end;
+   call data_level(0);
+
+   alias.lines.on();
+
+   transparent_mode;
+end DRAW.SCROLL.BAR.SHELL;
+
+UPDATE.SCROLL.BAR: proc (ptr) public swapable;
+   dcl ptr       fixed;
+   dcl status    fixed;
+   dcl barbits   fixed;
+   dcl trans     fixed;
+   dcl erased    fixed;
+   dcl (ulx,uly) fixed;
+   dcl (lrx,lry) fixed;
+   dcl (i,j)     fixed;
+   dcl last.pos  fixed;
+   dcl new.pos   fixed;
+   dcl bar.pattern fixed;
+   dcl saved.cursor.type fixed;
+
+   /* modified 7-30-87 cls fix cross-hatch erasure and replacement */
+
+   status = Read.Object(ptr+O#Status);   /* Read object status bits */
+
+   if (status & O#STAT.Enable) = 0       /* Object may not be drawn on screen */
+   then do;                              /* Just turn off update bit */
+      call Write.Object(ptr+O#Status,(Status & NOT(O#STAT.Update)));
+      return;
+   end;
+
+   if (status and O#STAT.Update) <> 0 then do;
+      bar.pattern = Read.Object(ptr+O#SBAR.Fill.Pattern) + "77";
+      if bar.pattern = "77" then bar.pattern = "111";  /* Default */
+
+      ulx = Read.Object(ptr+O#ULX);
+      uly = Read.Object(ptr+O#ULY);
+      lrx = Read.Object(ptr+O#LRX);
+      lry = Read.Object(ptr+O#LRY);
+      barbits = Read.Object(ptr+O#SBAR.Bits);
+
+      if (barbits&O#SBAR.Bits.Box.State)<>0 then do;
+         write(md) = (Read.Object(ptr+O#Status)\O#STAT.Exhibit)&not(O#STAT.Update); /* Displayed & Refreshed */
+         return;
+      end;
+
+      if gtype<>0 then do;
+         saved.cursor.type = mouse.cursor.type;
+         call mouse.switch(0); 
+         call Push.Graphics.Attributes;        /* Save whatever was going on */
+      end;
+
+      if (Status&O#STAT.Exhibit)=0           /* Bar undisplayed; put up skeleton */
+      then call Draw.Scroll.Bar.Shell(barbits,ulx,uly,lrx,lry,0);
+
+      last.pos = Read.Object(ptr+O#SBAR.Disp.Pos);
+      new.pos  = Read.Object(ptr+O#SBAR.Pos);
+
+      if gtype<>0 then transparent_mode;
+
+      if (((barbits&O#SBAR.Bits.State)=0)           /* Bar inactive and */
+      &   ((barbits&O#SBAR.Bits.State)=(barbits&O#SBAR.Bits.Disp.State))) /* active state and disp state are same */
+      &    (last.pos = new.pos)                 /* Pos not changed */
+      then do; 
+         write(md) = (Read.Object(ptr+O#Status)\O#STAT.Exhibit)&not(O#STAT.Update); /* Displayed & Refreshed */
+         if gtype<>0 then do;
+            call Pop.Graphics.Attributes;
+            call mouse.switch(saved.cursor.type);
+         end;
+         return;  
+      end;
+
+		/* Fill the bar if needed */
+		
+      alias.lines.off();
+
+      trans = (barbits & O#SBAR.Bits.Transparent) <> 0;
+      if (barbits&O#SBAR.Bits.State) <> shr(barbits&O#SBAR.Bits.Disp.State,1)   /* Current active state <> last active state */
+      then do;                              	/* Means change the state displayed */
+         if mg600 then do;
+            vector_mode;                       /* set term to draw */
+            call Blockmode_On;                 /* set term to draw in blocks */
+            if (barbits&O#SBAR.Bits.State)<>0  /* Bar has become ACTIVE */
+            and (trans = 0) then do;           /* But not transparent mode */
+               call Data_level(0);             /* draw solid */
+               call Set.Fill.Pattern(bar.pattern); /* pattern: crosshatch */
+            end;
+            else do;                           /* Bar has become INACTIVE OR in transparent mode */
+               call Data_Level(1);             /* erase */
+               call Set.Fill.Pattern("137");   /* pattern: solid */
+               erased = true;                  /* we have erased */
+            end;
+            if (barbits&O#SBAR.Bits.Orient) = 0 /* Orientation */
+            then call connect(ulx+SB.HArrowpix+bargap,uly-bargap,lrx-SB.HArrowpix-bargap,lry+bargap); /* Horizontal */
+            else call connect(ulx+bargap,uly-SB.VArrowpix-bargap,lrx-bargap,lry+SB.VArrowpix+bargap);  /* Vertical */
+            barbits = (barbits&not(O#SBAR.Bits.Disp.State))\shl(barbits&O#SBAR.Bits.State,1);
+            call Write.Object(ptr+O#SBAR.Bits,barbits);
+            call Blockmode_Off;                /* turn off just to be safe */
+         end;
+      end;
+      else do;  /* VT640, DQ640 */
+      end;
+
+		/* draw the box */
+		
+      if MG600 then do;
+         vector_mode;
+         call Blockmode_On;
+         if (barbits&O#SBAR.Bits.Orient)=0 then do; /* Horizontal orientation */
+            i = ulx+SB.HArrowpix+bargap+last.pos;   /* abs x pos of old box */
+            j = ulx+SB.HArrowpix+bargap+new.pos;    /* abs x pos of new box */
+            if trans = 0 then do;                   /* Not transparent mode */
+               call Set.Fill.Pattern("137");        /* pattern: solid */
+               if (Status&O#STAT.Exhibit) <> 0 then do;
+                  call Data_level(1);                  /* erase */
+                  call connect(i,uly-bargap,i+SB.HWidth-bargap-bargap,lry+bargap); /* erase old box */
+               end;
+
+               call Data_Level(0);                  /* draw */
+               call Set.Fill.Pattern(bar.pattern);  /* pattern: crosshatch */
+               call connect(i,uly-bargap,i+SB.HWidth-bargap-bargap,lry+bargap); /* fill old box with crosshatch */
+
+               call Set.Fill.Pattern("137");        /* pattern: solid */
+               call Data_level(1);                  /* erase */
+               call connect(j,uly-bargap,j+SB.HWidth-bargap-bargap,lry+bargap); /* erase are underneath new box */
+               call Data_level(0);                  /* draw */
+               call Blockmode_Off;                  /* out of blockmode */
+            end;
+            else do;                                /* transparent mode */
+               call Data_level(2);                  /* complement */
+               call Blockmode_Off;                  /* out of blockmode */
+               if erased = 0                        /* we didn't just draw empty bar */
+               then call gbox(i,uly-bargap,i+SB.HWidth-bargap-bargap,lry+bargap,0); /* complement old box */
+            end;
+            call gbox(j,uly-bargap,j+SB.HWidth-bargap-bargap,lry+bargap,0); /* border around box */
+         end;
+         else do;												 /* vertical orientation */
+            i = uly-SB.VArrowpix-bargap-last.pos;   /* abs x pos of old box */
+            j = uly-SB.VArrowpix-bargap-new.pos;    /* abs x pos of new box */
+            if trans = 0 then do;                   /* Not transparent mode */
+               call Set.Fill.Pattern("137");        /* pattern: solid */
+               if (Status&O#STAT.Exhibit) <> 0 then do;
+                  call Data_level(1);                  /* erase */
+                  call connect(ulx+bargap,i,lrx-bargap,i-SB.VWidth+bargap+bargap); /* erase old box */
+               end;
+
+               call Data_Level(0);                  /* draw */
+               call Set.Fill.Pattern(bar.pattern);  /* pattern: crosshatch */
+               call connect(ulx+bargap,i,lrx-bargap,i-SB.VWidth+bargap+bargap); /* fill old box with crosshatch */
+
+               call Set.Fill.Pattern("137");        /* pattern: solid */
+               call Data_level(1);                  /* erase */
+               call connect(ulx+bargap,j,lrx-bargap,j-SB.VWidth+bargap+bargap); /* erase new box area */
+               call Data_level(0);                  /* draw */
+               call Blockmode_Off;                  /* out of blockmode */
+            end;
+            else do;                                /* transparent mode */
+               call Data_level(2);                  /* complement */
+               call Blockmode_Off;                  /* out of blockmode */
+               if erased = 0                        /* we didn't just draw empty bar */
+               then call gbox(ulx+bargap,i,lrx-bargap,i-SB.VWidth+bargap+bargap,0); /* complement old box */
+            end;
+            call gbox(ulx+bargap,j,lrx-bargap,j-SB.VWidth+bargap+bargap,0); /* border new box */
+         end;
+      end;
+
+      else if gtype<>0 then do;  /* VT640 */
+         vector_mode;
+         if (barbits&O#SBAR.Bits.Orient)=0 then do;            /* Horizontal orientation */
+            if (Status&O#STAT.Exhibit) <> 0 then do;
+               call Data_level(1);                  /* erase */
+               i = ulx+SB.HArrowpix+1+last.pos;      /* abs x pos of old box */
+               call gbox(i,uly-1,i+SB.HWidth-2,lry+1,0); /* border around box */
+            end;
+
+            call Data_Level(0);                  /* draw */
+            i = ulx+SB.HArrowpix+1+new.pos;       /* abs x pos of new box */
+            call gbox(i,uly-1,i+SB.HWidth-2,lry+1,0); /* border around box */
+         end;
+         else do;
+            if (Status&O#STAT.Exhibit) <> 0 then do;
+               call Data_level(1);                  /* erase */
+               i = uly-SB.VArrowpix-1-last.pos;      /* abs x pos of old box */
+               call gbox(ulx+1,i,lrx-1,i-SB.VWidth+2,0); /* border new box */
+            end;
+
+            call Data_Level(0);                  /* draw */
+            i = uly-SB.VArrowpix-1-new.pos;       /* abs x pos of new box */
+            call gbox(ulx+1,i,lrx-1,i-SB.VWidth+2,0); /* border new box */
+         end;
+      end;
+
+      alias.lines.on();
+
+      call Write.Object(ptr+O#SBAR.Disp.Pos,Read.Object(ptr+O#SBAR.Pos)); /* Copy new position in to displayed area */
+      call Write.Object(ptr+O#Status,(Status&not(O#STAT.Update\O#STAT.Disp.Attr.Set))
+                        \(O#STAT.Exhibit\shl(Status&O#STAT.Attr.Set,1))); /* object now displayed and refreshed */
+
+      if gtype<>0 then do;
+         call Pop.Graphics.Attributes;          /* Put term back to what it was */
+         call mouse.switch(saved.cursor.type);  /**** Do not move this! Graphics Attribtues stack not big enough! */
+      end;
+   end;
+end UPDATE.SCROLL.BAR;
+
+ERASE.SCROLL.BAR: proc (id) swapable;
+   dcl id        fixed;
+   dcl (ulx,uly) fixed;
+   dcl (lrx,lry) fixed;
+   dcl barbits   fixed;
+   dcl ptr       fixed;
+   dcl i         fixed;
+   dcl last.pos  fixed;
+   dcl saved.cursor.type fixed;
+
+   if MG600 
+   then call Erase.Graphics.Region(id);
+   else if gtype<>0 then do;
+      if Locate.Object(id) then do;
+         ptr = Object.Ptr;
+         ulx = Read.Object(ptr+O#ULX);
+         uly = Read.Object(ptr+O#ULY);
+         lrx = Read.Object(ptr+O#LRX);
+         lry = Read.Object(ptr+O#LRY);
+         barbits = Read.Object(ptr+O#SBAR.Bits);
+
+         saved.cursor.type = mouse.cursor.type;
+         call mouse.switch(0); 
+         call Push.Graphics.Attributes;        /* Save whatever was going on */
+
+         call Draw.Scroll.Bar.Shell(barbits,ulx,uly,lrx,lry,1);
+
+         transparent_mode;
+         vector_mode;
+         call Data_level(1);                  /* erase */
+
+         last.pos = Read.Object(ptr+O#SBAR.Disp.Pos);
+
+         if (barbits&O#SBAR.Bits.Orient)=0 then do;   /* Horizontal orientation */
+            i = ulx+SB.HArrowpix+bargap+last.pos;          /* abs x pos of old box */
+            call gbox(i,uly-bargap,i+SB.HWidth-bargap-bargap,lry+bargap,0); /* border around box */
+         end;
+         else do;                                     /* Vertical orientation */
+            i = uly-SB.VArrowpix-bargap-last.pos;          /* abs x pos of old box */
+            call gbox(ulx+bargap,i,lrx-bargap,i-SB.VWidth+bargap+bargap,0); /* border new box */
+         end;
+
+         call Pop.Graphics.Attributes;          /* Put term back to what it was */
+         call mouse.switch(saved.cursor.type);  /**** Do not move this! Graphics Attribtues stack not big enough! */
+      end;
+   end;
+
+   call Set.Object.Status(id,O#STAT.Exhibit,false);
+   call Set.Object.Status(id,O#STAT.Update,true);
+   call Deposit.Object.Info(id,O#SBAR.Bits,
+                            (Fetch.Object.Info(id,O#SBAR.Bits)
+                             & Not(  O#SBAR.Bits.State
+                                   \ O#SBAR.Bits.Disp.State
+                                   \ O#SBAR.Bits.Box.State)));
+end ERASE.SCROLL.BAR;
+
+
+/* routine computes the pixel position that corresponds to */
+/* where the center of the box would be if the passed      */
+/* percent were to be deposited.   this is to facilitate   */
+/* doing other kinds of scroll bar animations (ie from     */
+/* the audio event editor)                                 */
+
+COMPUTE.SCROLL.BAR.BOX.POSITION: proc (id,percent) public swapable;
+   dcl id            fixed;
+   dcl ptr           fixed; /* Ptr to scroll bar */
+   dcl percent       fixed; /* Percent * 10 position of scroll bar */
+   dcl scroll.length fixed; /* Length of scroll area in pixels */
+   dcl pix           fixed;
+   dcl (ulx,uly)     fixed;
+   dcl (lrx,lry)     fixed;
+   dcl (barbits)     fixed;
+
+   if Locate.Object(id) then do;
+      ptr = Object.Ptr;
+
+      if (Read.Object(ptr+O#SBAR.Bits)&O#SBAR.Bits.Orient) = 0  /* Orientation */
+      then scroll.length = Read.Object(ptr+O#LRX)-Read.Object(ptr+O#ULX)
+                             -shl(SB.HArrowpix,1)-SB.HWidth;
+      else scroll.length = Read.Object(ptr+O#ULY)-Read.Object(ptr+O#LRY)
+                             -shl(SB.VArrowpix,1)-SB.VWidth;
+
+      if percent < 0    then percent = 0;
+      if percent > 1000 then percent = 1000;
+
+      load   scroll.length;                 /* pos = (scroll.length * percent) / 1000 */
+      mul    percent;  write("324") = res;
+      div    1000;
+      pix =  res; if rem ige 500 then pix = pix + 1;
+
+      ulx = Read.Object(ptr+O#ULX);
+      uly = Read.Object(ptr+O#ULY);
+      lrx = Read.Object(ptr+O#LRX);
+      lry = Read.Object(ptr+O#LRY);
+      barbits = Read.Object(ptr+O#SBAR.Bits);
+
+      if (barbits&O#SBAR.Bits.Orient)=0 then do; /* Horizontal orientation */
+         return ulx+SB.Harrowpix+pix+shr(SB.Hwidth,1);
+      end;
+      else do;
+         return uly-SB.Varrowpix-pix-shr(SB.VWidth,1);
+      end;
+   end;
+
+   return 0;
+
+end COMPUTE.SCROLL.BAR.BOX.POSITION;
+
+
+DEPOSIT.SCROLL.BAR: proc (id,percent) public swapable;
+   dcl id            fixed;
+   dcl ptr           fixed; /* Ptr to scroll bar */
+   dcl status        fixed;
+   dcl percent       fixed; /* Percent * 10 position of scroll bar */
+   dcl scroll.length fixed; /* Length of scroll area in pixels */
+   dcl pix           fixed;
+
+   if Locate.Object(id) then do;
+      ptr = Object.Ptr;
+      status = Read.Object(ptr + O#Status);
+
+      if (Read.Object(ptr+O#SBAR.Bits)&O#SBAR.Bits.State) = 0 then return;  /* Not active */
+
+      if (Read.Object(ptr+O#SBAR.Bits)&O#SBAR.Bits.Orient) = 0  /* Orientation */
+      then scroll.length = Read.Object(ptr+O#LRX)-Read.Object(ptr+O#ULX)
+                             -shl(SB.HArrowpix,1)-SB.HWidth;
+      else scroll.length = Read.Object(ptr+O#ULY)-Read.Object(ptr+O#LRY)
+                             -shl(SB.VArrowpix,1)-SB.VWidth;
+
+      if percent < 0    then percent = 0;
+      if percent > 1000 then percent = 1000;
+
+      load   scroll.length;                 /* pos = (scroll.length * percent) / 1000 */
+      mul    percent;  write("324") = res;
+      div    1000;
+      pix =  res; if rem ige 500 then pix = pix + 1;
+
+      if ((status & O#STAT.Exhibit) = 0)     /* Object never displayed... */
+      or (pix<>Read.Object(ptr+O#SBAR.Pos))  /* ...or value changed */
+      then do;
+         call Write.Event.Queue(Get.Screen.Event,S#Deposit,id);
+
+         call Write.Object(ptr+O#SBAR.Pos,        pix);      /* Write out new position */
+         call Write.Object(ptr+O#SBAR.Percent.Pos,percent);  /* save original percent pos as well */
+
+         if Check.Update.On.Deposit(ptr) <> 0
+         then call Update.Scroll.Bar(ptr);      /* Do update right now */
+      end;
+   end;
+end DEPOSIT.SCROLL.BAR;
+   
+ACTIVATE.SCROLL.BAR: proc(id,BoxPos) public swapable;
+   dcl id            fixed;
+   dcl BoxPos        fixed;
+
+   if Locate.Object(id) then do;
+      write(md) = Read.Object(Object.Ptr+O#SBAR.Bits)\O#SBAR.Bits.State; /* Set active state bit */
+      call Deposit.Scroll.Bar(id,BoxPos);
+      call Set.Object.Status(id,O#STAT.Update,true);
+      if  ((Read.Object(Object.Ptr+O#Action)&O#ACT.Update.On.Dep)<>0)  /* Refresh on Deposit */
+      and ((Read.Object(Object.Ptr+O#Status)&O#STAT.Enable      )<>0)
+      then call Update.Object(id);
+   end;
+
+end ACTIVATE.SCROLL.BAR;
+
+DEACTIVATE.SCROLL.BAR: proc(id) public swapable;
+   dcl id fixed;
+
+   /* modified 7-30-87 cls deactivates correctly, will activate correctly 
+      when activate is called again. */
+
+   if Locate.Object(id) then do;
+      write(md) = Read.Object(Object.Ptr+O#SBAR.Bits)&Not(O#SBAR.Bits.State); /* Set active state bit */
+      write(md) = Read.Object(Object.Ptr+O#Status)\O#STAT.Update;
+      Screen.Changed = true;
+   end;
+end DEACTIVATE.SCROLL.BAR;
+
+DRAW.SCROLL.BAR.ANIM.BOX: proc(ptr,pos,tag) swapable;
+   dcl ptr   fixed;
+   dcl pos   fixed;
+   dcl tag   fixed;
+
+   if gtype=0 then return;
+
+   vector_mode;         /* draw */
+   call data_level(2);  /* complement */
+
+   alias.lines.off();
+
+   If (Read.Object(ptr+O#SBAR.Bits)&O#SBAR.Bits.Orient) = 0    /* Orientation */
+   then do;
+     call gbox(pos-shr(SB.Hwidth,1)+bargap,Read.Object(ptr+O#ULY)-bargap,
+               pos+shr(SB.HWidth,1)-bargap,Read.Object(ptr+O#LRY)+bargap,0);
+     if tab then call connect(pos,Read.Object(ptr+O#ULY)-bargap,
+                              pos,Read.Object(ptr+O#LRY)+bargap);
+   end;
+   else do;
+     call gbox(Read.Object(ptr+O#ULX)+bargap,pos+shr(SB.Vwidth,1)-bargap,
+               Read.Object(ptr+O#LRX)-bargap,pos-shr(SB.VWidth,1)+bargap,0);
+   end;
+
+   alias.lines.on();
+end DRAW.SCROLL.BAR.ANIM.BOX;
+
+GET.SCROLL.BAR: proc (ptr) returns (fixed) public swapable;
+   dcl ptr         fixed;
+   dcl (x,p,t)     fixed;
+   dcl (ulx,lrx)   fixed;
+   dcl (minp,maxp) fixed;
+   dcl event       fixed static;
+   dcl disp        fixed static;
+   dcl saved.cursor.type fixed static;
+   dcl orient      fixed;
+   dcl evt         fixed;
+   dcl barbits     fixed;
+   dcl BackCode    fixed;
+   dcl ForwardCode fixed;
+   dcl BoxMoveExit fixed;
+   dcl Tab         fixed;
+
+   /* modified 7-30-87 to return mouse clicks correctly */
+   /* 9/30/87 - cj - gothere feature added              */
+
+   barbits = (Read.Object(ptr+O#SBAR.Bits));
+   orient  = (barbits&O#SBAR.Bits.Orient);
+
+   if (barbits&O#SBAR.Bits.State)=0 then do;  /* See if bar is activated */
+      Last.Event.Code = Get.Screen.Event;
+      Last.Event.Info = S#ObjectTerminate;    /* Nothing happened */
+      return Last.Event.Code;
+   end;
+
+   call Push.Graphics.Attributes;
+
+   if orient = 0 then do; /* horizontal scroll bar */
+      BackCode = 0;
+      ForwardCode = 1;
+      minp = Read.Object(ptr+O#ULX);
+      maxp = Read.Object(ptr+O#LRX);
+   end;
+   else do;               /* vertical scroll bar */
+      BackCode = 1;
+      ForwardCode = 0;
+      minp = Read.Object(ptr+O#LRY);
+      maxp = Read.Object(ptr+O#ULY);
+   end;
+
+   if (barbits&O#SBAR.Bits.Box.State)=0 then do;  /* Not animating box; See what was pressed */
+      if orient = 0 then do;                      /* horizontal scroll bar */
+
+         p = Mouse(Press.X);
+         t = Mouse(Press.Time);
+
+         if      p < (minp+SB.HArrowpix)
+                   then event = S#SBArrow+BackCode;
+         else if p > (maxp-SB.HArrowpix)
+                   then event = S#SBArrow+ForwardCode;
+         else if p < (minp+SB.HArrowpix+Read.Object(ptr+O#SBAR.Disp.Pos))
+                   then event = S#SBPage+BackCode;
+         else if p > (minp+SB.HArrowpix+Read.Object(ptr+O#SBAR.Disp.Pos)+SB.HWidth-2)
+                   then event = S#SBPage+ForwardCode;
+         else do;
+            event = S#SBBoxMove;
+            if  (((barbits&O#SBAR.Bits.GoThere) == 0)   /* if box provides window */
+ 			   &&   (MOUSE.PORT.IS.D50 == 0))
+            {
+               x = minp+SB.HArrowpix+Read.Object(ptr+O#SBAR.Disp.Pos)+shr(SB.HWidth,1); /* force mouse to center of box */
+               disable;         /* for mouse correction */
+               Mouse.X = Mouse.X + (x - p);
+               enable;
+               p = x;
+            }
+         end;
+
+      end;
+      else do;                     /* Vertical */
+
+         p = Mouse(Press.Y);
+         t = Mouse(Press.Time);
+
+         if      p < (minp+SB.VArrowpix)
+                   then event = S#SBArrow+BackCode;
+         else if p > (maxp-SB.VArrowpix)
+                   then event = S#SBArrow+ForwardCode;
+         else if p > (maxp-SB.VArrowpix-Read.Object(ptr+O#SBAR.Disp.Pos))
+                   then event = S#SBPage+ForwardCode;
+         else if p < (maxp-SB.VArrowpix-Read.Object(ptr+O#SBAR.Disp.Pos)-SB.VWidth+2)
+                   then event = S#SBPage+BackCode;
+         else do;
+            event = S#SBBoxMove;
+            if  (((barbits&O#SBAR.Bits.GoThere) == 0)   /* if box provides window */
+ 			   &&   (MOUSE.PORT.IS.D50 == 0))
+            {
+               x = maxp-SB.VArrowpix-Read.Object(ptr+O#SBAR.Disp.Pos)-shr(SB.Vwidth,1);
+               disable;
+               Mouse.Y = Mouse.Y + (x - p);
+               enable;
+               p = x;
+            }
+         end;
+      end;
+
+      if  (barbits&O#SBAR.Bits.GoThere)<>0   /* if should go there,  */
+      then do;                               /* then do it           */
+         if (Event = S#SBPage+ForwardCode)   /* treat page as        */
+         or (Event = S#SBPage+BackCode)      /* box move             */
+         then Event = S#SBBoxMove;           /* start as box move    */
+      end;
+
+   end;
+
+   if event <> S#SBBoxMove then do;  /* Some event other than Box Move */
+      call Pop.Graphics.Attributes;
+      Last.Event.Info = event;
+      Last.Event.Code = Get.Screen.Event;
+      Return Get.Screen.Event;
+   end;
+
+   else if (barbits&O#SBAR.Bits.Box.State)=0 then do;   /* Not animated so animate it */
+      barbits = barbits\O#SBAR.Bits.Box.State;
+      call Write.Object(ptr+O#SBAR.Bits,barbits);
+
+      saved.cursor.type = mouse.cursor.type;
+      call Mouse.Switch(0);                         /* Turn off crosshairs */
+
+      /* check limits of mouse position for valid range        */
+      if orient = 0 then do;               /* horizontal       */
+         if   p < minp+SB.HArrowpix+shr(SB.Hwidth,1)  
+         then p = minp+SB.HArrowpix+shr(SB.Hwidth,1);
+         else if p > maxp-SB.HArrowpix-shr(SB.HWidth,1)
+         then    p = maxp-SB.HArrowpix-shr(SB.HWidth,1);
+      end;
+      else do;
+         if   p < minp+SB.VArrowpix+shr(SB.VWidth,1)
+         then p = minp+SB.VArrowpix+shr(SB.VWidth,1);
+         else if p > maxp-SB.VArrowpix-shr(SB.Vwidth,1)
+         then    p = maxp-SB.VArrowpix-shr(SB.Vwidth,1);
+      end;
+    
+      if  (barbits&O#SBAR.Bits.GoThere)<>0   /* if should go there,  */
+      then tab = 1;
+    
+      call Draw.Scroll.Bar.Anim.Box(ptr,p,tab); /* Draw first box    */
+      disp = p;                                 /* box is displayed in current position */
+       
+      if orient = 0
+      then call Write.Object(ptr+O#SBAR.Pos,p-minp-SB.HArrowpix-shr(SB.Hwidth,1)); /* Write new position */
+      else call Write.Object(ptr+O#SBAR.Pos,maxp-SB.VArrowpix-shr(SB.Vwidth,1)-p);
+      call Write.Object(ptr+O#SBAR.Percent.Pos,-1); /* flag user setting so fetch.scroll.bar computes it */
+      call Write.Object(ptr+O#SBAR.Percent.Time,t); /* and real milliseconds of this position */
+
+      if (barbits&O#SBAR.Bits.Real.Time) <> 0 then do;
+         Last.Event.Info = S#SBBoxMove;
+         Last.Event.Code = Get.Screen.Event;
+         call Pop.Graphics.Attributes;
+         transparent_mode;
+         return Last.Event.Code;
+      end;
+   end;
+
+   do while 1; /* only get here if processing scroll box movements */
+      
+      call Enable.Object.and.User.Gets(ptr);
+
+      if Screen.Changed <> false            /* See if some objects need updating */
+      then call Update.Screen;              /* Will return right away if events pending */
+
+      evt = Get.Next.Event;
+
+      call Disable.Object.and.User.Gets(ptr);
+
+      if  (evt = Get.Mouse.Movement)
+      or  (evt = Get.Mouse.Button  )
+      then do;
+    
+         if orient = 0 then do;
+    
+            if evt = Get.Mouse.Movement
+            then do;
+               disable;
+               p = Mouse.X;
+               t = Mouse.Real.Milliseconds;
+               enable;
+            end;
+            else p = Mouse(Release.X);
+    
+            if   p < minp+SB.HArrowpix+shr(SB.Hwidth,1)  
+            then do;                               
+               p = minp+SB.HArrowpix+shr(SB.Hwidth,1);
+               if ((evt == Get.Mouse.Movement)
+ 			      &&  (MOUSE.PORT.IS.D50 == 0))
+               	Mouse.X = p;
+            end;
+            else if p > maxp-SB.HArrowpix-shr(SB.HWidth,1)
+            then do;
+               p = maxp-SB.HArrowpix-shr(SB.HWidth,1);
+               if ((evt == Get.Mouse.Movement)
+ 			      &&  (MOUSE.PORT.IS.D50 == 0))
+               	Mouse.X = p;
+            end;
+         end;
+         else do;
+    
+            if evt = Get.Mouse.Movement
+            then do;
+               disable;
+               p = Mouse.Y;
+               t = Mouse.Real.Milliseconds;
+               enable;
+            end;
+            else p = Mouse(Release.Y);
+    
+            if   p < minp+SB.VArrowpix+shr(SB.VWidth,1)
+            then do;
+               p = minp+SB.VArrowpix+shr(SB.VWidth,1);
+               if ((evt == Get.Mouse.Movement)
+ 			      &&  (MOUSE.PORT.IS.D50 == 0))
+               	Mouse.Y = p;
+            end;
+            else if p > maxp-SB.VArrowpix-shr(SB.Vwidth,1)
+            then do;
+               p = maxp-SB.VArrowpix-shr(SB.Vwidth,1);
+               if ((evt == Get.Mouse.Movement)
+ 			      &&  (MOUSE.PORT.IS.D50 == 0))
+               	Mouse.Y = p;
+            end;
+         end;
+
+         if p <> disp then do;     /* Position has changed */
+            if  (barbits&O#SBAR.Bits.GoThere)<>0     /* if should go there,  */
+            then tab = 1;                            /* draw tab for clarity  */
+    
+            call Draw.Scroll.Bar.Anim.Box(ptr,disp,tab); /* undraw current box */
+            call Draw.Scroll.Bar.Anim.Box(ptr,p,tab);    /* draw new box */
+            disp = p;
+    
+            if orient = 0
+            then call Write.Object(ptr+O#SBAR.Pos,p-minp-SB.HArrowpix-shr(SB.Hwidth,1)); /* Write new position */
+            else call Write.Object(ptr+O#SBAR.Pos,maxp-SB.VArrowpix-shr(SB.Vwidth,1)-p);
+            call Write.Object(ptr+O#SBAR.Percent.Pos,-1); /* flag user setting so fetch.scroll.bar computes it */
+         end;
+
+         if (evt = Get.Mouse.Movement) then do;
+            /* ignore perpendicular motion while mouse is in bar */
+            if (MOUSE.PORT.IS.D50 == 0)
+				{
+					if orient = 0 then do;
+						Mouse.Y = Read.Object(ptr+O#LRY)+shr(SB.HWidth,1);
+					end;
+					else do;
+						Mouse.X = Read.Object(ptr+O#ULX)+shr(SB.VWidth,1);
+					end;
+				}
+            call Write.Object(ptr+O#SBAR.Percent.Time,t); /* return real milliseconds of this position */
+
+            if (barbits&O#SBAR.Bits.Real.Time) <> 0 then do;
+               Last.Event.Info = S#SBBoxMove;
+               Last.Event.Code = Get.Screen.Event;
+               call Pop.Graphics.Attributes;
+               transparent_mode;
+               return Last.Event.Code;
+            end;
+         end;
+
+         else if (evt = Get.Mouse.Button) then do;
+            if Last.Event.Info > 0 then do;  /* Button released; stop animating */
+
+               if Get.Item.Enabled(Get.Mouse.Button)<>0 /* someone above us is interested in raw event */
+               then call Write.Event.Queue(Get.Mouse.Button,Last.Event.Info,Read.Object(ptr+O#ID));
+
+               barbits = barbits&not(O#SBAR.Bits.Box.State); /* Turn off animation bit */
+               call Write.Object(ptr+O#SBAR.Bits,barbits);
+
+               if  (barbits&O#SBAR.Bits.GoThere)<>0         /* if should go there,  */
+               then tab = 1;                                /* draw tab for clarity  */
+               call Draw.Scroll.Bar.Anim.Box(ptr,disp,tab); /* Undraw animation box */
+
+               write(md) = Read.Object(ptr+O#Status)\O#STAT.Update; /* Set refresh bit */
+               call Update.Scroll.Bar(ptr);     /* Do the update */
+
+               call Mouse.Switch(saved.cursor.type); /* Restore crosshairs */
+               call Pop.Graphics.Attributes;
+               transparent_mode;                /* SHOULD NOT HAVE TO DO THIS */
+
+               call Write.Event.Queue(Get.Screen.Event,S#Deposit,Read.Object(ptr+O#Id));
+
+               Last.Event.Info = S#ObjectTerminate;     /* So Scroll bar doesn't repeat */
+               Last.Event.Code = Get.Screen.Event;
+               return Get.Screen.Event;         /* Return event */
+            end;
+         end;
+      end;
+
+      else if (evt <> Get.In.Char) then do;  /* Something other than Mouse Buttons */
+         call Pop.Graphics.Attributes;
+         transparent_mode;
+         return evt;
+      end;
+  end;
+
+end GET.SCROLL.BAR;
+
+FETCH.SCROLL.BAR: proc(id) returns (fixed) public swapable;
+   dcl id            fixed;
+   dcl ptr           fixed;
+   dcl scroll.length fixed;
+   dcl spos          fixed;
+
+   if Locate.Object(id) then do;
+      ptr = Object.Ptr;
+
+      if (Read.Object(ptr+O#SBAR.Bits)&O#SBAR.Bits.State) = 0
+      then return 0;  /* Not active */
+
+      if (Read.Object(ptr+O#SBAR.Bits)&O#SBAR.Bits.Orient) = 0  /* Orientation */
+      then scroll.length = Read.Object(ptr+O#LRX)-Read.Object(ptr+O#ULX)
+                             -shl(SB.HArrowpix,1)-SB.HWidth;
+      else scroll.length = Read.Object(ptr+O#ULY)-Read.Object(ptr+O#LRY)
+                             -shl(SB.VArrowpix,1)-SB.VWidth;
+
+      spos = Read.Object(ptr+O#SBAR.Percent.Pos);  /* get user-defined setting */
+      if spos = (-1) then do;                      /* must compute from pixel setting */
+         spos = Read.Object(ptr+O#SBAR.Pos);
+                                                 
+         load   spos;                            
+         mul    1000;
+         mwait;
+         div    scroll.length;
+         spos   = res + (rem >= shr(scroll.length,1));
+      end;
+    
+      return spos;
+   end;
+   else return 0;
+end FETCH.SCROLL.BAR;
+
+SET.SCROLL.BAR.BITS: proc(id,bit,setting) public swapable;
+   dcl id       fixed;
+   dcl bit      fixed;
+   dcl setting  fixed;
+   dcl bits     fixed;
+
+   if Locate.Object(id) then do;
+      bits = Read.Object(Object.Ptr+O#SBAR.Bits);
+      if setting then bits = bits\bit;
+      else            bits = bits&not(bit);
+      call Write.Object(Object.Ptr+O#SBAR.Bits,bits);
+   end;
+end SET.SCROLL.BAR.BITS;
+
+SET.SCROLL.BAR.FILL.PATTERN: proc(id,pattern) public swapable;
+   dcl id      fixed;
+   dcl pattern fixed;
+
+   if Locate.Object(id) then do;
+      call Write.Object(Object.Ptr+O#SBAR.Fill.Pattern,pattern);
+   end;
+end SET.SCROLL.BAR.FILL.PATTERN;

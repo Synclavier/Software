@@ -1,0 +1,593 @@
+/* :SYNRSOU:06-MAIN:352-SPLC - PERFORM END OF NOTE CHECK AND TIMBRE FRAME SPLICING
+
+   Modified:
+   02/07/91 - MWH - Combine 3200, 6400 and 9600 RTP's
+   10/14/88 - CJ  - MODIFIED USAGE OF PARTIAL BLOCK AREAS FOR STARTING
+                    UP POLY NOTES IN MIDDLE
+   10/06/88 - TSS,SGS - Made mods to support MONO DAC voice cards with stereo
+   06/26/87 - MWH - Split FRP.PTR into FP0-FP3.PTR for expanded poly
+   12/10/86 - CJ  - FIXED UN.SUPPRESS BUG
+   10/03/86 - CJ,TS - FIXED ANOTHER BUG IN TIMBRE FRAME SPLICING (LOOPS)
+   9/05/86 - TS,CJ - FIXED BUG IN TIMBRE FRAME LOOPING
+   9/03/86 - cj,ts - end final decay when end of sound file reached
+   7/28/86 - CJ,KJC - FIXED STEREO IMAGE BUG, NACT CHANGES
+   7/24/86 - CJ,KJC - more changes for stereo playback (channel deallocation)
+   7/23/86 - KJC - changes for stereo playback
+   5/15/86 - "official" creation of release-M modules
+*/
+
+BEGIN;
+
+  IF NACT<>0 THEN DO;                             /* SOME ACTIVE PARTIALS - SET VOLUME, CHECK FOR C.E.D */
+
+    IF (INC.AXE=0)\(GDATA=0) THEN DO;             /* KEYBOARD NOTE */
+       MY.VOL=255;                                /* USE MAX FOR VK                */
+    END;
+    ELSE DO;                                      /* LIVE GUITAR NOTE - LEAVE AT LAST VOLUME IF HELD */
+      IF (GDATA&255)=6 THEN MY.VOL=SHR(GDATA,8);  /* ELSE USE GUITAR VOLUME KNOB */
+      ELSE MY.VOL=GVOL;                           /* USE ACTIVE GUITAR VOLUME FOR THIS NOTE */
+    END;
+
+    PPTR=PTLST;             /* GET POINTER TO PARTIAL LIST */
+    DO WHILE PPTR<>0;       /* SCAN EACH PARTIAL */
+
+      /* UPDATE VOLUME REGISTER */
+      /* FOR OVERALL VOLUME     */
+      /* OR REAL TIME EFFECTS   */
+
+      IF  ((INC.MONO=0)                         /* IF NO SAMPLING AT ALL */
+      AND  (INC.POLY=0))
+      OR (MCHN&(B.MONO\B.POLY))=0 THEN DO;      /* OR ORIGINAL SYNTHESIZER - COMPUTE ITEMS */
+         IF MCHN<>0 THEN DO;                    /* SKIP OVER MIDI-ONLY BLOCKS */
+            DISABLE;
+            LOAD MY.VOL; MUL AVOL;              /* COMPUTE NOTE VOLUME * VOL PEDAL */
+            IF PSTAT=DELAY.STATE                /* IF NOTE STILL QUED (NOT STARTED YET) */
+            THEN SUPR=(SUPR&"177400")\READ(4);  /* SAVE FOR QUED NOTE POSSIBLY */
+            ELSE DO;
+               // Optimize out identical writes to save kernel cpu time in Sync3. This was 66% of writes to FM.
+               WRITE(MAM) = FM.VOL.SHADOW;
+               WRITE(MAL) = UCHN;
+               IF (READ(4) != READ(MD)) {
+                  WRITE(MD) = READ(4);
+                  WRITE(CHA)=UCHN; WRITE(FUN)=VOL;  /* UPDATE VOL REGISTER */
+                  WRITE(DAT)=READ(4);               /* RESULT IS HERE */
+               }
+               
+               IF (SMCHN<>0) THEN DO;              /* UPDATE SPLICE CHANNEL TOO  */
+                  WRITE(MAL) = SUCHN;
+                  IF (READ(4) != READ(MD)) {
+                     WRITE(MD) = READ(4);
+                     WRITE(CHA)=SUCHN; WRITE(DAT)=READ(4); /* UPDATE VOL REGISTER */
+                  }
+               END;
+            END;
+            ENABLE;
+         END;
+      END;                                    /* OF BEGIN FOR ORIGINAL SYNTHESIZER */
+
+      ELSE IF (INC.MONO<>0)&((MCHN&B.MONO)<>0) THEN DO;     /* MONO SAMPLING (W. DISK) */
+         LOAD MY.VOL;  MUL AVOL;              /* COMPUTE AM AND OVERALL VOLUME */
+         LOAD READ(4); MUL FMPTR;             /* SCALE BY FILE VOLUME          */
+         IDAT=READ(4);                        /* SAVE IN CASE NOTE START       */
+         DISABLE;                             /* FOR CHECK OF MONO.CHAN        */
+            IF (MCHN=MONO.CHAN)               /* IF OUR CHANNEL                */
+            THEN MONO.VOL=READ(4);            /* STORE FOR USE BY INTERRUPT ROUTINE IF WE ARE THE ACTIVE CHANNEL */
+         ENABLE;
+      END;
+      ELSE IF (INC.POLY<>0) THEN DO;          /* MEANS POLY SYNTH */
+         SSTAT = MY.VOL;                      /* SAVE VOL INFO IN CASE NOTE HAS NOT STARTED */
+         IF PSTAT THEN DO;                    /* ONLY WRITE VOLUME IF ACTIVE */
+            LOAD MY.VOL;      MUL AVOL;       /* BASIC VOL; SCALE FOR RTE/AM   */
+            LOAD READ(4);     MUL FMPTR;      /* SCALE BY FILE VOLUME FIELD    */
+            I=READ(4);
+            K=SHL(I,8) XOR IDAT;
+            LOAD I; MUL  IDAT;                /* 0=ALL LEFT;  COMPUTE RIGHT VOLUME */
+            WRITE("300")=RES; DIV 16;         /* SCALE 0-4095 */
+            J=RES;                            /* RIGHT VOL    */
+            LOAD I; MUL  256-IDAT;            /* 256=ALL RIGHT; COMPUTE LEFT VOLUME */
+            WRITE("300")=RES; DIV 16;         /* SCALE 0-4096 */
+
+            // Skip unnecessary hardware writes
+            WRITE(MAM)=POLY.PSRDVOL.SHADOW;
+            DISABLE;
+               IF UCHN<>0 THEN DO;
+                  WRITE(MAL)=UCHN;
+                  IF (K != READ(MD)) {
+                     WRITE(MD)=K;
+                     WRITE(PSC)=UCHN;                 /* STEREO SLAVE CHANNEL */
+                     WRITE(PSF)=PSRDVOL;
+                     IF MONO_VOICES_PRESENT THEN DO;  /* MONO DAC VOICE CARDS */
+                        WRITE(PSD)=J; WRITE(PSD)=RES; /* RIGHT, LEFT - NO SWAP WITH MONO DAC */
+                        END;
+                        ELSE DO;
+                        WRITE(PSD)=RES; WRITE(PSD)=J;  /* RIGHT, LEFT - REVERSE FOR STEREO IMAGE */
+                     END;
+                  }
+               END;
+               WRITE(MAL)=MCHN;
+               IF (K != READ(MD)) {
+                  WRITE(MD)=K;
+                  WRITE(PSC)=MCHN;               /* ENVELOPE CHANNEL */
+                  WRITE(PSF)=PSRDVOL;
+                  WRITE(PSD)=J; WRITE(PSD)=RES;  /* RIGHT, LEFT */
+               }
+            ENABLE;
+         END;
+      END;
+
+      IF MY.VOL=0 THEN DO;
+         IF (SUPR>=0) THEN CALL SUPPRESS;
+      END; /* SUPPRESS UPON VOLUME GOING TO ZERO */
+      ELSE DO; 
+         IF (SUPR< 0)&(RVOL<>0) THEN DO;
+            PTL=PARTL;            /* SET PTL FOR SET.FRQ  */
+            CALL UN.SUPPRESS;     /* ALLOW IT TO CONTINUE */
+         END;
+      END;
+
+      /* $PAGE - CHECK FOR PEAK LEVEL REACHED,  OR END OF SPLICE SEGMENT */
+
+      /* IF C.E.L IS SET: 
+
+         1. IF PSTAT=DECAY.STATE,  THEN WE ARE PERFORMING A DECAY (EITHER
+            INITIAL DECAY OR FINAL DECAY) TO A LIMIT OF 0.   TEST FOR
+            LIMIT BEING REACHED.   WHEN LIMIT REACHED,  MARK NOTE
+            AS IDLE.
+
+         2. SPLICING - CHECK FOR LIMIT REACHED.  LIMIT MAY BE  A) PEAK
+            LIMIT OF INITIAL ATTACK,  OR   B) ZERO FOR DECAY OF PRIOR
+            TIMBRE FRAME. EDAT HOLDS UCHN LIMIT IN LOWER HALF, SUCHN
+            LIMIT IN UPPER HALF.  BOTH MUST BE REACHED FOR SPLICE
+            TO CONTINUE */
+
+      // Check envelope limit
+      IF (C.E.L<>0) THEN BEGIN;               /* CHECK FOR C.E.L NONZERO FIRST */
+
+        DCL FROM.LOOP FIXED;                  /* INDICATES LOOPING SPLICE TEMPORARILY */
+
+        IF (SMCHN<>0)                         /* IF SPLICING         */
+        THEN DO;                              /* MAKE SPECIAL CHECKS */
+
+           IF (C.E.L=2) THEN DO;              /* 2 - MEANS SPLICE DELAY STATE */
+              IF (SAMPLED.KBD.MILLISECONDS<ETIMER)  /* NOT TIME YET        */
+              THEN GOTO LOOP.EXIT;            
+              GOTO UGLY.GOTO.POINT;           /* CONTINUE WITH SPLICING */
+           END;
+
+           IF PSTAT=DECAY.STATE THEN I=0;     /* MEANS DECAY TO ZERO LIMIT */
+           ELSE I=EDAT;                       /* ELSE LOOK UP LIMIT TO CHECK FOR */
+
+           IF (INC.POLY=0)                    /* CHECK LEVEL OF SUCHN FIRST */
+           OR ((MCHN&B.POLY)=0) THEN DO;      /* OR ORIGINAL SYNTHESIZER - COMPUTE ITEMS */
+              DISABLE;
+              WRITE(CHA)=SUCHN;               /* MAKE SURE SUCHN IS AT ZERO (MIGHT NOT BE IN CASE OF STOLEN CHANNEL) */
+              WRITE(FUN)=ELIM; 
+              WRITE(DAT)=SHR(I,8);
+              WRITE(DAT)=SHR(I,8);
+              J=READ(CHA)&1;                  /* GET A ZERO IF HAS REACHED LIMIT OF ZERO */
+              ENABLE;
+           END;                               /* OF BEGIN FOR ORIGINAL SYNTHESIZER */
+           ELSE IF (INC.POLY<>0) THEN DO;     /* MEANS POLY SYNTH */
+              IF POLY.SPLICE THEN DO; END; /* POLY SPLICING */
+              J=0;
+           END;
+           IF J<>0 THEN GOTO LOOP.EXIT;       /* IF SUCHN HAS NOT REACHED 0 - WAIT HERE UNTIL IT HAS DONES SO BEFORE LOADING MEMORY & STARTING SPLICE */
+
+        END;
+        ELSE I=0;                             /* NOT SPLICING - MUST BE DECAY (INITIAL OR FINAL) TO LIMIT OF 0 */
+
+        IF  ((INC.MONO=0)                     /* IF NO SAMPLING AT ALL */
+        AND  (INC.POLY=0))
+        OR (MCHN&(B.MONO\B.POLY))=0 THEN DO;  /* OR ORIGINAL SYNTHESIZER - COMPUTE ITEMS */
+           IF MCHN=0 THEN I=0;                /* MIDI NOTE OFF SENT - DONE WITH FINAL DECAY */
+           ELSE DO;
+              DISABLE;
+              WRITE(CHA)=UCHN; WRITE(FUN)=ELIM; 
+              WRITE(DAT)=I;    WRITE(DAT)=I;  /* SEE IF LIMIT WAS REACHED */
+              I=READ(CHA)&1;                  /* GET 0 IF LIMIT REACHED   */
+              ENABLE;
+           END;
+        END;                                  /* OF BEGIN FOR ORIGINAL SYNTHESIZER */
+        ELSE IF (INC.MONO<>0)&((MCHN&B.MONO)<>0) THEN DO;  /* MONO SAMPLING (W. DISK) */
+           DISABLE;                                /* FOR MONO.PPTR TEST */
+           IF (MCHN<>MONO.CHAN) THEN I=0;          /* END OF ATTACK IMMED IF SOMEONE ELSE HAS OUTPUT */
+           ELSE DO;                                /* OUR CHANNEL - CHECK FOR LIMIT + DELAY */
+              I=1;                                 /* ASSUME NOT EQUAL */
+              IF (MONO.CVAL=MONO.ELIM)             /* LIMITS EQUAL */
+              THEN DO;                             /* WAIT FOR EQUAL FOR 10 MS FOR DAC TO REACH ZERO */
+                 IF      ISTAT<100 THEN ISTAT=100; /* BRING STATE UP */
+                 ELSE IF ISTAT=100 THEN ISTAT=101;
+                 ELSE    I=0;                      /* END NOTE ON THIRD EQUAL */
+              END;
+           END;
+           ENABLE;
+        END;
+        ELSE IF (INC.POLY<>0) THEN DO;             /* MEANS POLY SYNTH */
+           DISABLE;
+           WRITE(PSC)=MCHN;                        /* CHECK SYNTH       */
+           WRITE(PSF)=PSEVAL;                      /* CHECK CURRENT VAL */
+           I=READ(PSD);                            /* GET CUR VAL       */
+           WRITE(PSF)=PSELIM;
+           I=(I<>READ(PSD));                       /* ZERO IF EQUAL     */
+           WRITE(PSF)=PSRON;                       /* SEE IF RUNNING    */
+           IF READ(PSD)=0 THEN I=0;                /* END OF DECAY      */
+           ENABLE;                                 /* IF END OF SF      */
+        END;
+
+        IF I=0 THEN DO;                         /* LIMIT REACHED (ON BOTH CHANNELS IF SPLICING) */
+
+          IF PSTAT=DECAY.STATE THEN DO;         /* MEANS INITIAL DECAY TO ZERO LIMIT OR FINAL DECAY TO ZERO (END OF PARTIAL) */
+            DISABLE;                            /* REMOVE FROM INDEX QUE IF INDEX DELAY IS TO LONG */
+            IF IQF<>0 THEN DO;                  /* BLOCK IS LINKED ON TO A TIMER QUE */
+               CORE(IQB  )=IQF;                 /* OUR FP GOES TO FP BEHIND   US */
+               CORE(IQF+1)=IQB;                 /* OUR BP GOES TO BP AHEAD OF US */
+               IQF=0;
+            END;
+            ENABLE;
+
+            IF MCHN<>0                          /* IF NOT A MIDI-ONLY BLOCK */
+            THEN CALL CLEANUP.SYNTH(MCHN,UCHN); /* STOP SYNTHESIZER TO STOP FEEDTHROUGH */
+            PSTAT=DONE.STATE; C.E.L=0;          /* DONE WITH PARTIAL */
+            NACT=NACT-1;                        /* MUST COUNT ONE LESS ACTIVE, IN CASE NOTE RELEASES WITHOUT RETRIGGERING */
+            IF (SMCHN<>0) THEN DO;              /* CLEAN UP SPLICE CHANNEL , ACCOUNT FOR IT */
+               WRITE("304")=ADDR(UCHN);         /* ADDR(UCHN) TO R4 */
+               WRITE("364")=READ("344")&(NOT(B.SOUNDING));  /* MASK OF SOUNDING BITS */
+               WRITE("364")=READ("344")&(NOT(B.SOUNDING));
+               WRITE("364")=READ("344")&(NOT(B.SOUNDING));
+               WRITE("364")=READ("344")&(NOT(B.SOUNDING));
+               CALL CLEANUP.SYNTH(SMCHN,SUCHN);  /* UPDATE SPLICE CHANNEL TOO */
+            END;
+            IF (NACT=0)&(QME=1) THEN QME=0;      /* CLEAR FLAG - WILL CAUSE BLOCKS TO BE RELEASED NEXT TIME THROUGH */
+          END;   
+
+          ELSE DO;                         /* MEANS SPLICING - LIMIT REACHED - BEGI NEXT SEGMENT */
+
+             UGLY.GOTO.POINT:;             /* ENTER IMMEDIATELY WITHOUT WRITING LIMIT IF AFTER SPLICE DELAY */
+
+             WRITE(MAM)=TBP;
+             WRITE(MAL)=TIM.CSEM;
+
+             IF (TFLAG<>READ(MD))          /* IF TIMBRE HAS BEEN RECALLED */
+             THEN DO;                      /* BETTER STOP SPLICING NOW - PROVIDE GRACEFUL EXIT IF POSSIBLE */
+                IF NSTAT=1 THEN DO;        /* FD SPLICING - THEN TIMBRE RECALLED */
+                   PSTAT=DECAY.STATE;      /* START INITIAL DECAY FROM WHEREVER WE ARE */
+                   P.E.E=0;                /* STOP ANY S-CURVE SPLICING THAT WAS GOING ON */
+                   C.E.L=1;                /* SET C.E.L FOR LIMIT CHECK IN CASE THIS WAS FROM DELAY SEGMENT */
+                   GOTO LOOP.EXIT;         /* LEAVE C.E.L AT 1.  WRITE OUT ZERO TO LIMITS USING HOPEFULLY APPROPRIATE RATE OF CHANGE (ZEROES WRITTEN OUT ABOVE IN LIMIT CHECK) */
+                END;
+                C.E.L=0;                   /* LEAVE SOUND AS IS AFTER TIMBRE RECALLED - SHORT FINAL DECAY WILL BE DONE WHEN KEY IS RELEASE.  BUT LEAVE S-CURVE SPLICING ALONE? */
+                GOTO LOOP.EXIT;            /* JUST QUIT. */
+             END;
+
+             PTL=PARTL;                    /* LOOK UP PARTIAL # - STORE FOR QUICK ACCESS */
+             M  =FMPTR;                    /* LOOK UP FRAME POINTER FROM BLOCK. IF NON ZERO, MEANS WE HAVE BEEN HERE BEFORE */
+
+             IF M=0 THEN DO;               /* FIRST TIME THROUGH - NO CHANNEL SWAP REQUIRED. */
+
+                SUCHN=SUCHN&(NOT(B.SOUNDING));        /* SUCHN IS NOT SOUNDING SINCE WE JUST CHECKED FOR A LIMIT OF ZERO */
+                SMCHN=SMCHN&(NOT(B.SOUNDING));        /* ALLOW MEMORY SELECTION IF CHANNEL STOLEN NOW */
+
+                WRITE(MAL)=TIM.PARTIAL.POINTERS+PTL;
+                M=READ(MD)+NUM.PARAMS;                /* FIRST TIME THROUGH - COMPUTE STARTING POINTER */
+                FROM.LOOP=0;                          /* NEED THIS INFO BELOW */
+
+                IF (HELD.PSEL.BUTTONS)<>0 THEN DO;    /* PARTIAL BUTTON HELD - CHECK FOR SOLO */
+                   IF (TB=0) THEN DO;                 /* CHECK FURTHER IF KEYBOARD TIMBRE */
+                      I=PTL&3;                        /* GET PARTIAL # 0-3 */
+                      IF (HELD.PSEL.BUTTONS&BITS(I))<>0 
+                      THEN DO;                        /* FRAME SOLOING DESIRED */
+                         M=FR.PTRS(I);                /* FRAME FOUND - GO DIRECTLY TO JAIL.  DO NOT PASS "GO".  DO NOT COLLECT $200. */
+                         C.E.L=0;                     /* AND EXIT C.E.L - NO MORE CHECKS AFTER SPLICE IS STARTED */
+                         TFLAG=TFLAG-1;               /* CAUSE SHORT FINAL DECAY WHEN KEY IS LIFTED */
+                      END;
+                   END;                    /* OF TB = 0             */
+                END;                       /* OF PSEL BUTTON HELD   */
+
+             END;                          /* OF FIRST TIME THROUGH */
+
+             ELSE DO;                      /* MEANS WE HAVE BEEN HERE BEFORE - RECOMPUTE POINTER, SWAP CHANNELS, CHECK FOR T.F. LOOP */
+
+                WRITE(MAL)=TIM.PARTIAL.POINTERS+PTL;
+                M=M+READ(MD);              /* GET ABSOLUTE POINTER */
+
+                IF C.E.L<>2 THEN DO;       /* IF NOT A RESTART AFTER DELAY SEGMENT - CHECK FOR LOOP, ETC */
+
+                   I=M+P.E.SEG.LOOP;       /* GET POINTER TO 'LOOP' ENTRY FOR CURRENT FRAME */
+
+                   WRITE(MAM)=PAR.PTR+SHR(I,8); 
+                   WRITE(MAL)=I;
+
+                   I=READ(MD);             /* SEE IF WE SHOULD LOOP */
+
+                   IF (I<>0) AND (NSTAT=0) THEN DO; /* LOOPING SPECIFIED - FIND NEXT FRAME POINTER */
+                      N=M;                          /* SAVE POINTER */
+                      WRITE(MAM)=TBP;
+                      WRITE(MAL)=TIM.PARTIAL.POINTERS+PTL;
+                      M=READ(MD)+NUM.PARAMS;        /* GET POINTER TO FIRST FRAME */
+                      WRITE(MAM)=PAR.PTR+SHR(M,8); WRITE(MAL)=M;
+                      DO WHILE (I<>1)&(READ(MDI)=MOR);
+                         WRITE("300")=READ(MDI);  /* SKIP TYPE */
+                         M=M+READ(MD); I=I-1;     /* FIND DESIRED FRAME, IF IT EXISTS */
+                         WRITE(MAM)=PAR.PTR+SHR(M,8); WRITE(MAL)=M;
+                      END;
+                      IF M=N THEN DO;            /* MEANS LOOP TO SELF - SET SPECIALS STATE TO REDUCE COMPUTER WORK LOAD */
+                         C.E.L=0; P.E.E=0;       /* END OF SPLICING FOR NOW */
+                         GOTO LOOP.EXIT;         /* AND EXIT FOR NOW */
+                      END;
+                      FROM.LOOP=1;               /* NEED THIS INFO BELOW */
+                   END;
+
+                   ELSE DO;                      /* NO LOOPING SET UP FOR SPLICE TO NEXT FRAME */
+                      WRITE(MAM)=PAR.PTR+SHR(M+CLEN,8); 
+                      WRITE(MAL)=M+CLEN; 
+                      M=M+READ(MD); 
+                      FROM.LOOP=0;               /* NEED THIS INFO BELOW */
+                   END;
+
+                   UCHN=UCHN&(NOT(B.SOUNDING));    /* UCHN LIMIT WAS ZERO IF AFTER FIRST SPLICE */
+                   MCHN=MCHN&(NOT(B.SOUNDING));    /* ALLOW MEMORY SELECTION IF CHANNEL STOLEN NOW */
+
+                   L=UCHN; UCHN=SUCHN; SUCHN=L; /* SWAP CHANNELS FOR NEXT SPLICE, OR FOR INITIAL DECAY */
+                   L=MCHN; MCHN=SMCHN; SMCHN=L;
+
+                END;
+             END;
+
+             /* $PAGE - CHECK FOR END OF FRAMES */
+
+             WRITE(MAM)=PAR.PTR+SHR(M,8); 
+             WRITE(MAL)=M; 
+
+             IF (READ(MD)<>MOR)       /* END OF SPLICE LIST REACHED */
+             THEN DO;                 /* START INITIAL DECAY NOW */
+
+                IF (INC.POLY=0)       /* IF NO POLY, THEN MUST BE SYN2 */
+                OR ((MCHN&B.POLY)=0) THEN DO;             /* OR ORIGINAL SYNTHESIZER - COMPUTE ITEMS */
+                   DISABLE;
+                      WRITE(CHA)=UCHN; WRITE(FUN)=ELIM;   /* GET POSSIBLY NEW USER CHANNEL */
+                      WRITE(DAT)=EIDLIM;                  /* WRITE OUT NEW LIMIT */
+                      WRITE(FUN)=EDIV; WRITE(DAT)=   (EIDINT  );
+                      WRITE(FUN)=EADD; WRITE(DAT)=SHR(EIDINT,8);
+                   ENABLE;
+                END;                                      /* OF BEGIN FOR ORIGINAL SYNTHESIZER */
+
+                ELSE IF (INC.POLY<>0) THEN DO;            /* BEGIN INTIAL DECAY AFTER SPLICING */
+                   IF POLY.SPLICE THEN DO; END;
+                END;
+
+                IF ETMC<>(-1) THEN DO;                 /* SET UP FOR EXPONENTIAL INITIAL DECAY */
+                   P.E.E=1;  
+                   EDAT=EIDINT&"177400";               /* SAVE ADDER FOR EXPONENTIAL COMPUTATION */
+                   PPTMB=0;                            /* FOR CONSISTENCY - EXPONENTIATION ROUTINE REWRITES SPLICE CHANNEL ADDER */
+                END;                                   /* SHOULD HAVE NO EFFECT SINCE SPLICE CHANNEL IS AT DESIRED IMIT OF 0 */
+                ELSE P.E.E=0;                          /* CLEAN UP FROM POSSIBLE S CURVE SPLICE */
+
+                IF EIDLIM=0 THEN DO;                   /* INITIAL DECAY TO ZERO */
+                   PSTAT=DECAY.STATE;                  /* CHECK FOR LIMIT OF ZERO REACHED */
+                   C.E.L=1;                            /* SET FOR LIMIT CHECK,  IN CASE WAS TIMBRE FRAME SOLO ABOVE */
+                END;
+                ELSE C.E.L=0;                          /* NOTE - WE WOULD NEVER GET HERE IF THE FINAL DECAY HAS BEEN QUED */
+
+                SSTAT=1;                               /* INDICATE DONE WITH SPLICING */
+
+             END;
+
+             ELSE BEGIN;                 /* INITIATE SPLICE - FIRST LOAD WAVE TABLE */
+
+               IF C.E.L<>2 THEN DO;      /* BUT FIRST CHECK FOR SPLICE DELAY */
+                 WRITE(MAM)=PAR.PTR+SHR(M+P.E.SEG.DEL,8); 
+                 WRITE(MAL)=M+P.E.SEG.DEL;
+                 IF  (READ(MD)<>0)                   /* DELAY SPECIFIED */
+                 AND (C.E.L<>0)                      /* BUT IGNORE DELAY IF FRAME SOLO */
+                 THEN DO;                            /* ENTER DELAY STATE */
+                   ETIMER=SAMPLED.KBD.MILLISECONDS+READ(MD);     /* DELAY TIMER     */
+                   EDAT=FROM.LOOP;                   /* SAVE FROM.LOOP INDICATOR */
+                   C.E.L=2; P.E.E=0;                 /* SET DELAY STATE.  STOP EARLIER S-CURVE SPLICE SINCE WE HAVE REACHED LIMITS */
+                   IF FMPTR=0 THEN MRLCH=SUCHN;      /* MUST INITIALIZE MRLCH IN CASE KNOB CHANGE - WILL LOAD INTO SILENT CHANNEL */
+                   WRITE(MAM)=TBP;
+                   WRITE(MAL)=TIM.PARTIAL.POINTERS+PTL;
+                   FMPTR=M-READ(MD);                 /* SAVE FMPTR */
+                   GOTO LOOP.EXIT;                   /* THROUGH WITH ENVELOPE PROCESSING FOR NOW */
+                 END;
+               END;
+               ELSE DO;                               /* RETURN FROM SPLICE DELAY */
+                  FROM.LOOP=EDAT;                     /* LOOK UP FROM.LOOP SCANNED BEFORE */
+                  C.E.L=1;                            /* RESTORE C.E.L FROM =2 */
+               END;
+
+               IF (INC.POLY=0)        /* NO POLY - MUST BE SYN2 */
+               OR ((MCHN&B.POLY)=0) THEN DO;  /* OR ORIGINAL SYNTHESIZER - COMPUTE ITEMS */
+                  DISABLE;
+                     WRITE(CHA)=SUCHN; WRITE(FUN)=ZMA; WRITE(DAT)=0; /* LOAD WAVE SHAPE - BEGIN BY */
+                     WRITE(FUN)=TIM; WRITE(DAT)=(SHR(SUCHN,8)&"17")+48; /* SELECT MEMORY TO LOAD */
+                     WRITE(FUN)=MEM;
+                     INTCHA=SUCHN; INTFUN=MEM;/* SET IN CAE INTERRUPT HERE */
+                  ENABLE;
+                  L=M+S.ENV.T;          /* GET POINTER TO NEXT WAVE TABLE */
+                  N=0;
+                  WRITE(MAM)=PAR.PTR+SHR(L,8); 
+                  WRITE(MAL)=L;
+                  DO WHILE (N<16); /* PROCESS SIXTEEN POINTS PER LOOP - EXTERNAL MEMORY */
+                     WRITE(DAT)=READ(MD);
+                     WRITE(DAT)=ROT(READ(MDI),8);
+                     WRITE(DAT)=READ(MD);
+                     WRITE(DAT)=ROT(READ(MDI),8);
+                     WRITE(DAT)=READ(MD);
+                     WRITE(DAT)=ROT(READ(MDI),8);
+                     WRITE(DAT)=READ(MD);
+                     WRITE(DAT)=ROT(READ(MDI),8);
+                     WRITE(DAT)=READ(MD);
+                     WRITE(DAT)=ROT(READ(MDI),8);
+                     WRITE(DAT)=READ(MD);
+                     WRITE(DAT)=ROT(READ(MDI),8);
+                     WRITE(DAT)=READ(MD);
+                     WRITE(DAT)=ROT(READ(MDI),8);
+                     WRITE(DAT)=READ(MD);
+                     WRITE(DAT)=ROT(READ(MDI),8);
+                     N=N+1;
+                  END;
+               END;              /* OF BEGIN FOR ORIG SYNTH */
+               ELSE IF (INC.POLY<>0) THEN DO;     /* MEANS POLY SYNTH */
+                  IF POLY.SPLICE THEN DO; END; /* POLY SPLICING */
+               END;
+
+               I=M+P.E.SEG.UP;              /* GET POINTER TO SPLICE INFO */
+               WRITE(MAM)=PAR.PTR+SHR(I,8);
+               WRITE(MAL)=I; 
+               
+               I=READ(MDI);                /* LOOK UP ADDER & DIVIDER FOR UP*/
+               J=I&255;                    /* EXTRACT ADDER */
+               I=SHR(I,8);                 /* EXTRACT DIVISOR */
+               L=READ(MDI);                /* LOOK UP ADDER & IDIV FOR DOWN SEGMENT */
+               P=READ(MDI);                /* GET UDL - SEE IF EITHER UP OR DOWN SPLICE REQUIRES S-CURVING */
+               IF FROM.LOOP<>0             /* SPLICING FROM LOOP POINT */
+               THEN DO;                    /* GET SPECIAL LOOP INFO */
+                  WRITE(MAM)=TBP;
+                  WRITE(MAL)=TIM.LOOP.INTERP+PTL;
+                  L=READ(MD); 
+                  WRITE(MAL)=TIM.LOOP.DELTAS+PTL;
+                  P=P\READ(MD);            /* SPECIAL INFO IF DOWN SPLICE FROM LOOP POINT */
+
+                  N=M+P.E.SEG.LIM;         /* GET POINTER TO SPLICE INFO */
+                  WRITE(MAM)=PAR.PTR+SHR(N,8);
+                  WRITE(MAL)=N; 
+               END;
+               ELSE P=P\READ(MDI);         /* OR IN DDL IF THAT IS WHAT IS HAPPENING */
+               N=L&255;                    /* EXTRACT DOWN ADDER */
+               L=SHR(L,8);                 /* EXTRACT DOWN DIVISOR */
+               K=READ(MDI);                /* NEW UP LIMIT */
+               EDAT=SHL(K,8);              /* SET UP FOR LIMIT OF 0 ON UCHN, K ON SUCHN */
+
+               IF  (INC.POLY=0)            /* NO POLY - MUST BE SYN2 */
+               OR  ((MCHN&B.POLY)=0) THEN DO;  /* OR ORIGINAL SYNTHESIZER - COMPUTE ITEMS */
+                  DISABLE;                     /* INITIATE SPLICE HERE */
+                    PPTMB=KBD.MILLISECONDS;    /* SAVE TIME OF START OF SPLICE */
+                    WRITE(CHA)=UCHN;
+                    WRITE(FUN)=ELIM;
+                    WRITE(DAT)=0;              /* WRITE OUT LIMIT OF 0 */
+                    WRITE(FUN)=EDIV; WRITE(DAT)=L; /* DOWN DIVISOR */
+                    WRITE(FUN)=EADD; WRITE(DAT)=N; /* DOWN ADDER */
+                    WRITE(CHA)=SUCHN;
+                    WRITE(FUN)=ELIM;
+                    WRITE(DAT)=K;               /* ATTACK SPLICE CHANNEL TO UP PEAK */
+                    WRITE(FUN)=EDIV; WRITE(DAT)=I; /* UP DIVISOR */
+                    WRITE(FUN)=EADD; WRITE(DAT)=J; /* UP ADDER */
+                  ENABLE;
+               END;       /* OF BEGIN FOR ORIGINAL SYNTHESIZER */
+               ELSE IF (INC.POLY<>0) THEN DO;            /* MEANS POLY SYNTH */
+                  IF POLY.SPLICE THEN DO; END;        /* POLY SPLICING */
+               END;
+               IF P<>0 THEN DO;             /* SET UP FOR S CURVE SPLICE */
+                  IF FROM.LOOP<>0           /* IF FROM LOOP */
+                  THEN P.E.E=3;             /* SET P.E.E TO PERFORM S CURVE FROM LOOP POINT */
+                  ELSE P.E.E=2;             /* ELSE NORMAL S CURVE SPLICE */
+               END;
+               ELSE P.E.E=0;                /* ELSE NO EXPONENTIATION REQUIRED */
+               SUCHN=SUCHN\B.SOUNDING; 
+               SMCHN=SMCHN\B.SOUNDING;      /* SET BIT TO NOT RELOAD MEMORY IF THIS CHANNEL STOLEN */
+               MRLCH=SUCHN;                 /* MOST RECENTLY LOADED CHANNEL IS SUCHN */
+
+               /* $PAGE - CHECK FOR PITCH OFFSET  */
+
+               I=M+P.E.SEG.PDEL;                    /* GET POINTER TO 'PDEL' */
+               WRITE(MAM)=PAR.PTR+SHR(I,8); 
+               WRITE(MAL)=I;
+
+               IF READ(MD)<>0 THEN DO;            /* CHECK FOR PITCH DELTA - SET UP PORTAMENTO IF SO */
+                  I=READ(MD)*1024/1200;           /* CONVERT TO INTERNAL UNITS 1024/OCTAVE */
+                  IF READ(4) IGE 600 THEN I=I+1;  /* PERFORM ROUNDING HERE - WORKS SUPERBLY FOR MINUS NUMBERS */
+                  DESTF=DESTF+I;                  /* CHANGE DEST PITCH AS REQUIRED */
+                  L=M+P.E.SEG.ATK;                /* MUST LOOK UP ATTACK TIME */
+                  WRITE(MAM)=PAR.PTR+SHR(L,8); WRITE(MAL)=L;
+                  LOAD ABS(DESTF-CURRF); 
+                  DIV READ(MD);                   /* GET X PER MS */
+                  J=READ(5); K=READ(4);           /* GET INTEGER PART & REMAINDER */
+                  WRITE(5)=0; WRITE(4)=K; 
+                  WRITE(7)=READ(MD);              /* COMPUTE FRACTIOANL REMAINDER */
+                  IF J>255 THEN J=255;            /* LIMIT RATE TO 255 STEPS/ MILLISECOND */
+                  LIND=SHL(J,8)+SHR(READ(5),8);   /* GET 16 BIT RESULT */
+                  IF LIND=0 THEN LIND=1;          /* MAKE RATE NONZERO */
+                  GLIDE=5;                        /* SET BITS FOR GLIDE */
+                  NEW.INFO=1;                     /* SET FLAG TO CAUSE IMMEDIATE GLIDE */
+               END;
+
+               WRITE(MAM)=TBP;
+               WRITE(MAL)=TIM.PARTIAL.POINTERS+PTL;
+               FMPTR=M-READ(MD);                  /* COMPUTE & STORE RELATIVE  POINTER */
+
+            END;        /* OF INITIATE SLICE (VS INITIAL DECAY) */
+
+          END;          /* OF SPLICING CASE             */
+        END;            /* OF LIMIT WAS REACHED         */
+        LOOP.EXIT:;
+      END;              /* OF CASE FOR CHECK ENVELOPE LIMIT */
+
+      PPTR=PFPTR;             /* MOVE ON TO NEXT PARTIAL */
+    END;                      /* OF PARTIAL LOOP */
+
+  END;                        /* OF CASE FOR NACT<>0 */
+
+  /* $PAGE - HANDLE END OF NOTE */
+
+  ELSE IF (NSTAT=1)&(QME=0) THEN DO;          /* FINAL DECAY WITH NO MORE ACTIVE PARTIALS - DONE WITH NOTE */
+
+    DO WHILE PTLST<>0;                        /* FREE UP ALL CHANNELS */
+
+      PPTR=PTLST; PTLST=PFPTR;                /* UNLINK AND FREE UP PARTIAL BLOCK */
+
+      IF MCHN<>0 THEN DO;                     /* SKIP OVER MIDI-ONLY BLOCKS */
+
+         IF  ((INC.MONO=0)                    /* IF NO SAMPLING AT ALL */
+         AND  (INC.POLY=0))
+         OR (MCHN&(B.MONO\B.POLY))=0 THEN DO;       /* OR ORIGINAL SYNTHESIZER - COMPUTE ITEMS */
+            IF (MCHN&255)<LSYN1.END THEN I=FR1.PTR; /* PART OF LSYN1 */
+            ELSE                         I=FR2.PTR; /* CHANNEL IS PART OF LSYN2 */
+         END;
+         ELSE IF (INC.MONO<>0)&((MCHN&B.MONO)<>0) THEN DO;  /* MONO SAMPLING (W. DISK) */
+            I=FRM.PTR;
+         END;
+         ELSE IF (INC.POLY<>0) THEN DO;             /* MEANS POLY SYNTH */
+            I=CORE(ADDR(FP0.PTR) + (SHR(MCHN,6)&"3")); /* POINT AT CORRECT CHANNEL LIST FOR THIS POLY BIN */
+            IF UCHN<>0 THEN DO;                     /* IF STEREO PAIR */
+               CORE(I)=CORE(I)+1;                   /* ONE MORE FREE */
+               CORE(I+CORE(I))=MCHN&(NOT B.STEREO); /* PRESERVE STEREO PAIR ORDER */
+               MCHN=UCHN&(NOT B.STEREO);
+            END;
+         END;
+
+         CORE(I)=CORE(I)+1; /* INDICATE ONE MORE FREE */
+         CORE(I+CORE(I))=MCHN; /* PUT CHANNEL BACK ON FREE LIST */
+         MCHN=0;
+
+         IF (SMCHN<>0) THEN DO;                         /* FREE UP SPLICE CHANNEL AS WELL */
+            IF (INC.POLY=0)                             /* IF NO POLY */
+            OR (SMCHN&B.POLY)=0 THEN DO;                /* OR ORIGINAL SYNTHESIZER - COMPUTE ITEMS */
+               IF (SMCHN&255)<LSYN1.END THEN I=FR1.PTR; /* PART OF LSYN1 */
+               ELSE                          I=FR2.PTR; /* CHANNEL IS PART OF LSYN2 */
+            END;
+            ELSE IF (INC.POLY<>0) THEN DO;              /* MEANS POLY SYNTH */
+               I=CORE(ADDR(FP0.PTR) + (SHR(SMCHN,6)&"3"));    /* POINT AT CORRECT CHANNEL LIST FOR THIS POLY BIN */
+            END;
+            CORE(I)=CORE(I)+1;
+            CORE(I+CORE(I))=SMCHN; /* FREE UP SPLICE CHANNEL */
+            SMCHN=0;
+         END;                      /* NO NEED TO CHECK QUE POINTERS - SYSTEM ERROR IF WE EVER GOT HERE WITH BLOCK STILL LINKED */
+
+      END;                         /* OF MCHN<>0 */
+
+      CALL RELP;                   /* RELEASE PARTIAL BLOCK - WE KNOW IT IS NOT ON ANY QUES */
+
+    END;                           /* OF LOOP OVER PARTIALS */
+
+    NSTAT=2; 
+
+    IF STEALOK<>(-2) THEN DO;
+       STEALOK=(-1);               /* INDICATE NO CHANNELS LEFT, NO USE STEALING */
+       WRITE(MAM)=THP;             /* ONE LESS DECAYING NOTE */
+       WRITE(MAL)=THD.NDEC;
+       WRITE(MD )=READ(MD)-1;
+    END;
+
+  END;  
+
+END;                          /* OF BEGIN */

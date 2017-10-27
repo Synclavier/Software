@@ -1,0 +1,210 @@
+/*	:SYNSOU:STORMOD:ARCH1SOU  $TITLE  Laser Disk Archiving Screen Driver
+
+Modified:
+2000/02/27 - TY  - Changed LaserDisk.Archive.Screen.Driver() to indirectly accommodate display of sound file loops
+1994/01/06 - PF  - Fixed 3.11 optical screen bug
+1989/07/03 - SGS - Moved initialization of SFDDlgGrp to Set.SFD.Misc
+1989/05/02 - TSS - Merged changes for Optical disk to DTD transfer project
+1987/12/22 - MWH - Update poly cache base to be a 32 bit pointer
+*/
+
+module ARCH1MOD;
+
+dcl debug	lit '0';
+
+insert ':-xpl:catrout';
+insert ':-xpl:filerout';
+insert ':-xpl:scsicmds';
+insert ':-xpl:scsirout';
+insert ':-xpl:optical';
+insert ':-xpl:intrprtr';
+
+insert ':synlits:comlits';	/*	get configuration and pdl size	*/
+insert ':synlits:asciilit';
+insert ':synlits:globlits';
+insert ':synlits:syslits';
+insert ':synlits:fcodlits';
+insert ':synlits:samplits';
+
+insert ':synmods:globdcl';
+insert ':synmods:giddcl';
+insert ':synmods:mathdcl';
+insert ':synmods:ttydcl';
+insert ':synmods:plotdcl';
+insert ':synmods:tformdcl';
+insert ':synmods:xmemdcl';
+insert ':synmods:polydcl';
+insert ':synmods:smgrdcl';
+insert ':synmods:mousedcl';
+insert ':synmods:getdcl';
+insert ':synmods:getvdcl';
+insert ':synmods:tprimdcl';
+insert ':synmods:errdcl';
+insert ':synmods:filedcl';	/*	for parse.treename.string	*/
+
+insert ':synmods:recrddcl';
+insert ':synmods:indexdcl';
+insert ':synmods:odiskdcl';
+
+dcl (Cache.Ptr,Cache.Secs)			fixed	external;
+dcl Num.Snds.In.Cache				fixed	external;
+dcl Find.Cache							proc	returns(fixed)	external;
+dcl Restore.Level						fixed	external;
+dcl Compute.DSel.Button				proc	external;
+dcl entered.new.dev					fixed	external;
+dcl maximize.memory.for.record	proc	external;
+dcl bnk.len								fixed	external;
+dcl bnk.ptr								fixed	external;
+dcl nah.len								fixed	external;
+dcl nah.ptr								fixed	external;
+dcl Get.SFD.Reserved.Sectors     proc	external;
+
+
+insert ':synsou:stormod:globlits';	/*	global screen literals and constants	*/
+insert ':synsou:stormod:arc-lits';	/*	archive screen literals						*/
+
+insert ':synsou:stormod:arc-misc';	/*	misc events handler							*/
+insert ':synsou:stormod:arc-dlg';	/*	dialog panel routines						*/
+insert ':synsou:stormod:arc-ctrl';	/*	table control objects and handlers		*/
+insert ':synsou:stormod:arc-act';	/*	archive command buttons						*/
+insert ':synsou:stormod:arc-menu';	/*	main menu box for archiving screen		*/
+insert ':synsou:stormod:arc-tabl';	/*	archive screen table event handler		*/
+
+/*	$SUBTITLE Startup Code	*/
+
+Init.Archive.Screen: proc swapable;
+	dcl i	fixed;
+
+	call Clear.Term;
+	call PRINT.CCAT;
+	call Initialize.Screen.Manager(Trd.Len-Get.SFD.Reserved.Sectors());
+	call Set.Default.Action(O#ACT.Middle.Press|O#ACT.Update.On.Dep);
+	call Init.PID.GID.Area;		/*	zero out dynamic space	*/
+
+	call PID(WindowGrp ,-1);	/*	groups not defined yet	*/
+	call PID(MenuGrp	 ,-1);
+	call PID(MiscGrp	 ,-1);
+	call PID(ActionGrp ,-1);
+	call PID(OptCtrlGrp,-1);
+	call PID(DirCtrlGrp,-1);
+	call PID(TempGrp	 ,-1);
+
+	ActiveWindowId=(-1);			/*	no active window yet			*/
+	OpenWindowBits=0;				/*	reset - all windows closed	*/
+
+end Init.Archive.Screen;
+
+Open.Archive.Screen: proc swapable;
+
+	Default.Activate.Optical.Control.Bits=O#FormatDialog|O#AutoVolChange|O#UpdateDialog;
+
+	call Open.Misc.Objects;									/*	mouse hole, etc.	*/
+	call Set.SFD.Misc(GRP$Misc,ErrorRow,ErrorCol);	/*	link in SFD code	*/
+	call Set.SFD.Dialog.Row(7);							/*	dialogs will go on seventh row	*/
+	call Open.Menu(1);										/*	main dialog box	*/
+	call Open.Action.Buttons(NullMode);					/*	opens up CLEAR Button	*/
+	call Open.Archive.Windows(10,11);					/*	puts up the 2 scrolling tables	*/
+
+	Default.Activate.Optical.Control.Bits=O#FormatDialog|O#VolChangeDialog|O#UpdateDialog;
+
+end Open.Archive.Screen;
+
+Get.First.Screen.Event: proc swapable;		/*	set up a harmless event to get things started	*/
+
+	call Select.New.Cur.Obj(GID(SFName),-1,-1);	/*	select sound file name field	*/
+
+	Screen.Event.Group=GID(MiscGrp);			/*	make up null event to	*/
+	Screen.Event.Code	=Get.Screen.Event;	/*	get the ball rolling	*/
+	Screen.Event.Info	=S#NulEvent;
+	Screen.Event.Id	=GID(MouseHole);
+
+	/************* FOR DEBUGGING *****************/
+	/*********** ORDER IS IMPORTANT! *************/
+	/*	call Deposit.Switch(DebugSwitchId,Debug);	*/
+	/************* FOR DEBUGGING *****************/
+
+end Get.First.Screen.Event;
+
+/*	$SUBTITLE  Main Screen Event Handler	*/
+
+/*	dcl Dump.Objects proc external;	*/
+
+dcl Get.TRD.Storage proc (fixed) external;
+
+LaserDisk.Archive.Screen.Driver: proc (arg) public swapable;
+	dcl arg	fixed;
+	dcl i		fixed;
+
+	DESTINATION.PARTIAL.#	=0;	/*	init vars to safe & usable state	*/
+	DESTINATION.FRAME.#		=0;
+	RETURN.IMMEDIATELY		=0;
+
+	i = TRD.LEN;
+
+	bnk.len = 0;
+	call Get.TRD.Storage(SFD.Trd.Storage.Needed);
+
+	SFD.PTR = TRD.PTR;
+	SFD.LEN = Get.SFD.Memory(SFD.PTR);
+
+	if SFD.LEN=0 then do;
+		call noroom.error;			/*	not enough external memory	*/
+		return -1;
+	end;
+
+	PUSH.SYSTEM.PDL;					/*	free up as much of the stack as we can	*/
+
+	call Init.Archive.Screen;		/*	set up some basic stuff	*/
+	call Open.Archive.Screen;		/*	and define the screen	*/
+
+	call PID(SFD.Initial.TRD.LEN,i);
+
+	Exit.My.Screen=0;					/*	init global vars	*/
+	Goto.This.Screen=0;
+
+	call Get.First.Screen.Event;	/*	get the first event to handle	*/
+
+	do while Exit.My.Screen=0;		/*	wait for exit condition	*/
+		if  (Screen.Event.Group IGE GRP$Window)
+		and (Screen.Event.Group ILT (GRP$Window+Max.Open.Windows))
+		then call Get.Next.MultiWindow.Event;		/*	process event & get next one	*/
+
+		else if Screen.Event.Group=GID(MenuGrp)
+		then call Get.Next.Menu.Event;				/*	process menu table updates	*/
+
+		else if Screen.Event.Group=GID(ActionGrp)
+		then call Get.Next.Action.Button.Event;	/*	process menu buttons	*/
+
+		else if (Screen.Event.Group=GID(DirCtrlGrp))
+			  or (Screen.Event.Group=GID(OptCtrlGrp))
+		then call Get.Next.MultiWindow.Control.Event;
+
+		else if Screen.Event.Group=GID(MiscGrp)
+		then call Get.Next.Misc.Event;		/*	process R-Page mouse hole, errors, exiting, debugging	*/
+
+		else call Get.Next.Optical.Event;	/*	get the next event to handle	*/
+
+	end;
+
+
+	call Select.Active.Window(OptWindowId);
+	call SaveDisplayPos(LaserDev,0);				/*	save scroll positions of windows	*/
+	call Select.Active.Window(DirWindowId);	/*	get state vars for dir window loaded	*/
+	call SaveDisplayPos(DirDevice,0);
+
+	/*	DirDevice is saved in SaveDisplayPos	*/
+	call PID(SFR.SORTINFO,		UserSort );
+	call PID(SFR.FUNCTIONINFO,	FunctionInfo );
+	call PID(SFR.SHOWINFO,		ShowInfo );
+	call PID(SFR.ITEMFILTER,	ItemFilter);
+	call PID(ODS.LASERFORMAT,Fetch.Switch(GID(OptFormatSwitchId)));
+
+	Exit.My.Screen=0;		/*	clear flag after loop	*/
+
+	POP.SYSTEM.PDL;		/*	restore stack to original state	*/
+
+	call Get.TRD.Storage(GID(SFD.Initial.TRD.LEN));	/*	Reallocate to normal length	*/
+
+end LaserDisk.Archive.Screen.Driver;
+
+end ARCH1MOD;

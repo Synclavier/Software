@@ -1,0 +1,529 @@
+/*	:SYNSOU:AUDMOD:AUD-DTD  $TITLE  Direct-To-Disk interface routines
+
+Modified:
+2000/06/27 - TY  - Added conditional to Stop.DTD.Playback() to avoid trying to refresh time displays when the Q-screen is not active.
+						 This scenario is possible now that pressing the VK STOP button can cause a call to Stop.DTD.Playback().
+1991/09/13 - cj  - Created event bit on DTD track name change
+1991/05/29 - cj  - added arg to trigger.dtd.cue.by.id
+1990/10/25 - cj  - moved new project stuff to lodmod
+1989/06/14 - cj  - modified place.cue.in.sequence to always place a complex cue event
+1989/05/24 - cj  - different argument for Play.DTD.Cue.Segment
+1989/05/16 - MWH - Move locate DTD cue procedure to LODMOD
+1989/05/01 - cj  - set event.in.s#.msb correctly whenever a cue was saved
+						 (define.dtd.cue, define.entire.dtd.cue)
+1989/04/26 - cj  - moved more routines to lod-dtd, moved trigger.dtd.cue
+1989/04/19 - cj  - moved several routines to lod-dtd
+1988/10/03 - cj  - added Fetch.Cue.Caption routine;
+1988/06/18 - cj  - doa/ddt routing to set.ddt.drive.parameters
+*/
+
+dcl PLACE.BASE	fixed public;
+dcl PLACE.PTR	fixed public;
+
+SET.DTD.PROJECT.PARAMETER: proc (parm,value) public swapable;
+	dcl parm		fixed;
+	dcl value	fixed;
+
+	/*	PARM:	0 - Start.Time
+				1 - End.Time
+				2 - Sampling Rate
+	*/
+
+	if LOD.Running <> 0 then do;
+
+		call Send.To.Lod(12,0);
+		write(mam) = SCSI.Ptr;
+		write(mdi) = value;
+
+		do case parm;
+			call Send.To.Lod(141,2);
+			call Send.To.Lod(142,2);
+			call Send.To.Lod(146,2);
+		end;
+
+		/*	Set up global information right away - even through we will	*/
+		/*	probably see an event shortly that will re-compute				*/
+		/*	everything again after all the error checking is complete.	*/
+
+		call SET.UP.AEE.DTD.GLOBALS;
+
+	end;
+end SET.DTD.PROJECT.PARAMETER;
+
+SET.DTD.PROJECT.STATUS: proc (status,sel.bits) public swapable;
+	dcl status		fixed;
+	dcl sel.bits	array;
+	dcl i				fixed;
+	dcl cp			fixed;
+
+	/*	STATUS:	0 - Unlocked
+					1 - Locked
+	*/
+
+	if LOD.Running <> 0 then do;
+
+		cp = AEE.Current.Project;		/*	save current project #	*/
+
+		call Send.To.Lod(12,0);
+
+		do i = 0 to 49;
+			if (sel.bits(shr(i,4))&(bits(i&15))) <> 0 then do;
+				call Select.DTD.Current.Project(i);
+				write(mam) = SCSI.Ptr;
+				if status = 0 then write(mdi) = 13;
+				else					 write(mdi) = 12;
+				call Send.To.Lod(144,2);
+			end;
+		end;
+
+		call Select.DTD.Current.Project(cp);	/*	Switch back to original	*/
+
+	end;
+end SET.DTD.PROJECT.STATUS;
+
+SET.DTD.PROJECT.NAME: proc (name) public swapable;
+	dcl name			array;
+	dcl tmp	(12)	fixed;
+	dcl i				fixed;
+
+	if LOD.Running <> 0 then do;
+		do i = 0 to name(0)-1;
+			call pbyte(tmp,i,byte(name,i));
+		end;
+		do i = name(0) to 23;
+			call pbyte(tmp,i,a.sp);
+		end;
+		call Send.To.Lod(12,0);
+		write(mam) = SCSI.Ptr;
+		do i = 1 to 12;
+			write(mdi) = tmp(i);
+		end;
+		call Send.To.Lod(140,24);	/*	Send new name	*/
+	end;
+end SET.DTD.PROJECT.NAME;
+
+SET.DTD.DRIVE.NAME: proc (drive,name) public swapable;
+	dcl drive	fixed;
+	dcl name		array;
+	dcl tmp(8)	fixed;
+	dcl i			fixed;
+
+	if LOD.Running <> 0 then do;
+		call Send.To.Lod(13,0);
+		write(mam) = SCSI.Ptr;
+		write(mdi) = drive;
+		call Send.To.Lod(143,2);	/*	Select track	*/
+
+		do i = 0 to name(0)-1;
+			call pbyte(tmp,i,byte(name,i));
+		end;
+		do i = name(0) to 15;
+			call pbyte(tmp,i,a.sp);
+		end;
+		write(mam) = SCSI.Ptr;
+		do i = 1 to 8;
+			write(mdi) = tmp(i);
+		end;
+		call Send.To.Lod(140,16);			/*	Send new name	*/
+		New.Seq.Info = New.Seq.Info | 2;	/*	New track name	*/
+		write(MAM) = D115D.Note.Change.Tracks;
+		write(MAL) = FIRST.LOD.TRACK+drive;
+		write(MD)  = "177777";				/*	"new notes" OR "new timbre"	*/
+	end;
+end SET.DTD.DRIVE.NAME;
+
+SEND.FOR.TRACK.DIRECTORY: proc returns (fixed) public swapable;
+	dcl i		fixed;
+	dcl j		fixed;
+	dcl time	fixed;
+
+	if LOD.Running = 0 then return 0;
+
+	write(mam) = TRD.Ptr;
+
+	rpc 256;
+	write(mdi)=0;
+
+	rpc (280-256);
+	write(mdi)=0;
+
+	New.DTD.Info		= New.DTD.Info		  & not(Bit2\Bit0);
+	New.ABLE.DTD.Info	= New.ABLE.DTD.Info & not(Bit2\Bit0);
+
+	j					= Store.DTD.Info;	/*	save, since sometimes we are called	*/
+	Store.DTD.Info	= 2;					/*	from P screen, other times not		*/
+
+	call Send.To.Lod(13,0);
+
+	time = Real.Milliseconds;		/*	Give DTD 2 seconds to respond	*/
+	do while ((New.ABLE.DTD.Info & Bit2) = 0) & ((real.milliseconds-time) ilt 2000);
+		call Send.To.Lod(23,0);		/*	send 'NO OP' to DTD until it	*/
+		chill.out.and.run.syn();
+		Check.Next.Event();			/*	graciously sends us a track	*/
+	end;									/*	directory							*/
+
+	Store.DTD.Info = j;
+
+	if (New.ABLE.DTD.Info&Bit2) = 0 then do;
+		call No.Direct.To.Disk;
+		return 0;
+	end;
+
+	New.ABLE.DTD.Info = New.ABLE.DTD.Info&not(Bit2\Bit0);
+
+	return 1;
+end SEND.FOR.TRACK.DIRECTORY;
+
+/*	Sample dtd disk times is called from the main loop	*/
+/*	to present the real time time displays - ie the		*/
+/*	Shuttle Time display (numeric) and the shuttle		*/
+/*	real time moving flag										*/
+
+Sample.DTD.Disk.Time:proc(Play.State) public swapable;
+	dcl Play.State	fixed;
+
+	if (Shuttle.Group <> 0)
+	then do;
+
+		/*	If playing a cue in scan mode or recording on the	*/
+		/*	DTD synced to synclav, show the dtd time:				*/
+
+		if (Play.State = 2)
+		or (Play.State = 6)
+		then do;
+			call Check.Next.Event;
+			call DEPOSIT.SHUTTLE.TIME.DISPLAY(Loc(Addr(Cur.DTD.MS.Msb)));
+			call Check.Next.Event;
+		end;
+
+		/*	If playing a cue in scan mode, or scrubbing from	*/
+		/*	the remote box, or recording on the DTD, show the	*/
+		/*	current DTD time on the coarse bar:						*/
+
+		if (Play.State   = 2)
+		or (Play.State   = 6)
+		or (Play.State   = 7)
+      or (simulate_dtd = 1)
+		then do;
+			call Check.Next.Event;
+			call Flag.Coarse.Scroll.Bar(loc(addr(cur.DTD.MS.Msb)));
+			call Check.Next.Event;
+		end;
+
+	end;
+
+	/*	Refresh the big time display any time the DTD is playing or	*/
+	/*	recording (except when scrubbing).									*/
+
+	if  (Big.Time.Display.Mode =  bt#dtd)
+	and (Play.State				<> 0		)
+	and (Play.State				<> 7		)
+	then call Refresh.Big.Time.Display;
+
+end Sample.DTD.Disk.Time;
+
+STOP.DTD.PLAYBACK: proc public swapable;
+	dcl i						fixed;
+	dcl Q.Screen.Active	fixed external;
+
+	//	only refresh the time displays if we're still in the Q-screen
+	if (Q.Screen.Active == true) {
+		i = DTD.Play.State;			/*	save current state							*/
+		Stop.DTD.Play.State();		/*	use system routine to stop output		*/
+		/*	Perform final update for time display and scroll bar here to get	*/
+		/*	the time accurate:																*/
+		Sample.DTD.Disk.Time(i);
+	}
+	else Stop.DTD.Play.State();
+
+end STOP.DTD.PLAYBACK;
+
+/*	create dtd system cue is used to create a cue that references	*/
+/*	the entire disk.  this is used to read and write data				*/
+/*	directly by sector #															*/
+
+CREATE.DTD.SYSTEM.CUE:proc (cue.ptr) PUBLIC swapable;
+	dcl cue.ptr	fixed;
+
+	write(mam) = Cue.Ptr;		/*	build cue here						*/
+
+	write(mdi) = cue.name+1;	/*	record length up through name	*/
+	rpc cue.name;
+	write(mdi) = 0;
+
+	write(mal) = cue.s.msb;		/*	in time								*/
+	write(mdi) = 0;
+	write(mdi) = 0;
+
+	write(mal) = cue.e.msb;		/*	out time								*/
+	write(mdi) = (-1);
+	write(mdi) = ( 0);
+
+	write(mal) = cue.trks;
+	write(md ) = dtd.avail.trks;
+
+end CREATE.DTD.SYSTEM.CUE;
+
+SET.DTD.TRIG.RATE:proc (rate) public swapable;
+	dcl rate	fixed;
+
+	if DTD.MAX.SECS <> 0 then do;
+		write(mam) = SCSI.Ptr;
+		write(md ) = rate;
+		call Send.To.Lod(136,2);
+	end;
+end SET.DTD.TRIG.RATE;
+
+DEFINE.ENTIRE.DTD.CUE.WITH.ERROR.MESSAGES:proc (cue.ptr) returns (fixed) public swapable;
+	dcl cue.ptr		fixed;
+	dcl i				fixed;
+	dcl tmp(17-1)	fixed;
+
+	write(mam) = cue.ptr;
+	write(mal) = CUE.NAME;
+	do i=0 to 17-1;
+		tmp(i)=read(mdi);
+	end;
+
+	i = DEFINE.ENTIRE.DTD.CUE(cue.ptr);
+
+	if i<0 then do;
+		do case abs(i);
+			call Display.Notice(NT#SystemError,ATTR#Normal,NulStr,0,0,0);
+			call Display.Notice(NT#CueNameTooLong,ATTR#Normal,NulStr,tmp(0),0,0);
+			call Display.Notice(NT#CueNameAlreadyExists,ATTR#Normal,tmp,0,0,0);
+			call Display.Notice(NT#TooManyCues,ATTR#Normal,NulStr,0,0,0);
+			call Display.Notice(NT#OutOfCueTableMemory,ATTR#Normal,NulStr,0,0,0);
+			call Display.Notice(NT#CueRecordTooLong,ATTR#Normal,NulStr,CUE.NAME+1+shr(tmp(0)+1,1),0,0);
+		end;
+		i=0;
+	end;
+
+	return i;
+
+end DEFINE.ENTIRE.DTD.CUE.WITH.ERROR.MESSAGES;
+
+FETCH.CUE.CAPTION: proc (id, buf) PUBLIC swapable;
+	dcl id	fixed;
+	dcl buf	array;
+	dcl rlen	fixed;
+	dcl nlen	fixed;
+	dcl clen	fixed;
+
+	buf(0) = 0;
+
+	if FETCH.ENTIRE.DTD.CUE (id, Scsi.ptr) <> 0
+	then do;
+		write(mam) = Scsi.Ptr;
+		write(mal) = CUE.RLEN;
+		rlen		  = read(md);
+		write(mal) = CUE.NAME;
+		nlen		  = shr(read(md)+3,1);	/*	# of wrds in cue name	*/
+		if rlen igt CUE.NAME+nlen
+		then do;
+			write(mal) = CUE.NAME+nlen;
+			clen		  = read(md);			/*	caption len, bytes	*/
+		end;
+		else clen	  = 0;					/*	no comment in record	*/
+
+		if (clen<>0) & (clen ILE 64) then do;
+			write(mal) = CUE.NAME+nlen;
+			call COPY.IN(addr(buf(0)),shr(clen+3,1));
+		end;
+	end;
+end FETCH.CUE.CAPTION;
+
+ADD.CUE.TO.PLACE.LIST: proc (cueid,track,time) public swapable;
+	dcl cueid	fixed;
+	dcl track	fixed;
+	dcl time		array;
+
+	if Place.Ptr >= Place.Len then return;	/*	No more place records available	*/
+
+	write(mam) = Place.Base+shr(Place.Ptr,8);
+	write(mal) = Place.Ptr;
+	write(mdi) = cueid;
+	write(mdi) = track;
+	write(mdi) = time(0);
+	write(mdi) = time(1);
+
+	Place.Ptr = Place.Ptr + 4;
+end ADD.CUE.TO.PLACE.LIST;
+
+SEND.PLACE.LIST.TO.SEQUENCER: proc public swapable;
+	dcl i					fixed;
+	dcl cuename(16)	fixed;
+	dcl cueid			fixed;
+	dcl track			fixed;
+	dcl time(1)			fixed;
+	dcl (j,k,l)			fixed;
+
+	call Display.Notice(NT#SendingPlaceListToSequencer,ATTR#Normal,NulStr,0,0,0);
+	do i = 0 to Place.Ptr-1 by 4;
+		write(mam) = Place.Base+shr(i,8);
+		write(mal) = i;
+		cueid		  = read(mdi);
+		track		  = read(mdi);
+		time(0)	  = read(mdi);
+		time(1)	  = read(mdi);
+		j = PLACE.CUE.IN.SEQUENCE(cueid,track,time,0) < 0;
+		if j < 0 then do;					/*	capture first error	*/
+			if k = 0 then do;
+				k = j; l = track;
+			end;
+		end;
+	end;
+
+	Place.Ptr = 0;
+
+	if k < 0 then call Display.Place.Error(k,l-1);
+	else call Display.Notice(NT#RealTimeCuesPlaced,ATTR#Normal,NulStr,track-1,0,0);
+end SEND.PLACE.LIST.TO.SEQUENCER;
+
+ERASE.DTD.DRIVES: proc (sel.bits) public swapable;
+	dcl sel.bits		fixed;
+	dcl dstart	(1)	fixed;
+	dcl dend		(1)	fixed;
+
+	call STR32(0, zero.time, dstart);	/*	erase from start of track	*/
+
+	Call DTD.Sample.#.To.Msecs(AEE.Current.Project.End, CF#Time, S$Speed,
+		AEE.Current.Project.Rate, AEE.Current.Project.Base, dend);
+
+	call ERASE.DTD.DRIVE.AREA(sel.bits,dstart,dend);
+
+end ERASE.DTD.DRIVES;
+
+ERASE.DTD.CURRENT.PROJECT: proc public swapable;	/*	erase current project	*/
+	if DTD.MAX.SECS <> 0 then do;
+		write(mam) = SCSI.Ptr;
+		write(mdi) = 4;
+		call Send.To.Lod(144,2);
+	end;
+end ERASE.DTD.CURRENT.PROJECT;
+
+dcl WAIT.FOR.DTD.COMMAND.TO.FINISH proc recursive;
+
+ERASE.DTD.PROJECTS: proc (sel.bits) public swapable;
+	dcl (i,j)		fixed;
+	dcl p				fixed;
+	dcl cp			fixed;
+	dcl sel.bits	array;
+	dcl used (50)	fixed;
+
+	if DTD.MAX.SECS <> 0 then do;
+
+		cp = AEE.Current.Project;		/*	save current project #	*/
+
+		do i = 0 to 49 by 10;			/*	loop through all projects	*/
+			write(mam) = SCSI.Ptr;
+			write(mdi) = i;
+			call Send.To.Lod(189,2);	/*	Get song directory	*/
+			do j = 0 to 9;
+				write(mam) = SCSI.Ptr + shr(j*24+13,8);
+				write(mal) = j*24+13;						/*	locate to start time	*/
+				if (sel.bits(shr(i+j,4))&(bits((i+j)&15))) <> 0
+				then used(i+j) = read(mdi)+read(mdi);	/*	add up start and end time; if =0 then project does not exist	*/
+				else used(i+j) = 0;
+			end;
+		end;
+
+		do i = 0 to 49;						/*	Loop through all projects, erase ones that have something in them	*/
+			if used(i) <> 0 then do;
+				call Select.DTD.Current.Project(i);
+				call ERASE.DTD.CURRENT.PROJECT;
+				call WAIT.FOR.DTD.COMMAND.TO.FINISH;
+			end;
+		end;
+
+		call Select.DTD.Current.Project(cp);
+
+	end;
+end ERASE.DTD.PROJECTS;
+
+FETCH.DTD.CROSS.FADE: proc public swapable;
+
+	if DTD.MAX.SECS <> 0 then do;
+		call Send.To.Lod(34,0);		/*	get cross fade for current song	*/
+		write(mam) = SCSI.Ptr;
+		return (read(md));
+	end;
+	return 0;
+end FETCH.DTD.CROSS.FADE;
+
+/*	wait for dtd command (ie erase tracks, etc)	*/
+/*	to complete											*/
+
+WAIT.FOR.DTD.COMMAND.TO.FINISH: proc public swapable;
+	dcl busy	fixed;
+	dcl time	fixed;
+	dcl code	fixed;
+
+	busy = 1;										/*	assume we are busy	*/
+
+	do while busy <> 0;
+		write(mam) = Scsi.Ptr;
+		write(md ) = 37;
+		call Send.To.Lod(144,2);
+		write(mam) = Scsi.Ptr;
+		busy = read(md);
+
+		if busy <> 0 then do;					/*	wait if command is pending		*/
+
+			call Send.To.Lod(23,0);				/*	get any error message pending	*/
+
+			time = real.milliseconds;
+			do while (real.milliseconds - time) ilt 100;	/*	.1 second	*/
+		
+			chill.out.and.run.syn();
+
+				Check.Next.Event();
+
+				if new.ABLE.ertyp<>0 then do;					/*	error message	*/
+					code = new.ABLE.ertyp;						/*	get bits			*/
+					new.ABLE.ertyp = 0;							/*	clear it			*/
+					call Handle.System.Error.Codes(code);	/*	present errors	*/
+				end;
+			end;
+		end;
+
+	end;
+
+end WAIT.FOR.DTD.COMMAND.TO.FINISH;
+
+/*	$page - toggle armed recording tracks	*/
+
+/*	toggle dtd armed recording tracks is called to punch in/out of	*/
+/*	tracks during live recording												*/
+
+TOGGLE.DTD.ARMED.RECORDING.TRACKS:proc (bitinfo) PUBLIC swapable;
+	dcl bitinfo	fixed;
+
+	if LOD.Running <> 0 then do;
+		write(mam) = Scsi.Ptr;
+		write(mdi) = 38;
+		write(mdi) = bitinfo;
+		call Send.To.Lod(144,4);
+	end;
+end TOGGLE.DTD.ARMED.RECORDING.TRACKS;
+
+/*	Trigger.dtd.cue is used to manually trigger a cue or en event	*/
+/*	by id.																			*/
+
+TRIGGER.DTD.CUE: proc (Cue.Id, Trkinfo, Evptr) public swapable;
+	dcl cue.id	fixed;	/*	id# of cue to trigger				*/
+	dcl Trkinfo	fixed;	/*	syncl track # if any for routing	*/
+	dcl Evptr	fixed;	/*	pass POINTER to event RECORD		*/
+								/*	or 0 for simple cue.					*/
+
+	/*	use system routine for triggering the cue. if we succeed at	*/
+	/*	that, then set DTD play state and enable for scrolling.		*/
+
+	if Trigger.DTD.Cue.By.Id(Cue.Id, Trkinfo, Evptr, 0) <> 0
+	then do;
+		call Send.To.Lod(DTD.Scrolling.On,0);	/*	turn scrolling on, so we be sure to see when triggered playback stops	*/
+		DTD.Play.State = 5;
+		Most.Recent.AEE.Activity = 0;				/*	for use by take buttons	*/
+	end;
+
+end TRIGGER.DTD.CUE;

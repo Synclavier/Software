@@ -1,0 +1,1420 @@
+/* TRAPRET3  $TITLE  ROUTINES TO ACCESS ABLE DIRECTORIES
+
+   Modified:
+   02/17/92 - PF  - Update AEE.Sequence.Name when new seq recalled over protocol
+   11/06/91 - PF  - Expanded Quick Update to include poly files
+   11/04/91 - PF  - Added 'Quick Update' feature
+   09/26/91 - MWH - Fix broken DS_OPEN logic for POLY sound files
+   07/07/91 - cj  - Accessed poly sound file contents over protocol
+   05/29/91 - cj  - added arg to trigger.dtd.cue.by.id
+   11/08/90 - MWH - Reformat DS routines
+   10/24/90 - cj - fixed bug with catalog name in directory entry
+   10/22/90 - CJ - Added audition code.
+   10/15/90 - CJ - CREATED.
+
+*/
+
+/* $page - routines for transferring data */
+
+dcl num.of.ids        lit '4';
+dcl next.transfer.id  fixed;
+
+dcl tra.open  (  num.of.ids-1) fixed;    /* true of tra id is open         */
+dcl tra.node  (  num.of.ids-1) fixed;    /* double check for node          */
+dcl tra.type  (  num.of.ids-1) fixed;    /* holds type of ds               */
+                                         /*    1 = able readdata device    */
+                                         /*    2 = ned worm                */
+                                         /*    3 = project directory       */
+                                         /*    4 = track directory         */
+                                         /*    5 = dtd audio               */
+                                         /*    6 = dtd cue information     */
+                                         /*    7 = poly ram                */
+dcl tra.ftype (  num.of.ids-1) fixed;    /* holds file type                */
+dcl tra.id    (  num.of.ids-1) fixed;    /* holds cue id or project #      */
+dcl tra.addr  (2*num.of.ids-1) fixed;    /* disk address                   */
+dcl tra.len   (2*num.of.ids-1) fixed;    /* length of disk space           */
+dcl tra.blen  (2*num.of.ids-1) fixed;    /* byte length of disk space      */
+
+/* Handy routine to locate a file in poly memory based on DSID             */
+
+locate.poly.sf: proc(fcb_data, msb, lsb) swapable;
+   dcl fcb_data    array;
+   dcl (msb, lsb)  fixed;
+
+   dcl i           fixed;
+   dcl j           fixed;
+   dcl (k,l,bin)   fixed;
+   dcl (temp.base) (1)        fixed;
+   dcl (ix       ) (1)        fixed;
+
+   dcl psd         lit '"157"';
+
+   do bin = 0 to polynums - 1;          /* look in each poly bin       */
+
+      call set.cur.bin(bin);            /* point at current in         */
+      call copy32(psfirst, ix);         /* start at first block        */
+
+      do while com32(ix, pslast) <> lw#ieq;   /* look at each block    */
+
+         call copy32(ix, temp.base);    /* get working copy            */
+         temp.base(0) = temp.base(0) \ shl(bin,base#bin_p);
+         call psmread(temp.base, 0, 0); /* set up for read             */
+
+         j = read(psd);                 /* get block length in sectors */
+         k = read(psd);                 /* get and ignore users        */
+
+         do i = 0 to f#name_len - 1;    /* get file name               */
+            fcb_data(f#nm + i) = read(psd);
+         end;
+
+         k = read(psd); /* bl.dev  */   /* get original device and     */
+         l = read(psd); /* bl.sec  */   /* sector to locate file       */
+
+         if (fcb_data(f#nm) <> 0)       /* ignore empty blocks...      */
+         &  (fcb_data(f#nm) <> 1)       /* ignore sound file cache     */
+         then do;
+
+            call encode.ram.addr(j, k, l, loc(addr(fcb_data(f#nm))));
+
+            if (bitmsb = msb)
+            &  (bitlsb = lsb)
+            then do;
+               call copy32(temp.base, sfile.base);
+               F#MS_Length = 0;
+               F#LS_Length = j-1;
+               return 1;
+            end;
+         end;
+
+         call add16(j, ix);             /* skip over this block        */
+      end;                              /* of loop through bin         */
+   end;                                 /* of loop over bin            */
+
+   return 0;
+
+end locate.poly.sf;
+
+
+Send.Access.Status: Proc(msg, len, des, tag, diid, dsid, length, status, rarg1, rarg2, rarg3) swapable;
+   dcl msg       fixed;   /* message super/sub types for this packet     */
+   dcl len       fixed;   /* length of this protocol packet              */
+   dcl des       fixed;   /* destination node                            */
+   dcl tag       fixed;   /* message tag #                               */
+   dcl diid      array;   /* directory id                                */
+   dcl dsid      array;   /* data structure id                           */
+   dcl length    array;   /* length in bytes                             */
+   dcl status    fixed;
+   dcl rarg1     fixed;
+   dcl rarg2     fixed;
+   dcl rarg3     fixed;
+
+   write(mam) = misc.ptr;
+   
+   write(mdi) = len;
+   write(mdi) = des;
+   write(mdi) = msg;
+   write(mdi) = tag;             /* word: message tag                    */
+   write(mdi) = diid(0);
+   write(mdi) = diid(1);
+   write(mdi) = dsid(0);
+   write(mdi) = dsid(1);
+   write(mdi) = length(0);
+   write(mdi) = length(1);
+   write(mdi) = status;
+   write(mdi) = rarg1;
+   write(mdi) = rarg2;
+   write(mdi) = rarg3;
+
+   return Send.Protocol.Packet.With.Retry(misc.ptr, 1, 10000);
+
+end Send.Access.Status;
+
+Access.Data.Structure: proc(packet,des,type) swapable;
+   dcl packet     array;
+   dcl des        fixed;
+   dcl type       fixed;
+
+   dcl tag        fixed;
+   dcl diid(1)    fixed;
+   dcl dsid(1)    fixed;
+   dcl cpid(1)    fixed;
+   dcl arg1       fixed;
+   dcl argname(40)fixed;
+
+   dcl len        fixed;
+   dcl msg        fixed;
+   dcl id         fixed;
+   dcl status     fixed;
+   dcl length(1)  fixed;
+   dcl a     (1)  fixed;
+   dcl b     (1)  fixed;
+   dcl c     (1)  fixed;
+   dcl ditree(3)  fixed;
+   dcl dstree(3)  fixed;
+   dcl cptree(3)  fixed;
+   dcl dstype     fixed;
+   dcl rarg1      fixed;
+   dcl rarg2      fixed;
+   dcl rarg3      fixed;
+
+   dcl (i,j)      fixed;
+   dcl fcb_data   (f#len - 1) fixed;
+   dcl name       (18       ) fixed;
+   dcl songinfo   (song.len ) fixed;
+   dcl ret        fixed;
+   dcl errorcodes (2)         fixed;
+   dcl auddevice  fixed;
+
+   dcl Copy.File.To.Dtd      proc(array, array, array, array       ) external;
+   dcl Audition.SF.Using.DTD proc(fixed, fixed, fixed, fixed, fixed) external;
+   dcl TRY.TO.READ.SEQ       proc(fixed, fixed)                      external;
+
+   insert ':synauxs:audauxs:aoptlits'; /* for error codes */
+
+   /* First scan the packet information into handy variables             */
+   /* The first 5 words are common to all packets processed here         */
+
+   tag     = packet( 0);               /* get tag                        */
+   diid(0) = packet( 1);               /* directory dsid                 */
+   diid(1) = packet( 2);
+   dsid(0) = packet( 3);               /* data structure id              */
+   dsid(1) = packet( 4);
+   arg1    = packet( 5);               /* sometimes, this is also valid  */
+
+
+   /* Now get a transfer id that we can use: */
+
+   id = next.transfer.id;              /* get next transfer id           */
+   next.transfer.id = (next.transfer.id + 1) & (num.of.ids - 1);
+
+   i = 0;                              /* look for next as long as       */
+   do while (i < num.of.ids)           /* this one is open.              */
+   &        (tra.open(id) = TRUE);
+      i  = i + 1;
+      id = next.transfer.id;
+      next.transfer.id = (next.transfer.id + 1) & (num.of.ids - 1);
+   end;
+
+   length  ( 0) = 0;                   /* initialize length to 0         */
+   length  ( 1) = 0;
+
+   /* Set up message type and length early in case of bad status */
+
+   if type = DS_ACCESS_ACTIVATE then do;
+      msg = T#DS_Activate_Status;
+      len = L#DS_Activate_Status;
+   end;
+
+   else if type = DS_ACCESS_OPEN then do;
+      msg = T#DS_Open_Status;
+      len = L#DS_Open_Status;
+   end;
+
+   else if type = DS_ACCESS_AUDITION then do;
+      msg = T#DS_Audition_Status;
+      len = L#DS_Audition_Status;
+      /* Handle copy/move:                                               */
+   end;
+
+   else if type = DS_ACCESS_COPY then do;
+      msg = T#DS_Copy_Status;
+      len = L#DS_Copy_Status;
+   end;
+
+   if tra.open(id) = TRUE              /* see if transfer channel        */
+   then status = ##.no.id;             /* available.                     */
+
+   /* If data structure is a directory,  then open it and get info:      */
+
+   else if (shr(diid(0),8) <> poly_ram)/* if directory is not poly ram.. */
+   and     (shr(dsid(0),8) <> 0       )/* and data structure itself is   */
+   then do;                            /* a directory, then look at it   */
+
+      status = fetch.dsid.directory(dsid, dstree, 0, 0, '', false);
+
+      if status = ##.good              /* if we could read.catalog...    */
+      then do;                         /* expand diid for comparison     */
+         if (decode.dsid(diid, ditree) = FALSE)
+         then status = ##.bad.id;
+      end;
+
+      if status = ##.good              /* good so far ...                */
+      then do;
+
+         do i = 0 to next.level - 2;   /* make sure the dir id is the    */
+            if ditree(i) <> dstree(i)  /* dir that contains this         */
+            then status = ##.bad.id;   /* data structure.                */
+         end;
+
+         do i = next.level-1 to 3;     /* directory should be one level  */
+            if (ditree(i) <> 0)        /* above the data structure       */
+            then status = ##.bad.id;
+         end;
+
+         if status = ##.good           /* make sure got it               */
+         then do;
+
+            /* Read able directories as disk file:                       */
+
+            if dstree(0) < optical     /* handle able devices            */
+            then do;
+               tra.type (id) = 1;
+               tra.ftype(id) = T#Dir;
+               tra.addr (shl(id,1)  ) = C#MS_Sector;
+               tra.addr (shl(id,1)+1) = C#LS_Sector;
+               tra.len  (shl(id,1)  ) = C#MS_Length;
+               tra.len  (shl(id,1)+1) = C#LS_Length;
+               length   (0)           = C#MS_Length;
+               length   (1)           = C#LS_Length;
+               call SHL32(length, 9);
+               call COPY32(length, loc(addr(tra.blen(shl(id,1)))));
+               dstype = T#AbleDir;
+            end;
+
+            /* Handle reading optical directory as reading the           */
+            /* optical itself:                                           */
+
+            else if dstree(0) = optical
+            then do;
+               tra.type (id) = 2;
+               tra.ftype(id) = T#Dir;
+               tra.addr(shl(id,1)  ) = shl(odev, 8);
+               tra.addr(shl(id,1)+1) = 0;
+               a(0) = O$MS_DirStart;    /* get start of directory        */
+               a(1) = O$LS_DirStart;
+               b(0) = O$MS_DirLen;      /* and its length                */
+               b(1) = O$LS_DirLen;
+               call ADD32(a, b, c);     /* get end of directory          */
+               a(0) = O$MS_DataStart;   /* get start of data area        */
+               a(1) = O$LS_DataStart;
+               b(0) = O$MS_DataLen;     /* and its length                */
+               b(1) = O$LS_DataLen;
+               call ADD32(a, b, b);     /* get end of data area          */
+               if COM32(b, c) = lw#igt  /* get greater of end of data    */
+               then call COPY32(b, c);  /* or end of directory           */
+               tra.len (shl(id,1)  ) = c(0);
+               tra.len (shl(id,1)+1) = c(1);
+               length  (0)           = c(0);
+               length  (1)           = c(1);
+               call SHL32(length, 9);
+               call COPY32(length, loc(addr(tra.blen(shl(id,1)))));
+               dstype = T#NedWorm;
+            end;
+
+            /* Handle reading direct to disk directory as a device:      */
+
+            else if dstree(0) = dtd_device   /* check accessing the      */
+            then do;                         /* dtd                      */
+               if (get.dtd.name(dstree(1), songinfo, name) <> T#Dir)
+               then status = ##.bad.id;
+               else do;
+                  tra.type (id) = 3;         /* contents of 'songinfo'   */
+                  tra.ftype(id) = T#Dir;
+                  tra.addr(shl(id,1)  ) = 0;
+                  tra.addr(shl(id,1)+1) = 0;
+                  tra.id   (id) = songinfo(0) - 1; /* save project #     */
+                  tra.len (shl(id,1)  ) = 0;
+                  tra.len (shl(id,1)+1) = 1;
+                  length(0)             = 0;
+                  length(1)             = shl(song.len, 1);
+                  call COPY32(length, loc(addr(tra.blen(shl(id,1)))));
+                  dstype = T#DtdProj;
+               end;
+            end;
+
+            /* Handle other pseudo devices:                              */
+            /* could allow reading of poly memory directly, but not      */
+            /* for now.  If we wanted to, could send amount of poly      */
+            /* mem back as directory length in entry info...             */
+
+            else status = ##.bad.id;
+
+         end;
+      end;
+   end;
+
+
+   /* Else if data structure is a file,  then open its directory and     */
+   /* then get some information about the file:                          */
+
+   else do;
+
+      status = fetch.dsid.directory(diid, ditree, 0, 0, '', false);
+
+      if status = ##.good then do;     /* make sure we could read dir    */
+
+         if ditree(0) = 0              /* see if trying to access a file */
+         then status = ##.bad.id;      /* in root directory ...          */
+
+         else if ditree(0) < optical   /* else see if file is    */
+         then do;                      /* in an able directory           */
+
+            if (dsid(0) <> 0)          /* check for valid dsid           */
+            or (dsid(1) =  0)
+            or (dsid(1) IGT 128)
+            then status = ##.bad.id;
+
+            else do;
+
+               if (get_fcb(dsid(1) - 1, fcb_data) = FALSE)
+               then status = ##.bad.id;
+
+               else do;
+                  call clean_fcbname(fcb_data, name);
+                  if (findfile(name) < 0)
+                  then status = ##.bad.id;
+                  else do;
+                     do i = 0 to 4; FNBUF(i) = 0; end; /* set FNBUF for */
+                     call COPY.STRING(name, FNBUF);    /* audition      */
+                     tra.type (id) = 1;
+                     tra.ftype(id) = type.of(F#Type);
+                     tra.addr(shl(id,1)  ) = F#MS_Sector;
+                     tra.addr(shl(id,1)+1) = F#LS_Sector;
+                     tra.len (shl(id,1)  ) = F#MS_Length;
+                     tra.len (shl(id,1)+1) = F#LS_Length;
+                     length(0) = shl(F#MS_Length,9) \ shr(F#LS_Length,7);
+                     length(1) = shl(F#LS_Length,9);
+                     if (F#Words&255) <> 0         /* if not event sectors */
+                     then call SUB16(512 - shl(F#Words&255, 1), length);
+                     call COPY32(length, loc(addr(tra.blen(shl(id,1)))));
+                     dstype = tra.ftype(id);
+                  end;
+               end;
+            end;
+         end;
+
+         /* Handle accessing files on the optical:                       */
+
+         else if ditree(0) = optical
+         then do;
+
+            if (dsid(0) <> 0)          /* check for valid dsid           */
+            or (dsid(1) =  0)
+            or (dsid(1) IGT I$FileCount)
+            then status = ##.bad.id;
+
+            else do;                   /* valid pointer to optical file  */
+
+               a(0) = 0;               /* get index # into file list     */
+               a(1) = dsid(1) - 1;
+               call SHL32(a, 6);       /* get sector and word            */
+               i = a(1) & 255;         /* get words                      */
+               call SHR32(a, 8);
+
+               call seek(FileList, I$FileStart + a(1), 3);
+               call seek(FileList, shl(i, 1), 1);
+
+               call fread(copy.buf, L#Rec_Length, 2, FileList);
+
+               call fetch.optical.name(copy.buf, name);
+               FNBUF(0) = 8;           /* extract file name for          */
+               do i = 0 to 3;          /* audition                       */
+                  FNBUF(i+1) = copy.buf(L$Name+i);
+               end;
+
+               tra.type (id) = 2;      /* optical disk                   */
+               tra.ftype(id) = type.of(copy.buf(L$File_Type));
+               tra.addr(shl(id,1)  ) = shl(odev,8) + copy.buf(L$MS_SecStart);
+               tra.addr(shl(id,1)+1) = copy.buf(L$LS_SecStart);
+               tra.len (shl(id,1)  ) = copy.buf(L$MS_SecLen  );
+               tra.len (shl(id,1)+1) = copy.buf(L$LS_SecLen  );
+               length(0)             = copy.buf(L$MS_SecLen  );
+               length(1)             = copy.buf(L$LS_SecLen  );
+               call SHL32(length, 9);
+               call COPY32(length, loc(addr(tra.blen(shl(id,1)))));
+               dstype = tra.ftype(id);
+            end;
+         end;
+
+         /* handle accessing a data structure from the dtd:              */
+
+         else if ditree(0) = dtd_device
+         then do;
+
+            if ditree(1) = 0           /* there are no files in the      */
+            then status = ##.bad.id;   /* "Direct to Disk:" directory    */
+
+            else if (dsid(0) <> 0)     /* check for valid dsid           */
+            or      (dsid(1) =  0)
+            or      (dsid(1) <  0)
+            then status = ##.bad.id;
+
+            else do;                   /* else check further             */
+
+               i = get.dtd.name(dsid(1), songinfo, name);
+
+               if (i < 0    )          /* if non existent code           */
+               or (i = T#Dir)          /* or points to cp or proj        */
+               or ((ditree(1) <> dtd_cp) & ((i = T#DtdTrackDir) \ (i = T#Raw16Audio)))
+               then status = ##.bad.id;
+
+               /* Handle accessing project info file:                    */
+
+               else if i = T#DtdProj
+               then do;
+                  if ditree(1) = dtd_cp
+                  then call fetch.dtd.song.info(AEE.Current.Project, songinfo, name);
+                  else call fetch.dtd.song.info(ditree(1) - dtd_projs, songinfo, name);
+                  tra.type (id) = 3;               /* contents of 'songinfo' */
+                  tra.ftype(id) = i;
+                  tra.addr(shl(id,1)  ) = 0;
+                  tra.addr(shl(id,1)+1) = 0;
+                  tra.id   (id) = songinfo(0) - 1; /* save project #     */
+                  tra.len (shl(id,1)  ) = 0;
+                  tra.len (shl(id,1)+1) = 1;
+                  length(0)             = 0;
+                  length(1)             = shl(song.len, 1);
+                  call COPY32(length, loc(addr(tra.blen(shl(id,1)))));
+                  dstype = tra.ftype(id);
+               end;
+
+               /* Handle accessing track directory file:               */
+
+               else if i = T#DtdTrackDir
+               then do;
+                  tra.type (id) = 4;      /* contents of track directory   */
+                  tra.ftype(id) = i;
+                  tra.addr(shl(id,1)  ) = 0;
+                  tra.addr(shl(id,1)+1) = 0;
+                  tra.len (shl(id,1)  ) = 0;
+                  tra.len (shl(id,1)+1) = 1;
+                  length(0)             = 0;
+                  length(1)             = 512;
+                  call COPY32(length, loc(addr(tra.blen(shl(id,1)))));
+                  dstype = tra.ftype(id);
+               end;
+
+               /* Handle accessing of raw audio                            */
+
+               else if i = T#Raw16Audio
+               then do;
+                  tra.type (id) = 5;      /* raw 16 bit audio from dtd     */
+                  tra.ftype(id) = i;
+                  tra.addr(shl(id,1)  ) = 0;
+                  tra.addr(shl(id,1)+1) = 0;
+                  call SUB32(AEE.Current.Project.End,   /* get length */
+                             AEE.Current.Project.Base,  /* in samples */
+                             length);
+                  call COPY32(length, loc(addr(tra.len(shl(id,1)))));
+                  call SHR32(loc(addr(tra.len(shl(id,1)))), 8);
+                  call SHL32(length, 1);
+                  call COPY32(length, loc(addr(tra.blen(shl(id,1)))));
+                  dstype = tra.ftype(id);
+               end;
+
+               /* Handle accessing of direct to disk cue:                  */
+
+               else if i = T#Cue
+               then do;
+                  tra.type (id) = 6;      /* contents of cue               */
+                  tra.ftype(id) = i;
+                  tra.addr(shl(id,1)  ) = 0;
+                  tra.addr(shl(id,1)+1) = 0;
+                  tra.id   (id) = dsid(1) - dtd_cues + 1;
+
+                  write(mam) = scsi.ptr;  /* access cue.rlen               */
+
+                  tra.len (shl(id,1)  ) = 0;
+                  tra.len (shl(id,1)+1) = shr(read(md) + 255, 8);
+                  length(0)             = 0;
+                  length(1)             = shl(read(md), 1);
+                  call COPY32(length, loc(addr(tra.blen(shl(id,1)))));
+                  dstype = tra.ftype(id);
+               end;
+
+               else status = ##.bad.id;
+            end;
+         end;
+
+         else if ditree(0) = poly_ram  /* check for poly ram             */
+         then do;
+
+            if locate.poly.sf(fcb_data, dsid(0), dsid(1)) = 0  /* find sound file  */
+            then status = ##.bad.id;
+
+            else do;
+               call clean_fcbname(fcb_data, name);
+               do i = 0 to 4; FNBUF(i) = 0; end; /* set FNBUF for */
+               call COPY.STRING(name, FNBUF);    /* audition      */
+               tra.type (id) = 7;
+               tra.ftype(id) = type.of(t#sound);
+               tra.addr(shl(id,1)  ) = sfile.base(0);
+               tra.addr(shl(id,1)+1) = sfile.base(1);
+               tra.len (shl(id,1)  ) = F#MS_Length;
+               tra.len (shl(id,1)+1) = F#LS_Length;
+               length(0) = shl(F#MS_Length,9) \ shr(F#LS_Length,7);
+               length(1) = shl(F#LS_Length,9);
+               call COPY32(length, loc(addr(tra.blen(shl(id,1)))));
+               dstype = tra.ftype(id);
+            end;
+         end;
+
+         /* handle pseudo directories: */
+
+         else status = ##.bad.id;
+
+      end;
+   end;
+
+
+   /* Now perform desired function on the data structure.  Begin with    */
+   /* activate/recall:                                                   */
+
+   if status = ##.good        /* perform desired function if             */
+   then do;                   /* good status                             */
+
+      if type = DS_ACCESS_ACTIVATE
+      then do;                         /* activate/recall                */
+
+         if (dstype = T#DtdProj)       /* calling up a project           */
+         then do;
+            i = run.syn;
+            run.syn = 0;
+            call SELECT.DTD.CURRENT.PROJECT(tra.id(id));
+            run.syn = i;
+         end;
+
+         else if (dstype = T#Cue)      /* calling up a cue               */
+         then do;
+            call SET.DTD.CURRENT.REEL(0);    /* select "cue"             */
+            call Fetch.Entire.DTD.Cue(tra.id(id), Current.Cue.Ptr);
+            call Deposit.A.New.Current.Cue(1);
+            call UnSet.Cue.Modified;
+         end;
+
+         else if (dstype = T#Seq)      /* call up sequence               */
+         then begin;
+            Doing.Proto.Audition = 1;  /* allow stop to break out        */
+            call TRY.TO.READ.SEQ(tra.addr(shl(id,1)), tra.addr(shl(id,1)+1));
+            Doing.Proto.Audition = 0;
+            call GID(AEE.Sequence.Name);
+			j = name(0); if (name(0) > shl(AEE.Sequence.Name.Wlen-1,1)) name(0) = shl(AEE.Sequence.Name.Wlen-1,1);
+            call COPY.OUT(addr(name(0)), AEE.Sequence.Name.Wlen);
+			name(0) = j;
+			new.prm.info = new.prm.info \ 256;  /* update various seq name displays */
+            call GID(Cur.Seq.Path.Name);		/* don't know path name at this point */
+			write(md) = 0;
+         end;
+
+         else if (dstype = T#Snd)      /* call up a sound file           */
+         then do;                      /* to keyboard                    */
+            Doing.Proto.Audition = 1;  /* allow stop to break out        */
+            if ditree(0) = poly_ram
+            then call Recall.Sound.File(name, 12,
+                                        loc(addr(tra.addr(shl(id,1)))),
+                                        loc(addr(tra.len (shl(id,1)))),
+                                        RSF#Partial0 \ RSF#NoIO \ RSF#NoCheck, 0);
+
+            else call Recall.Sound.File(name, 0,
+                                        loc(addr(tra.addr(shl(id,1)))),
+                                        loc(addr(tra.len (shl(id,1)))),
+                                        RSF#Partial0 \ RSF#NoIO \ RSF#NoCheck, 0);
+            Doing.Proto.Audition = 0;
+         end;
+
+         else status = ##.bad.arg;
+      end;
+
+
+      /* Handle return of transfer id:                                   */
+
+      else if type = DS_ACCESS_OPEN
+      then do;                /* return transfer id                      */
+         tra.open(id) = TRUE;
+         tra.node(id) = des;
+         rarg1 = id;          /* return the transfer id                  */
+         rarg2 = arg1 & 1;    /* and the access codes granted            */
+         rarg3 = dstype;      /* return data structure type              */
+      end;
+
+
+      /* Handle audition:                                                */
+
+      else if type = DS_ACCESS_AUDITION
+      then do;                /* handled below after returning status!   */
+
+         if arg1 = 0 then do;             /* user wants us to pick       */
+            if dstype = T#Cue             /* for cue, always use DTD     */
+            then auddevice = 2;
+            else if (polynums = 0)        /* if no poly                  */
+            then auddevice = 2;           /* then use DTD                */
+            else auddevice = 1;           /* else use poly               */
+         end;
+         else auddevice = arg1;           /* else use specified          */
+
+         if dstype = T#Cue                /* for cues                    */
+         then do;
+            if dtd.max.secs = 0           /* make sure we have dtd       */
+            then status = ##.no.media;
+            else if auddevice <> 2        /* check args ...              */
+            then status = ##.bad.arg;
+
+            else call Trigger.DTD.Cue.By.Id(tra.id(id), 0, 0, 0);
+         end;
+
+         else if dstype <> T#Snd          /* audition sound file by      */
+         then status = ##.bad.filetype;   /* dtd below.                  */
+
+         else do;                         /* check sound file            */
+            if  (ditree(0) = poly_ram)    /* must audition using poly    */
+            and (auddevice <> 1)          /* if sf is in poly...         */
+            then status = ##.bad.arg;
+         end;
+
+      end;
+
+
+      /* Handle copy/move:                                               */
+
+      else if type = DS_ACCESS_COPY       /* handle move of data struct  */
+      then do;
+
+         cpid(0) = packet(5);             /* get possible directory id      */
+         cpid(1) = packet(6);             /* of where to copy too           */
+
+         do i = 1 to 17;                  /* if copy/move command           */
+            argname(i) = rot(packet(8+i),8);
+         end;
+         do while byte(argname, argname(0)) <> 0;   /* get name match in ABLE format  */
+            argname(0) = argname(0) + 1;
+         end;
+         call pbyte(argname, argname(0)+1, 0);      /* zero out upper half (maybe)    */
+
+         if argname(0) = 0                /* duplicate current name      */
+         then call COPY.STRING(name, argname);
+
+         if dstype <> T#Snd               /* for now, only copy SF's     */
+         then status = ##.bad.filetype;   /* to DTD                      */
+         else status = fetch.dsid.directory(cpid, cptree, 0, 0, '', false);
+
+         if status = ##.good then do;     /* if legit destination, then  */
+            if cptree(0) <> dtd_device    /* check dest device           */
+            then status = ##.bad.arg;
+            else if get.dtd.name(cptree(1), songinfo, name) <> T#Dir
+            then status = ##.bad.arg;
+            else if next.level <> 2       /* dest must be dtd:project:   */
+            then status = ##.bad.arg;
+         end;
+
+         if status = ##.good then do;     /* continue if ok              */
+            if cptree(1) <> dtd_cp        /* make desired project        */
+            then do;                      /* the current project         */
+               i = run.syn;               /* if needed                   */
+               run.syn = 0;
+               call SELECT.DTD.CURRENT.PROJECT(songinfo(0)-1);
+               run.syn = i;
+            end;
+
+            Doing.Proto.Audition = 1;     /* allow stop to break out     */
+            call copy.file.to.dtd(loc(addr(tra.addr(shl(id,1)))),
+                                  loc(addr(tra.len (shl(id,1)))),
+                                  argname, errorcodes);
+            Doing.Proto.Audition = 0;
+
+            if errorcodes(0) <> 0 then do;     /* if we got an error, then */
+               if errorcodes(0) = Xfer#DuplicateName
+               then status = ##.dup.name;
+               else if errorcodes(0) = Xfer#NoRoom
+               then status = ##.no.storage;
+               else status = ##.opt.xfer.err;  /* return status over       */
+               rarg1 = errorcodes(0);          /* protocol                 */
+               rarg2 = errorcodes(1);
+            end;
+         end;
+      end;
+
+      else status = ##.bad.arg;
+   end;
+
+   ret = Send.Access.Status(msg, len, des, tag, diid, dsid, length, status, rarg1, rarg2, rarg3);
+
+   /* Audition sound file here if we need to: */
+
+   if (status = ##.good) & (type = DS_ACCESS_AUDITION) & (dstype = T#Snd)
+   then begin;
+
+      if auddevice = 1 then do;           /* audition using poly         */
+         Doing.Proto.Audition = 1;        /* allow stop to break out     */
+         if ditree(0) = poly_ram
+         then call Recall.Sound.File(name, 12,
+                   loc(addr(tra.addr(shl(id,1)))),
+                   loc(addr(tra.len (shl(id,1)))),
+                   RSF#Partial0 \ RSF#NoIO \ RSF#NoCheck \ RSF#Audition, 0);
+         else call Recall.Sound.File(name, 0,
+                   loc(addr(tra.addr(shl(id,1)))),
+                   loc(addr(tra.len (shl(id,1)))),
+                   RSF#Partial0 \ RSF#NoIO \ RSF#NoCheck \ RSF#Audition, 0);
+         Doing.Proto.Audition = 0;
+      end;
+
+      else do;                            /* else using dtd              */
+         Doing.Proto.Audition = 1;
+         call Audition.SF.Using.DTD(tra.addr(shl(id,1)  ),
+                                    tra.addr(shl(id,1)+1),
+                                    tra.addr(shl(id,1)  ),
+                                    tra.addr(shl(id,1)+1),0);
+         Doing.Proto.Audition = 0;
+      end;
+   end;
+
+   return ret;
+
+end Access.Data.Structure;
+
+Request.DS.Read: proc (packet,des) swapable;
+   dcl packet     array;
+   dcl des        fixed;
+
+   dcl tag        fixed;
+   dcl id         fixed;
+   dcl baddr(1)   fixed;
+   dcl blen (1)   fixed;
+
+   dcl status     fixed;
+   dcl waddr(1)   fixed;
+   dcl wlen (1)   fixed;
+   dcl a    (1)   fixed;
+   dcl daddr(1)   fixed;
+   dcl flen (1)   fixed;
+   dcl wordaddr   fixed;
+   dcl wordlen    fixed;
+   dcl readlen    fixed;
+   dcl source     fixed;
+   dcl amount     fixed;
+   dcl useblock   fixed;
+   dcl totalsize  fixed;
+   dcl datasize   fixed;
+   dcl pointer    fixed;
+   dcl i          fixed;
+   dcl j          fixed;
+
+   dcl name(19)   fixed;
+   dcl songinfo   (song.len)  fixed;
+
+   tag      = packet(0);            /* get tag                        */
+   id       = packet(1);            /* transfer id                    */
+   baddr(0) = packet(2);            /* where in DS to read            */
+   baddr(1) = packet(3);            
+   blen (0) = packet(4);            /* Length of DS to read           */
+   blen (1) = packet(5);
+
+   if (id IGE num.of.ids   )        /* check for ID being ok          */
+   or (tra.open(id) = FALSE)        /* channel should be open         */
+   or (tra.node(id) <> des )        /* from this node                 */
+   or (baddr(1))                    /* must be even byte bound        */
+   or (blen (1))                    /* even length bound              */
+   or (blen (0) <> 0)               /* or > 64K bytes                 */
+   or (blen (1) =  0)               /* or ask for no words?           */
+   or (blen (1) IGT (-512))         /* must leave room for status     */
+   then status = ##.bad.arg;
+
+   else do;
+
+      call COPY32(baddr, waddr);          /* get address and length   */
+      call COPY32(blen,  wlen );          /* in words                 */
+      call SHR32(waddr, 1);
+      call SHR32(wlen , 1);
+      daddr(0) = tra.addr(shl(id,1)  );   /* get start of file        */
+      daddr(1) = tra.addr(shl(id,1)+1);   /* on disk                  */
+      flen (0) = tra.blen(shl(id,1)  );   /* get file length in       */
+      flen (1) = tra.blen(shl(id,1)+1);   /* bytes                    */
+      call SHR32(flen, 1);                /*         ... then words   */
+
+      if COM32(waddr, flen) >= lw#ieq     /* if asking for past eof   */
+      then status = ##.bad.arg;           /* then error               */
+
+      else do;
+         call SUB32(flen, waddr, a);      /* get words left in file   */
+         if COM32(a, wlen) = lw#ilt       /* limit to length to that  */
+         then call COPY32(a, wlen);       /* available                */
+         status = ##.good;                /* ok so far                */
+      end;
+   end;
+
+   if status = ##.good then do;           /* continue if ok so far    */
+      wordaddr = waddr(1) & 255;          /* get start in sector      */
+      call COPY32(waddr, a);              /* get word address in temp */
+      call SHR32(a, 8);                   /* get sector address       */
+      call ADD32(a, daddr, daddr);        /* get disk sector          */
+      if  (tra.type(id) = 2)              /* if reading optical       */
+      and (daddr(1))                      /* on odd sector            */
+      then do;                            /* then back down to last   */
+         daddr(1) = daddr(1) xor 1;       /* even sector.             */
+         wordaddr = wordaddr + 256;
+      end;
+      else if (tra.type(id) = 7)          /* if reading poly, set up  */
+      then do;                            /* pointers here, skipping  */
+         call psmread(daddr, 1, wordaddr);/* the block header         */
+      end;
+      wordlen = wlen(1);                  /* get length in words      */
+      if (tra.type(id) = 6)               /* fetch cue into scsi.ptr  */
+      then do;
+         if Fetch.Entire.DTD.Cue(tra.id(id), Scsi.ptr) = 0
+         then do;
+            status = ##.no.media;         /* no media if cue unsaved  */
+            wordlen = 0;
+         end;
+      end;
+   end;
+   else wordlen = 0;                      /* else transfer no words   */
+
+   /* Construct reply message (s) */
+
+   totalsize = 10 + shl(wordlen, 1);    /* get total data bytes back  */
+
+   write(mam) = misc.ptr;               /* set up ext mem block       */
+   write(mdi) = 0;                      /* length - set later         */
+   write(mdi) = des;                    /* set destination            */
+
+   if totalsize IGT 60 then do;         /* begin blocking if need to  */
+      useblock   = 1;                   /* use blocking               */
+      write(mdi) = T#Net_Block \ T#Net_Block_Start;
+      write(mdi) = tag;                 /* tag for block transfer     */
+      write(mdi) = totalsize + 2;       /* data bytes for blocks      */
+   end;                                 /* plus suptype/subtype       */
+   else useblock = 0;                   /* not blocking               */
+
+   write(mdi) = T#DS_Transfer;          /* super/sub                  */
+
+   write(mdi) = tag;                    /* word: tag                  */
+   write(mdi) = id;                     /* word: transfer id          */
+   write(mdi) = status;                 /* word: status               */
+   write(mdi) = baddr(0);               /* long: data address         */
+   write(mdi) = baddr(1);
+
+   datasize = 10;                       /* 10 data bytes so far       */
+
+   if (useblock) or (wordlen = 0)       /* send header here if multi block */
+   then do;                             /* transfer, or no information     */
+      pointer = read(mal);
+      write(mal) = P#Len;
+      write(md ) = shl(pointer,1);
+
+      call SEND.PROTOCOL.PACKET.WITH.RETRY(misc.ptr, 1, 10000);
+
+      if wordlen = 0                    /* done write here if cannot       */
+      then return 1;                    /* transfer any data               */
+
+      write(mam) = misc.ptr;
+      write(mal) = P#Type;
+      write(mdi) = T#Net_Block;         /* continuation block         */
+      write(mdi) = tag;                 /* tag for block transfer     */
+      write(mdi) = 0;                   /* reserved                   */
+
+      datasize   = 0;                   /* reset data size for next   */
+
+   end;
+
+   /* Send disk data: */
+
+   do while wordlen <> 0;               /* send over while more words */
+      pointer = read(mal);              /* save ext mem pointer       */
+
+      if wordlen IGT shl(extbuf.len,8)  /* compute chunk size         */
+      then readlen = shl(extbuf.len,8);
+      else if (wordlen + wordaddr) IGT shl(extbuf.len,8)
+      then readlen = shl(extbuf.len,8);
+      else readlen = wordlen + wordaddr;
+
+      /* check for read header of optical disk:                          */
+
+      do case (tra.type(id) - 1);       /* get data as needed            */
+
+         do;                            /* 1: from able level            */
+            call ext.readdata(daddr(0), daddr(1),
+                              extbuf.ptr, 0,
+                              0, readlen);
+          end;
+
+          do;                           /* 2: from optical disk          */
+             if  ((daddr(0) & 255) = 0) /* physical sector 0             */
+             and ( daddr(1)        = 0)
+             then do;
+
+                if readlen IGT H#Rec_Length    /* limit to read of header       */
+                then readlen = H#Rec_Length;
+
+                do while ReadHeader(odev) = false; end;
+
+                do i = 0 to H#Rec_Length - 1;
+                   j = gbuf(i);
+                   write(mam) = extbuf.ptr + shr(i, 8);
+                   write(mal) = i;
+                   write(md ) = j;
+                end;
+             end;
+
+             else call ext.readdata(daddr(0), daddr(1),
+                                    extbuf.ptr, 0,
+                                    0, readlen);
+         end;
+
+         do;                           /* 3: from dtd project entry   */
+            call fetch.dtd.song.info(tra.id(id), songinfo, name);
+            call extset (extbuf.ptr, 0, readlen, 0);
+            write(mam) = extbuf.ptr;
+            call copy.out(addr(songinfo(0)), song.len);
+         end;
+
+         do;                          /* 4: contents of track directory */
+            call extset (extbuf.ptr, 0, readlen, 0);
+            call Snarf.Track.Directory;
+            call COPY.EXT.MEM.SEC(scsi.ptr, extbuf.ptr, 1);
+         end;
+
+         do;                         /* 5: direct to disk audio         */
+            call extset (extbuf.ptr, 0, readlen, 0);
+            /* note: this will be complicated.  Must put into data      */
+            /* function reading mode and access the data!!              */
+         end;
+
+         do;                         /* 6: a direct to disk cue:        */
+            call COPY.EXT.MEM.SEC(scsi.ptr + daddr(1), extbuf.ptr, extbuf.len);
+         end;
+
+         do;                         /* 7: read data from poly          */
+                                     /* pointers were set above         */
+         end;
+      end;
+
+      source = wordaddr;                /* where we start in buffer      */
+
+      do while source < readlen;        /* send out data bytes           */
+
+         amount = readlen - source;     /* get words left in buffer      */
+
+         if shl(amount, 1) IGT (60 - datasize) /* limit to packet size   */
+         then amount = shr(60 - datasize, 1);
+
+         if tra.type(id) = 7            /* if reading poly, get data     */
+         then do;
+            call poly.in(addr(copy.buf(0)), amount);
+         end;
+         else do;                       /* else get buffered data        */
+            write(mam) = extbuf.ptr + shr(source, 8);
+            write(mal) = source;
+            call copy.in(addr(copy.buf(0)), amount);
+         end;
+
+         write(mam) = misc.ptr;
+         write(mal) = pointer;
+
+         call copy.out(addr(copy.buf(0)), amount);
+
+         datasize = datasize + shl(amount, 1);
+         wordlen  = wordlen  - amount;
+         source   = source   + amount;
+
+         pointer = read(mal);
+         write(mal) = P#Len;
+         write(md ) = shl(pointer,1);
+
+         if (useblock) & (wordlen = 0)  /* set end of block bit for */
+         then do;                       /* last block               */
+            write(mal) = P#Type;
+            write(md ) = read(md) \ T#Net_Block_Last;
+         end;
+
+         call SEND.PROTOCOL.PACKET.WITH.RETRY(misc.ptr, 1, 10000);
+
+         write(mam) = misc.ptr;    /* set up for write of more */
+         write(mal) = P#Data + 2;  /* data                     */
+         datasize   = 0;
+
+         pointer = read(mal);      /* reset in case loop       */
+
+      end;
+
+      call ADD16(shr(readlen, 8), daddr);  /* advance disk address  */
+      wordaddr = 0;                        /* next block from start */
+                                           /* of buffer             */
+   end;
+
+   return 1;
+
+end Request.DS.Read;
+
+Request.Entries.By.Update.Stamp: proc (packet,des) swapable;
+   dcl packet array;
+   dcl des    fixed;
+
+   dcl number        fixed;
+   dcl cur.stamp#(1) fixed;
+   dcl diff(1)       fixed;
+   dcl useblock      fixed;
+   dcl status        fixed;
+   dcl entrysize     fixed;
+   dcl totalsize     fixed;
+   dcl datasize      fixed;
+   dcl counter       fixed;
+   dcl pointer       fixed;
+   dcl index         fixed;
+   dcl wrd.ptr       fixed;
+   dcl name(Event.Cue.Max.Words-1)	fixed;
+   dcl i             fixed;
+
+   dcl tag           fixed;
+   dcl dir.id(1)     fixed;
+   dcl stamp#(1)     fixed;
+   dcl max#(1)       fixed;
+   dcl maxlen        fixed;
+   dcl num.entries   fixed;
+   dcl fcb_data(f#len - 1) fixed;
+   dcl lengthmsb     fixed;
+   dcl lengthlsb     fixed;
+
+   tag       = packet(0);
+   dir.id(0) = packet(1);
+   dir.id(1) = packet(2);
+   stamp#(0) = packet(3);
+   stamp#(1) = packet(4);
+   max#(0)   = packet(5);
+   max#(1)   = packet(6);
+   maxlen    = packet(7);
+
+   cur.stamp#(0) = -1;
+   cur.stamp#(1) = -1;
+
+   if (shr(dir.id(0),8) = dtd_device)
+   then do;
+      if READ.IN.CUE.HIST = 0
+      then number = 0;
+
+      else do;
+         write(MAM) = CUE.HIST.BUF;
+         cur.stamp#(0) = read(mdi);
+         cur.stamp#(1) = read(md );
+
+         call SUB32(cur.stamp#,stamp#,diff);
+         call ADD16(1,diff);
+
+         if (COM32(cur.stamp#,stamp#) = lw#ilt)
+         or (COM16(CUE.HIST.NUM.RECS,diff) = lw#ilt)
+         then number = 0;
+         else number = diff(1);
+
+         if number > max#(1)
+         then number = max#(1);
+      end;
+   end;
+   else if (shr(dir.id(0),8) = poly_ram)
+   then do;
+      if READ.IN.POLY.HIST = 0
+      then number = 0;
+
+      else do;
+         write(MAM) = POLY.HIST.BUF;
+         cur.stamp#(0) = read(mdi);
+         cur.stamp#(1) = read(md );
+
+         call SUB32(cur.stamp#,stamp#,diff);
+         call ADD16(1,diff);
+
+         if (COM32(cur.stamp#,stamp#) = lw#ilt)
+         or (COM16(POLY.HIST.NUM.RECS,diff) = lw#ilt)
+         then number = 0;
+         else number = diff(1);
+
+         if number > max#(1)
+         then number = max#(1);
+      end;
+   end;
+   else number = 0;
+
+   /* Construct reply message (s) */
+
+   if maxlen then maxlen = maxlen + 1;  /* round up to boundary       */
+   if maxlen IGT 34                     /* limit to 34 bytes so       */
+   then maxlen = 34;                    /* info fits in block         */
+   if maxlen   = 0                      /* always send at least       */
+   then maxlen = 2;                     /* a trailing null!!          */
+
+   entrysize = 20 + maxlen;             /* bytes in entry             */
+
+   totalsize = 22 + number * entrysize; /* bytes of response          */
+
+   write(mam) = misc.ptr;               /* set up ext mem block       */
+   write(mdi) = 0;                      /* length - set later         */
+   write(mdi) = des;                    /* set destination            */
+
+   if totalsize IGT 60 then do;         /* begin blocking if need to  */
+      useblock   = 1;                   /* use blocking               */
+      write(mdi) = T#Net_Block \ T#Net_Block_Start;
+      write(mdi) = tag;                 /* tag for block transfer     */
+      write(mdi) = totalsize + 2;       /* data bytes for blocks      */
+   end;                                 /* plus suptype/subtype       */
+
+   write(mdi) = T#Update_Entries;
+
+   write(mdi) = tag;                      /* word: tag                */
+   write(mdi) = dir.id(0);
+   write(mdi) = dir.id(1);
+   write(mdi) = stamp#(0);
+   write(mdi) = stamp#(1);
+   write(mdi) = 0;                        /* long: number of entries  */
+   write(mdi) = number;
+   write(mdi) = maxlen;                   /* word: max name len       */
+   write(mdi) = status;                   /* 0 = good; 1 = bad dir id; 2 = bad entry # */
+
+   cur.stamp#(1) = cur.stamp#(1) + 1;     /* listener actually wants to see "next" stamp */
+   if (cur.stamp#(1) = 0)
+   then cur.stamp#(0) = cur.stamp#(0) + 1;
+
+   write(mdi) = cur.stamp#(0);            /* write out "next" stamp to packet */
+   write(mdi) = cur.stamp#(1);
+
+   datasize = 22;                         /* 22 data bytes so far     */
+
+   if (useblock) or (number = 0)          /* send header here if multi block */
+   then do;                               /* transfer, or no information     */
+      pointer = read(mal);
+      write(mal) = P#Len;
+      write(md ) = shl(pointer,1);
+
+      call SEND.PROTOCOL.PACKET.WITH.RETRY(misc.ptr, 1, 10000);
+
+      if number = 0                       /* done if no entries avail */
+      then return 1;
+
+      write(mam) = misc.ptr;
+      write(mal) = P#Type;
+      write(mdi) = T#Net_Block;         /* continuation block         */
+      write(mdi) = tag;                 /* tag for block transfer     */
+      write(mdi) = 0;                   /* reserved                   */
+
+      datasize   = 0;                   /* reset data size for next   */
+
+   end;
+
+   /* Send entry information: */
+
+   do while (counter < number);         /* send back needed info         */
+      pointer = read(mal);              /* save ext mem pointer          */
+
+      if (shr(dir.id(0),8) = dtd_device)
+      then do;
+         index   = (stamp#(1) + counter) mod CUE.HIST.NUM.RECS;
+         wrd.ptr = (index * CUE.HIST.REC.LEN) + CUE.HIST.HDR.LEN;
+
+         write(mam) = CUE.HIST.BUF + shr(wrd.ptr,8);
+         write(mal) = wrd.ptr;
+
+         write("313") = addr(misc.buf(0));
+         rpc(CUE.HIST.REC.LEN - 17);           /* read in all but cue name */
+         write("373") = read(mdi);
+
+         write("313") = addr(name(0));
+         rpc(17);                              /* and read name into name array */
+         write("373") = read(mdi);
+
+         write(mam) = misc.ptr;                /* reset xmem pointers      */
+         write(mal) = pointer;
+
+         write("313") = addr(misc.buf(0));     /* copy all but name back out */
+         rpc(CUE.HIST.REC.LEN - 17);
+         write(mdi) = read("373");
+      end;
+
+      else if (shr(dir.id(0),8) = poly_ram)
+      then do;
+         index   = (stamp#(1) + counter) mod POLY.HIST.NUM.RECS;
+         wrd.ptr = (index * POLY.HIST.REC.LEN) + POLY.HIST.HDR.LEN;
+
+         write(mam) = POLY.HIST.BUF + shr(wrd.ptr,8);
+         write(mal) = wrd.ptr;
+
+         write("313") = addr(misc.buf(0));
+         rpc(POLY.HIST.REC.LEN);              /* read in poly history record */
+         write("373") = read(mdi);
+
+         lengthlsb = shl(misc.buf(2)-1,9);    /* get len in bytes */
+         lengthmsb = shr(misc.buf(2)-1,7);    /* ingnoring base sector */
+
+         do i = 0 to f#name_len - 1;          /* get name and convert to xpl format */
+            fcb_data(f#nm + i) = misc.buf(5 + i);
+         end;
+         call clean_fcbname(fcb_data, name);
+
+         /* pass length,dev,sec and name to create dsid */
+         call encode.ram.addr(misc.buf(2),misc.buf(3),misc.buf(4),loc(addr(misc.buf(5))));
+
+         write(MAM) = misc.ptr;               /* set up to build entry */
+         write(MAL) = pointer;
+
+         write(mdi) = misc.buf(0);            /* dir id msb/lsb */
+         write(mdi) = misc.buf(1);
+         write(mdi) = bitmsb;                 /* ds id msb/lsb */
+         write(mdi) = bitlsb;
+         write(mdi) = misc.buf(9);            /* change code */
+         write(mdi) = lengthmsb;
+         write(mdi) = lengthlsb;
+         write(mdi) = 0;                      /* rev# msb/lsb */
+         write(mdi) = 0;
+         write(mdi) = type.of(T#Sound);       /* type */
+
+      end;
+
+      /* now write name out for either case: dtd or poly */
+
+      if name(0) IGT 32 then name(0) = 32;  /* do a little clean up first */
+      call pbyte(name, name(0), 0);
+
+      if name(0) > (maxlen-1)       /* limit name to extracted bytes    */
+      then name(0) = (maxlen-1);
+
+      call pbyte(name, name(0),   0);  /* convert to C string           */
+      call pbyte(name, name(0)+1, 0);
+
+      do i = 0 to shr(name(0), 1);
+         write(mdi) = rot(name(i+1),8);
+      end;
+      do i = shr(name(0) + 2 ,1) to shr(maxlen,1)-1;
+         write(mdi) = 0;
+      end;
+
+      datasize = datasize + entrysize; /* count data bytes written    */
+      counter = counter + 1;           /* count entries sent          */
+
+      /* Force buffer out over protocol if needed:                    */
+
+      if (counter = number)            /* if sending last one         */
+      or ((datasize + entrysize) > 60) /* or no room for another one  */
+      then do;
+
+         pointer = read(mal);
+         write(mal) = P#Len;
+         write(md ) = shl(pointer,1);
+
+         if (useblock) & (counter = number)  /* set end of block bit for */
+         then do;                            /* last block               */
+            write(mal) = P#Type;
+            write(md ) = read(md) \ T#Net_Block_Last;
+         end;
+
+         call SEND.PROTOCOL.PACKET.WITH.RETRY(misc.ptr, 1, 10000);
+
+         write(mam) = misc.ptr;    /* set up for write of more */
+         write(mal) = P#Data + 2;  /* data                     */
+         datasize   = 0;
+      end;
+   end;
+
+   return 1;
+
+end Request.Entries.By.Update.Stamp;
+
+Handle.Retrieval: proc swapable;
+   dcl (len,des)            fixed;
+   dcl subtype              fixed;
+   dcl data_words           lit '32';      /* Number of data words to read   */
+   dcl packet(data_words-1) fixed;         /* Array to hold data from packet */
+   dcl ret                  fixed;
+   dcl i                    fixed;
+
+   write(mam) = Packet.Ptr;
+
+   write(mal) = P#LEN;    len     = read(md);
+   write(mal) = P#SOURCE; des     = read(md);
+
+   write(mal) = P#TYPE;   
+   subtype    = read(md) & "377";
+
+   write(mal) = P#DATA;
+   write("313") = addr(packet(0));
+   rpc data_words;
+   write("373") = read(mdi);
+
+   ret = 1;            /* assume ok unless someone returns a specific error */
+
+   if subtype < 8
+   then do case subtype;    /* branch on specific time base command */
+
+      do;  /*  0: Request Directory Key By Name  */
+         ret = Request.Directory.Key.By.Name(packet,des);
+      end;
+
+      do;  /*  1: Request Directory Key By Index */
+         ret = Request.Directory.Key.By.Index(packet,des);
+      end;
+
+      do;  /*  2: Request Directory Key By Id   */
+         ret = Request.Directory.Key.By.Id(packet,des);
+      end;
+
+   end;             /* of branch on specific creation/recording command */
+
+   /* Handle directory info requests */
+
+   else if subtype < 16
+   then do case (subtype-8);
+      do;  /*  8: Request Directory Info */
+         ret = Request.Directory.Info(packet,des);
+      end;
+
+      ;    /*  9: Directory Info Answer  */
+
+      do;  /*  10: Request Directory Entries */
+         ret = Request.Directory.Entries(packet,des);
+      end;
+
+      ;    /*  11: Directory Entries Answer  */
+
+   end;
+
+   else if subtype < 32
+   then do case (subtype-16);
+      do;  /*  16: Open DS For Transfer      */
+         ret = Access.Data.Structure(packet,des,DS_ACCESS_OPEN);
+      end;
+
+      ;    /*  17: Open DS For Transfer answer */
+
+      do;  /*  18: close DS                    */
+
+         i = packet(0);               /* get transfer id        */
+
+         if i ILT num.of.ids          /* make sure looks good   */
+         then do;
+            if tra.node(i) = des      /* make sure node matches */
+            then tra.open(i) = FALSE; /* for double check       */
+         end;
+      end;
+
+      do;  /*  19: Request DS Read    */
+         ret = Request.DS.Read(packet,des);
+      end;
+
+      do;  /*  20: answer to Ds transfer */
+      end;
+
+      do;  /*  21: write ???             */
+      end;
+
+      do;  /*  22: move/copy data structure */
+         ret = Access.Data.Structure(packet,des,DS_ACCESS_COPY);
+      end;
+
+      do;  /*  23: move/copy status return */
+      end;
+
+      do;  /*  24: activate data structure */
+         ret = Access.Data.Structure(packet,des,DS_ACCESS_ACTIVATE);
+      end;
+
+      do;  /*  25: activate data structure status return */
+      end;
+
+   end;
+
+   else do case (subtype-32);
+      do;  /*  32: Request Entries By Update Stamp */
+         ret = Request.Entries.By.Update.Stamp(packet,des);
+      end;
+
+      do;    /*  33: Entries By Update Stamp return */
+      end;
+   end;
+
+   return(ret);             /* return processed status */
+
+end Handle.Retrieval;

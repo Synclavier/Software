@@ -1,0 +1,1200 @@
+/* :SYNRSOU:11-TIMB:198-SYN2 - WAVE MEMORY COMPUTATION, WAVE MEMORY ALLOCATION */
+
+/*
+   08/05/91 - PF - optimized duration lookup for poly RAM events
+   06/19/91 - PF - ADDED SUPPORT FOR RAM EVENT CAPABILITY
+   04/20/89 - CJ - HANDLE EVENT TYPE TIMBRE FRAMES IN ALLOC.PARTIAL
+   10/17/88 - TSS - Made ALLOC.SUB only mess with load bin for kbd timbre
+   09/29/88 - TSS - ADDED CODE TO SET POLY BIN FOR LOADING FILES DURING 4X TEST
+   6/25/88 - CJ  - SKIPPED 'OUT OF FM WAVE TABLES' ERROR MESSAGE
+                   IF NO FM VOICES INSTALLED IN SYSTEM.  PURPOSE IS
+                   TO NOT DISPLAY THIS MESSAGE ON STAND ALONE
+                   DIRECT TO DISK SYSTEMS
+   9/09/87 - MWH - Use prefered poly bin in track header
+   8/24/87 - MWH - Merge with other release-N edits
+   7/21/87 - MWH - Update all to support max 4 poly bins, 512mb/bin
+   7/17/87 - MWH - add code to select which poly bin to load sound files in
+   7/06/87 - MWH - kbd lookup table literals; restructured for 32 bit poly
+   1/05/86 - CJ - MODIFIED MONO SAMPLING FILE SEARCH
+   9/25/86 - KJO - updated for -7 catalog structure
+   8/14/86 - cj - fixed dealloc bug
+   7/28/86 - CJ,KC - CHANGED ALLOCATE TO SET UP STEREO.SF
+   7/24/86 - KJC,CJ - KBDTAB changes
+   5/15/86 - "official" creation of release-M modules
+*/
+
+/* THESE FIRST FEW ROUTINES ASSIST IN COMPUTING A TIME DOMAIN WAVE
+   SHAPE FROM A LIST OF COEFFICIENTS */
+
+/* COMPUTE.WAVE CONSTRUCTS A SYNTHESIZER WAVE FORM FROM A LIST
+OF HARMONIC COEFFICIENTS AND PHASES.   THIS ROUTINE IS USED
+BOTH TO COMPUTE THE MAIN WAVE SHAPE FOR SYNTHESIZED SOUNDS,
+AS WELL AS WAVE SHAPES FOR TIMBRE FRAMES */
+
+/* 'ADD.IN' ADDS IN ONE HARMONIC TO A WAVESHAPE */
+
+DCL WAVE.COMPUTED  FIXED;   /* FLAG USED WITHIN ALLOCATE.WMEM TO AVOID DUPLICATE CALLS */
+DCL OFFSET         FIXED;   /* ACCUMULATES DC OFFSET */
+DCL POLY.TOGGLE    FIXED PUBLIC;     /* POLY BIN TO LOAD SOUND FILE IN */
+
+DCL PRINT_WAVE     LIT '0';
+
+COMPUTE.WAVE:PROC PUBLIC SWAPABLE; /* COMPUTE WAVEFORM GIVEN HARMONIC CONTENTS */
+  DCL (MIN,MAX)   FIXED;
+  DCL (I,J,K,L,M) FIXED;
+
+  ADD.IN:PROC(NUM,COEF);  /* CONSTRUCTS WAVESHAPE IN MISC.BUF.  USES 'PHASE.INFO' */
+    DCL (NUM,COEF) FIXED;
+    DCL (I,J,K)    FIXED;
+
+    IF (PHASE.INFO<>0)\(NUM<>1) THEN J=SHR(COEF,8)&"374"; /* EXTRACT PHASE INFO PASSED TO US */
+    ELSE J=0; /* USE ZERO PHASE FOR FIRST COEFFICIENT OF FRAME 0 */
+    COEF=COEF&"1777"; /* EXTRACT MAIN COEFFICIENT */
+    IF COEF=0 THEN RETURN; /* NOTHING TO ADD IN */
+
+    // Sine table is centered on 1024, going up to 2047 and down to 0.
+    LOAD COEF; MUL 1024; K=RES; DIV 2000; /* ACCUMULATE DC POINT */
+    OFFSET=OFFSET+RES; /* ADD IN COEF TO KEEP TRACK OF MIDPOINT OF WAVE */
+
+    // Could print coefficient and offset
+    #if (PRINT_WAVE)
+      send 'Coef', coef, offset, res;
+    #endif
+
+    DO I=0 TO 255; /* CYCLE THROUGH */
+      LOAD COEF; 
+      WRITE(MAM)=STB.PTR+SHR(J,8); WRITE(MAL)=J;
+      MUL READ(MD);     /* MULTIPLY BY SINE FUNCTION */
+      K=RES; DIV 2000;
+      MISC.BUF(I)=MISC.BUF(I)+RES; /* GET ANSWER */
+      J=(J+NUM)&255;
+    END;
+  END ADD.IN;
+
+  DO I=0 TO 255; MISC.BUF(I)=0; END;     /* ZERO OUT */
+
+  OFFSET=0;                              /* INITIALIZE DC OFFSET */
+  I=PTPTR+P.COEF.LOC;                    /* GET POINTER TO HARMONICS IN TIMBRE DEF (OR IN KLUDGED FRAME POINTER) */
+  DO J=0 TO NUM.HARMONICS-1;             /* ADD IN */
+     WRITE(MAM)=PAR.PTR+SHR(I,8); WRITE(MAL)=I;
+     CALL ADD.IN(J+1,READ(MD));
+     I=I+1;        /* ADVANCE POINTER */
+  END;
+
+  // Could print out the waveform after summing and before scaling
+  #if (PRINT_WAVE)
+    DO J=0 TO 255;
+       if ((j&15) ==  0) send j, ': ',;
+       send MISC.BUF(J),;
+       if ((j&15) == 15) send;
+       if ((j&15) == 15) interp_flush_char_output();
+    END;
+  #endif
+
+  MIN=MISC.BUF(0); MAX=MISC.BUF(0); /* FIND MIN & MAX */
+  DO I=1 TO 255;
+    IF MISC.BUF(I) < MIN THEN MIN=MISC.BUF(I);
+    IF MISC.BUF(I) > MAX THEN MAX=MISC.BUF(I);
+  END;
+
+  I=MAX-OFFSET; IF (OFFSET-MIN) > I THEN I=(OFFSET-MIN); /* FIND HIGHEST PEAK */
+  IF MAX<OFFSET+I THEN MAX=OFFSET+I; /* MAKE PEAK MATCH MINIMUM */
+  IF MIN>OFFSET-I THEN MIN=OFFSET-I; /* COMPUTE NEW MINIMUM AS WELL */
+
+  DO I=0 TO 255; MISC.BUF(I)=MISC.BUF(I)-MIN; END; /* SUBTRACT MIN */
+  MAX=MAX-MIN; /* COMPUTE NEW MAX */
+
+  IF MAX=0 THEN DO; I=0; L=0; M=128; MAX=1; END; /* PRODUCE DC (FLAT WAVEFORM) */
+  ELSE DO;
+     I=MAX/512;  /* TRY TO ROUND IN FOLLOWING ROUTINE */
+     L=255; M=0; /* MAX OF 255, NO DC OFFSET TO CORRECT FOR */
+  END;
+
+  DO J=0 TO 255; /* SCALE THE WAVEFORM */
+     LOAD MISC.BUF(J)+I; MUL L; K=RES; DIV MAX;
+     MISC.BUF(J)=RES+M;
+
+  // Could print out waveform
+  #if (PRINT_WAVE)
+     if ((j&15) ==  0) send j, ': ',;
+     send MISC.BUF(J),;
+     if ((j&15) == 15) send;
+     if ((j&15) == 15) interp_flush_char_output();
+  #endif
+
+  END;
+
+  WAVE.COMPUTED=1; /* SET FLAG TO ELIMINATE POSSIBLE SECOND COMPUTATION BELOW */
+
+END COMPUTE.WAVE;
+
+/* $SUBTITLE  Routine to Allocate and Setup Wave Memories */
+
+/* 'ALLOC' IS THE MAIN ROUTINE FOR ALLOCATING WAVEFORM MEMORIES.
+   WAVE MEMORIES IN THE ORIGINAL SYNCL II SYNTHESIZER,  AS WELL AS
+   ATTACK BUFFERS IN EXTERNAL MEMORY, AS WELL AS SAMPLE FILES STORED
+   IN THE POLY SYNTH ARE ALL MANAGED BY 'ALLOC' AND 'DEALLOC'.
+
+   ONE OF THE MOST IMPORTANT JOBS OF 'ALLOC' IS DETERMINE THE SYNTHESIZER
+   TYPE THAT IS REQUIRED FOR THIS TIMBRE (I.E. SAMPLING VS. SYNTHESIZED).
+
+   'DEALLOC' IS PASSED A TIMBRE # (IN THE GLOBAL VARIABLE ALLOC#)
+   AND PROCEEDS TO FREE UP MEMORIES/ETC. FOR ALL THE PARTIALS IN
+   THAT TIMBRE.  PTPTR IS PRESERVED DURING A CALL TO DEALLOC.
+
+   'ALLOC'   IS PASSED A TIMBRE #  (IN THE GLOBAL VARIABLE ALLOC#)
+   AND PROCEEDS TO ALLOCATE MEMORIES/ETC. FOR JUST THAT PARTIAL.
+
+   FOR THE ORIGINAL SYNCL II SYNTHESIZER:
+
+      'ALLOC' EXAMINES THE COEFFICIENT LIST FOR EACH PARTIAL TIMBRE 
+      AND COMPARES THEM WITH THE COEFFICIENTS FOR THE WAVES THAT ARE 
+      PRESENTLY STORED IN THE SYNTHESIZER WAVE MEMORIES.  IF A MATCH IS 
+      FOUND, THEN THAT MEMORY IS USED.  IF NO MATCH IS FOUND AND A FREE 
+      MEMORY IS AVAILABLE, THEN IT IS FILLED WITH THE WAVEFORM.
+
+      THE SYNTHESIZER BANKS ARE DIVIDED INTO TWO LOGICAL HALVES FOR WAVE
+      MEMORY ALLOCATION PURPOSES.   IF FEWER THAN 24 WAVE MEMORIES ARE
+      REQUIRED,  THEN ALL WAVESHAPES WILL BE IN EACH SYNTHESIZER AND
+      ANY CHANNEL CAN BE USED FOR ANY SOUND.   IF 25-48 WAVE MEMORES ARE
+      REQUIRED,  THEN SOME PARTIALS CAN ONLY BE SYNTHESIZED USING CERTAIN
+      CHANNELS.   THIS RESULTS IN A SLIGHTLY GREATER CONFLICT FOR SOME
+      CHANNELS IN CERTAIN SITUATIONS.
+
+      'ALLOC' LOADS THE DESIRED WAVE MEMORY INTO ONE OR BOTH LOGICAL
+      SYNTHESIZERS,  DEPENDING ON THE NEEDS FOR WAVE MEMORIES.   THE
+      WMEM# ARRAY HOLDS WHICH WAVE MEMORY IN WHICH
+      SYNTHESIZER HAVE THE WAVEHAPE FOR THIS PARTIAL.  A VALUE OF 0
+      MEANS NO MEMORY IS ALLOCATED BY THIS PATIAL.
+
+      'ALLOC' RETURNS A ZERO IF A MEMORY WAS ALLOCATED,  OR 
+      A ONE IF IT COULD NOT FIND A SUITABLE MEMORY. */
+
+      /* A SPECIAL RANDOM NUMBER ALGORITHM IS USED TO REDUCE THE AMOUNT
+      OF MEMORY REQUIRED FOR WAVE MEMORY ALLOCATION.  A 32-BIT RANDOM
+      NUMBER IS COMPUTED FOR EACH SET OF COEFFICIENTS.   THE RANDOM
+      NUMBER IS CHOSEN SO THAT A ONE BIT DIFFERENCE IN THE COEFFICIENT
+      LIST PRODUCES A COMPLETELY DIFFERENT RANDOM NUMBER.   THIS
+      RANDOM NUMBER KEY IS USED TO KEEP TRACK OF WHICH WAVESHAPE IS IN EACH
+      WAVE MEMORY.
+
+      THERE EXISTS ONE CHANCE IN 4,294,967,296 FOR A MEMORY CONFLICT TO OCCUR.
+      THIS WOULD HAPPEN IF TWO DIFFERENT SETS OF COEFFICIENTS YIELDED THE
+      SAME RANDOM NUMBER.   TESTS CONDUCTED ON ACTUAL .BNKDATA FILES INDICATE
+      THAT NO DISSIMILAR COEFFICIENT LISTS YIELDED IDENTICAL RANDOM NUMBERS.
+      THIS 1-IN-4-BILLION ERROR WAS DEEMED ACCEPTABLE (2/84) CONSIDERING THE
+      1000 OR SO WORDS OF MEMORY THAT WERE SAVED. */
+
+/* FOR PATCH LIST TIMBRES:
+
+      BLOCKS OF MEMORY ARE ALLOCATED TO HOLD A KEYBOARD LOOK UP TABLE.
+      EACH FILE IS OPENED.  FOR MONO SAMPLING,  ATTACK BUFFERS ARE
+      LOADED INTO EXTERNAL MEMORY.   FOR POLY SAMPLING,  THE ENTIRE
+      FILE IS LOADED INTO THE POLY SYN MEMORY */
+
+/* $PAGE - ENCODE ROUTINE */
+
+/* 48 real 16 bit random numbers - from Kiewit 2/21/84 */
+
+DCL CRND DATA 
+(46827, 23922,  54168,  5986, 39886, 18635,  31555,  1298,
+ 11532, 44794,  48026, 63648, 32951, 58239,   9612, 49259, 
+ 41629, 12184,  16329,  8339, 37965, 53830,  34496, 54006, 
+ 19735,    71,  27809, 34613, 47626, 58395,  22874, 58030, 
+ 48629, 40449,  43675, 32897, 12648, 17401,  46035, 61837, 
+ 58034, 57793,  48690, 48242, 38370, 30937,   2215, 23950);
+
+DCL (EMSB,ELSB) FIXED;
+
+ENCODE:PROC(PTR) SWAPABLE; /* ENCODE COEFFICIENTS TO 32-BIT RANDOM NUMBER */
+   DCL (I,PTR) FIXED;
+
+   EMSB=0; ELSB=1; /* INITIALIZE TO 1 */
+   DO I=0 TO 23; /* PROCESS EACH COEFFICIENT */
+      LOAD CRND(I+I  ); MUL P.LOOKUP(PTR+I); /* LSB */
+      EMSB=EMSB+READ(4); ELSB=ELSB+READ(5); IF ELSB ILT READ(5) THEN EMSB=EMSB+1;
+      LOAD CRND(I+I+1); MUL P.LOOKUP(PTR+I); /* MSB */
+      EMSB=EMSB+READ(5);
+   END;
+END ENCODE;
+
+/* $PAGE - ALLOCATE AND DEALLOCATE SUBROUTINES */
+
+DCL (MEM1USERS)    (23)      FIXED; /* # OF USERS OF EACH MEMORY IN LOGICAL SYNTHESIZER #1 */
+DCL (MEM2USERS)    (23)      FIXED; /* # OF USERS OF EACH MEMORY IN LOGICAL SYNTHESIZER #2 */
+DCL (MEM1MSB)      (23)      FIXED; /* ALLOCATION RND# MSB */
+DCL (MEM1LSB)      (23)      FIXED; /* ALLOCATION LSB */
+DCL (MEM2MSB)      (23)      FIXED; /* ALLOCATION RND# MSB */
+DCL (MEM2LSB)      (23)      FIXED; /* ALLOCATION LSB */
+
+/* NOTE: ROUTINES MUST PRESERVE MAM & MAL */
+
+INCREMENT:PROC(ARR,I);        /* PROCEDURE TO COUNT USERS OF WAVE MEMORY */
+   DCL ARR ARRAY, I FIXED;
+   ARR(I&31)=ARR(I&31)+1;     /* COUNT ONE MORE USER OF THIS WAVE MEMORY */
+END INCREMENT;
+
+DECREMENT:PROC(ARR,I);        /* PROCEDURE TO FREE UP USERS OF WAVE MEMORY */
+   DCL ARR ARRAY, I FIXED;
+   ARR(I&31)=ARR(I&31)-1;     /* COUNT ONE LESS USER OF THIS WAVE MEMORY */
+END DECREMENT;
+
+/* NOTE: FREEUP.MEM PRESERVES MAM & MAL PTRS */
+
+FREEUP.MEM:PROC(I);           /* MARK MEMORIES AS FREE */
+   DCL (I) FIXED;
+   IF (I&255)<>0      THEN CALL DECREMENT(MEM1USERS,I&255); /* FREE UP */
+   IF (I&"177400")<>0 THEN CALL DECREMENT(MEM2USERS,SHR(I,8));
+END FREEUP.MEM;
+
+DEALLOC:PROC(TB) PUBLIC SWAPABLE;   /* SHORT ROUTINE TO FREE UP MEMORIES/BUFFERS BEFORE CHANGING TIMBRES */
+   DCL (TB,PTL,J,K,L) FIXED;        /* FREES UP INFO FOR ALL PARTIALS FOR SPECIFIED TIMBRE */
+   DCL (TBP)          FIXED;
+   DCL (BASE) (1)     FIXED;        /* 32 BIT POLY POINTER                */
+
+   WRITE(MAM)=TIM.HEAD;             /* POINT TO LOOK UP TABLE             */
+   WRITE(MAL)=TB;
+   TBP=READ(MD);                    /* POINTER TO TIMBRE HEAD             */
+
+   IF TBP=0 THEN RETURN;            /* NO BLOCK AVAILABLE                 */
+
+   DO PTL=0 TO NUM.PARTIALS-1;      /* FREE UP WAVE MEMORY OF OLD PARTIAL */
+
+      WRITE(MAM)=TBP;               /* POINT TO TIMBRE HEAD               */
+
+      WRITE(MAL)=TIM.WMEM#+PTL;     /* FREE UP FM WAVE MEMORY USAGE       */
+      J=READ(MD);                   /* GET EXISTSING WAVE(S)  (OR 0)      */
+      WRITE(MD )=0;                 /* ZERO OUT                           */
+      WRITE(MAL)=TIM.CAN.USE.BOTH+PTL;
+      WRITE(MD )=0;
+      CALL FREEUP.MEM(J);           /* FREE UP THESE WAVE MEMORIES (IF ANY ALLOCATED FOR THIS PARTIAL) */
+
+      IF (INC.MONO<>0)\(INC.POLY<>0)     /* IF SOME SAMPLING INCLUDED, LOOK FURTHER */
+      THEN DO;
+
+         WRITE(MAL)=TIM.KBDTAB.PTR+PTL;
+         J=READ(MD);                     /* GET KEYBOARD TABLE POINTER */
+         WRITE(MD )=0;                   /* FREE UP KBD TABLE          */
+
+         WRITE(MAL)=TIM.SYNTH.TYP+PTL;
+         L=READ(MD);                     /* GET SYNTH TYPE                */
+
+         IF (J<>0)                       /* IF BLOCK EXISTS               */
+         THEN DO;                        /* THEN FREE IT UP               */
+
+            IF (L=TIM#POLY)\(L=TIM#MONO) /* IF TYP IS MONO OR POLY        */
+            THEN DO K=0 TO (NUM.KEYS*KLT.SIZE - 1) BY KLT.SIZE;  /* CHECK EACH ENTRY IN KBDTAB BLOCK */
+               WRITE(MAM)=TIM.PTR+J-1;   /* POINT TO KBD TABLE            */
+               WRITE(MAL)=K+KLT.PATCH.TIM.PTR;
+               IF READ(MDI)<>0 THEN DO;  /* IF KLT.PATCH.TIM.PTR FOR THIS KEY EXISTS, */
+                                         /* THEN COUNT ONE LESS USER      */
+                  BASE(LW#MSB)=READ(MDI)&BASE#ONLY;  /* GET KLT.BASE.MSB           */
+                  BASE(LW#LSB)=READ(MD);             /* GET KLT.BASE.LSB           */
+                  IF (INC.MONO=0)                    /* IF NO MONO, THEN IS POLY   */
+                  OR ((INC.POLY<>0)&(L=TIM#POLY))    /* IF POLY, THEN CHECK SYNTYP */
+                  THEN CALL PS.USERS(BASE,-1);       /* ONE LESS USER FOR THE FILE */
+                  ELSE IF (INC.POLY=0)               /* IF NO POLY, THEN IS MONO   */
+                  OR ((INC.MONO<>0)&(L=TIM#MONO))    /* MONO                       */
+                  THEN CALL MS.USERS(READ(MD),-1);
+               END;                   /* OF ENTRY NONZERO */
+            END;                      /* OF LOOP OVER ACTIVE PART OF KBDTAB */
+
+            WRITE(MAM)=TIM.PTR+J-1;   /* LOAD POINTER TO START OF BLOCK */
+            WRITE(MD)=TIM.FREE;       /* CONSTRUCT LINKED LIST */
+            TIM.FREE=J;
+            TIM.#FREE=TIM.#FREE+1;
+
+         END;      /* OF BEGIN IF THIS PARTIAL OWNED A KBDTAB BLOCK */
+      END;         /* OF BEGIN FOR MONO OR POLY CODE INCLUDED IN THIS COMPILATION */
+   END;            /* OF LOOP OVER 4 PARTIALS */
+
+   WRITE(MAM)=TBP;
+   WRITE(MAL)=TIM.POLY.EVENT;      
+   WRITE(MD )=0;                   /* CLEAR POLY EVENT USAGE FLAG */
+
+END DEALLOC;
+
+/* $PAGE - CODE TO ALLOCATE FILES FOR PATCH PARTIALS */
+
+ALLOC.PATCH.PARTIAL:PROC(TB,PTL,TBP) SWAPABLE;
+  DCL (TB,PTL,TBP) FIXED;
+  DCL (J,K,L,M)        FIXED;
+  DCL (SYNTYP)         FIXED;
+  DCL (THERE)          FIXED;
+  DCL (OURCHECK)       FIXED;
+  DCL (FRAMECNT)       FIXED;
+  DCL (SAMPLE.STATUS)  FIXED;        /* STATUS FLAG WHEN LOADING SAMPLES       */
+  DCL (STEREO.SF)      FIXED;        /* HOLDS STEREO INFO DURING KBD SETUP     */
+  DCL (K.PTR)          FIXED;        /* SAVES POINTER TO KEYBOARD LOOKUP TABLE */
+  DCL (DIRMSB,DIRLSB)  FIXED;        /* DISK ADDRESS OF DIRECTORY ENTRY */
+  DCL (MSB,LSB)        FIXED;
+
+	IF ((P.LOOKUP(PTPTR+NUM.PARAMS+TYPE)=CU.TYPE) 			// DETECT A CUE    TIMBRE
+	||  (P.LOOKUP(PTPTR+NUM.PARAMS+TYPE)=EV.TYPE))			// DETECT AN EVENT TIMBRE
+	{																		// if so, zero out bogus cue id in ev.cue.id until cue id gets looked up
+		SYNTYP=TIM#CUE;
+	
+		J=PTPTR+NUM.PARAMS;              						// ZERO OUT DATA IN CASE NOT ALLOCATED
+		DO WHILE (P.LOOKUP(J)=MOR);      						// PROCESS EACH FILE NAME
+			if (p.lookup(j+TYPE) == EV.TYPE)						// if is event type, null out unknown id
+				P.STORE(j+EV.CUE.ID, 0);
+			J=J+P.LOOKUP(J+CLEN);         						// GET NEXT PATCH LIST ENTRY
+		END;                             						// OF LOOP OVER FILE BLOCKS
+	}
+	
+	else
+	{
+		IF (INC.POLY<>0)                 						// POLY SAMPLING
+		THEN SYNTYP=TIM#POLY;            						// INDICATE A PATCH TIMBRE - PLAY WITH SAMPLING HARDWARE
+		ELSE SYNTYP=TIM#MONO;            						// USE MONO SAMPLING HARDWARE IF AVAIL
+		
+		J=PTPTR+NUM.PARAMS;              						// ZERO OUT DATA IN CASE NOT ALLOCATED
+		L=0;                             
+		DO WHILE (P.LOOKUP(J)=MOR);      						// PROCESS EACH FILE NAME
+			IF (P.LOOKUP(J+PT.EVENT))     						// TEST FOR POLY EVENT PATCH ENTRY
+			THEN L=1;                     						// SET FLAG FOR BELOW
+			CALL P.LOOKUP(J+PT.KEYTC);
+			DO K=PT.KEYTC TO PT.LEN-1;   						 	// ZERO OUT ALL PRE-COMPUTED AREAS
+			  WRITE(MDI)=0;
+			END;
+			J=J+P.LOOKUP(J+CLEN);         						// GET NEXT PATCH LIST ENTRY
+		END;                             						// OF LOOP OVER FILE BLOCKS
+	}
+  
+  WRITE(MAM)=TBP;             /* POINT TO TIMBRE HEAD            */
+  WRITE(MAL)=TIM.SYNTH.TYP+PTL;
+  WRITE(MD )=SYNTYP;          /* SAVE FOR OTHER PEOPLES USAGE    */
+
+  IF (L<>0)                   /* ANY POLY EVENT PATCH FRAMES */
+  THEN DO;
+     WRITE(MAL)=TIM.POLY.EVENT;    /* POINT TO WORD IN TIMBRE HEAD */
+     WRITE(MD )=1;                 /* SET FLAG FOR POLY EVENTS PRESENT */
+  END;
+
+  IF (INC.MONO<>0)\(INC.POLY<>0)   /* IF SAMPLING INCLUDED      */
+  THEN DO;
+
+     IF  (((P.LOOKUP(PTPTR+P.EPEAKL)\P.LOOKUP(PTPTR+P.ESUSTL))&1023)=0)
+     THEN RETURN 0;                /* NO PATCH TABLE NEEDED IF PK/SUST LEVEL IS 0 */
+
+     IF TIM.FREE=0 THEN DO;         /* NO BLOCK - ALLOCATE ONE */
+
+        J=TIM.LEN;                  /* SAVE CURRENT LENGTH     */
+        IF GET.TIM.STORAGE(TIM.LEN+1) <> 0 THEN DO;
+           TIM.FREE=J+1;
+           TIM.#FREE=TIM.#FREE+1;
+           WRITE(MAM)=TIM.PTR+TIM.FREE-1;
+           WRITE(MD )=0;            /* END OF LINKED LIST   */
+        END;
+
+        WRITE(MAM)=TIM.HEAD;        /* LOOK UP TBP AGAIN IN */
+        WRITE(MAL)=TB;              /* CASE THINGS MOVED    */
+        TBP=READ(MD);               /* DURING ALLOCATION    */
+
+     END;
+
+     /* $PAGE - LOAD SOUND FILE INTO ATTACK BUFFER (MONO) OR POLY MEMORY */
+
+     IF TIM.FREE<>0 THEN DO;         /* SEE IF FREE BLOCK THERE OR CREATED */
+
+        WRITE(MAM)=TBP;              /* STORE KBD TAB POINTER */
+        WRITE(MAL)=TIM.KBDTAB.PTR+PTL;
+        WRITE(MD )=TIM.FREE;
+
+        IF TB=0 THEN NEW.KBD.PRE=1;         
+
+        K.PTR=TIM.FREE;             /* SAVE POINTER TO BLOCK TO USE FOR KBD LOOKUP TABLE */
+        WRITE(MAM)=TIM.PTR+TIM.FREE-1;
+        TIM.FREE=READ(MD);          /* ADVANCE TO NEXT FREE BLK     */
+        TIM.#FREE=TIM.#FREE-1;
+
+        DO J=0 TO 255;              /* FIRST, ZERO OUT THE KEYBOARD PATCH LIST */
+           WRITE(MDI)=0;
+        END;
+
+        IF SYNTYP=TIM#CUE THEN DO;  /* CUE LIST - JUST SET FLAG FOR LOD ROUTINE */
+           WRITE(MAM)=TBP;              
+           WRITE(MAL)=TIM.NEEDS.CUE.ALLOC;
+           WRITE(MD )=1;
+           ALLOCATE.LOD.CUES = 1;
+           RETURN 0;
+        END;
+
+        J=PTPTR+NUM.PARAMS;         /* GET POINTER TO START OF PATCH LIST FOR THIS PARTIAL */
+        FRAMECNT=1;                 /* COUNT # OF FRAMES      */
+        SAMPLE.STATUS=0;            /* ASSUME NO PROBLEMS YET */
+
+        DO WHILE (P.LOOKUP(J)=MOR)  /* PROCESS EACH FILE NAME */
+        AND (POLY.READ.ABORTED=0);  /* UNLESS ABORTED         */
+
+           GET.NAME.FROM.PARTIAL(J);
+
+           IF FNBUF(1)<>0 THEN DO;                  /* ONLY LOOK UP IF FILE SPECIFIED */
+
+              IF (INC.MONO=0)                       /* IF NO MONO, THEN IS POLY   */
+              OR ((INC.POLY<>0)&(SYNTYP=TIM#POLY))  /* IF POLY, THEN CHECK SYNTYP */
+              THEN THERE=PS.SEARCH;                 /* SEE IF IN POLY MEMORY      */
+              IF (INC.POLY=0)                       /* IF NO POLY, THEN IS MONO   */
+              OR ((INC.MONO<>0)&(SYNTYP=TIM#MONO))  /* MONO                       */
+              THEN THERE=MS.SEARCH;                 /* SEE IF IN MEMORY           */
+
+              IF  (THERE=0)                         /* NOT IN MEMORY - SEE IF ON DISK */
+              THEN DO;                              /* THEN CHECK FILE ON DISK    */
+
+                 K=0;                                   /* ASSUME NOT FOUND */
+
+                 IF ((INC.MONO=0))                      /* MUST BE POLY */ 
+                 OR ((INC.POLY<>0)&(SYNTYP=TIM#POLY))   /* OR IS POLY */
+                 THEN DO;                               /* POLY COMPILATION OR TIMBRE */
+
+                    /* POLY SITUATIONS ONLY: */
+
+                    IF INC.MONO<>0 THEN CALL STOP.DISK; /* BE SAFE */
+
+                    // Check asset library
+                    if ((k == 0) && (interp_is_running != 0)) {
+                       dcl gotFile fixed;
+                       dcl gotRev  fixed;
+                       
+                       interp_locate_file(T#Sound, addr(lnbuf(0)));  // See if in data base
+                       
+                       gotFile = interp_located_file(0) & 0x0001;
+                       gotRev  = interp_located_file(0) & 0xFFFE;
+                       
+                       if (gotFile) then do;
+                          K = LOCATE(interp_snd_file_name, 0);
+                       end;
+                    }
+
+                    if (lnbuf(0) <= 8) then do;
+                       IF  (K=0)                           /* IF NOT ELSEWHERE */
+                       AND (FLOPPY.CACHE.VALID<>0)         /* AND WE HAVE SOME CACHED INFO */
+                       THEN K=LOCATE(FNBUF,ACTIVE.LEVEL); /* THEN CHECK FLOPPY FIRST */
+
+                       IF  (K=0)                           /* NOT ELSEWHERE */
+                       AND (CACHE.SECS<>0)
+                       THEN K=FIND.SOUND(FNBUF);           /* SEARCH WINCHESTER CACHE TOO */
+
+                       IF  (K=0)                           /* NOT ELSEWHERE */
+                       AND (((DRIVE.SELECT.ACTIVE<>0)      /* DSEL BUTTON OR SNDR SCREEN */
+                       AND   (MAP.LEVEL(ACTIVE.LEVEL)<6))  /* ACTIVE LEVEL IS NOT WINCHESTER (WINCHESTER FILES ARE IN CACHE) */
+                       OR   (CACHE.SECS=0))                /* NO CACHE IN POLYMEM */
+                       THEN K=LOCATE(FNBUF,ACTIVE.LEVEL);  /* SEARCH ON ACTIVE DEVICE */
+
+                       IF  (K=0)                           /* NOT ELSEWHERE */
+                       AND ((CURTYP=0)                     /* CURRENT CATALOG IS FLOPPY */
+                       OR   (CACHE.SECS=0))                /* NO CACHE IN POLYMEM */
+                       THEN K=LOCATE(FNBUF,1);             /* SEARCH ON CURRENT DEVICE */
+
+                       IF  (K=0)                           /* NOT ELSEWHERE */
+                       AND ((SYSTYP=0)                     /* SYSTEM CATALOG IS FLOPPY */
+                       OR   (CACHE.SECS=0))                /* NO CACHE IN POLYMEM */
+                       THEN K=LOCATE(FNBUF,0);
+
+                       IF  (K=0)                             /* NOT FOUND ELSEWHERE */
+                       AND (OPTICAL.DISK.READY<>0)           /* OPTICAL IS AROUND AND READY */
+                       THEN DO;
+                         K=INDEX_LOCATE(FNBUF,MISC.BUF,10);  /* LOOK ON OPTICAL DISK */
+                         IF K<>0 THEN DO;
+                            MSB=F#MS_SECTOR; LSB = F#LS_SECTOR;
+                            CALL EntryToSec(misc.buf(l$dir_entry));
+                            dirmsb = f#ms_sector \ shl(10,8); /* SAVE DEVICE TYPE */
+                            dirlsb = f#ls_sector+1;           /* POINT TO SOUND FILE HEADER */
+                            if dirlsb=0 then dirmsb=dirmsb+1;
+                            f#ms_sector = msb; f#ls_sector = lsb;
+                         end;
+                       end;
+                    end;
+                 END;
+
+                 ELSE IF ((INC.POLY=0))              /* MUST BE MONO */
+                 OR      ((INC.MONO<>0)&(SYNTYP=TIM#MONO))
+                 THEN DO;                               /* MONO COMPILATION OR MONO TIMBRE */
+
+                    /* MONO SITUATIONS ONLY */
+                    // Long file names not supported for mono sampling
+                    IF INC.MONO<>0 THEN CALL STOP.DISK; /* BE SAFE */
+
+                    IF  (MAP.LEVEL(ACTIVE.LEVEL)>=6)    /* W0 OR W1    */
+                    AND (MAP.LEVEL(ACTIVE.LEVEL)<=7)    /* SUBCATALOG  */
+                    THEN K=LOCATE(FNBUF,ACTIVE.LEVEL);  /* SEARCH      */
+
+                    IF  (K=0)                    /* NOT FOUND          */
+                    AND (CURTYP=1)               /* UCAT = W. DISK     */
+                    AND (ACTIVE.LEVEL<>1)        /* BUT DO NOT REPLICATE FAILED SEARCH ABOVE FOR SPEED */
+                    THEN K=LOCATE(FNBUF,1);      /* CHECK USER CAT     */
+
+                    IF  (K=0) 
+                    AND (SYSTYP=1)               /* NOT FOUND, SYSTEM IS A WINCH */
+                    AND (ACTIVE.LEVEL<>0)        /* BUT DO NOT REPLICATE FAILED SEARCH ABOVE FOR SPEED */
+                    THEN K=LOCATE(FNBUF,0);      /* LOOK IN SYSTEM CAT ONLY HERE, IN CASE SINGLE DRIVE */
+
+                    IF  (K=0)                    /* NOT FOUND          */
+                    AND (FIND_DEVICE(7)<>0)      /* W1 EXISTS          */
+                    AND ((ACTIVE.LEVEL<>1)       /* BUT SKIP SEARCH    */
+                    OR   (UDEV        <>SHL(7,8))/* IF UCAT IS W1 TO   */
+                    OR   (UCAT        <>0))      /* SAVE TIME          */
+                    THEN K=LOCATE(FNBUF,7);      /* LOOK IN W1         */
+
+                 END;
+
+                 IF K=0 THEN DO;           /* NEVER FOUND THE FILE */
+                    IF THERE=0 THEN DO;    /* DISPLAY ERROR UNLESS CHECK */
+                       CALL DISPLAY.ERR(4); CALL MISSING.ERROR;
+                       SAMPLE.STATUS=SAMPLE.STATUS\4; /* SET BIT FOR MISSING SOUND FILE */
+                    END;                   /* ELSE LEAVE IT - USE THE FILE IN MEMORY EVEN IF NOT ONE ON DISK */
+                 END;
+
+                 ELSE IF F#TYPE<>T#SOUND THEN DO; /* FILE FOUND - CHECK TYPE */
+                    CALL DISPLAY.ERR(4); CALL TYPE.ERROR; 
+                    SAMPLE.STATUS=SAMPLE.STATUS\4; /* SET BIT FOR MISSING SOUND FILE */
+                    THERE=0;               /* CAN NOT USE FILE EVEN IF IN POLY MEMORY */
+                 END;                      /* SINCE WE FOUND A NEW ONE BY SAME NAME */
+
+                 /* $PAGE - FILE IS FOUND - CHECK CHECKSUM IF DESIRED */
+
+                 ELSE DO;                              /* FILE IS FOUND - CHECK CHECK SUM AND LOAD INTO MEMORY */
+
+                    IF (INC.MONO=0)                 /* IF NO MONO, THEN IS POLY   */
+                    OR ((INC.POLY<>0)&(SYNTYP=TIM#POLY))   /* IF POLY, THEN CHECK SYNTYP */
+                    THEN DO;
+                       IF SHR(F#MS_SECTOR,8)<>10 THEN DO;  /* NOT OPTICAL DISK */
+                          DIRMSB=F#MS_SECTOR; DIRLSB=F#LS_SECTOR;
+                       END;
+                       THERE=PS.LOAD(F#MS_SECTOR,F#LS_SECTOR,DIRMSB,DIRLSB,0); /* LOAD WHOLE FILE IF POSSIBLE */
+                    END;
+                    IF (INC.POLY=0)                    /* IF NO POLY, THEN IS MONO */
+                    OR ((INC.MONO<>0)&(SYNTYP=TIM#MONO))      /* MONO */
+                    THEN THERE=MS.LOAD(F#MS_SECTOR,F#LS_SECTOR); /* DISK IO STOPPED ABOVE */
+                    IF THERE=0
+                    THEN SAMPLE.STATUS=SAMPLE.STATUS\2; /* SET FLAG FOR OUT OF MEMORY */
+                 END;       /* OF FILE IS FOUND      */
+              END;          /* OF CHECK FILE ON DISK */
+
+              /* $PAGE - SET UP SOUND FILE INFO IN PARTIAL */
+				  
+				  // Here's where we look up some information from the Sound File Header, and
+				  // combine it with information in this partial.  For example, the partial might
+				  // contain partial-specific looping instructions (PT.TLEN, PT.LLEN)
+				  // or partial-specific mark start/mark end instructions (PT.INSOFS, PT.INWOFS, PT.EVENT).
+
+              IF THERE<>0 THEN DO;                     					// FILE IS IN MEMORY
+
+                 IF (INC.MONO=0)                       					// IF NO MONO, THEN IS POLY
+                 OR ((INC.POLY<>0)&(SYNTYP=TIM#POLY))  					// IF POLY, THEN CHECK SYNTYP
+                 THEN DO;                              					// POLY - EXTRACT INFO, SET UP LOOP
+					  	  // Fetch the basic infor about this sound file from the management block in poly memory.
+						  // That is, load BL.LEN through BL.KHZ into MISC.BUF.
+                    STEREO.SF = PS.EXTRACT();          					// EXTRACT BASIC FILE INFO INTO MISC.BUF
+						  
+						  // Now lookup partial specific modifiers of interest.  That is: PT.TLEN, PT.LLEN,
+						  // PT.INSOFS, PT.INWOFS, PT.EVENT and merge that into misc.buf.  This is the
+						  // place where we actually merge information from the sound file into the memory
+						  // area of this patch frame.
+                    CALL P.LOOKUP(J+PT.TLEN);          					// LOOKUP SPECIAL INFO FROM PARTIAL
+                    DO K=PT.TLEN TO PT.EVENT;
+                       MISC.BUF(K)=READ(MDI);
+                    END;
+						  
+						  // Lastly, stuff the BL.BLEN amount (sectors allocated for this file in poly memory) into
+						  // MISC.BUF so that it will end up in the partial area for later use in limiting
+						  // poly ram events.
+						  MISC.BUF(PT.BLEN) = MISC.BUF(BL.LEN);				// STORE BLEN SO THAT IT WILL END UP IN PARTIAL AREA
+						  
+                    CALL SETUP.POLY.INFO;              					// LIMIT LENGTHS TO SOUND, COMPUTE LOOP/ON BIT
+                 END;
+
+                 IF (INC.POLY=0)                       					// IF NO POLY, THEN IS MONO
+                 OR ((INC.MONO<>0)&(SYNTYP=TIM#MONO))  					// MONO
+                 THEN STEREO.SF=MS.EXTRACT;            					// GET FILE INFO INTO MISC.BUF
+                 
+					  // STORE ALL PRE-COMPUTED INFORMATION SO WE CAN PLAY THIS NOTE.  THEN STORE A POINTER
+					  // TO THIS PARTIAL IN THE KEYBOARD LOOKUP TABLE.  NOTE THAT THIS ALSO HAS THE EFFECT OF
+					  // LIMITING PT.TLEN AND PT.LLEN TO BE IN BOUNDS, BASED UPON INFORMATION IN THE SOUND FILE
+					  // AS EXAMINED BY SETUP.POLY.INFO
+                 CALL P.LOOKUP(J+PT.TLEN);
+                 DO M=PT.TLEN TO PT.COPYL-1;           					// STORE IN PARTIAL FOR EASY REFERENCE
+                    WRITE(MDI)=MISC.BUF(M);
+                 END;
+
+					  // Now fill out the keyboard lookup table entry
+                 M=0;                            							// COUNT NEW USERS OF THIS FILE
+                 DO L=P.LOOKUP(J+PT.SKEY) TO P.LOOKUP(J+PT.EKEY); 	// SET UP KEYBOARD LIST FOR EACH KEY
+                    WRITE(MAM)=TIM.PTR+K.PTR-1;  							// SET MAM POINTER TO KBD LOOKUP TABLE
+                    WRITE(MAL)=L*KLT.SIZE;       							// SET MAL POINTER TO CORRECT KEY
+                    IF READ(MD)<>0 THEN CALL OVERLAP.ERROR;  			// OVERLAPPING
+                    ELSE DO;
+                       WRITE(MDI)=J-PTPTR;       /* GET OFFSET FROM START OF PARTIAL IN CASE THINGS MOVE AROUND */
+                       WRITE(MD)=0;              /* START WITH NO STEREO OR MSB'S */
+                       IF STEREO.SF <> 0 THEN WRITE(MD)=BASE#STEREO_B;  /* ADD STEREO */
+                       WRITE(MDI)=READ(MD) \ SFILE.BASE(LW#MSB);        /* ADD FILE BASE POLY BIN/PAGE */
+                       WRITE(MDI)=SFILE.BASE(LW#LSB);                   /* WRITE FILE BASE LOW 16 BITS */
+                       M=M+1;                    /* COUNT 1 MORE USER */
+                    END;
+                 END;
+
+                 IF (INC.MONO=0)                       /* IF NO MONO, THEN IS POLY   */
+                 OR ((INC.POLY<>0)&(SYNTYP=TIM#POLY))  /* IF POLY, THEN CHECK SYNTYP */
+                 THEN CALL PS.USERS(SFILE.BASE,M);     /* COUNT NEW USERS */
+
+                 IF (INC.POLY=0)                       /* IF NO POLY, THEN IS MONO */
+                 OR ((INC.MONO<>0)&(SYNTYP=TIM#MONO))       /* MONO */
+                 THEN CALL MS.USERS(SFILE.BASE(LW#LSB),M);  /* COUNT NEW USERS */
+
+              END;                  /* OF TYPE IS A SOUND FILE */
+           END;                     /* OF NON-NULL FILE NAME BEGIN */
+           J=J+P.LOOKUP(J+CLEN);    /* GET NEXT PATCH LIST ENTRY */
+           FRAMECNT=FRAMECNT+1;     /* COUNT # OF FRAMES      */
+        END;                        /* OF LOOP OVER FILE BLOCKS */
+     END;                           /* OF BEGIN IF A FILE BLOCK WAS THERE */
+     ELSE DO;                       /* NO MEMORY FOR PATCH LOOK UP BLOCK */
+        CALL DISPLAY.ERR(14);       /* NOT ENOUGH ROOM IN EXT MEMORY */
+        CALL NOMEM.ERROR;           /* NOT ENOUGH EXTERNAL MEMORY */
+        RETURN 8;                   /* OUT OF KBD BLOCK MEMORY */
+     END;
+  END;                          /* OF BEGIN IF SAMPLING INCLUDED */
+
+  IF       SAMPLE.STATUS=0     THEN RETURN 0; /* NO ERRORS */
+  ELSE IF (SAMPLE.STATUS&2)<>0 THEN RETURN 2; /* OUT OF SAMPLE MEMORY */
+  ELSE IF (SAMPLE.STATUS&4)<>0 THEN RETURN 4; /* MISSING SOUND FILES */
+
+END ALLOC.PATCH.PARTIAL; /* OF TIMBRE WITH A PATCH LIST FRAME */
+
+/* $PAGE - MAIN CODE FOR ALLOCATING A SYNTH PARTIAL */
+
+ALLOC.SYNTH.PARTIAL:PROC(TB,PTL,TBP) SWAPABLE;
+  DCL (TB,PTL,TBP)     FIXED;
+  DCL (I,J,K,L,M)      FIXED;
+  DCL (STARTING.POINT) FIXED STATIC;        /* USED IN ROTARY SEARCH FOR FREE MEMORY */
+  DCL (SYNTH.TOGGLE)   FIXED;               /* LOGICAL SYNTHESIZER PREFERENCE */
+
+  LOOK.FOR:PROC(MSBAR,LSBAR);        /* SEE IF WAVESHAPE IS IN A SYNTHESIZER */
+     DCL (MSBAR,LSBAR) ARRAY, I FIXED;
+     DO I=0 TO 23;                   /* CHECK EACH WAVE MEMORY */
+        IF (MSBAR(I)=EMSB) & (LSBAR(I)=ELSB) THEN RETURN I+32; /* FOUND */
+     END;
+     RETURN 0;                       /* CURRENT WAVESHAPE IS NOT IN SYNTHESIZER */
+  END;
+
+  FIND.FREE:PROC(USERSAR);           /* SEE IF ONE WAVE MEMORY IF THIS SYNTHESIZER IS FREE */
+     DCL (USERSAR) ARRAY, (I) FIXED;
+     DO I=0 TO 23;                   /* CHECK EACH WAVE MEMORY */
+        IF USERSAR(STARTING.POINT)=0 THEN RETURN STARTING.POINT+32; /* FOUND - USE THIS WAVE MEMORY */
+        STARTING.POINT=STARTING.POINT+1;
+        IF STARTING.POINT=24 THEN STARTING.POINT=0; /* ROTARY POINTER FOR NEXT TIME */
+     END;
+     RETURN 0;                       /* NO FREE MEMORY */
+  END FIND.FREE;
+
+  LOAD.OSYN.WMEM:PROC(LSYN,MEMRY);   /* LOAD WAVESHAPE INTO LOGICAL SYNTHESIZER 1 OR 2 */
+     DCL (I,J,K,L,M,LSYN,MEMRY) FIXED;
+     MEMRY=MEMRY&31;                 /* GET WAVE MEMORY 0-23 */
+     IF LSYN=1 THEN DO;              /* LOGICAL SYNTH #1 */
+        MEM1MSB(MEMRY)=EMSB; MEM1LSB(MEMRY)=ELSB;
+        I=LSYN1.START;     J=LSYN1.END; /* GET CHANNELS */
+        K=FR1.PTR;                   /* CHANNEL LIST FOR LOGICAL SYNTH 1 */
+     END;
+     ELSE DO;                        /* LOGICAL SYNTHESIZER 2 */
+        MEM2MSB(MEMRY)=EMSB; MEM2LSB(MEMRY)=ELSB;
+        I=LSYN2.START;     J=LSYN2.END; /* GET CHANNELS */
+        K=FR2.PTR;                   /* CHANNEL LIST FOR LOGICAL SYNTH 2 */
+     END;
+     DO L=I TO J-16 BY 16;           /* LOOP THROUGH EACH ACTUAL SYNTHESIZER IN LOGICAL SYNTHESIZER BANK */
+       DO M=1 TO CORE(K);            /* LOOK FOR FREE CHANNEL IN THIS ACTUAL SYNTHESIZER */
+         IF ((CORE(K+M)&"360")=L) THEN DO;
+           M=CORE(K+M)+1;            /* PICK FREE USER CHANNEL */
+           GOTO LOAD.THIS.MEMORY;
+         END;
+       END;
+       M=L+1; /* USE CHANNEL 1 IF NONE FREE */
+       LOAD.THIS.MEMORY:;
+       DISABLE;                    /* FOR SMA, TIMBRE SELECTION */
+          WRITE(CHA)=M; WRITE(FUN)=ZMA; WRITE(DAT)=0; /* ZERO MAR */
+          WRITE(FUN)=TIM;
+          WRITE(DAT)=MEMRY+32;     /* SELECT MEMORY TO LOAD */
+          WRITE(FUN)=MEM;
+          INTCHA=M; INTFUN=MEM;    /* SET UP CHANNEL, FUNCTION CODE IN CASE INTERRUPT HERE */
+       ENABLE;
+       DO M=0 TO 255;              /* LOOP OVER POINTS */
+          WRITE(DAT)=MISC.BUF(M);  /* IF INTERRUPTS HAPPEN HERE, CHA AND FUN SHOULD */
+       END;                        /* BE RESTORED TO INTCHA, INTFUN */
+     END;                          /* OF PROCESS EACH SYNTHESIZER */
+
+  END LOAD.OSYN.WMEM;
+
+
+  /* $PAGE - ALLOCATE, COMPUTE, AND LOAD SYNCL II MEMORY */
+
+  IF  (((P.LOOKUP(PTPTR+P.EPEAKL)\P.LOOKUP(PTPTR+P.ESUSTL))&1023)=0)
+  THEN RETURN 0;                     /* NO MEMORY NEEDED IF PK/SUST LEVEL IS 0 */
+
+  CALL ENCODE(PTPTR+P.COEF.LOC);     /* COMPUTE RANDOM # KEY FOR THIS COEFFICIENT LIST */
+
+  IF LSYN1.START<>LSYN1.END THEN DO; /* TRY TO LOAD INTO LSYN1,  IF ANY CHANNELS THERE (NONE IF 8 VOICE) */
+     I=LOOK.FOR(MEM1MSB,MEM1LSB);    /* SEE IF THIS WAVESHAPE IS IN LOGICAL SYNTHESIZER 1 */
+     IF I=0 THEN DO;                 /* NOT THERE - SEE IF FREE ONE */
+        I=FIND.FREE(MEM1USERS);      /* SEE IF FREE MEMORY IN LSYN1 */
+        IF I<>0 THEN DO;             /* USE IT - LOAD WAVE MEMORY */
+           CALL COMPUTE.WAVE;        /* COMPUTE WAVESHAPE INTO MISC.BUF */
+           CALL LOAD.OSYN.WMEM(1,I); /* LOAD WAVESHAPE INTO THIS MEMORY */
+        END;
+     END;
+     IF I<>0 THEN DO;                /* MEMORY WAS CORRECT OR LOADED  - INDICATE USED */
+        WRITE(MAM)=TBP;              /* POINT TO TIMBRE HEAD            */
+        WRITE(MAL)=TIM.WMEM#+PTL;    /* WAVE MEMORY # ENTRY             */
+        WRITE(MD )=I;                /* STORE IN LOWER HALF TO INDICATE LSYN1 */
+        CALL INCREMENT(MEM1USERS,I); /* COUNT ONE MORE USER */
+     END;
+  END;
+
+  IF LSYN2.START<>LSYN2.END THEN DO; /* TRY FOR LOGICAL SYNTHESIZER TWO */
+     I=LOOK.FOR(MEM2MSB,MEM2LSB);    /* SEE IF THIS WAVESHAPE IS IN LOGICAL SYNTHESIZER 2 */
+     IF I=0 THEN DO;                 /* NOT THERE - LOAD IF FREE ONE */
+        I=FIND.FREE(MEM2USERS);      /* SEE IF FREE MEMORY IN LSYN2 */
+        IF I<>0 THEN DO;             /* USE IT - LOAD WAVE MEMORY */
+           IF WAVE.COMPUTED=0 THEN CALL COMPUTE.WAVE; /* COMPUTE WAVESHAPE INTO MISC.BUF */
+           CALL LOAD.OSYN.WMEM(2,I); /* LOAD WAVESHAPE INTO THIS MEMORY IN LSYN2 */
+        END;
+     END;
+     IF I<>0 THEN DO;                  /* IF SO - USE */
+        WRITE(MAM)=TBP;                /* POINT TO TIMBRE HEAD            */
+        WRITE(MAL)=TIM.WMEM#+PTL;      /* WAVE MEMORY # ENTRY             */
+        WRITE(MD )=READ(MD)\SHL(I,8);  /* STORE IN UPPER HALF FOR LSYN2   */
+        IF READ(MD)<>SHL(I,8) THEN DO; /* BOTH MUST BE THERE              */
+           WRITE(MAL)=TIM.CAN.USE.BOTH+PTL;
+           WRITE(MD )=1;
+        END;
+        CALL INCREMENT(MEM2USERS,I);    /* COUNT ONE MORE USER */
+     END;
+  END;
+
+   #if (PRINT_WAVE)
+     // COULD COMPUTE WAVE FOR DEBUGGING
+     IF ((LSYN1.START==LSYN1.END) && (LSYN2.START==LSYN2.END)) COMPUTE.WAVE();
+   #endif
+
+  /* $PAGE - NO FREE MEMORIES - DIVIDE UP SYNTHESIZER BANK IF POSSIBLE */
+
+  WRITE(MAM)=TBP;                /* POINT TO TIMBRE HEAD            */
+  WRITE(MAL)=TIM.WMEM#+PTL;      /* WAVE MEMORY # ENTRY             */
+  IF READ(MD)=0 THEN DO;         /* OOPS - NO FREE WAVEMEMORIES - FIND PARTIAL USING BOTH SYNTHESIZERS */
+
+     I=PAR.NUMT-1;               /* START AT TOP - GIVES PRIORITY TO KEYBOARD */
+     J=0;
+
+     DO WHILE (I>=0)&(J=0);      /* LOOK FOR WAVE IN BOTH MEMORIES */
+        WRITE(MAM)=TIM.HEAD;     /* SEE IF TIMBRE USED */
+        WRITE(MAL)=I;
+        IF READ(MD)<>0 THEN DO;  /* TIMBRE HEAD EXISTS */
+           WRITE(MAM)=READ(MD);  /* POINT TO TIMBRE HEAD BLOCK */
+           DO K=0 TO NUM.PARTIALS-1;
+              WRITE(MAL)=TIM.WMEM#+K;
+              IF  ((READ(MD)&"000377")<>0)   /* WAVE MEM AVAIL IN BOTH SYNS */
+              AND ((READ(MD)&"177400")<>0)
+              THEN J=READ(MD);
+           END;
+        END;
+        I=I-1;
+     END;
+
+     IF I<0 THEN RETURN 1;  /* *** OOPS - NO WAVE MEMORIES AVAILABLE - WILL ALWAYS EXIT HERE FOR 8 VOICE IF OUT OF MEMORIES */
+
+     CALL COMPUTE.WAVE;             /* COMPUTE WAVESHAPE INTO MISC.BUF */
+
+     IF SYNTH.TOGGLE=0 THEN DO;     /* LOAD INTO LOGICAL SYNTH #1 */
+        J=J&255;                    /* WE WILL USE THIS MEMORY IN LOGICAL SYNTH #0 */
+        DO I=0 TO PAR.NUMT-1;
+           WRITE(MAM)=TIM.HEAD;     /* SEE IF TIMBRE USED */
+           WRITE(MAL)=I;
+           IF READ(MD)<>0 THEN DO;
+              WRITE(MAM)=READ(MD);  /* POINT TO TIMBRE HEAD BLOCK */
+              DO K=0 TO NUM.PARTIALS-1;
+                 WRITE(MAL)=TIM.WMEM#+K;
+                 IF (READ(MD)&255)=J THEN DO;
+                    WRITE(MD)=READ(MD)&"177400";
+                    CALL DECREMENT(MEM1USERS,J);
+                    WRITE(MAL)=TIM.CAN.USE.BOTH+K;
+                    WRITE(MD)=0;
+                 END;
+              END;
+           END;
+        END;
+        CALL LOAD.OSYN.WMEM(1,J); /* LOAD WAVESHAPE INTO THIS MEMORY */
+        CALL INCREMENT(MEM1USERS,J);   /* COUNT ONE MORE USER */
+        WRITE(MAM)=TBP;                /* POINT TO TIMBRE HEAD            */
+        WRITE(MAL)=TIM.WMEM#+PTL;      /* WAVE MEMORY # ENTRY             */
+        WRITE(MD )=J;                  /* STORE FOR USING */
+     END;
+     ELSE DO;                          /* LOAD INTO LOGICAL SNTH #2       */
+        J=J&"177400";                  /* WE WILL USE THIS MEMORY IN LOGICAL SYNTH #1 */
+        DO I=0 TO PAR.NUMT-1;
+           WRITE(MAM)=TIM.HEAD;        /* SEE IF TIMBRE USED */
+           WRITE(MAL)=I;
+           IF READ(MD)<>0 THEN DO;
+              WRITE(MAM)=READ(MD);     /* POINT TO TIMBRE HEAD BLOCK */
+              DO K=0 TO NUM.PARTIALS-1;
+                 WRITE(MAL)=TIM.WMEM#+K;
+                 IF (READ(MD)&"177400")=J THEN DO;
+                    WRITE(MD)=READ(MD)&255;
+                    CALL DECREMENT(MEM2USERS,SHR(J,8));
+                    WRITE(MAL)=TIM.CAN.USE.BOTH+K;
+                    WRITE(MD)=0;
+                 END;
+              END;
+           END;
+        END;
+        CALL LOAD.OSYN.WMEM(2,SHR(J,8)); /* LOAD WAVESHAPE INTO THIS MEMORY */
+        CALL INCREMENT(MEM2USERS,SHR(J,8));   /* COUNT ONE MORE USER */
+        WRITE(MAM)=TBP;                /* POINT TO TIMBRE HEAD            */
+        WRITE(MAL)=TIM.WMEM#+PTL;      /* WAVE MEMORY # ENTRY             */
+        WRITE(MD )=J;                  /* STORE FOR USING                 */
+     END;
+     SYNTH.TOGGLE=SYNTH.TOGGLE XOR 1; /* PREFER NEXT SYNTHESIZER NEXT TIME TOO */
+  END;
+
+  ELSE DO;            /* WAVE WAS IN AT LEAST ONE,  OR WAS LOADED INTO AT LEAST ONE */
+     I=READ(MD)&255;                     /* GET POSSIBLE WAVE # IN LSYN1 */
+     J=READ(MD)&"177400";                /* GET POSSIBLE WAVE # IN LSYN2 ,IN UPPER HALF */
+     IF WAVE.COMPUTED<>0 THEN DO;        /* IF WE COMPUTE A WAVE FORM - MOVE ON TO NEXT MEMORY FOR NEXT TIME */
+        STARTING.POINT=STARTING.POINT+1;
+        IF STARTING.POINT=24 THEN STARTING.POINT=0; /* ROTARY POINTER FOR NEXT TIME */
+     END;
+     IF (I<>0) AND (J<>0) THEN DO;    /* CHECK OTHER PARTIALS IF WE LOADED INTO BOTH LSYNS */
+        DO L=0 TO PAR.NUMT-1;
+           WRITE(MAM)=TIM.HEAD;        /* SEE IF TIMBRE USED */
+           WRITE(MAL)=L;
+           IF READ(MD)<>0 THEN DO;
+              WRITE(MAM)=READ(MD);     /* POINT TO TIMBRE HEAD BLOCK */
+              DO K=0 TO NUM.PARTIALS-1;
+                 WRITE(MAL)=TIM.WMEM#+K;
+                 IF READ(MD)=I THEN DO;     /* LOWER ONLY - NOW AVAILABLE IN LSYN2 */
+                    WRITE(MD)=READ(MD)\J;
+                    WRITE(MAL)=TIM.CAN.USE.BOTH+K;
+                    WRITE(MD )=1;
+                    CALL INCREMENT(MEM2USERS,SHR(J,8)); 
+                 END;
+                 IF READ(MD)=J THEN DO;     /* ONLY IN UPPER HALF - NOW IN BOTH */
+                    WRITE(MD)=READ(MD)\I;
+                    WRITE(MAL)=TIM.CAN.USE.BOTH+K;
+                    WRITE(MD )=1;
+                    CALL INCREMENT(MEM1USERS,I); 
+                 END;
+              END;
+           END;
+        END;
+     END;
+  END;
+
+  RETURN 0; /* NORMAL STATUS - WAVE MEMORY FOUND */
+
+END ALLOC.SYNTH.PARTIAL;
+
+/* $PAGE - CODE FOR 'ALLOC.PARTIAL' */
+
+/* ALLOC.PARTIAL RETURNS A STATUS VALUE DEPENDING UPON WHETHER OR NOT
+   IT WAS SUCCESSFUL IN SETTING UP THE DESIRED PARTIAL.
+        0  MEANS NO ERRORS OCCURRED.
+        1  MEANS YOU RAN OUT OF FM SYNTH WAVETABLES.
+        2  MEANS YOU RAN OUT OF MEMORY (MONO OR POLY).
+        4  MEANS SOME SOUND FILES WERE MISSING. 
+        5  MEANS YOU RAN OUT OF EXTERNAL MEMORY (TIM.HEAD, KBDTAB) */
+
+ALLOC.PARTIAL:PROC(TB,PTL) FIXED SWAPABLE;  /* SET UP ALLOCATION FOR SPECIFIED PARTIAL */
+  DCL (TB,PTL)         FIXED;               /* MUST CALL WITH GLOBAL 'PTPTR' SET UP */
+  DCL (TBP)            FIXED;
+
+  /* INTIALIZE */
+  /* HANDLE PATCH LIST MEMORY ALLOCATION */
+
+  WRITE(MAM)=TIM.HEAD;         /* POINT TO LOOK UP TABLE          */
+  WRITE(MAL)=TB;               /* POINT TO ENTRY                  */
+  TBP=READ(MD);                /* POINT TO TIMBRE HEAD            */
+
+  IF TBP=0 THEN DO;
+     CALL DISPLAY.ERR(14);     /* NOT ENOUGH ROOM IN EXT MEMORY   */
+     CALL NOMEM.ERROR;         /* NOT ENOUGH EXTERNAL MEMORY      */
+     RETURN 8;                 /* OUT OF KBD BLOCK MEMORY         */
+  END;
+
+  WRITE(MAM)=TBP;              /* POINT TO TIMBRE HEAD            */
+  WRITE(MAL)=TIM.PARTIAL.POINTERS+PTL;
+  PTPTR=READ(MD);              /* LOOK UP POINTER TO DESIRED PARTIAL */
+
+  WRITE(MAL)=TIM.SYNTH.TYP+PTL;
+  WRITE(MD )=0;                /* INIT SYNTH TYPE TO 0               */
+
+  WRITE(MAL)=TIM.WMEM#+PTL;    /* INIT WAVE # TO 0                   */
+  WRITE(MD )=0;
+
+  WRITE(MAL)=TIM.CAN.USE.BOTH+PTL;
+  WRITE(MD )=0;                /* INIT BOTH TO 0                     */
+
+  WAVE.COMPUTED=0;             /* INDICATE WAVE NOT YET COMPUTED     */
+  IF (P.LOOKUP(PTPTR)=SUP)     /* IF SUPPRESSED TIMBRE               */
+  THEN RETURN 0;               /* OK. NO MEMORY NEEDED               */
+
+  IF  (P.LOOKUP(PTPTR+NUM.PARAMS)=MOR)
+  AND ((P.LOOKUP(PTPTR+NUM.PARAMS+TYPE)=PT.TYPE)  /* DETECT A PATCH  TIMBRE */
+  OR   (P.LOOKUP(PTPTR+NUM.PARAMS+TYPE)=CU.TYPE)  /* DETECT A CUE    TIMBRE */
+  OR   (P.LOOKUP(PTPTR+NUM.PARAMS+TYPE)=EV.TYPE)) /* DETECT AN EVENT TIMBRE */
+  THEN RETURN ALLOC.PATCH.PARTIAL(TB,PTL,TBP);
+  ELSE RETURN ALLOC.SYNTH.PARTIAL(TB,PTL,TBP);
+
+END ALLOC.PARTIAL;
+
+/* $SUBTITLE  ROUTINES TO PERFORM A SPECIAL LOCK ON CURRENTLY ACTIVE SOUND FILES */
+
+LOCK.TIMBRE:  PROC(TB) SWAPABLE;    /* SETS BIT IN USERS FIELD FOR ONE TIMBRE */
+   DCL (TB,TBP,I,PTL,K) FIXED;
+
+   /* THE "100000" BIT IN THE USERS FIELD OF SOUND FILES IS SET
+   BY THIS ROUTINE IF THE SOUND IS USED IN THE SPECIFIED TIMBRE. */
+
+   IF INC.POLY=0 THEN RETURN;
+
+   WRITE(MAM)=TIM.HEAD;         /* POINT TO LOOK UP TABLE          */
+   WRITE(MAL)=TB;               /* POINT TO ENTRY                  */
+   TBP=READ(MD);                /* POINT TO TIMBRE HEAD            */
+
+   IF TBP=0 THEN RETURN;        /* NOT AVAILABLE                   */
+
+   DO PTL=0 TO NUM.PARTIALS-1;     /* LOOP OVER PARTIALS IN THIS TIMBRE  */
+
+      WRITE(MAM)=TBP;              /* POINT TO TIMBRE HEAD               */
+      WRITE(MAL)=TIM.PARTIAL.POINTERS+PTL;
+      I=READ(MD);                  /* LOOK UP POINTER TO DESIRED PARTIAL */
+
+      IF P.LOOKUP(I)<>SUP THEN DO;          /* PARTIAL IS POTENTIALLY ACTIVE */
+
+         IF ((P.LOOKUP(I+P.EPEAKL)\P.LOOKUP(I+P.ESUSTL))&1023)<>0
+         THEN DO;                           /* PARTIAL HAS NON-ZERO LEVEL */
+
+            I=I+NUM.PARAMS;                 /* STEP OVER REGULAR PARMS */
+
+            DO WHILE (P.LOOKUP(I     )=MOR)      /* HAVE A FRAME */
+               AND   (P.LOOKUP(I+TYPE)=PT.TYPE); /* AND IT'S A PATCH FRAME */
+
+               GET.NAME.FROM.PARTIAL(I);
+
+               IF FNBUF(1)<>0 THEN DO;           /* ONLY LOOK UP IF FILE SPECIFIED */
+                  FNBUF(0)=8;                    /* SET LENGTH TO 8 CHARACTERS (ZERO FILLED) */
+
+                  K=PS.SEARCH;                   /* SEE IF ALREADY IN POLY MEMORY */
+
+                  IF K<>0 THEN DO;               /* SOUND FILE ALREADY THERE */
+                     CALL PSMREAD(SFILE.BASE,0,BL.USERS); /* SET UP FOR READ OF USERS FIELD */
+                     IF (READ(PSD)&"100000")=0   /* IF SOUND NOT ALREADY LOCKED */
+                     THEN CALL PS.USERS(SFILE.BASE,"100000"); /* SET SPECIAL BIT */
+                  END;
+
+               END;                              /* HAVE A REAL FILE */
+               I=I+P.LOOKUP(I+CLEN);             /* ADVANCE PTR TO NEXT FRAME */
+            END;                                 /* OF LOOP THROUGH PATCH FRAMES */
+         END;                                    /* OF NON-ZERO LEVEL */
+      END;                                       /* OF PARTIAL IS NOT SUPPRESSED */
+   END;                                          /* OF LOOP OVER PARTIALS */
+END LOCK.TIMBRE;
+
+LOCK.ALL.TIMBRES:  PROC SWAPABLE; /* SETS BIT IN USERS FIELD FOR ALL TIMBRES */
+   DCL TB FIXED;
+
+   IF INC.POLY=0 THEN RETURN;
+
+   DO TB=0 TO PAR.NUMT-1;      /* LOOP THROUGH ALL TIMBRES */
+      CALL LOCK.TIMBRE(TB);
+   END;
+
+END LOCK.ALL.TIMBRES;
+
+UNLOCK.TIMBRES:  PROC SWAPABLE; /* CLEARS BIT IN USERS FIELD FOR SOUNDS IN POLYMEM */
+   DCL (J,K,BIN)    FIXED;
+   DCL (I,BASE) (1) FIXED;
+
+   /* THE "100000" BIT IN THE USERS FIELD OF ALL SOUND FILES IS CLEARED
+   BY THIS ROUTINE IF THE BIT IS SET. */
+
+   IF INC.POLY=0 THEN RETURN;
+
+   DO BIN=0 TO POLYNUMS-1;         /* LOOP OVER ALL BINS */
+      CALL SET.CUR.BIN(BIN);       /* POINT AT THIS BIN  */
+      CALL COPY32(PSFIRST,I);      /* START HERE         */
+      DO WHILE COM32(I,PSLAST) <> LW#IEQ;  /* STEP THROUGH ALL SOUND FILES IN POLYMEM */
+         CALL COPY32(I,BASE);      /* ADD BIN # TO PTR   */
+         BASE(LW#MSB) = BASE(LW#MSB) \ SHL(BIN,BASE#BIN_P);
+         CALL PSMREAD(BASE,0,0);   /* SET UP FOR READ    */
+         J=READ(PSD);              /* GET SECTOR LENGTH  */
+         K=READ(PSD);              /* AND USERS FIELD    */
+
+         IF K<0 THEN CALL PS.USERS(BASE,"100000"); /* TURN OFF BIT */
+
+         CALL ADD16(J,I);          /* STEP TO NEXT BLOCK IN MEMORY */
+      END;
+   END;                            /* OF LOOP OVER BINS  */
+END UNLOCK.TIMBRES;
+
+/* $PAGE - ALLOCATE A COMPLETE TIMBRE */
+
+DCL SOUND.FILE.MISSING FIXED PUBLIC;
+DCL ALLOC.STATUS       FIXED PUBLIC;
+
+/*  FIND.TRK RETURNS THE NUMBER OF THE FIRST TRACK FOUND USING THE
+ *  TIMBRE "TIM#".  -1 IS RETURNED IF NO SUCH TRACK EXISTS.
+ */
+FIND.TRK: PROC(TIM#) SWAPABLE;
+   DCL TIM# FIXED;                 /* TIMBRE NUMBER */
+   DCL I    FIXED;
+
+   DO I=0 TO MAX.TRACKS - 1;       /* SEARCH ALL TRACK HEADERS */
+      WRITE(MAM) = TRK.HEAD;
+      WRITE(MAL) = I;              /* POINT AT THIS TRACK */
+      IF READ(MD) <> 0 THEN DO;    /* IF A TRACK HEAD EXISTS FOR THIS ONE */
+         WRITE(MAM) = READ(MD);    /* LOOK IT UP */
+         WRITE(MAL) = THD.CTIMB;   /* FIND THE TIMBRE NUMBER IN IT */
+         IF READ(MD) = TIM#        /* IF IT MATCHES OURS */
+         THEN RETURN I;            /* RETURN THE TRACK NUMBER */
+      END;
+   END;
+   RETURN -1;                      /* NEVER FOUND IT */
+END FIND.TRK;
+
+ALLOC.SUB:PROC (TB) SWAPABLE; /* CALLED FROM HERE ONLY */
+   DCL (TB,PTL,TRK) FIXED;
+
+   TRK = FIND.TRK(TB);        /* GET 1ST TRACK HEAD USING THIS TIMBRE */
+   IF TRK <> -1               /* IF WE FOUND A TRACK */
+   THEN POLY.TOGGLE = TRK.HEAD.LOOKUP(TRK,THD.POLY);  /* GET POLY BIN TO USE */
+   ELSE POLY.TOGGLE = 0;                              /* ELSE DEFAULT TO BIN-0 */
+
+   IF (DIAGNOSTICS.ENABLED<>0) & (TB = 0) /* VOICE TEST FOR KBD TIMBRE */
+   THEN POLY.TOGGLE = SHR(XXXXCH,5);      /* COMPUTE BIN # BASED ON 4X CHANNEL */
+
+   IF POLY.TOGGLE >= POLYNUMS OR POLY.TOGGLE < 0 THEN POLY.TOGGLE = 0;  
+
+   DO PTL=0 TO NUM.PARTIALS-1;        /* ALLOCATE 4 PARTIALS */
+     ALLOC.STATUS=ALLOC.STATUS\ALLOC.PARTIAL(TB,PTL);
+   END;
+
+END ALLOC.SUB;
+
+ALLOC.TIMBRE:PROC(TB) FIXED PUBLIC SWAPABLE;  /* CALLED FROM MAIN LOOP         */
+   DCL TB FIXED;              /* TIMBRE TO ALLOCATE */
+
+   POLY.READ.ABORTED=0;            /* RESET FLAG                    */
+   ALLOC.STATUS=0;
+
+   /* 1. FIRST LOCK ANY EXISTING SOUND FILES NEEDED FOR THESE 4 PARTIALS */
+   IF INC.POLY THEN CALL LOCK.TIMBRE(TB);
+
+   /* 2. NOW GO AHEAD AND ALLOCATE NEW FILES */
+   CALL ALLOC.SUB(TB);        /* CALL MAIN SUB & RETURN STATUS */
+
+   /* 3. NOW UNLOCK THE SOUNDS FROM STEP 1. */
+   IF INC.POLY THEN CALL UNLOCK.TIMBRES;
+
+   // Present poly read aborted message
+   IF POLY.READ.ABORTED<>0
+   THEN DO;
+      CALL DISPLAY.ERR(30);        /* PRESENT ABORT MESSAGE */
+      IF (INC.POLY)&(ALLOC.STATUS&6)<>0 /* SET FLAG FOR NOW */
+      THEN SOUND.FILE.MISSING=1;
+      RETURN 1;
+   END;
+
+   // Present out of wave memories only if FM voices exist
+   ELSE IF ((ALLOC.STATUS&1)<>0)          /* IF NO FM WAVE TABLES FOUND */
+   AND      ((LSYN1.START <> LSYN1.END)   /* BUT SOME INSTALLED IN      */
+   OR        (LSYN2.START <> LSYN2.END))  /* SYSTEM                     */
+   THEN DO;
+      CALL DISPLAY.ERR(2);         /* THEN DISPLAY ERROR         */
+      RETURN 1;                    /* PRESENT NO OTHER MESSAGES */
+   END;
+
+   // Present sound file missing
+   ELSE IF (INC.POLY)&((ALLOC.STATUS&6)<>0) THEN DO;
+      SOUND.FILE.MISSING=1;
+      RETURN 1;                    /* PRESENT NO OTHER MESSAGES */
+   END;
+
+   // Fail silently if calling up FM timbre even if no FM voices. Allows debugging.
+   RETURN 0;
+END ALLOC.TIMBRE;
+
+ALLOC.ALL.TIMBRES:PROC FIXED PUBLIC SWAPABLE; /* PROCEDURE TO ALLOCATE ALL MEMORIES (IE SEQUENCE RECALL) */
+   DCL TB FIXED;
+
+   POLY.READ.ABORTED=0;              /* RESET FLAG       */
+   ALLOC.STATUS=0;                   /* ASSUME NO ERRORS */
+
+   /* 0. SET UP FLOPPY CACHE */
+
+   CALL SETUP.FLOPPY.CACHE;
+   CALL MOUNT.OPTICAL.VOLUME;         /* ALSO CACHE OPT DISK IF NEEDED */
+
+   /* 1. FIRST LOCK ANY EXISTING SOUND FILES NEEDED FOR ALL 18 TIMBRES */
+   IF INC.POLY THEN CALL LOCK.ALL.TIMBRES;
+
+   /* 2. NOW GO AHEAD AND ALLOCATE NEW FILES */
+   DO TB=0 TO PAR.NUMT-1;       /* LOOP OVER ALL TIMBRES IN PAR.PTR */
+      CALL ALLOC.SUB(TB);       /* ALLOCATE WAVE MEMORY/SET UP FILE INFO */
+   END;
+
+   FLOPPY.CACHE.VALID=0;             /* ERASE FLOPPY CACHE AFTER ALLOCATE */
+   CALL DISABLE_CACHE(FLOPPY.CACHE.NUM); /* DISABLE CACHE */
+   OPTICAL.DISK.READY=0;
+
+   /* 3. NOW UNLOCK THE SOUNDS FROM STEP 1. */
+   IF INC.POLY THEN CALL UNLOCK.TIMBRES;
+
+   IF POLY.READ.ABORTED<>0
+   THEN DO;
+      CALL DISPLAY.ERR(30);          /* PRESENT ABORT MESSAGE */
+      BOTH.DISPLAY=0;                /* BUT NOT ON BOTH LINES */
+      IF NEW.PAN<>0 THEN             /* NEW PAN ONLY          */
+      CALL DISPLAY.NUMB.LEFT;        /* PUT # LEFT ON LOWER   */
+      IF (INC.POLY)&(ALLOC.STATUS&6)<>0 /* SET FLAG FOR NOW */
+      THEN SOUND.FILE.MISSING=1;
+      RETURN 1;
+   END;
+   ELSE IF ALLOC.STATUS<>0 THEN DO;
+      IF  ((ALLOC.STATUS&1)<>0)         /* IF NO FM WAVE TABLES FOUND */
+      AND ((LSYN1.START <> LSYN1.END)   /* BUT SOME INSTALLED IN      */
+      OR   (LSYN2.START <> LSYN2.END))  /* SYSTEM                     */
+      THEN CALL DISPLAY.ERR(3);         /* THEN DISPLAY ERROR         */
+      IF (INC.POLY)&(ALLOC.STATUS&6)<>0 /* SET FLAG FOR NOW */
+      THEN SOUND.FILE.MISSING=1;
+      RETURN 1;                      /* PRESENT NO OTHER MESSAGES */
+   END;
+
+   RETURN 0;
+END ALLOC.ALL.TIMBRES;
+
+DEALLOC.ALL:PROC PUBLIC SWAPABLE;    /* PROCEDURE TO DEALLOCATE ALL TIMBRES */
+   DCL TB FIXED;
+
+   DO TB=0 TO PAR.NUMT-1;            /* ALL TIMBRES IN PAR.PTR */
+      CALL DEALLOC(TB);
+   END;
+
+END DEALLOC.ALL;
+
+
+/* $PAGE - ALLOCATE AND PRECOMPUTE ALL TIMBRES IN MEMORY */
+
+
+ALLOC.AND.COMPUTE:PROC PUBLIC SWAPABLE;
+   DCL TB FIXED;
+
+   DO TB=0 TO PAR.NUMT-1;
+      CALL ALLOC.TIMBRE      (TB);
+      CALL COMPUTE.ENV.PARAMS(TB);
+      CALL COMPUTE.LOGS      (TB);
+      CALL COMPUTE.RBITS     (TB);
+   END;
+
+   CALL COMPUTE.VOLUME.LEVELS;
+   CALL COMPUTE.MISC.INFO;
+   CALL COMPUTE.ACTIVE.TRKS;
+   CALL COMPUTE.RTE.BUTTONS;
+
+END ALLOC.AND.COMPUTE;
+

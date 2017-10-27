@@ -1,0 +1,1291 @@
+/* EDITPRIM  $TITLE  Primitive Functions for Sequence Editing
+
+   Modified:
+   12/15/91 - PF  - Made PUNCH.NOTES.FROM.TRK public
+   01/30/91 - MWH - Report which tracks have had new notes
+   01/09/91 - PF  - various bug fixes for sequencer and MIDInet
+   07/10/90 - PF  - Init REAL.TIME.OF.NEXT.CLICK in QUICK.PLAY.INIT
+   01/14/87 - TS  - FIXED ANOTHER BUG IN DELETE.TIME.AT.POINT (M-BETA VERSION)
+   12/01/86 - TS  - FIXED BUG IN DELETE.TIME.AT.POINT & MOVED CHAIN.TRACKS TO NEW FILE
+   11/23/86 - TS  - MADE SOME CHANGES TO CHAIN PROCEDURE
+   11/19/86 - TS  - ADDED SOME ERROR RECOVERY TO CHAIN/INSERT/DELETE
+   11/14/86 - TS  - FIXED SOME PROBLEMS IN CHAIN.TRACKS
+   11/13/86 - TS  - ADDED CHAIN.TRACKS ROUTINE
+   11/05/86 - TS  - PUT TOGETHER A TRACK GARBAGE COLLECT ROUTINE & BEGAN DELETE ROUTINES
+   11/04/86 - EG  - FIXED BUG IN INSERT.TIME.AT.POINT
+   11/03/86 - TS  - ADDED ILP CHECK TO INSERT.TIME.ON.TRK/DELETE.TIME.FROM.TRK
+   09/26/86 - eeg - created this file
+*/
+
+dcl Edit.Error  fixed public; /* global error flag usable by edit routines */
+dcl Quick.Edits fixed;        /* set flag to do edits as quickly as possible */
+
+UNLINK.NLS.FROM.TRACK:  PROC (SEC) SWAPABLE; /* REMOVES NLS FROM TRACK AND PUTS ONTO FREE LIST */
+   DCL SEC     FIXED;             /* RELATIVE PTR TO NLS TO FREE UP */
+   DCL (FP,RP) FIXED;
+   DCL TRK     FIXED;
+
+   IF SEC=0 THEN RETURN;          /* IN CASE SECTOR IS NOT ALLOCATED */
+
+   WRITE(MAM)=NAH.PTR+SEC;        /* POINT AT NLS TO FREE UP */
+   FP=READ(MDI);                  /* GET ITS NLS.FOR PTR     */
+   RP=READ(MDI);                  /* AND ITS NLS.REV PTR     */
+   TRK=READ(MD );                 /* AND ITS NLS.TRK #       */
+
+   CALL DEALLOCATE.NAH.BLOCK(SEC);   /* PUT BLOCK BACK ONTO FREE LIST */
+
+   WRITE(MAM)=NAH.PTR+RP;         /* BACK UP TO NLS.REV - MAY POINT TO TRACK HEAD */
+   WRITE(MD )=FP;                 /* NEW FP (MAY BE 0)   (MAY BE STORING IN THD HERE) */
+
+   IF FP<>0 THEN DO;              /* UPDATE BACK POINTER */
+      WRITE(MAM)=NAH.PTR+FP;
+      WRITE(MAL)=NLS.REV;
+      WRITE(MD )=RP;              /* RP MAY  POINT TO THD        */
+   END;
+
+   WRITE(MAM)=TRK.HEAD;           /* POINT AT OUR TRK HEAD       */
+   WRITE(MAL)=TRK;
+   WRITE(MAM)=READ(MD);
+   WRITE(MAL)=THD.NUM.NLS;        /* AND DECREMENT THE NUMBER OF */
+   WRITE(MD )=READ(MD)-1;         /* NOTE SEGMENTS ON OUR TRK    */
+
+END UNLINK.NLS.FROM.TRACK;
+
+GET.THD.PTR:  PROC (TRK) FIXED SWAPABLE; /* RETURNS ABS PTR TO TRK */
+   DCL TRK FIXED;
+   WRITE(MAM)=NAH.PTR; WRITE(MAL)=TRK;
+   IF READ(MD)=0
+   THEN RETURN 0;                 /* NO TRK HEAD */
+   ELSE RETURN NAH.PTR+READ(MD);
+END GET.THD.PTR;
+
+QUICK.PLAY.INIT: PROC (THD.PTR) SWAPABLE; /* DOES A QUICK PLAY.INITIALIZE TYPE PROCEDURE */
+   DCL THD.PTR       FIXED;      /* ABS TRK HEAD PTR FOR DESIRED TRK */
+   DCL SAVE.MARK.MSB FIXED;      /* KLUDGE TO SPEED UP INIT CALL */
+
+   IF THD.PTR = 0 THEN RETURN;
+
+   SAVE.MARK.MSB=MARK.BUTTON.MSB;
+   MARK.BUTTON.MSB=1;            /* WILL MAKE INIT CALL FASTER */
+
+   PLAY.TIME.MSB  = 0;           /* INITIALIZE TIME TO START */
+   PLAY.TIME.LSB  = 0;
+   PLAY.TIME.ACU  = 0;
+   NEXT.CLICK     = ZERO.TIME;   /* FIRST CLICK AT SCRIPT 0.000 */
+   NEXT.SEQ.EVENT = ZERO.TIME;
+   BEAT.NUMBER    = 0;           /* INCREMENTED TO 1 WHEN SEQ STARTS */
+
+   PRIOR.CLICK.MSB = 0;          /* SEQ TIMES OF PRIOR AND NEXT CLICK */
+   PRIOR.CLICK.LSB = 0;
+   NEXT.CLICK.MSB  = 0;
+   NEXT.CLICK.LSB  = ZERO.TIME;
+
+   REAL.TIME.OF.NEXT.CLICK.MSB=0;
+   REAL.TIME.OF.NEXT.CLICK.LSB=ZERO.TIME;
+
+   NEXT.EVENT.QUEUE=0;           /* START WITH EMPTY LIST */
+
+   CALL INIT.TRACK.HEAD.FOR.PLAY(THD.PTR); /* SET UP TRK HEAD, MOSTLY */
+
+   WRITE(MAM)=THD.PTR;
+   WRITE(MAL)=THD.TRK;
+   #TRK=READ(MD);
+   #PTR=THD.PTR;
+   CALL LOAD.#.INFO (THD.NMSB);    /* COPY PLAY INFO ONTO */
+   CALL STORE.#.INFO(THD.LP.NMSB); /* LOOP PLAY INFO      */
+
+   MARK.BUTTON.MSB=SAVE.MARK.MSB; /* RESTORE TO ORIGINAL VALUE */
+END QUICK.PLAY.INIT;
+
+/* $SUBTITLE  ROUTINE TO CLEAN UP/COMPRESS NLS'S ON A TRACK */
+
+
+GARBAGE.COLLECT.TRK: PROC(TRK) PUBLIC SWAPABLE; /* CLEANS UP AN ENTIRE TRACK */
+   DCL (TRK)             FIXED;  /* TRACK TO GARBAGE COLLECT          */
+   DCL (RLEN)            FIXED;
+   DCL (OURFP,OURLP)     FIXED STATIC;
+   DCL (PRIORSEC)        FIXED;
+   DCL (PRIORFP,PRIORLP) FIXED;
+   DCL (K)               FIXED;
+
+   SLIDE.DOWN:PROC;
+      CALL COPY.EXT.MEM(NAH.PTR+#SEC, OURFP,
+                        NAH.PTR+#SEC, NLS.FIRSTL,OURLP-OURFP);
+
+      WRITE(MAM)=NAH.PTR+#SEC;
+      WRITE(MAL)=NLS.FP;
+      WRITE(MDI)=NLS.FIRSTL;
+      WRITE(MD )=NLS.FIRSTL+(OURLP-OURFP);
+      WRITE(MAL)=READ(MD);
+      WRITE(MD )=NLS.EOS;
+
+      #WRD = 0;                /* FUDGE CALL TO ADJUST.SEQUENCER.PTRS */
+      CALL ADJUST.SEQUENCER.PTRS(#SEC,NLS.FIRSTL-OURFP);
+   END SLIDE.DOWN;
+
+
+   WRITE(MAM)=TRK.HEAD;                /* SEE IF TRACK HAS A TRK HEAD */
+   WRITE(MAL)=TRK;
+   #PTR=READ(MD);                      /* SAVE PTR TO TRK HEAD        */
+
+   IF #PTR=0 THEN RETURN;              /* TRACK HAS NO HEADER         */
+
+   #TRK=TRK;
+   WRITE(MAM)=#PTR;
+   #SEC=READ(MD);                      /* GET PTR TO FIRST NLS (THD.FOR) */
+
+   IF #SEC=0 THEN RETURN;              /* TRACK HAS NO NLS'S */
+
+
+   /* SKIP OVER FULL NLS'S AT FRONT OF TRACK */
+
+   WRITE(MAM)=NAH.PTR+#SEC;            /* POINT TO 1ST NLS ON TRK */
+   WRITE(MAL)=NLS.FP;
+
+   DO WHILE (#SEC    <>0         )     /* NOT AT END OF TRK          */
+   AND      (READ(MDI)=NLS.FIRSTL)     /* BOTH NLS.FP & NLS.LP ARE   */
+   AND      (READ(MD )>NLS.LAST  );    /* SET TO INDICATE A FULL NLS */
+
+      WRITE(MAL)=NLS.FOR;              /* LOOKUP PTR TO NEXT NLS     */
+      #SEC=READ(MD);                   /* SAVE IN TEMP               */
+      WRITE(MAM)=NAH.PTR+#SEC;         /* POINT AT NEXT NLS          */
+      WRITE(MAL)=NLS.FP;
+
+   END;                                /* OF SKIP OVER FULL NLS'S */
+
+   IF #SEC=0 THEN RETURN;              /* ENTIRE TRACK IS COMPACTED */
+
+
+   /* $PAGE */
+
+
+   /* Create a system event when garbage collecting a track since */
+   /* the pointers to certain notes may change:                   */
+
+   NEW.SEQ.INFO = NEW.SEQ.INFO \ 4;
+
+   WRITE(MAL)=NLS.FP;
+   OURFP=READ(MDI);
+   OURLP=READ(MD );
+
+   WRITE(MAL)=NLS.FP;                  /* RESTORE PTR */
+   IF  (READ(MD)<>NLS.FIRSTL)          /* NLS DOES NOT START AT FIRST LOC */
+   AND (READ(MDI)<>READ(MDI))          /* AND NLS IS NOT EMPTY            */
+   THEN CALL SLIDE.DOWN;               /* SLIDE NLS CONTENTS DOWN         */
+
+   PRIORLP=NLS.LAST+1;                 /* INITIAL CONDITION FORCES SETTING OF PRIORSEC */
+
+   DO WHILE #SEC<>0;                   /* LOOP UNTIL WE HIT END OF TRACK */
+
+      TOP.OF.LOOP:
+
+      /* 1. IF CURRENT NLS IS EMPTY, JUST FREE IT UP */
+
+      WRITE(MAM)=NAH.PTR+#SEC;
+      WRITE(MAL)=NLS.FP;
+
+      DO WHILE READ(MDI)=READ(MDI);    /* FREE UP EMPTY NLS'S (NLS.FP=NLS.LP) */
+         WRITE(MAL)=NLS.FOR;
+         #SEC=READ(MD);                /* OUR NEXT NLS */
+
+         CALL UNLINK.NLS.FROM.TRACK(READ(MAM)-NAH.PTR); /* FREE UP CURRENT ONE */
+
+         IF #SEC=0 THEN RETURN;        /* ALL DONE - END OF TRK */
+
+         WRITE(MAM)=NAH.PTR+#SEC;
+         WRITE(MAL)=NLS.FP;
+      END;
+
+      WRITE(MAL)=NLS.FP;               /* RESTORE PTR */
+      OURFP=READ(MDI);
+      OURLP=READ(MD );
+
+      IF OURFP<>NLS.FIRSTL             /* NLS DOES NOT START AT FIRST LOC */
+      THEN CALL SLIDE.DOWN;            /* SLIDE NLS CONTENTS DOWN         */
+
+      WRITE(MAM)=NAH.PTR+#SEC;
+
+      IF PRIORLP>NLS.LAST THEN DO;     /* SET PRIOR NLS TO CURRENT NLS */
+         PRIORSEC=#SEC;
+         WRITE(MAL)=NLS.FOR;           /* LOOKUP FORWARD PTR       */
+         #SEC=READ(MD);                /* GET NLS.FOR FOR NEXT NLS */
+         WRITE(MAL)=NLS.FP;
+         PRIORFP=READ(MDI);            /* SAVE NLS.FP */
+         PRIORLP=READ(MD );            /* SAVE NLS.LP */
+
+         IF #SEC=0 THEN RETURN;        /* ALL DONE - END OF TRK */
+
+         GOTO TOP.OF.LOOP;             /* START AGAIN */
+
+      END;
+
+      WRITE(MAL)=NLS.FP;
+      OURFP=READ(MDI);                 /* SAVE NLS.FP */
+      OURLP=READ(MD );                 /* SAVE NLS.LP */
+
+
+      /* 2. PUT ENTIRE CURRENT NLS INTO PRIOR NLS IF IT WILL FIT */
+
+      WRITE(MAL)=OURLP-1;           /* COMPUTE LENGTH OF LAST NOTE */
+      IF ((READ(MD)&"77")=VEL.NOTE) /* RECORD IN CURRENT NLS       */
+      THEN RLEN=4;
+      ELSE RLEN=2;
+
+      /* $PAGE */
+
+      IF (PRIORLP+(OURLP-OURFP)) <= (NLS.LAST+RLEN)
+      THEN DO;                    /* COMBINE CURRENT NLS INTO PRIOR NLS */
+
+         CALL COPY.EXT.MEM(NAH.PTR+#SEC    ,OURFP  ,
+                           NAH.PTR+PRIORSEC,PRIORLP,OURLP-OURFP);
+
+         WRITE(MAM)=NAH.PTR+PRIORSEC;
+         WRITE(MAL)=NLS.LP;
+         WRITE(MD )=PRIORLP+(OURLP-OURFP);
+         WRITE(MAL)=READ(MD);
+         WRITE(MD )=NLS.EOS;
+
+         #WRD = 0;                /* FUDGE CALL TO ADJUST.SEQUENCER.PTRS */
+         CALL ADJUST.SEQUENCER.PTRS(PRIORSEC,PRIORLP-OURFP);
+
+         WRITE(MAM)=NAH.PTR+#SEC;    /* GET PTR TO NEXT NLS */
+         #SEC=READ(MD);              /* SAVE NLS.FOR           */
+
+         CALL UNLINK.NLS.FROM.TRACK(READ(MAM)-NAH.PTR); /* FREE UP CURRENT NLS */
+
+         PRIORLP=PRIORLP+(OURLP-OURFP); /* ENDING VALUE FOR PRIOR NLS */
+
+      END;  /* OF COPY ALL OF CURRENT NLS INTO PRIOR NLS */
+
+
+      /* 3. COPY NOTES FROM CURRENT NLS INTO PRIOR NLS TO FILL PRIOR */
+
+      ELSE IF PRIORLP<=NLS.LAST   /* SEE IF PART OF NLS WILL */
+      THEN DO;                    /* FIT INTO PRIOR NLS      */
+
+         WRITE(MAM)=NAH.PTR+#SEC; /* LOOK AT THIS NLS        */
+         RLEN=0;                  /* INIT LENGTH TO COPY     */
+         DO WHILE (RLEN+PRIORLP) ILE NLS.LAST; /* LOOP WHILE MORE ROOM IN PRIOR NLS */
+            WRITE(MAL)=OURFP+RLEN;
+            IF READ(MD) THEN RLEN=RLEN+4;
+            ELSE             RLEN=RLEN+2;
+         END;
+         
+         CALL COPY.EXT.MEM(NAH.PTR+#SEC    ,OURFP,
+                           NAH.PTR+PRIORSEC,PRIORLP, RLEN);
+
+         WRITE(MAM)=NAH.PTR+PRIORSEC;
+         WRITE(MAL)=NLS.LP;
+         WRITE(MD )=PRIORLP+RLEN;
+         WRITE(MAL)=READ(MD);
+         WRITE(MD )=NLS.EOS;
+
+         CALL COPY.EXT.MEM(NAH.PTR+#SEC,OURFP+RLEN,
+                           NAH.PTR+#SEC,NLS.FIRSTL,OURLP-(OURFP+RLEN));
+
+         WRITE(MAM)=NAH.PTR+#SEC;
+         WRITE(MAL)=NLS.FP;
+         WRITE(MDI)=NLS.FIRSTL;
+         WRITE(MD )=NLS.FIRSTL+(OURLP-(OURFP+RLEN));
+         WRITE(MAL)=READ(MD);
+         WRITE(MD )=NLS.EOS;
+
+         #WRD = 0;                /* FUDGE CALL TO ADJUST.SEQUENCER.PTRS */
+         CALL ADJUST.SEQUENCER.PTRS(PRIORSEC,PRIORLP-OURFP);
+
+         K=#SEC;                  /* SAVE TEMPORARILY                    */
+         #SEC = PRIORSEC;         /* FOR CALL TO ADJUST.SEQUENCER.PTRS   */
+         #WRD = PRIORLP+RLEN-1;
+
+         CALL ADJUST.SEQUENCER.PTRS(K,NLS.FIRSTL-PRIORLP);
+
+         #SEC = K;                /* RESTORE */
+         PRIORLP=NLS.LAST+1;      /* FORCE RESETTING OF PRIORSEC ABOVE */
+
+      END;                        /* OF COPY FROM CURRENT NLS INTO PRIOR UNTIL PRIOR IS FULL */
+
+   END;                           /* OF LOOP UNTIL WE HIT END OF TRACK */
+END GARBAGE.COLLECT.TRK;
+
+
+/* $SUBTITLE */
+
+
+GET.TRK.HEAD.PTR:  PROC (TRK) FIXED SWAPABLE;
+   DCL TRK FIXED;
+
+   WRITE(MAM)=TRK.HEAD;          /* SEE IF TRK HEADER EXISTS   */
+   WRITE(MAL)=TRK;
+
+   IF READ(MD)<>0
+   THEN RETURN READ(MD);         /* TRK HEAD EXISTS - RETURN ABS PTR TO IT */
+   ELSE RETURN ALLOCATE.TRK.HEADER(TRK); /* TRY TO GET ONE */
+
+END GET.TRK.HEAD.PTR;
+
+
+STEP.TO.TIME:  PROC (MSB,LSB) PUBLIC SWAPABLE;
+   DCL (MSB,LSB) FIXED;
+
+   DO WHILE ((#ANYR<>0))          /* HAVE NOT HIT START OF TRK */
+   AND      (((MSB ILT #LMSB))    /* AND OUR TIME IS BEFORE    */
+   OR        ((MSB  =  #LMSB)     /* CURRENT LAST EVENT TIME   */
+   AND        (LSB ILE #LLSB)));
+      CALL BACKUP.TO.PRIOR.NOTE;  /* KEEPS # INFO CORRECT      */
+   END;
+
+   DO WHILE ((#ANYF<>0))          /* HAVE NOT HIT END OF TRK   */
+   AND      (((MSB IGT #NMSB))    /* OUR TIME IS BEYOND        */
+   OR        ((MSB  =  #NMSB)     /* CURRENT NEXT EVENT TIME   */
+   AND        (LSB IGT #NLSB)));
+      CALL ADVANCE.TO.NEXT.NOTE;  /* STEP FORWARD BY ONE NOTE  */
+   END;
+
+END STEP.TO.TIME;
+
+
+COMPARE.SEQ.PTRS: PROC(SEC1,WRD1,SEC2,WRD2) SWAPABLE;
+   DCL (SEC1,WRD1,SEC2,WRD2) FIXED;
+
+   /*
+      RETURNS:
+               +1 IF (SEC1,WRD1) > (SEC2,WRD2)
+                0 IF THEY ARE EQUAL
+               -1 IF (SEC1,WRD1) < (SEC2,WRD2)
+   */
+
+   IF (SEC1=SEC2) THEN DO;
+      IF      (WRD1=WRD2) THEN RETURN 0;
+      ELSE IF (WRD1>WRD2) THEN RETURN (1);
+      ELSE RETURN (-1);
+   END;
+
+   WRITE(MAM)=NAH.PTR+SEC1;
+   WRITE(MAL)=NLS.REV;
+   DO WHILE (READ(MD)<>0);
+      IF (READ(MD)=SEC2)
+      THEN RETURN (1);     /*  SEC2 BEFORE SEC1 */
+      
+      WRITE(MAM)=NAH.PTR+READ(MD);
+      WRITE(MAL)=NLS.REV;
+   END;
+   RETURN (-1);              /* HIT BEGINNING, SO SEC2 MUST BE AFTER SEC1 */
+END COMPARE.SEQ.PTRS;
+
+
+/* $SUBTITLE  ADJUST.PTRS ROUTINE */
+
+
+ADJUST.PTRS:  PROC (PTR,MSB,LSB) SWAPABLE; /* MOVES LOOP/PLAY PTRS AFTER SLIDING TRK */
+   DCL (PTR)     FIXED; /* PASSED EITHER THD.NMSB, OR THD.LP.NMSB */
+   DCL (MSB,LSB) FIXED; /* CORRESPONDING TIME (ADVANCED TIME OR LOOP TIME) */
+
+   /* NOTE: ROUTINE ASSUMES #TRK & #PTR HAVE ALREADY BEEN SET UP */
+
+   CALL LOAD.#.INFO(PTR);    /* RELOAD # VARS */
+   WRITE(MAM)=NAH.PTR+#SEC;
+   WRITE(MAL)=#WRD;
+
+   DO WHILE ((READ(MD)&"174001")<>"110001")       /* HAVE NOT HIT AN ILP END RECORD */
+      AND   (#ANYF<>0)                            /* LOOP WHILE MORE NOTES */
+      AND   ( (#NMSB ILT MSB)  /* AND WE SHOULD HAVE ALREADY PLAYED THIS NOTE */
+      OR     ((#NMSB  =  MSB)
+      AND     (#NLSB ILT LSB)));
+
+      CALL ADVANCE.TO.NEXT.NOTE;
+
+   END;
+
+   DO WHILE ((READ(MD)&"174001")<>"104001")       /* HAVE NOT HIT AN ILP START RECORD */
+      AND   (#ANYR<>0)                            /* LOOP WHILE MORE NOTES */
+      AND   ( (#LMSB IGT MSB)  /* AND IT IS NOT TIME */
+      OR     ((#LMSB  =  MSB)  /* TO PLAY THIS NOTE YET */
+      AND     (#LLSB IGT LSB)));
+
+      CALL BACKUP.TO.PRIOR.NOTE;
+
+   END;
+
+   CALL STORE.#.INFO(PTR);
+
+END ADJUST.PTRS;
+
+
+/* $SUBTITLE  ADJUST.TIMES */
+
+ADJUST.TIMES:  PROC (EDIT.MSB,EDIT.LSB,XLEN.MSB,XLEN.LSB,XPOSITIVE) SWAPABLE; /* ADDS IN DIST TO TRK HEAD EVENT TIMES */
+   DCL (EDIT.MSB,EDIT.LSB) FIXED;   /* TIME OF INSERT */
+   DCL (XLEN.MSB,XLEN.LSB) FIXED;     /* LENGTH OF INSERTION */
+   DCL (XPOSITIVE)         FIXED;     /* 1 IF TIME INSERTED, 0 IF TIME DELETED */
+   DCL (LEN.MSB,LEN.LSB)   FIXED STATIC;     /* LENGTH OF INSERTION */
+   DCL (POSITIVE)          FIXED STATIC;     /* 1 IF TIME INSERTED, 0 IF TIME DELETED */
+   DCL (S,W)               FIXED;
+
+   ADJUST: PROC(PTR); 
+      DCL PTR FIXED;  /* MAL POINTER TO A 32 BIT TIME (MSB,LSB)    */
+
+      IF POSITIVE=0 THEN DO;
+         WRITE(MAL)=PTR+1;                  /* POINT AT LSB      */
+         IF READ(MD) ILT LEN.LSB THEN DO;   /* NEED TO BORROW    */
+            WRITE(MAL)=PTR;                 /* POINT AT MSB      */
+            WRITE(MD)=READ(MD)-1;           /* BORROW FROM IT    */
+         END;
+         ELSE WRITE(MAL)=PTR;               /* POINT AT MSB      */
+
+         WRITE(MDI)=READ(MD)-LEN.MSB;       /* SUBTRACT LENGTH   */
+         WRITE(MD )=READ(MD)-LEN.LSB;
+
+         WRITE(MAL)=PTR;                    /* CHECK FOR UNDERFLOW */
+         IF (READ(MD) IGT LEN.MSB)
+         OR ((READ(MDI) = LEN.MSB)
+         AND (READ(MD ) IGT LEN.LSB))
+         THEN DO;
+            WRITE(MAL)=PTR;                 /* LIMIT TO ZERO       */
+            WRITE(MDI)=0; 
+            WRITE(MD )=0;
+         END;
+      END;
+      ELSE DO;
+         WRITE(MAL)=PTR;
+         WRITE(MDI)=READ(MD ) + LEN.MSB;
+         WRITE(MD )=READ(MD ) + LEN.LSB;
+         IF READ(MD) ILT LEN.LSB THEN DO;
+            WRITE(MAL)=PTR;
+            WRITE(MD)=READ(MD)+1;
+         END;
+         ELSE WRITE(MAL)=PTR;
+
+         IF (READ(MD) ILT LEN.MSB)     /* CHECK FOR OVERFLOW */
+         OR ((READ(MDI) = LEN.MSB)
+         AND (READ(MD) ILT LEN.LSB)) THEN DO;
+            WRITE(MAL)= PTR;
+            WRITE(MDI)= -1;
+            WRITE(MD) = -1;
+         END;
+      END;
+
+   END ADJUST;
+
+   LEN.MSB = XLEN.MSB;  /* SAVE IN LOCAL STATICS */
+   LEN.LSB = XLEN.LSB;
+   POSITIVE = XPOSITIVE;
+
+   WRITE(MAM)=#PTR;                /* RESTORE PTR TO TRACK HEAD      */
+   WRITE(MAL)=THD.WRD;
+   W=READ(MDI); S=READ(MD);
+   IF COMPARE.SEQ.PTRS(#SEC,#WRD,S,W)<=0 THEN DO;
+      WRITE(MAM)=#PTR;             /* RESTORE PTR TO TRACK HEAD      */
+      CALL ADJUST(THD.NMSB);       /* ADJUST PLAY TIMES              */
+      IF #ANYF<>0 THEN DO;
+         CALL ADVANCE.TO.NEXT.NOTE;
+         IF COMPARE.SEQ.PTRS(#SEC,#WRD,S,W)<=0 THEN DO;
+            WRITE(MAM)=#PTR;             /* RESTORE PTR TO TRACK HEAD      */
+            CALL ADJUST(THD.LMSB);       /* ADJUST PLAY TIMES              */
+         END;
+         CALL BACKUP.TO.PRIOR.NOTE;
+      END;
+   END;
+
+   WRITE(MAM)=#PTR;                /* RESTORE PTR TO TRACK HEAD      */
+   WRITE(MAL)=THD.LP.WRD;
+   W=READ(MDI); S=READ(MD);
+   IF COMPARE.SEQ.PTRS(#SEC,#WRD,S,W)<=0 THEN DO;
+      WRITE(MAM)=#PTR;                /* RESTORE PTR TO TRACK HEAD      */
+      CALL ADJUST(THD.LP.NMSB);       /* ADJUST LOOP PLAY TIMES              */
+      IF #ANYF<>0 THEN DO;
+         CALL ADVANCE.TO.NEXT.NOTE;
+         IF COMPARE.SEQ.PTRS(#SEC,#WRD,S,W)<=0 THEN DO;
+            WRITE(MAM)=#PTR;          /* RESTORE PTR TO TRACK HEAD      */
+            CALL ADJUST(THD.LP.LMSB); /* ADJUST LOOP PLAY TIMES              */
+         END;
+         CALL BACKUP.TO.PRIOR.NOTE;
+      END;
+   END;
+
+   WRITE(MAM)=#PTR;                 /* RESTORE PTR TO TRACK HEAD      */
+   WRITE(MAL)=THD.ILP;
+   IF READ(MD)<>0 THEN DO;
+      WRITE(MAL)=THD.ILS.WRD;
+      W=READ(MDI); S=READ(MD);
+      IF COMPARE.SEQ.PTRS(#SEC,#WRD,S,W)<=0 THEN DO; /* IF CHANGE IS AT OR BEFORE LOOP START */
+         WRITE(MAM)=#PTR;              /* RESTORE PTR TO TRACK HEAD      */
+         CALL ADJUST(THD.COUNTIN.MSB); /* ADJUST  ILP COUNTIN LEN        */
+      END;
+      IF COMPARE.SEQ.PTRS(#SEC,#WRD,S,W)>0 THEN DO; /* IF CHANGE IS AFTER LOOP START */
+         WRITE(MAM)=#PTR;                 /* RESTORE PTR TO TRACK HEAD      */
+         WRITE(MAL)=THD.ILE.WRD;
+         W=READ(MDI); S=READ(MD);
+         IF COMPARE.SEQ.PTRS(#SEC,#WRD,S,W)<=0 THEN DO; /* IF CHANGE IS AT OR BEFORE LOOP END */
+            WRITE(MAM)=#PTR;              /* RESTORE PTR TO TRACK HEAD      */
+            CALL ADJUST(THD.LOOPLEN.MSB); /* ADJUST  ILP LOOPLEN LEN     */
+         END;
+      END;
+   END;
+
+   MARK.BUTTON.VALM = 0;                   /* FORCE FULL PLAY.INITIALIZE ON NEXT START */
+   MARK.BUTTON.VALL = 0;                   
+
+END ADJUST.TIMES;
+
+
+/* $SUBTITLE */
+
+
+CHECK.INSERT.TIME: PROC (INS.MSB,INS.LSB) FIXED PUBLIC SWAPABLE;
+   DCL (INS.MSB,INS.LSB) FIXED; /* TIME AT WHICH INSERT IS DESIRED */
+   DCL (M,L)             FIXED; /* ILP COUNTIN + LOOPLEN TIME */
+
+   WRITE(MAM)=#PTR;
+   WRITE(MAL)=THD.ILP;            /* SEE IF TRK HAS AN ILP */
+   IF READ(MD)<>0 THEN DO;        /* NEED TO MAKE SOME SPECIAL CHECKS IF ILP ON TRK */
+      WRITE(MAL)=THD.COUNTIN.MSB;
+      M=  READ(MDI); L=  READ(MDI); /* GET THD.COUNTIN.MSB, THD.COUNTIN.LSB */
+      M=M+READ(MDI); L=L+READ(MD);  /* ADD THD.LOOPLEN.MSB, THD.LOOPLEN.LSB TO IT */
+      IF L ILT READ(MD) THEN M=M+1; /* HANDLE CARRY */
+
+      IF ((INS.MSB IGT M))        /* TRYING TO INSERT BEYOND ILP */
+      OR ((INS.MSB  =  M)         /* OR IN MIDDLE OF LOOPED ILP  */
+      AND (INS.LSB IGT L))        /* THIS IS TOO WIERD SO BOMB OUT */
+      THEN RETURN 0;              /* DISALLOW INSERT BEYOND ILP */
+   END;
+   RETURN 1;
+END CHECK.INSERT.TIME;
+
+
+CHECK.DELETE.TIME: PROC (DEL.MSB,DEL.LSB,LEN.MSB,LEN.LSB) FIXED PUBLIC SWAPABLE;
+   DCL (DEL.MSB,DEL.LSB) FIXED;   /* TIME AT WHICH TO DO DELETE */
+   DCL (LEN.MSB,LEN.LSB) FIXED;   /* AMOUNT OF TIME TO DELETE   */
+   DCL (I,J)             FIXED;
+   DCL (M,L)             FIXED;
+
+   WRITE(MAM)=#PTR;
+   WRITE(MAL)=THD.ILP;            /* SEE IF TRK HAS AN ILP */
+   IF READ(MD)<>0 THEN DO;        /* NEED TO MAKE SOME SPECIAL CHECKS IF ILP ON TRK */
+
+      I=DEL.MSB+LEN.MSB;          /* COMPUTE TIME AT WHICH DELETE ENDS */
+      J=DEL.LSB+LEN.LSB;
+      IF J ILT DEL.LSB THEN I=I+1;
+
+      IF ((I ILT DEL.MSB))        /* CHECK FOR OVERFLOW */
+      OR ((I  =  DEL.MSB)
+      AND (J ILT DEL.LSB)) THEN DO; /* OVERFLOW */
+         I=(-1); J=(-1);            /* LIMIT TO MAX TIME */
+      END;
+
+      WRITE(MAL)=THD.COUNTIN.MSB;
+
+      IF (((DEL.MSB ILT READ(MD )))  /* DELETE START IS IN FRONT OF ILP */
+      OR  ((DEL.MSB  =  READ(MDI))
+      AND  (DEL.LSB ILE READ(MD ))))
+      THEN DO;                       /* MAKE SURE DELETE END IS ALSO IN FRONT OF ILP */
+         WRITE(MAL)=THD.COUNTIN.MSB;
+         IF ((I IGT READ(MD )))      /* DELETE END IS INSIDE ILP */
+         OR ((I  =  READ(MDI))
+         AND (J IGT READ(MDI)))
+         THEN RETURN 0;              /* DELETE ACROSS ILP BOUNDARY NOT ALLOWED */
+      END;
+
+      WRITE(MAL)=THD.COUNTIN.MSB;
+      M=  READ(MDI); L=  READ(MDI); /* GET THD.COUNTIN.MSB, THD.COUNTIN.LSB */
+      M=M+READ(MDI); L=L+READ(MD);  /* ADD THD.LOOPLEN.MSB, THD.LOOPLEN.LSB TO IT */
+      IF L ILT READ(MD) THEN M=M+1; /* HANDLE CARRY */
+
+      IF  ((I IGT M))               /* COMPARE DELETE END TO ILP END */
+      OR  ((I  =  M)
+      AND  (J IGT L))
+      THEN RETURN 0;                /* DISALLOW DELETE BEYOND ILP */
+
+   END;
+   RETURN 1;
+END CHECK.DELETE.TIME;
+
+
+/* $SUBTITLE  ROUTINE TO INSERT REST ON TRACK AT CURRENT (#SEC,#WRD) */
+
+/* PROBABLY IT IS A GOOD IDEA TO DO A PLAY.INITIALIZE AFTER */
+/* INSERTING TIME ON A TRACK.  IN ANY EVENT, REMEMBER TO    */
+/* REBUILD THE EVENT QUEUE.                                 */
+
+INSERT.TIME.AT.POINT:  PROC (INS.MSB,INS.LSB,LEN.MSB,LEN.LSB) FIXED PUBLIC SWAPABLE; /* INSERTS GAP OF TIME AT SPECIFIED POINT IN TRACK */
+   DCL (INS.MSB,INS.LSB)   FIXED; /* TIME AT WHICH TO DO INSERT */
+   DCL (LEN.MSB,LEN.LSB)   FIXED; /* AMOUNT OF TIME TO INSERT   */
+   DCL (I,J,DONE)          FIXED;
+
+   /*** NOTE: THIS ASSUMES THAT THE # VARIABLES ARE SET UP AND VALID */
+
+   IF (LEN.MSB\LEN.LSB)=0 THEN RETURN 1;  /* NOTHING TO INSERT - ALL DONE */
+
+   /* Create a system event when sliding tracks: */
+
+	interp_seq_dirtyness(1);
+
+   NEW.SEQ.INFO = NEW.SEQ.INFO \ 4;
+   WRITE(MAM) = D115D.NOTE.CHANGE.TRACKS;
+   WRITE(MAL) = #TRK;                 /* REMEMBER TRACK # ON NEW.SEQ.INFO */
+   WRITE(MD) = "177777";              /*   "NEW NOTES" OR "NEW TIMBRE"    */
+
+   DONE=0;
+
+   IF #ANYR<>0 THEN DO;               /* SEE IF CAN ADJUST PREVIOUS NOTE */
+      CALL BACKUP.TO.PRIOR.NOTE;
+      IF (READ(MD)&"174001")="100001" THEN DO;  /* IF AN EXTENDED REST NOTE */
+         CALL LOOK.UP.NOTE.INFO;
+         #W2 = #W2 + LEN.MSB;              /* ADD IN TIME     */
+         #W3 = #W3 + LEN.LSB;
+         IF   #W3 ILT LEN.LSB 
+         THEN #W2 = #W2+1;
+         CALL STORE.NOTE.INFO;
+         DONE=1;
+      END;
+      CALL ADVANCE.TO.NEXT.NOTE;
+   END;
+
+
+   /* $PAGE */
+
+
+   IF DONE=0 THEN DO;                /* IF WE HAVEN'T FINISHED YET */
+      IF #ANYF=0 THEN DO;
+         LEN.MSB = LEN.MSB+INS.MSB;
+         LEN.LSB = LEN.LSB+INS.LSB;
+         IF LEN.LSB ILT INS.LSB
+         THEN LEN.MSB=LEN.MSB+1;
+         IF LEN.LSB ILT #NLSB
+         THEN LEN.MSB = LEN.MSB-1;
+         LEN.MSB=LEN.MSB-#NMSB;
+         LEN.LSB=LEN.LSB-#NLSB;
+
+         IF INSERT.REST.RECORD(4)=0 THEN DO;
+            CALL QUICK.PLAY.INIT(#PTR); /* KEEP TRK HEAD SAFE */
+            RETURN 0; /* BOMBED OUT */
+         END;
+
+         WRITE("324")=READ(MDI);    /* SKIP 1ST WORD OF REST */
+         WRITE(MDI)  =LEN.MSB;      /* EXTEND LENGTH OF TRACK */
+         WRITE(MD )  =LEN.LSB;      /* BY ADDING TO REST NOTE */
+
+      END;
+      ELSE DO;
+         CALL LOOK.UP.NOTE.INFO;
+
+         I = 1023-(SHR(#W1,1)&1023);         /* AMOUNT OF TIME USABLE IN DELTA FIELD */
+         IF   LEN.MSB = 0                    /* TRY TO JUST ADJUST STARTING TIME DELTA */
+         AND  LEN.LSB ILE I
+         THEN DO;
+            I = SHR(#W1,1)&1023;             /* EXTRACT START DELTA */
+            I = I + LEN.LSB;                 /* ADD IN NEW TIME     */
+            #W1 = (#W1&"174001")\(SHL(I,1)); /* PUT IT BACK IN #W1   */
+         END;
+
+         ELSE DO;                             /* OTHERWISE ADJUST EXTENDED START TIME DELTA */
+            IF ((#W1&"174001")<>"100001")     /* NOT ALREADY POINTING AT LONG REST */
+            THEN DO;                          /* TRY TO INSERT ONE ON TRK */
+               IF INSERT.REST.RECORD(4)=0     /* RAN OUT OF ROOM */
+               THEN DO;
+                  CALL QUICK.PLAY.INIT(#PTR); /* KEEP TRK HEAD SAFE */
+                  RETURN 0;                   /* BOMB OUT           */
+               END;
+               CALL LOOK.UP.NOTE.INFO;
+            END;
+
+            #W2 = #W2 + LEN.MSB;              /* ADD IN TIME     */
+            #W3 = #W3 + LEN.LSB;
+            IF    #W3 ILT LEN.LSB 
+            THEN  #W2 = #W2+1;
+         END;
+         CALL STORE.NOTE.INFO;
+      END;
+   END;
+
+   CALL ADJUST.TIMES(INS.MSB,INS.LSB,LEN.MSB,LEN.LSB,1); 
+
+   IF (MOVE=0)&(QUICK.EDITS=0) THEN DO; /* TRY TO ADVANCE/BACKUP PLAY PTRS */
+      CALL ADJUST.PTRS(THD.NMSB   ,ADVANCED.SEQ.TIME.MSB, ADVANCED.SEQ.TIME.LSB);
+      CALL ADJUST.PTRS(THD.LP.NMSB,LOOP.SEQ.TIME.MSB    , LOOP.SEQ.TIME.LSB);
+   END;                       /* OF TRY TO CORRECT PLAY PTRS */
+
+   CALL QUICK.PLAY.INIT(#PTR); /* KEEP TRK HEAD SAFE */
+   RETURN 1;                   /* INSERT WAS SUCCESSFUL */
+
+END INSERT.TIME.AT.POINT;
+
+
+/* $SUBTITLE  ROUTINE TO INSERT REST ON TRACK AT PASSED TIME */
+
+
+INSERT.TIME.ON.TRK:  PROC (TRK,INS.MSB,INS.LSB,LEN.MSB,LEN.LSB) FIXED PUBLIC SWAPABLE; /* INSERTS GAP OF TIME AT SPECIFIED POINT IN TRACK */
+   DCL TRK               FIXED;   /* ABS TRK TO INSERT TIME ON  */
+   DCL (INS.MSB,INS.LSB) FIXED;   /* TIME AT WHICH TO DO INSERT */
+   DCL (LEN.MSB,LEN.LSB) FIXED;   /* AMOUNT OF TIME TO INSERT   */
+
+   #TRK=TRK;
+   #PTR=GET.TRK.HEAD.PTR(#TRK);
+   IF #PTR=0 THEN RETURN 0;       /* RAN OUT OF MEMORY */
+
+   IF CHECK.INSERT.TIME(INS.MSB,INS.LSB)=0
+   THEN DO;
+      CALL DISPLAY.ERR(55); /* CANNOT INSERT PAST ILP */
+      RETURN 0;
+   END;
+
+   CALL LOAD.#.INFO(THD.NMSB);       /* LOAD # VARS FROM CURRENT PLAY INFO */
+
+   IF #SEC=0 THEN DO;
+      IF ALLOCATE.FIRST.NLS=0 
+      THEN RETURN 0;
+      CALL LOAD.#.INFO(THD.NMSB);       /* LOAD # VARS FROM CURRENT PLAY INFO */
+   END;
+
+   CALL STEP.TO.TIME(INS.MSB,INS.LSB); /* MOVE # VARS TO JUST BEFORE DESIRED TIME */
+
+   TRK=INSERT.TIME.AT.POINT(INS.MSB,INS.LSB,LEN.MSB,LEN.LSB);
+
+   RETURN TRK;                         /* RETURN STATUS */
+
+END INSERT.TIME.ON.TRK;
+
+
+/* $SUBTITLE  ROUTINE TO SHORTEN TRACK AT CURRENT (#SEC,#WRD) */
+
+/* DELETE.TIME.AT.POINT ASSUMES THAT THE CALLER WILL DO A   */
+/* PLAY.INITIALIZE SHORTLY AFTER DOING THE DELETE.          */
+/* AFTER DONE WITH DELETES, REMEMBER TO REBUILD EVENT QUEUE */
+
+DELETE.TIME.AT.POINT: PROC (DEL.MSB,DEL.LSB,LEN.MSB,LEN.LSB) FIXED PUBLIC SWAPABLE;
+   DCL (DEL.MSB,DEL.LSB)         FIXED; /* TIME AT WHICH TO DO DELETE */
+   DCL (LEN.MSB,LEN.LSB)         FIXED; /* AMOUNT OF TIME TO DELETE   */
+   DCL (SSEC,SWRD,ENDSEC,ENDWRD) FIXED;
+   DCL (M,L,S,W,NUM.MSB,NUM.LSB) FIXED;
+   DCL (I,SHORTEN.ILP.VARS)      FIXED;
+
+   SAVE.#.VARS: PROC (LOC);
+      DCL (LOC,I) FIXED; /* LOC=0 TO 7 TO STORE UP TO 32 COPIES OF # VARS */
+
+      /* STORES THE 8 IMPORTANT # VARS IN MISC.BUF             */
+      /* (#NMSB,#NLSB)     *//* NEXT TIME CORRESPONDING TO PTR */
+      /* (#LMSB,#LLSB)     *//* LAST TIME CORRESPONDING TO PTR */
+      /* (#WRD,#SEC)       *//* RELATIVE PTR INTO NAH AREA     */
+      /* (#ANYF,#ANYR)     *//* ANY REV & FOR FOR THIS POINT   */
+
+      WRITE("313")=ADDR(#NMSB);
+      DO I=SHL(LOC,3) TO SHL(LOC,3)+7; MISC.BUF(I)=READ("373"); END; /* SAVE CURRENT VALUES */
+
+   END SAVE.#.VARS;
+
+   RESTORE.#.VARS: PROC (LOC);
+      DCL (LOC,I) FIXED; /* LOC=0 TO 7 TO RESTORE 1 OF 8 COPIES OF # VARS */
+
+      WRITE("313")=ADDR(#NMSB);
+      DO I=SHL(LOC,3) TO SHL(LOC,3)+7; WRITE("373")=MISC.BUF(I); END; /* RESTORE TO PRIOR VALUES */
+
+   END RESTORE.#.VARS;
+
+   SUBTRACT: PROC (MSB,LSB); /* SUBTRACT (MSB,LSB) FROM TIME POINTED TO BY MAL */
+      DCL (MSB,LSB) FIXED;
+      IF READ(MD) ILT MSB THEN DO;       /* UNDERFLOW - LIMIT TO ZERO */
+         WRITE(MDI)=0; WRITE(MDI)=0;
+      END;
+      ELSE DO;
+         WRITE(MDI)=READ(MD)-MSB;
+         IF READ(MD) ILT LSB THEN DO;    /* NEED TO BORROW */
+            WRITE(MAL)=READ(MAL)-1;      /* RESTORE PTR TO MSB WORD */
+            IF READ(MD)<>0 THEN DO;      /* ABLE TO BORROW */
+               WRITE(MDI)=READ(MD)-1;    /* BORROW */
+               WRITE(MD )=READ(MD)-LSB;  /* AND FINISH SUBTRACT */
+            END;
+            ELSE DO;                     /* UNDERFLOW - LIMIT TO ZERO */
+               WRITE(MDI)=0; WRITE(MDI)=0;
+            END;
+         END;
+         ELSE WRITE(MD)=READ(MD)-LSB;    /* NO BORROW - SIMPLE SUBTRACT */
+      END;
+   END SUBTRACT;
+
+   /*** NOTE: THIS ASSUMES THAT THE # VARIABLES ARE SET UP AND VALID */
+   /* # VARS SHOULD BE POINTING TO THE FIRST NOTE INSIDE THE DELETE  */
+   /* REGION                                                         */
+
+   IF (LEN.MSB\LEN.LSB)=0 THEN RETURN 1; /* NOTHING TO DELETE, ALL DONE */
+   IF #ANYF=0             THEN RETURN 1; /* AT END OF TRK, NOTHING TO DELETE */
+
+   /* Create a system event when sliding tracks: */
+
+	interp_seq_dirtyness(1);
+
+   NEW.SEQ.INFO = NEW.SEQ.INFO \ 4;    /* LET SCREENS KNOW ABOUT POSSIBLE CHANGES */
+   WRITE(MAM) = D115D.NOTE.CHANGE.TRACKS;
+   WRITE(MAL) = #TRK;                  /* REMEMBER TRACK # ON NEW.SEQ.INFO */
+   WRITE(MD) = "177777";               /*   "NEW NOTES" OR "NEW TIMBRE"    */
+
+
+   /* $PAGE */
+
+
+   SSEC=#SEC; SWRD=#WRD;                /* SAVE PTR TO START OF DELETE REGION */
+   CALL SAVE.#.VARS(0);                 /* # VARS CORRESPONDING TO START OF DELETE REGION IN LOC 0 */
+
+   #MSB=DEL.MSB+LEN.MSB;                /* COMPUTE FIRST TIME BEYOND DELETE REGION */
+   #LSB=DEL.LSB+LEN.LSB;
+   IF #LSB ILT LEN.LSB THEN #MSB=#MSB+1;
+
+   IF ((#MSB ILT DEL.MSB))
+   OR ((#MSB  =  DEL.MSB)
+   AND (#LSB ILT DEL.LSB)) THEN DO;     /* HAD AN OVERFLOW       */
+      #MSB=(-1); #LSB=(-1);             /* LIMIT TO LARGEST TIME */
+   END;
+
+
+   NUM.MSB=0; NUM.LSB=0;           /* INIT COUNT OF NOTES DELETED */
+
+   IF  ((#ANYF<>0))                /* HAVE NOT HIT END OF TRK   */
+   AND (((#MSB IGT #NMSB))         /* OUR TIME IS BEYOND        */
+   OR   ((#MSB  =  #NMSB)          /* CURRENT NEXT EVENT TIME   */
+   AND   (#LSB IGT #NLSB))) THEN DO;
+
+      WRITE(MAM)=NAH.PTR+#SEC;
+      WRITE(MAL)=#WRD;
+      IF  ((READ(MDI)&"100000")=0)         /* NOT AN ALTERNATE FORMAT NOTE */
+      AND ((READ(MD )&"77")<>REST.NOTE)    /* AND NOT A REST NOTE          */
+      THEN NUM.LSB=1;                      /* DELETING FIRST NOTE          */
+
+      CALL ADVANCE.TO.NEXT.NOTE;           /* STEP FORWARD BY ONE NOTE  */
+
+      DO WHILE ((#ANYF<>0))                /* HAVE NOT HIT END OF TRK   */
+      AND      (((#MSB IGT #NMSB))         /* OUR TIME IS BEYOND        */
+      OR        ((#MSB  =  #NMSB)          /* CURRENT NEXT EVENT TIME   */
+      AND        (#LSB IGT #NLSB)));
+
+         IF  ((READ(MDI)&"100000")=0)      /* NOT AN ALTERNATE FORMAT NOTE */
+         AND ((READ(MD )&"77")<>REST.NOTE) /* AND NOT A REST NOTE       */
+         THEN DO;                          /* KEEP TRACK OF NUMBER OF NOTES DELETED */
+            NUM.LSB=NUM.LSB+1;
+            IF NUM.LSB=0 THEN NUM.MSB=NUM.MSB+1; /* CARRY */
+         END;
+
+         CALL ADVANCE.TO.NEXT.NOTE;        /* STEP FORWARD BY ONE NOTE  */
+      END;
+   END;
+   ENDSEC=#SEC; ENDWRD=#WRD;            /* SAVE PTR TO END OF DELETE REGION */
+
+   WRITE(MAM)=#PTR;                     /* NOW UPDATE NUMBER OF NOTES ON TRK IN TRK HEADER */
+   WRITE(MAL)=THD.NN.MSB;               /* DO A 32-BIT SUBTRACT */
+   WRITE(MDI)=READ(MD)-NUM.MSB;
+   IF READ(MD) ILT NUM.LSB THEN DO;     /* HANDLE BORROW */
+      WRITE(MAL)=THD.NN.MSB;
+      WRITE(MDI)=READ(MD)-1;
+   END;
+   WRITE(MD)=READ(MD)-NUM.LSB;
+
+   /* BEFORE DELETING, CHECK THE ILP PTRS TO DETERMINE */
+   /* IF WE ARE SHORTENING EITHER THE ILP COUNTIN OR   */
+   /* THE ILP LOOPLEN TIMES                            */
+
+   SHORTEN.ILP.VARS=0; /* ASSUME WE DON'T NEED TO ADJUST ILP */
+   WRITE(MAM)=#PTR;
+   WRITE(MAL)=THD.ILP;
+   IF READ(MD)<>0 THEN DO;
+      WRITE(MAL)=THD.ILS.WRD;
+      W=READ(MDI); S=READ(MD);
+      IF COMPARE.SEQ.PTRS(S,W,SSEC  ,SWRD)>=0  /* ILS PTR IS BEYOND START OF DELETE REGION */
+      THEN SHORTEN.ILP.VARS=1;                 /* SHORTEN THE ILP COUNTIN */
+      IF COMPARE.SEQ.PTRS(S,W,ENDSEC,ENDWRD)<0 /* ILS PTR IS BEFORE END OF DELETE REGION */
+      THEN SHORTEN.ILP.VARS=2;                 /* SHORTEN THE ILP LOOPLEN */
+   END;
+
+   /* $PAGE */
+
+
+   IF #ANYF=0 THEN DO;                  /* ERASE TO END OF THIS TRK */
+
+      CALL RESTORE.#.VARS(0);           /* RESET # VARS TO START OF EDIT REGION */
+
+      IF (ENDSEC<>SSEC) OR (ENDWRD<>SWRD)
+      THEN DO;                             /* ACTUALLY HAVE SOMETHING TO DELETE */
+         WRITE(MAM)=NAH.PTR+#SEC;          /* SHORTEN THIS NLS */
+         WRITE(MAL)=NLS.LP;
+         WRITE(MD )=#WRD;
+         WRITE(MAL)=#WRD;
+         WRITE(MD )=NLS.EOS;
+
+         WRITE(MAL)=NLS.FOR;               /* GET PTR TO NEXT SECTOR */
+         #SEC=READ(MD);
+
+         DO WHILE #SEC<>0;
+            WRITE(MAM)=NAH.PTR+#SEC;       /* GET PTR TO NEXT SECTOR */
+            #SEC=READ(MD);
+
+            CALL UNLINK.NLS.FROM.TRACK(READ(MAM)-NAH.PTR); /* DELETE THIS SECTOR */
+
+         END;
+      END;
+
+   END;       /* OF DELETE REST OF THIS TRK */
+
+
+   /* $PAGE */
+
+
+   ELSE DO;   /* NOT DELETING ALL THE WAY TO THE END OF THE TRACK */
+
+      /* WE ARE NOW POINTING AT THE FIRST NOTE */
+      /* TO KEEP BEYOND THE DELETE REGION      */
+
+      CALL SAVE.#.VARS(1);                 /* SAVE # VARS FOR 1ST NOTE BEYOND DELETE REGION */
+
+      /* (M,L) WILL EVENTUALLY CONTAIN TIME FROM */
+      /* LAST KEPT NOTE BEFORE DELETE REGION TO  */
+      /* FIRST KEPT NOTE BEYOND DELETE REGION    */
+
+      M=#NMSB-#MSB;                        /* COMPUTE TIME FROM END OF DELETE */
+      L=#NLSB-#LSB;                        /* REGION TO FIRST NOTE KEPT */
+      IF #LSB IGT #NLSB THEN M=M-1;        /* BORROW */
+
+      WRITE(MAM)=NAH.PTR+#SEC;             /* GET RID OF START DELTA ON */
+      WRITE(MAL)=#WRD;                     /* FIRST NOTE TO KEEP AFTER  */
+      WRITE(MD )=READ(MD)&"174001";        /* OUR DELETE REGION         */
+
+      CALL RESTORE.#.VARS(0);              /* RESTORE TO 1ST NOTE INSIDE DELETE REGION */
+
+      IF #ANYR<>0 THEN DO;                 /* LOOK FOR LONG REST BEHIND US */
+         CALL BACKUP.TO.PRIOR.NOTE;
+         IF (READ(MDI)&"174001")="100001" THEN DO; /* LONG REST BEHIND US */
+            WRITE(MDI)=0;                  /* ZERO OUT EXTRA DELTA */
+            WRITE(MD )=0;                  /* FIELD OF LONG REST   */
+         END;                              /* WILL ACCOUNT FOR ITS TIME BELOW */
+         CALL ADVANCE.TO.NEXT.NOTE;        /* STEP BACK TO ORIGINAL LOC */
+      END;
+
+      M=M+(DEL.MSB-#LMSB);                     /* COMPUTE TIME FROM LAST NOTE KEPT */
+      L=L+(DEL.LSB-#LLSB);                     /* TO START OF DELETE REGION AND */
+      IF #LLSB IGT DEL.LSB         THEN M=M-1; /* ACCUMULATE WITH ABOVE TIME */
+      IF L     ILT (DEL.LSB-#LLSB) THEN M=M+1;
+
+      IF (M\L)<>0 THEN DO;                 /* WILL NEED TO ADD BACK SOME TIME BELOW */
+
+         S=#LMSB; W=#LLSB; I=#ANYR;        /* SAVE TIME OF LAST NOTE KEPT BEFORE DELETE REGION AND #ANYR AT THAT POINT */
+
+         /* DO A LITTLE FIXING UP OF SOME # TIMES */
+         /* AT END OF DELETE REGION SPECIFICALLY  */
+         /* CORRECT #NMSB,#NLSB,#LMSB,#LLSB TIMES */
+
+         CALL RESTORE.#.VARS(1);           /* RE-LOAD THE # VARS FOR JUST AFTER THE DELETE REGION */
+         #LMSB=S; #LLSB=W;                 /* LAST TIME IS TIME OF LAST NOTE KEPT BEFORE DELETE REGION */
+         #ANYR=I;                          /* THIS WILL BE CORRECT AFTER DELETE */
+
+         WRITE(MAM)=NAH.PTR+SSEC;
+         WRITE(MAL)=NLS.FP;
+
+         IF  (ENDSEC=SSEC)                 /* DELETE REGION CONTAINED IN ONE NLS */
+         AND (READ(MD)<>SWRD)              /* AND NOT DELETING FROM 1ST NOTE IN NLS */
+         THEN #WRD=SWRD;                   /* THEN ENDWRD PTR WILL GET SHUFFLED DOWN TO SWRD */
+
+         #NMSB=#NMSB-LEN.MSB;              /* SUBTRACT OFF AMOUNT OF TIME BEING DELETED */
+         IF LEN.LSB IGT #NLSB THEN #NMSB=#NMSB-1;
+         #NLSB=#NLSB-LEN.LSB;
+
+         #NMSB=#NMSB-M;                    /* PLUS EXTRA TIME WE HAVE TO CORRECT FOR BELOW */
+         IF L IGT #NLSB THEN #NMSB=#NMSB-1;
+         #NLSB=#NLSB-L;
+         CALL SAVE.#.VARS(1);              /* AND RE-SAVE THE ADJUSTED VALUES */
+
+         CALL RESTORE.#.VARS(0);
+      END;
+
+
+      /* $PAGE */
+
+
+      IF (ENDSEC<>SSEC) OR (ENDWRD<>SWRD)
+      THEN DO;                             /* ACTUALLY HAVE SOMETHING TO DELETE */
+
+         WRITE(MAM)=NAH.PTR+#SEC;          /* NOW POINTING AT START OF DELETE REGION */
+         WRITE(MAL)=NLS.FP;
+
+         IF (#WRD<>READ(MD)) THEN DO;      /* DELETE REGION BEGINS IN MIDDLE OF NLS */
+
+            WRITE(MAL)=NLS.LP;
+
+            IF (ENDSEC  <>SSEC)               /* END OF DELETE REGION IS IN ANOTHER NLS */
+            OR (READ(MD)<=ENDWRD)             /* OR ENDS PRECISELY AT END OF THIS NLS */
+            THEN DO;                          /* WE CAN JUST SHORTEN THIS NLS */
+
+               WRITE(MD )=#WRD;               /* SHORTEN THE NLS.LP PTR */
+               WRITE(MAL)=#WRD;
+               WRITE(MD )=NLS.EOS;            /* AND INSERT NEW NLS.EOS MARKER */
+
+               IF ENDSEC<>SSEC THEN DO;       /* DONE WITH SSEC, ADVANCE #SEC TO NEXT NLS */
+                  WRITE(MAL)=NLS.FOR;
+                  #SEC=READ(MD);
+               END;
+
+            END;
+
+            ELSE DO;                          /* (ENDSEC=SSEC) NEED TO SHUFFLE TWO PARTS OF NLS TOGETHER */
+
+               CALL COPY.EXT.MEM(NAH.PTR+ENDSEC,ENDWRD,
+                                 NAH.PTR+ENDSEC,SWRD  ,READ(MD)-ENDWRD);
+
+               WRITE(MAM)=NAH.PTR+ENDSEC;
+               WRITE(MAL)=NLS.LP;             /* FIX UP NLS.LP PTR */
+               WRITE(MD )=READ(MD)-(ENDWRD-SWRD);
+               WRITE(MAL)=READ(MD);
+               WRITE(MD )=NLS.EOS;            /* WRITE OUT NEW NLS.EOS  */
+               ENDWRD=SWRD;                   /* HAVE SHUFFLED PTR DOWN */
+            END;
+         END;
+
+         DO WHILE #SEC<>ENDSEC;               /* LOOP OVER NLS'S WHICH CAN BE COMPLETELY FREED UP */
+
+            WRITE(MAM)=NAH.PTR+#SEC;
+            #SEC=READ(MD);                    /* GET NLS.FOR PTR TO NEXT SECTOR */
+
+            CALL UNLINK.NLS.FROM.TRACK(READ(MAM)-NAH.PTR); /* FREE UP CURRENT SECTOR */
+
+         END;
+
+
+         WRITE(MAM)=NAH.PTR+SSEC;
+         WRITE(MAL)=NLS.FP;
+
+         IF (SSEC<>ENDSEC)            /* DELETE BEGINNING OF LAST NLS IN DELETE REGION */
+         OR (READ(MD)=SWRD)           /* OR DELETE FIRST PART OF NLS */
+         THEN DO;
+
+            WRITE(MAM)=NAH.PTR+#SEC;
+            WRITE(MAL)=NLS.FP;
+            WRITE(MD)=ENDWRD;                 /* MOVE THE NLS.FP PTR EFFECTIVELY ERASING ANY NOTES IN FRONT OF US */
+         END;
+
+      END;
+
+
+      /* $PAGE */
+
+
+      IF (M\L)<>0 THEN DO;
+
+         CALL RESTORE.#.VARS(1);          /* RE-LOAD # VARS FOR FIRST NOTE AFTER DELETE REGION */
+
+         IF #ANYR<>0 THEN DO;             /* SEE IF LONG REST IN FRONT OF DELETE REGION */
+            CALL BACKUP.TO.PRIOR.NOTE;
+            IF (READ(MDI)&"174001")="100001"
+            THEN DO;                      /* ACCOUNT FOR TIME IN LONG REST */
+
+               WRITE(MDI)=READ(MD)+M;
+               WRITE(MD )=READ(MD)+L;
+               IF READ(MD) ILT L THEN DO; /* HANDLE CARRY */
+                  WRITE(MAL)=READ(MAL)-1;
+                  WRITE(MD )=READ(MD )+1;
+               END;
+               M=0; L=0;                  /* SET TO ZERO, SINCE ALL DONE NOW */
+            END;
+            CALL ADVANCE.TO.NEXT.NOTE;    /* STEP BACK TO ORIGINAL NOTE */
+         END;
+
+         IF (M\L)<>0 THEN DO; /* STILL NEED TO ACCOUNT FOR TIME */
+            IF (M=0) AND (L ILT 1024)
+            THEN DO; /* PUT INTO START DELTA OF NOTE AFTER DELETE REGION */
+               WRITE(MAM)=NAH.PTR+#SEC;
+               WRITE(MAL)=#WRD;
+               WRITE(MD )=(READ(MD)&"174001")\SHL(L,1);
+            END;
+            ELSE DO; /* GO AHEAD AND INSERT A REST NOTE TO ACCOUNT FOR TIME */
+
+               IF INSERT.REST.RECORD(4)=0 THEN DO;
+                  CALL QUICK.PLAY.INIT(#PTR); /* KEEP TRK HEAD SAFE */
+                  RETURN 0;
+               END;
+
+               /* WE DON'T HAVE TO WORRY ABOUT KEEPING #NMSB,#NLSB, ETC. */
+               /* CORRECT SINCE WE ARE DONE WITH NOTE TIMES.  ROUTINE    */
+               /* ASSUMES CALLER WILL DO A PLAY INITIALIZE WHEN DONE     */
+
+               WRITE(MDI)=READ(MD)&"174001";  /* MAKE SURE REST HAS ZERO START DELTA */
+               WRITE(MDI)=M;
+               WRITE(MD )=L;
+            END;
+         END;
+      END;
+
+   END;            /* OF MORE NOTES ON TRK BEYOND DELETE REGION */
+
+
+   /* FIX UP THE TRK HEAD PTRS AND TIMES HERE  */
+   /* FIX ILP COUNTIN & LOOPLEN INFO           */
+   /* CLEAN UP TRK HEADER INFO AFTER DELETE    */
+
+   CALL QUICK.PLAY.INIT(#PTR);   /* KEEP TRK HEAD SAFE */
+
+   /* IF DELETE STARTED BEFORE ILS TIME, THEN */
+   /* SHORTEN THE ILP COUNTIN VARS, IF DELETE */
+   /* STARTED BEFORE THE ILE TIME BUT AFTER   */
+   /* THE ILS TIME, THEN SHORTEN THE LOOPLEN  */
+
+   IF SHORTEN.ILP.VARS<>0 THEN DO; /* ADJUST ILP COUNTIN/LOOPLEN */
+      WRITE(MAM)=#PTR;
+
+      IF SHORTEN.ILP.VARS=1        /* SHORTEN THE ILP COUNTIN TIME */
+      THEN WRITE(MAL)=THD.COUNTIN.MSB;
+      ELSE IF SHORTEN.ILP.VARS=2   /* SHORTEN THE ILP LOOPLEN TIME */
+      THEN WRITE(MAL)=THD.LOOPLEN.MSB;
+
+      CALL SUBTRACT(LEN.MSB,LEN.LSB);
+   END;
+
+   WRITE(MAM)=#PTR;              /* IF NO NOTES LEFT ON TRACK */
+   WRITE(MAL)=THD.NN.MSB;        /* AFTER DELETE, THEN GET RID OF EVERYTHING */
+   IF (READ(MDI)\READ(MDI))=0 THEN CALL ERASE.TRACK(#TRK);
+
+   RETURN 1;
+
+END DELETE.TIME.AT.POINT;
+
+
+/* $SUBTITLE  ROUTINE TO SHORTEN TRACK STARTING FROM PASSED TIME */
+
+
+DELETE.TIME.FROM.TRK:  PROC (TRK,DEL.MSB,DEL.LSB,LEN.MSB,LEN.LSB) FIXED PUBLIC SWAPABLE; /* DELETES GAP OF TIME AT SPECIFIED POINT IN TRACK */
+   DCL TRK               FIXED;   /* ABS TRK TO DELETE TIME FROM  */
+   DCL (DEL.MSB,DEL.LSB) FIXED;   /* TIME AT WHICH TO DO DELETE */
+   DCL (LEN.MSB,LEN.LSB) FIXED;   /* AMOUNT OF TIME TO DELETE   */
+
+   WRITE(MAM)=TRK.HEAD;           /* SEE IF WE HAVE A TRK HEAD  */
+   WRITE(MAL)=TRK;
+   IF READ(MD)=0 THEN RETURN 1;   /* NO TRK - NOTHING TO DELETE */
+   #PTR=READ(MD);
+
+   WRITE(MAM)=#PTR;               /* SEE IF WE HAVE ANY NLS'S   */
+   WRITE(MAL)=THD.NUM.NLS;
+   IF READ(MD)=0 THEN RETURN 1;   /* NO NLS'S - NOTHING TO DELETE */
+   #TRK=TRK;
+
+   IF CHECK.DELETE.TIME(DEL.MSB,DEL.LSB,LEN.MSB,LEN.LSB)=0
+   THEN DO;
+      CALL DISPLAY.ERR(55); /* CANNOT DELETE PAST/THRU ILP */
+      RETURN 0;
+   END;
+
+   CALL LOAD.#.INFO(THD.NMSB);         /* LOAD # VARS FROM CURRENT PLAY INFO */
+
+   CALL STEP.TO.TIME(DEL.MSB,DEL.LSB); /* MOVE # VARS TO JUST BEFORE DESIRED TIME */
+
+   TRK=DELETE.TIME.AT.POINT(DEL.MSB,DEL.LSB,LEN.MSB,LEN.LSB);
+
+   RETURN TRK;                         /* RETURN STATUS */
+
+END DELETE.TIME.FROM.TRK;
+
+/* $SUBTITLE */
+
+PUNCH.NOTES.FROM.TRK: proc(trk,startm,startl,lenm,lenl,delete.time,erase.beyond.ilp) fixed public swapable;
+   dcl trk              fixed;   /* which track to do punch on */
+   dcl (startm,startl)  fixed;   /* where to start punching */
+   dcl (lenm,lenl)      fixed;   /* length of region to punch out */
+   dcl delete.time      boolean; /* true to delete time, else just removes notes */
+   dcl erase.beyond.ilp boolean; /* true to erase notes after the ilp */
+   dcl ilp.there        boolean;
+   dcl (smsb,slsb)      fixed;   /* temps to hold ILP start time */
+   dcl (emsb,elsb)      fixed;   /* temps to hold ILP end   time */
+   dcl status           fixed;
+
+   write(mam)=Trk.Head; write(mal)=trk; #ptr=read(md);
+   if #ptr=0 then return 1;         /* empty trk - all done */
+
+   if (lenm\lenl)=0 then return 1;  /* nothing to punch - all done */
+
+   call Increment.Num.Notes;        /* keeps # of notes > 0, even after delete - keeps track from getting erased */
+   status=1;                        /* assume no errors */
+
+   if Trk.Head.Lookup(trk,thd.ilp)<>0 then do;
+      ilp.there=true;
+      call Trk.Head.Lookup(trk,thd.countin.msb); /* save start time of ilp */
+      smsb=read(mdi);
+      slsb=read(mdi);
+      emsb=read(mdi)+smsb;                       /* compute end time of ilp */
+      elsb=read(md )+slsb;
+      if elsb ilt slsb then emsb=emsb+1;
+
+      call Remove.Ilp.From.Track(trk);
+
+      if erase.beyond.ilp then do; /* erase notes after the ilp */
+         status=Delete.Time.From.Trk(trk,emsb,elsb,-1,-1); /* erase notes beyond ilp */
+      end;
+   end;
+   else ilp.there=false;
+
+   if status<>0 then do;
+      status=Delete.Time.From.Trk(trk,startm,startl,lenm,lenl);
+   end;
+
+   if (status<>0) & (not delete.time) then do;
+      write(mam)=trk.head;
+      write(mal)=trk;
+      if read(md)<>0 then do;  /* only insert rest if trk still exists */
+         status=Insert.Time.On.Trk(trk,startm,startl,lenm,lenl);
+      end;
+   end;
+
+   if (status<>0) & (ilp.there) then do; /* put ilp back onto track */
+      write(mam)=trk.head;
+      write(mal)=trk;
+      if read(md)<>0 then do;  /* only restore ilp if trk still exists */
+         status=Create.Ilp.On.Track(trk,smsb,slsb,emsb,elsb);
+      end;
+   end;
+
+   write(mam)=Trk.Head; write(mal)=trk; #ptr=read(md);
+
+   if #ptr<>0
+   then call Decrement.Num.Notes; /* restore thd note count to correct value */
+   else write("50")=7;            /* big problems */
+
+   return status;
+
+end PUNCH.NOTES.FROM.TRK;
+
+DELETE.NOTELIST.FROM.TRK:PROC (T) PUBLIC SWAPABLE;
+   DCL (T,THP,SEC,FP) FIXED;
+
+	interp_seq_dirtyness(1);
+
+	NEW.SEQ.INFO = NEW.SEQ.INFO \ 6;     /* NEW SEQ NOTES; NEW SEQ NAMES */
+	WRITE(MAM) = D115D.NOTE.CHANGE.TRACKS;
+	WRITE(MAL) = T;                     /* REMEMBER TRACK # ON NEW.SEQ.INFO */
+	WRITE(MD) = "177777";               /*   "NEW NOTES" OR "NEW TIMBRE"    */
+
+   WRITE(MAM)=NAH.PTR;                   /* GET RELATIVE POINTER TO TRACK HEAD */
+   WRITE(MAL)=T;                         /* FOR THIS TRACK */
+   THP       =READ(MD);
+
+   IF THP=0 THEN RETURN;                 /* NO TRACK HEAD - RETURN */
+
+   WRITE(MAM)=NAH.PTR+THP;               /* POINT TO TRACK HEAD */
+   SEC       =READ(MD);                  /* GET RELATIVE POINTER TO FIRST NLS */
+
+   DO WHILE SEC<>0;                      /* WHILE THERE IS ANOTHER NLS */
+      WRITE(MAM)=NAH.PTR+SEC;                    /* POINT TO NEXT NLS */
+      FP        =READ(MD);               /* GET FORWARD POINTER */
+      CALL DEALLOCATE.NAH.BLOCK(SEC);    /* FREE UP THIS NLS */
+      SEC=FP;
+   END;
+
+   WRITE(MAM)=NAH.PTR+THP;               /* POINT BACK TO TRACK HEAD */
+
+   WRITE(MAL)=THD.FOR;                   /* PERFORM MISC CLEAN UP */
+   WRITE(MD) =0;
+   WRITE(MAL)=THD.NN.MSB;
+   WRITE(MDI)=0;
+   WRITE(MD) =0;
+
+   WRITE(MAL)=THD.NUM.NLS;
+   WRITE(MD) =0;
+
+   CALL QUICK.PLAY.INIT(NAH.PTR+THP);    /* QUICK INIT */
+
+   CALL COMPUTE.NUMB.LEFT;               /* FOR DISPLAY */
+   CALL CHECK.MEMORY.FOR.RECORD;
+
+  	CALL COMPUTE.MISC.INFO;      			  /* COMPUTE ARLIST, CPLIST */
+   CALL REBUILD.EVENT.QUEUE;
+
+END;

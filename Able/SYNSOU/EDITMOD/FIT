@@ -1,0 +1,779 @@
+/*	:SYNSOU:EDITMOD:FIT - Procedures for the S-page's "Fit To Time" and "Justify" functions	*/
+
+/*
+Modified:
+1999/04/04 - TY  - In Modify.Bounce, made the (op == op#seq.to.real) and (op == op#real.to.seq) blocks
+						 convert durations as well as start times.
+1998/05/31 - TY  - Added code to JUSTIFY.REGION and to the "else if (op = d#justify)" block of
+						 MODIFY.BOUNCE so that quantizing will work correctly when using a click track.
+					  - Replaced time-consuming "do while" loops with equivalent algebraic solutions in
+						 the part of MODIFY.BOUNCE that finds the clicks which bookend NOTE.TIME.
+					  - Implemented rounding in the "calculate time of window midpoint" part of
+						 MODIFY.BOUNCE.  When BASE is odd, this prevents notes at the "midpoint" closer to
+						 the earlier beat from quantizing towards the later beat.
+1991/01/30 - MWH - Report which tracks have had new notes
+1991/01/14 - PF  - Made Justify (S Page) work with Tempo Change
+1991/01/09 - MWH - Report which tracks have had new notes
+1990/07/10 - PF  - Begin using REAL.TIME.OF.NEXT.CLICK
+1988/10/03 -CJ,EG- MADE FIT TO TIME WORK WITH LIVE CLICK TRACK
+*/
+
+/*
+DB: proc (nt, s)	fixed;
+	dcl nt	array;
+	dcl s		array;
+
+
+	return;	/ * turn off for now * /
+
+
+	call cpos(15,0); call erase.to.end.of.line;
+	call ps(s);
+
+	call cpos(16,0); call erase.to.end.of.line;
+	call ps('base = ');call pnum(base, 0);call pc(sp);
+	call ps('grid = ');call pnum(grid, 0);call pc(sp);
+	call ps('indx = ');call pnum(index, 0);call pc(sp);
+
+	call cpos(17,0); call erase.to.end.of.line;
+	call ps('note.time    = ');call conv.32bit.int.to.str(nt, misc.buf);call ps(misc.buf);call pc(sp);
+
+	call cpos(18,0); call erase.to.end.of.line;
+	call ps('this.beat    = ');call conv.32bit.int.to.str(this.beat, misc.buf);call ps(misc.buf);call pc(sp);
+	call ps('next.beat    = ');call conv.32bit.int.to.str(next.beat, misc.buf);call ps(misc.buf);call pc(sp);
+
+	call cpos(19,0); call erase.to.end.of.line;
+	call ps('window.start = ');call conv.32bit.int.to.str(window.start, misc.buf);call ps(misc.buf);call pc(sp);
+	call ps('window.end   = ');call conv.32bit.int.to.str(window.end, misc.buf);call ps(misc.buf);call pc(sp);
+
+	call cpos(20,0); call erase.to.end.of.line;
+	call ps('window.len   = ');call conv.32bit.int.to.str(window.len, misc.buf);call ps(misc.buf);call pc(sp);
+	call ps('window.mid   = ');call conv.32bit.int.to.str(window.mid, misc.buf);call ps(misc.buf);call pc(sp);
+
+	call get_enable(get.in.char);
+	call get.next.event;
+	call get_disable(get.in.char);
+end DB;
+
+RDB: proc (A, B, R, NT, IN.RANGE)	fixed;
+	DCL A		ARRAY;
+	DCL B		ARRAY;
+	DCL R		ARRAY;
+	dcl nt	array;
+	DCL IN.RANGE	FIXED;
+
+	return;	/ *** FOR NOW: *** /
+
+	call cpos(13,0); call erase.to.end.of.line;
+	call ps('IN.RANGE = ');call pnum(IN.RANGE, 0);call pc(sp);
+
+	call cpos(14,0); call erase.to.end.of.line;
+	call ps('A    = ');call conv.32bit.int.to.str(A, misc.buf);call ps(misc.buf);call pc(sp);
+
+	call cpos(15,0); call erase.to.end.of.line;
+	call ps('B    = ');call conv.32bit.int.to.str(B, misc.buf);call ps(misc.buf);call pc(sp);
+
+	call cpos(16,0); call erase.to.end.of.line;
+	call ps('R    = ');call conv.32bit.int.to.str(R, misc.buf);call ps(misc.buf);call pc(sp);
+
+	call cpos(17,0); call erase.to.end.of.line;
+	call ps('note.time    = ');call conv.32bit.int.to.str(nt, misc.buf);call ps(misc.buf);call pc(sp);
+
+	call cpos(18,0); call erase.to.end.of.line;
+	call ps('this.beat    = ');call conv.32bit.int.to.str(this.beat, misc.buf);call ps(misc.buf);call pc(sp);
+	call ps('next.beat    = ');call conv.32bit.int.to.str(next.beat, misc.buf);call ps(misc.buf);call pc(sp);
+
+	call cpos(19,0); call erase.to.end.of.line;
+	call ps('window.start = ');call conv.32bit.int.to.str(window.start, misc.buf);call ps(misc.buf);call pc(sp);
+	call ps('window.end   = ');call conv.32bit.int.to.str(window.end, misc.buf);call ps(misc.buf);call pc(sp);
+
+	call cpos(20,0); call erase.to.end.of.line;
+	call ps('window.len   = ');call conv.32bit.int.to.str(window.len, misc.buf);call ps(misc.buf);call pc(sp);
+	call ps('window.mid   = ');call conv.32bit.int.to.str(window.mid, misc.buf);call ps(misc.buf);call pc(sp);
+
+	call get_enable(get.in.char);
+	call get.next.event;
+	call get_disable(get.in.char);
+end RDB;
+*/
+
+get.thd.ptr:  proc (trk)	fixed swapable;	/*	returns abs ptr to trk	*/
+	dcl trk	fixed;
+	write(mam) = nah.ptr; write(mal) = trk;
+	if read(md) = 0
+	then return 0;							/*	no trk head	*/
+	else return nah.ptr+read(md);
+end get.thd.ptr;
+
+get.trk.head: proc (trk)	fixed swapable;	/*	allocate trk head; returns abs ptr to it	*/
+	dcl trk	fixed;
+
+	if allocate.trk.header(trk) = 0	/*	try to create the thd	*/
+	then do;									/*	none available				*/
+		call display.err(0);				/*	display 'not enough room to bounce'	*/
+		edit.error = e#noroom;			/*	set global error flag	*/
+		return 0;							/*	no memory - bomb out		*/
+	end;
+
+	write(mam) = trk.head;				/*	get abs ptr to new thd		*/
+	write(mal) = trk;
+	return read(md);						/*	return abs ptr to new thd	*/
+
+end get.trk.head;							/*	of allocate new trk head	*/
+
+quick.play.init: proc (thd.ptr) swapable;	/*	does a quick play.initialize type procedure	*/
+	dcl thd.ptr			fixed;			/*	abs trk head ptr for desired trk	*/
+	dcl save.mark.msb	fixed;			/*	kludge to speed up init call		*/
+
+	if thd.ptr = 0 then return;
+
+	save.mark.msb = mark.button.msb;
+	mark.button.msb = 1;					/*	will make init call faster	*/
+
+	play.time.msb = 0;					/*	initialize time to start	*/
+	play.time.lsb = 0;
+	play.time.acu = 0;
+	next.click	  = zero.time;			/*	first click at script 0.000		*/
+	next.seq.event= zero.time;
+	beat.number	  = 0;					/*	incremented to 1 when seq starts	*/
+
+	real.time.of.next.click.msb = 0;
+	real.time.of.next.click.lsb = zero.time;
+
+	next.event.queue = 0;				/*	start with empty list	*/
+
+	call init.track.head.for.play(thd.ptr);	/*	set up trk head, mostly	*/
+
+	write(mam) = thd.ptr;
+	write(mal) = thd.trk;
+	#trk = read(md);
+	#ptr = thd.ptr;
+	call load.#.info (thd.nmsb);		/*	copy play info onto	*/
+	call store.#.info(thd.lp.nmsb);	/*	loop play info			*/
+
+	mark.button.msb = save.mark.msb;	/*	restore to original value	*/
+end quick.play.init;
+
+switch.tracks: proc (old,new,newptr) swapable;	/*	delete old trk, switch new to have old trk #	*/
+	dcl (old,new)	fixed;
+	dcl (newptr,i)	fixed;
+
+	call erase.track(old);				/*	free up old trk	*/
+
+	write(mam) = newptr;					/*	point at new thd	*/
+	i = read(mdi);							/*	save thd.for		*/
+	write("324") = read(mdi);			/*	skip over thd.rev	*/
+	write(md) = old;						/*	reset thd.trk		*/
+
+	do while i<>0;							/*	loop while more	*/
+		write(mam) = nah.ptr+i;			/*	point at sou nls	*/
+		i = read(mdi);						/*	save nls.for		*/
+		write("324") = read(mdi);		/*	skip over nls.rev	*/
+		write(md) = old;					/*	reset nls.trk		*/
+	end;
+
+	write(mam) = trk.head;				/*	fix up trk.head array	*/
+	write(mal) = old;						/*	des now points at		*/
+	write(md ) = newptr;					/*	original sou thd		*/
+	write(mal) = new;						/*	and source is now		*/
+	write(md ) = 0;						/*	empty						*/
+
+	write(mam) = nah.ptr;				/*	fix up nah.ptr array	*/
+	write(mal) = old;						/*	old now points at		*/
+	write(md ) = newptr-nah.ptr;		/*	original thd			*/
+	write(mal) = new;						/*	and original trk is	*/
+	write(md ) = 0;						/*	now empty				*/
+
+end switch.tracks;
+
+
+init.trk.head.info:  proc (sptr,dptr) swapable;	/*	copies select info from sptr to dptr	*/
+	dcl (sptr,dptr)	fixed;			/*	source and dest thd	*/
+
+	write(mam) = sptr;			/*	read info from source thd	*/
+	call copy.in(addr(misc.buf(0)),256);	/*	read in thd info	*/
+
+	write(mam) = dptr;			/*	point at dest trk head		*/
+	write(mal) = thd.poly;		 write(md) = misc.buf(thd.poly);	/*	copy over info	*/
+	write(mal) = thd.midi;		 write(md) = misc.buf(thd.midi);
+	write(mal) = thd.tvol;		 write(md) = misc.buf(thd.tvol);
+	write(mal) = thd.trou;		 write(md) = misc.buf(thd.trou);
+	write(mal) = thd.tpan;		 write(md) = misc.buf(thd.tpan);
+	write(mal) = thd.cue.out;	 write(md) = misc.buf(thd.cue.out);
+	write(mal) = thd.oratio;	 write(md) = misc.buf(thd.oratio);
+	write(mal) = thd.sxpos;		 write(md) = misc.buf(thd.sxpos);
+	write(mal) = thd.stimb;		 write(md) = misc.buf(thd.stimb);
+	write(mal) = thd.slpitch;	 write(md) = misc.buf(thd.slpitch);
+	write(mal) = thd.scale;		 call copy.out(addr(misc.buf(thd.scale)),12);
+	write(mal) = thd.usage;		 call copy.out(addr(misc.buf(thd.usage)),thd.usage.len);
+	write(mal) = thd.syn.crout; call copy.out(addr(misc.buf(thd.syn.crout)),16);
+	write(mal) = thd.ilpctr;	 write(md) = misc.buf(thd.ilpctr);
+	write(mal) = thd.active.midi.rtes; write(md) = misc.buf(thd.active.midi.rtes);
+	write(mal) = thd.cue.track; write(md) = misc.buf(thd.cue.track);
+	write(mal) = thd.midi.path; write(md) = misc.buf(thd.midi.path);
+   write(mal) = thd.midx;      write(md) = misc.buf(thd.midx);
+
+	new.motion				  = 1;	/*	send new cue track constants		*/
+	new.cue.track.settings = 1;	/*	over after track head allocate	*/
+
+end init.trk.head.info;
+
+
+dcl pct.change.set boolean static;	/*	true if pct.change has been calculated	*/
+
+dcl (base, index, grid)	fixed;
+dcl this.beat		(1)	fixed;
+dcl next.beat		(1)	fixed;
+dcl window.start	(1)	fixed;
+dcl window.end		(1)	fixed;
+dcl window.len		(1)	fixed;
+dcl window.mid		(1)	fixed;
+
+/*	modify.bounce bounces the source track notes to a temp track, and	*/
+/*	calls an appropriate routine to change some aspect of the note if	*/
+/*	it is in the edit region as specified in the sequence editor.		*/
+
+modify.bounce: proc (xsou, op, info)	fixed public swapable;
+	dcl xsou				fixed;			/*	abs trk # for source track	*/
+	dcl op				fixed;			/*	operation to perform	*/
+	dcl info				array;			/*	operation dependent information	*/
+
+	dcl (sou,des)		fixed static;	/*	abs trk # for source and destination tracks	*/
+	dcl (sptr,dptr)	fixed static;	/*	abs ptrs to trk heads for respective tracks	*/
+	dcl (sinfo) (7)	fixed;			/*	8 word array to hold source trk info	*/
+	dcl (dinfo) (7)	fixed;			/*	8 word array to hold dest	 trk info	*/
+	dcl note.time (1)	fixed;
+	dcl save.time (1)	fixed;			/*	holds time of current note	*/
+	dcl (i,j)			fixed;
+
+	dcl duration		fixed;
+
+	dcl in.range		boolean;			/*	used for range checking in justify	*/
+	dcl (a, b, r) (1)	fixed;			/*	used for range checking in justify	*/
+
+	dcl inside.filter.region boolean;	/*	true if current note falls within the range of filter parameters	*/
+
+	dcl saved.grps(THD.NUMGRPAUX-1)	fixed;
+
+	dcl j#offset	lit '(info(0))';		/*	justify info literals	*/
+	dcl j#range	lit '(info(1))';
+	dcl j#pct	lit '(info(2))';
+
+	/*	sinf0 and dinfo words:
+		0 - 1  ==>  sec and wrd track ptr
+		2 - 3  ==>  msb and lsb of track time
+		4 - 7  ==>  words of note record	*/
+
+	insert ':synsou:editmod:bncefncs';	/*	low level bounce routines needed here	*/
+
+	sieve: proc (base, index, grid);		/*	adapted from code by a. talbot!	*/
+		dcl (base, index, grid)	fixed;
+
+		if (grid) then do;	/*	if grid is odd, then multiply by 2 to make things even for rounding later	*/
+			grid	= shl(grid, 1);
+			index	= shl(index, 1);
+		end;
+
+		write(5) = base;
+		write(6) = index;
+		mwait;
+		write(7) = grid;
+
+		return read(5) + (read(4) ige  shr(grid, 1));
+
+	end sieve;
+
+	fit.note: proc (where, note.time, sinfo, info);
+		dcl where				fixed;		/*	0 - before region, 1 - in region, 2 - after region	*/
+		dcl note.time			array;
+		dcl sinfo				array;
+		dcl info					array;
+
+		dcl pct.change			fixed static;
+		dcl pct.of.reg			fixed;	/*	holds the pct of the region that a note falls in	*/
+		dcl oln (1)				fixed;	/*	old time of last note in region	*/
+		dcl nln (1)				fixed;	/*	new time of last note in region	*/
+		dcl osln (1)			fixed;	/*	old time of second to last note in region	*/
+		dcl nsln (1)			fixed;	/*	new time of second to last note in region	*/
+		dcl (t1, t2, t3) (1)	fixed;
+		dcl sign.changed		boolean;	/*	1 if sign has changed		*/
+		dcl new.time (1)		fixed;	/*	new end time for region	*/
+
+		dcl pct						lit '(info(2))';
+		dcl scale.after.region	lit '(info(3))';	/*	0 - don't scale after region end, 1 - scale until end of tracks	*/
+		dcl method					lit '(info(4))';	/*	0 - instant change, 1 - linear change, 2 - log change	*/
+
+		call copy32(loc(addr(info(0))), new.time);
+
+		do case (where);
+			;		/*	CASE 0: nothing before region	*/
+
+			do;	/*	CASE 1: in region	*/
+				call sub32(note.time,start,loc(addr(bitmsb)));		/*	note time - region start	*/
+				call ratio_multiply(pct, 1000);							/*	(note time - region start) * percent to change		*/
+				call add32(loc(addr(bitmsb)), start, loc(addr(sinfo(2))));	/*	add in start to offset from region start	*/
+
+				if (method > 0)
+				then do;
+					/*	linear - change linearly over time	*/
+					if (com32(loc(addr(sinfo(2))), note.time) = lw#igt)
+					then call sub32(loc(addr(sinfo(2))), note.time, loc(addr(sinfo(2))));
+					else do;
+						call sub32(note.time, loc(addr(sinfo(2))), loc(addr(sinfo(2))));
+						sign.changed = 1;
+					end;
+
+					call sub32(note.time, start, t1);		/*	current note time - region start	*/
+					call sub32(finish, start, t2);			/*	region end - region start	*/
+					pct.of.reg = (conv.ratio.to.percent(t1, t2));	/*	(percent of time this note falls on * 1000)	*/
+					load sinfo(3); uload sinfo(2);
+					mul pct.of.reg;
+					bitmsb = ures; bitlsb = res;
+					call ratio_multiply(1, 1000);
+					sinfo(2) = bitmsb; sinfo(3) = bitlsb;
+
+					if  (com32(new.time, finish) = lw#igt)
+					and (sign.changed = 0)
+					then call add32(note.time, loc(addr(sinfo(2))), loc(addr(sinfo(2))));
+					else call sub32(note.time, loc(addr(sinfo(2))), loc(addr(sinfo(2))));
+
+					/*	if we haven't set up the percent change constant, and	*/
+					/*	we plan to scale notes after the region, we must keep	*/
+					/*	track of the last 2 notes in the region...				*/
+					if (pct.change.set = false) and (scale.after.region)
+					then do;		/*	keep track of last 2 notes	*/
+						call copy32(oln, osln);
+						call copy32(nln, nsln);
+						call copy32(note.time, oln);
+						call copy32(loc(addr(sinfo(2))), nln);
+					end;
+				end;
+			end;
+
+			do;	/*	CASE 2: after region	*/
+				if (com32(new.time, finish) = lw#igt)	/*	we expanded the region	*/
+				then do;
+
+					/*	new.note.time = current.note.time + (new finish time - old finish time)	*/
+					call sub32(new.time, finish, note.time);
+
+					call add32(note.time, loc(addr(sinfo(2))), loc(addr(sinfo(2))));
+
+				end;
+				else do;											/*	we made the region smaller	*/
+
+					/*	new.note.time = current.note.time - (old finish time - new finish time)	*/
+					call sub32(finish, new.time, note.time);
+					call sub32(loc(addr(sinfo(2))), note.time, loc(addr(sinfo(2))));
+				end;
+
+				/*	if we haven't set up the percent change constant, and	*/
+				/*	we plan to scale notes after the region, we have to	*/
+				/*	first calculate the percent change to use for scaling	*/
+				/*	after the region...												*/
+				if (scale.after.region) then do;
+					if (pct.change.set = false) then do;	/*	calculate pct change	*/
+						pct.change.set = true;
+						if (method = 0)
+						then pct.change = pct;					/*	static case	*/
+						else do;
+							call sub32(nln,nsln,t1);
+							call sub32(oln,osln,t2);
+
+							if ((t1(0)|t1(1)|t2(0)|t2(1)) <> 0)
+							then pct.change = (conv.ratio.to.percent(t1, t2));
+							else if (pct.change = 0) then pct.change = pct;
+						end;
+					end;
+
+					call sub32(loc(addr(sinfo(2))), new.time, loc(addr(bitmsb)));	/*	note time - new region end time	*/
+					call ratio_multiply(pct.change, 1000);									/*	(note time - new region end) * percent to change	*/
+					call add32(loc(addr(bitmsb)), new.time, loc(addr(sinfo(2))));	/*	add in start to offset from region start	*/
+				end;	/*	of if (scale.after.region)	*/
+			end;
+
+		end;	/*	of do case	*/
+
+	end fit.note;
+
+	/**** main code starts here ****/
+
+	if recd<>0 then return 0;			/*	can't bounce during record	*/
+
+	sou = xsou;			/*	transfer these values to local statics	*/
+	des = bounce.trk;	/*	will use bounce.trk for temporary scratch trk.	*/
+
+	/*	Create a system event when modifying a track by bouncing.	*/
+	/*	New notes on the track + possible new timbre names.		*/
+
+	interp_seq_dirtyness(1);
+	
+	new.seq.info = new.seq.info \ 6;	/*	new seq names; new notes on track	*/
+	write(MAM) = D115D.Note.Change.Tracks;
+	write(MAL) = sou;						/*	Remember track # on new.seq.info	*/
+	write(MD) = "177777";				/*	"new notes" OR "new timbre"		*/
+
+	write(mam) = trk.head;				/*	get ptr to source track			*/
+	write(mal) = sou;
+	sptr = read(md);						/*	save ptr to source trk head	*/
+
+	if sptr<>0 then do;					/*	source trk has a trk head		*/
+
+		if  (trk.head.lookup(sou,thd.ilp   ) = 0)	/*	no ilp on sou trk	*/
+		and (trk.head.lookup(sou,thd.nn.msb) = 0)	/*	and no notes on	*/
+		and (trk.head.lookup(sou,thd.nn.lsb) = 0)	/*	sou trk				*/
+		then goto done.with.bounce;		/*	nothing to do - all done	*/
+
+	end;
+	else return 1;
+
+	/*	now try to guess if there is enough room to		*/
+	/*	perform the bounce function. shuffle memory if	*/
+	/*	required.													*/
+
+	if enough.memory.for.bounce = 0	/*	not enough memory for bounce operation	*/
+	then do;
+		call display.err(0);				/*	display 'not enough room to bounce'	*/
+		edit.error = e#noroom;			/*	set global error flag	*/
+		return 0;							/*	bomb out	*/
+	end;
+
+	#trk = des;								/*	will do bounce onto des trk	*/
+	#ptr = get.trk.head(des);			/*	allocate trk head for it		*/
+	if #ptr = 0 then return 0;			/*	ran out of memory - quit		*/
+
+	call init.trk.head.info(sptr,#ptr);	/*	set up 1info for des trk using sou thd	*/
+	call alloc.timbre.uses(des);		/*	account for timbre uses	*/
+	call compute.arlist;					/*	set up thd.cue.track, ribbon cue, etc	*/
+
+	write(mam) = #ptr;					/*	point at trk head			*/
+	call load.#.info(thd.nmsb);		/*	set up # vars				*/
+
+	call init.info.for.bounce(sptr,sinfo);	/*	set up for 1st note on sou trk	*/
+
+	/*	Save and preserve group information for source track; it will be assigned	*/
+	/*	to the copied-over-track when we are through											*/
+
+	write(mam) = sptr;
+	write(mal) = THD.GROUPLIST;
+
+	do i = 0 to THD.NUMGRPAUX-1;
+		saved.grps(i) = read(md);
+		write(mdi)	  = 0;
+	end;
+
+	do while sinfo(0)<>0;			/*	loop while more notes to bounce	*/
+
+		call get.next.note.to.bounce(sinfo);
+
+		if sinfo(0)<>0 then do;		/*	have a note to bounce	*/
+
+			save.time(0) = sinfo(2);
+			save.time(1) = sinfo(3);
+
+			note.time(0) = sinfo(2);
+			note.time(1) = sinfo(3);
+
+			i = com32(note.time, start);
+			j = com32(note.time, finish);
+
+			if		  (op == op#seq.to.real) {
+				if (((sinfo(4) & "100000") != 0) ||			//	If (this is an alternate format note record) -or-
+					 (((sinfo(4) & 1) != 0) &&					//	(this is a four-word normal record and
+					  ((sinfo(6) & shl(b.upd, 8)) != 0)))	//	the update bit is set (i.e., is a RTE))...
+					//	then just convert it's Start Time
+					Map.Sequence.Time.To.Real.Time(loc(addr(sinfo(2))), loc(addr(sinfo(2))));
+				else {
+					//	else convert both it's Start Time and Duration
+					Extract.Dur(loc(addr(sinfo(4))),note.time);			//	Extract Seq Duration from SINFO
+					Add32(loc(addr(sinfo(2))), note.time, note.time);	//	Seq Start Time + Seq Duration = Seq End Time
+					Map.Sequence.Time.To.Real.Time(loc(addr(sinfo(2))), loc(addr(sinfo(2))));	//	Convert Seq Start Time to Real Start Time
+					Map.Sequence.Time.To.Real.Time(note.time, note.time);								//	Convert Seq End Time to Real End Time
+					Sub32(note.time, loc(addr(sinfo(2))), note.time);	//	Real End Time - Real Start Time = Real Duration
+					//	Put the Real Duration back into SINFO
+					i = Msec.To.Duration(note.time);
+					sinfo(4) = (sinfo(4) & "103777") | shl((i & "36000"), 1);	//	load exponent and 2-bit mantissa (msb)
+					sinfo(5) = (sinfo(5) &		"77") | shl( i, 6);					//	load rest of mantissa
+				}
+			}
+
+			else if (op == op#real.to.seq) {
+				if (((sinfo(4) & "100000") != 0) ||			//	If (this is an alternate format note record) -or-
+					 (((sinfo(4) & 1) != 0) &&					//	(this is a four-word normal record and
+					  ((sinfo(6) & shl(b.upd, 8)) != 0)))	//	the update bit is set (i.e., is a RTE))...
+					//	then just convert it's Start Time
+					Map.Real.Time.To.Sequence.Time(loc(addr(sinfo(2))), loc(addr(sinfo(2))));
+				else {
+					//	else convert both it's Start Time and Duration
+					Extract.Dur(loc(addr(sinfo(4))),note.time);			//	Extract Real Duration from SINFO
+					Add32(loc(addr(sinfo(2))), note.time, note.time);	//	Real Start Time + Real Duration = Real End Time
+					Map.Real.Time.To.Sequence.Time(loc(addr(sinfo(2))), loc(addr(sinfo(2))));	//	Convert Real Start Time to Seq Start Time
+					Map.Real.Time.To.Sequence.Time(note.time, note.time);								//	Convert Real End Time to Seq End Time
+					Sub32(note.time, loc(addr(sinfo(2))), note.time);	//	Seq End Time - Seq Start Time = Seq Duration
+					//	Put the Seq Duration back into SINFO
+					i = Msec.To.Duration(note.time);
+					sinfo(4) = (sinfo(4) & "103777") | shl((i & "36000"), 1);	//	load exponent and 2-bit mantissa (msb)
+					sinfo(5) = (sinfo(5) &		"77") | shl( i, 6);					//	load rest of mantissa
+				}
+			}
+
+			else if (i = lw#ilt)
+			or		  (i = lw#ieq)
+			then do;							/*	note is before start	*/
+				/*	nothing	*/
+			end;
+
+			else if ((i = lw#igt)
+			and		(j = lw#ilt))
+			then do;							/*	note between start and finish	*/
+				if (op = d#fit.time)
+				then call fit.note(1, note.time, sinfo, info);
+
+				else if (op = d#justify) then do;
+
+					if  (apply.filter) then do;
+						#w1 = sinfo(4);	/*	check note.filter needs #w1-#w4 valid	*/
+						#w2 = sinfo(5);
+						#w3 = sinfo(6);
+						#w4 = sinfo(7);
+						inside.filter.region = check.note.filter;
+					end;
+					else inside.filter.region = true;
+
+					if (inside.filter.region) then do;
+
+						if click.track.mode igt 3	/*	live click track	*/
+						then do;
+							/*	remap actual note time to logical time for justifying	*/
+							call remap.with.live.click(note.time(0), note.time(1), 0, 0, 1);
+							note.time(0) = remapped.time.msb;
+							note.time(1) = remapped.time.lsb;
+
+							/*	SET THIS.BEAT & NEXT.BEAT TO BOOKEND NOTE.TIME	*/
+							if (com32(note.time, next.beat) = lw#igt)
+							then do;
+								call copy32(note.time,bitmsbarray);
+								call sub16(zero.time,bitmsbarray);
+								/*	THE 16 BIT QUOTIENT OF THE FOLLOWING D4567 DIVISION SHOULD			*/
+								/*	SUFFICE BECAUSE NO CLICK TRACK COULD CONTAIN MORE THAN 64K NOTES?	*/
+								load bitlsb; uload bitmsb; div 1000; mwait;
+								uload 0;	/*	CLEAR THE REMAINDER	*/
+								mul 1000;
+								bitlsb=res; bitmsb=ures;
+								call add16(zero.time,bitmsbarray);
+								call copy32(bitmsbarray,this.beat);
+								call copy32(this.beat,next.beat);
+								call add16(1000,next.beat);
+							end;
+						end;
+						else do;
+							/*	SET THIS.BEAT & NEXT.BEAT TO BOOKEND NOTE.TIME	*/
+							if (com32(note.time, next.beat) = lw#igt)
+							then call Map.Sequence.Time.To.Nearest.Clicks(note.time,this.beat,next.beat);
+
+							/*	Compute click rate at this location	*/
+							base = next.beat(1) - this.beat(1);
+						end;
+
+						/*	Compute window time for first section within the beat:	*/
+						index = 1;
+						call copy32(this.beat, window.start);
+						call copy32(this.beat, window.end  );
+						call add16(sieve(base, 1, grid), window.end);
+
+						do while (com32(note.time, window.end) = lw#igt);	/*	advance window times to next window	*/
+							call copy32(window.end, window.start);				/*	set window start = window end	*/
+							index = index+1;
+							call copy32(this.beat,window.end);
+							call add16(sieve(base, index, grid), window.end);
+						end;
+
+						call sub32(window.end, window.start, window.len);	/*	calculate time length of window		*/
+
+						call copy32(window.start, window.mid);					/*	calculate time of window midpoint	*/
+						load window.len(1); div 2;
+						call add16(res+rem, window.mid);
+
+						in.range = false;
+
+						if  (abs(j#range) = 100)
+						then in.range = true;
+						else do;
+							bitmsb = window.len(0); bitlsb = window.len(1);
+							call ratio_multiply(abs(j#range), 100);
+							r(0) = bitmsb; r(1) = bitlsb;
+							call shr32(r, 1);
+
+							call copy32(window.start, a);
+							call add32(a, r, a);
+
+							call copy32(window.end, b);
+							call sub32 (b, r, b);
+
+							if ((com32(note.time, a) = lw#igt)
+							and (com32(note.time, b) = lw#ilt))
+							then do;
+								if (j#range < 0)
+								then in.range = true;
+							end;
+							else if (j#range > 0) then in.range = true;
+
+						end;
+
+						if (in.range) then do;
+							if (com32(note.time, window.mid) = lw#ilt)		/*	justify note!	*/
+							then do;
+								if (j#pct <> 100) then do;
+									call sub32(note.time, window.start, loc(addr(bitmsb)));
+									call ratio_multiply(j#pct,100);
+									call sub32(note.time, loc(addr(bitmsb)), note.time);
+								end;
+								else call copy32(window.start, note.time);	/*	load window.start into new note time	*/
+							end;
+							else do;
+								if (j#pct <> 100) then do;
+									call sub32(window.end, note.time, loc(addr(bitmsb)));
+									call ratio_multiply(j#pct,100);
+									call add32(note.time, loc(addr(bitmsb)), note.time);
+								end;
+								else call copy32(window.end, note.time);		/*	load window.end into new note time		*/
+							end;
+
+							/*	remap logical note time back to actual time	*/
+							if click.track.mode igt 3 then do;
+								call remap.with.live.click(note.time(0), note.time(1), 0, 0, 0);
+								note.time(0) = remapped.time.msb;
+								note.time(1) = remapped.time.lsb;
+							end;
+							sinfo(2) = note.time(0);
+							sinfo(3) = note.time(1);
+
+							if (j#offset <> 0) then do;	/*	offset note time from grid by j#offset ms.	*/
+								if (j#offset > 0)
+								then call add16(j#offset, loc(addr(sinfo(2))));
+								else call sub16(abs(j#offset), loc(addr(sinfo(2))));
+							end;
+						end;	/*	of if (in.range)	*/
+					end;	/*	of if (inside.filter.region)	*/
+				end;	/*	of "if (op = d#justify)"	*/
+			end;	/*	of "note between start and finish"	*/
+
+			else do;								/*	note is after region	*/
+				if (op = d#fit.time)
+				then call fit.note(2, note.time, sinfo, info);
+			end;
+
+			call bounce.note(sinfo);		/*	bounce note onto des trk	*/
+
+			sinfo(2) = save.time(0);		/*	restore time in sinfo	*/
+			sinfo(3) = save.time(1);
+
+			call advance.to.next.note(sinfo);
+
+		end;	/*	of have a note to bounce	*/
+
+	end;	/*	of loop while more notes to bounce	*/
+
+	call switch.tracks(sou,des,#ptr);	/*	get rid of des	*/
+
+	write(mam) = #ptr;
+	write(mal) = THD.GROUPLIST;
+
+	do i = 0 to THD.NUMGRPAUX-1;
+		write(mdi) = saved.grps(i);
+	end;
+
+	done.with.bounce:
+
+	call compute.active.trks;			/*	make sure thd.active set correctly	*/
+
+	call quick.play.init(get.thd.ptr(des));	/*	keep trk head safe	*/
+
+	return 1;								/*	bounce was successful	*/
+end modify.bounce;
+
+fit.region: proc(new.time, new.length, pct, method, scale.after.region) swapable;
+	dcl new.time				array;	/*	holds a 32bit value	*/
+	dcl new.length				array;
+	dcl pct						fixed;
+	dcl method					fixed;	/*	0 - instant change, 1 - linear change, 2 - log change	*/
+	dcl scale.after.region	fixed;	/*	0 - don't scale after region end, 1 - scale until end of tracks	*/
+	dcl trk						fixed;	/*	track to be modified	*/
+	dcl (sptr,dptr)			fixed;
+	dcl alltrks					boolean;	/*	true if edit will affect all tracks	*/
+	dcl info (5)				fixed;	/*	used to pass parameter info to bounce routine	*/
+
+	if (num.of.soloed.tracks = 0)
+	then alltrks = true;
+	else alltrks = false;
+
+	pct.change.set = false;	/*	initialize this flag	*/
+
+	info(0) = new.time(0);
+	info(1) = new.time(1);
+	info(2) = pct;
+	info(3) = scale.after.region;
+	info(4) = method;
+
+	do trk = num.kbd.tracks to first.lod.track-1;	/*	loop through all tracks	*/
+		write(mam) = trk.head;
+		write(mal) = trk;
+		if read(md)<>0
+		then sptr = read(md);
+
+		if (sptr <> 0) then do;
+		write(mam) = tbut.ptr;
+		write(mal) = trk;
+
+		if ((alltrks)								/*	if editing all tracks	*/
+		or ((read(md)&b.soloed.trk)<>0))		/*	or this track is soloed	*/
+		then do;										/*	then do the fit			*/
+
+			call modify.bounce(trk, d#fit.time, info);
+
+		end;
+		end;
+	end;
+	call play.initialize;
+
+end fit.region;
+
+justify.region: proc (start, finish, info) swapable;
+	dcl start	array;
+	dcl finish	array;
+	dcl info		array;	/*	offset, range, percent	*/
+								/*	offset	: grid offset	*/
+								/*	range		: how far from (or close to) the grid does a note have to be to get justified	*/
+								/*	percent	: what percent of the justify "distance" will be used	*/
+								/*	- i.e. 100% - justify exactly to the beat, 50% justify half way to the beat	*/
+
+	dcl trk		fixed;	/*	track to be modified	*/
+	dcl alltrks boolean;	/*	true if edit will affect all tracks	*/
+
+	alltrks = (num.of.soloed.tracks ieq 0);
+
+	do trk = num.kbd.tracks to first.lod.track-1;	/*	loop through all tracks	*/
+		write(mam) = tbut.ptr;
+		write(mal) = trk;
+
+		if ((alltrks)											/*	if editing all tracks	*/
+		or ((read(md)&b.soloed.trk)<>0))					/*	or this track is soloed	*/
+		then do;
+			grid = samp.crm;
+			call str32(0, zero.time, this.beat);
+
+			if click.track.mode igt 3						/*	live click track	*/
+			then do;
+				call str32(0, 1000+zero.time, next.beat);
+				base = 1000;
+			end;
+			else do;
+				call Map.Sequence.Time.To.Nearest.Clicks(this.beat,this.beat,next.beat);
+				base = next.beat(1) - this.beat(1);
+			end;
+
+			call modify.bounce(trk, d#justify, info);
+		end;
+	end;
+	call play.initialize;
+end justify.region;

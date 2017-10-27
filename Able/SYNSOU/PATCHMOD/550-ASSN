@@ -1,0 +1,1325 @@
+/*	:SYNSOU:PATCHMOD:550-ASSN  $TITLE  Routines for the Assignment Menu and Patch Screens
+
+Modified:
+1999/10/19 - TY  - Modified PRINT.ASSIGNMENT.LINE to display the "effective" transpose key based on the SFM Ocatve Base
+						 when an explicit transpose key is not defined.
+1999/10/15 - TY  - Fixed three bugs in ASSIGNMENT.MENU.MOUSE.POS and one in the ABSOLUTE SELECT case of
+						 ASSIGNMENT.MENU.INPUT that prevented mouse clicks from working as intended.
+						 1. An upper and lower byte were anded together rather than ored together, causing the result to be zero.
+						 2. The while loop was based on an impossible condition resulting in a zero column regardless of where the
+						 mouse was clicked.
+						 3. Clicking in row 24 caused illegal values to be passed to ASSIGNMENT.MENU.INPUT
+						 4. It was possible to click to a line past the last file in the patch list.
+						 Made modifications so that clicking below the list can still change the column.
+						 Disabled mouse in patch area when (num.frames == 0).
+1999/10/14 - TY  - Fixed a failure to update the tuning, total length or loop length parameters in
+						 the VK window when a partial was changed with the space bar
+1999/10/11 - TY  - Clicking on Current Timbre links to A-Page and back.
+						 Clicking on Current Catalog links to D-Page and back.
+1988/12/01 - cj  - Displayed memory left in each bin
+1987/07/17 - MWH - Update all to support max 4 poly bins, 512mb/bin
+1987/07/06 - MWH - kbd lookup table literals; restructured for 32 bit poly
+1986/10/04 - KJO - updated for -7 catalog structure
+1986/08/18 - tss - made change to PRINT.CURRENT.CATNAME call
+1986/08/15 - cj  - Fixed csem bug
+1986/08/14 - BSW - got rid of mouse menu selections and the little 's' that always appears.
+						 (must place mouse above keyword for now)
+						 made the literals local again
+1986/07/24-KJC,CJ- KBDTAB CHANGES
+1986/07/11 - BSW - added return to previous screen feature in input process
+1986/05/15 - "official" creation of release-M modules
+*/
+
+// Make selected I screen innards available to Add To Timbre
+DCL PATCH.SCREEN.BASE.LINE    FIXED PUBLIC;
+DCL PATCH.SCREEN.YPOS         FIXED PUBLIC;
+
+DCL BASE.LINE  LIT 'PATCH.SCREEN.BASE.LINE';
+DCL #YPOS      LIT 'PATCH.SCREEN.YPOS';
+
+DCL LINE.LIMIT		FIXED;		/*	FOR ERASING	*/
+DCL (#XPOS)       FIXED;
+dcl num.frames		fixed;		/*	holds number of frames for partial     */
+dcl input.state	fixed;		/*	current local state variable           */
+DCL (POS.TOKLEN)	FIXED;		/*	NUMBER OF CHARACTERS ALLOWED IN TOKEN	*/
+DCL (SPACE.TYPED)	FIXED;		/*	SELECT PARTIAL ON SECOND SPACE         */
+DCL (SHOW.NAME)   FIXED;      /* SHOW LONG FILE NAMES                   */
+
+dcl error.x	data (36,36,0,0);	/*	local error positions	*/
+dcl error.y	data (10,10,23,0);
+
+/*	the following literals mix up the meanings of x and y	*/
+
+dcl memlx	lit '12';
+dcl basex	lit '12';
+
+dcl filey	lit ' 4';
+dcl skeyy	lit '14';
+dcl ekeyy	lit '21';
+dcl voly		lit '26';
+dcl tray		lit '34';
+dcl tuny		lit '45';
+dcl tleny	lit '53';
+dcl lleny	lit '66';
+
+dcl cursor.col data (filey,skeyy,ekeyy,voly,tray,tuny,tleny,lleny,76);	/*	for looking up	*/
+dcl synth.typ.look data (0,0,1,1,0);		/*	true if is a page i patch list	*/
+
+CHECK.BASE.LINE: proc swapable;
+	dcl i	fixed;
+	i=find.partial;								/*	get this partial	*/
+	if synth.typ.look(TIM.HEAD.LOOKUP(0,tim.synth.typ+i)) then do;				/*	is a patch list timbre			*/
+		num.frames=count.timbre.frames(i);	/*	see how many frames in this patch list. SAVE FOR FUTURE USE.	*/
+		if base.line+#ypos>=num.frames		/*	off bottom of screen					*/
+		then do;										/*	code will blow up if no frames	*/
+			do while base.line>=num.frames;
+				if base.line<5 then base.line=0;
+				else base.line=base.line-5;
+			end;
+			#ypos=num.frames-base.line-1;
+			tds.line#=base.line+#ypos;
+		end;
+	end;
+end CHECK.BASE.LINE;
+
+HANDLE.LENGTH.ENTRY: proc(ptr,offs) swapable;			//	handle entry of total length or loop length from I screen
+	dcl (ptr,offs)	fixed;
+	dcl (i,j)		fixed;
+	DCL (STEREO	)	FIXED;
+	DCL (KHZ		)	FIXED;
+	dcl (sec,msec,mcsec)	fixed;
+
+	STEREO=P.LOOKUP(PTR+PT.STEREO);							//	get stereo info for current or most recent sound file
+	KHZ	=P.LOOKUP(PTR+PT.KHZ   );							//	or perhaps zeroes
+	IF (STEREO<>0 ) and (STEREO<>1	) THEN STEREO=0;
+	IF (KHZ ILT 10) OR  (KHZ IGT 2000) THEN KHZ	 =500;
+
+	call CONV.STR.TO.SFTIME(token,loc(addr(sec)));		//	convert typed-in string to sound file time
+	if ertyp<>0 then return;									//	error encountered
+
+	call p.lookup(ptr+pt.tlen);								//	get pointer to partial info
+	do i=pt.tlen to pt.copyl-1;								//	read in partial in prep for call to setup.poly.info
+		misc.buf(i)=read(mdi);
+	end;
+
+	load msec;		mul 1000;									//	msec * 1000
+	bitmsb = ures;	bitlsb = res;
+
+	bitlsb = bitlsb+mcsec;										//	plus mcsec
+	if bitlsb ilt mcsec then bitmsb=bitmsb+1;
+
+	load sec*100; mul 10000;									//	seconds * 1,000,000
+	bitmsb=bitmsb + ures;
+	bitlsb=bitlsb + res;
+	if bitlsb ilt res then bitmsb=bitmsb+1;
+
+	CALL ratio_multiply(SHL(KHZ,STEREO),500*20);			//	CORRECT FOR SAMPLING RATE, also for 50 khz base rate
+
+	misc.buf(offs	)=bitmsb;									//	store entered user value in 24-bit format
+	misc.buf(offs+1)=bitlsb;
+
+	call setup.poly.info;										//	check loop lengths and calc synth playback info
+
+	call p.lookup(ptr+pt.wtabl);								//	store wave table length
+	do i=pt.wtabl to pt.onloop;								//	to use by note start
+		write(mdi)=misc.buf(i);									//	(also the loop/on bit)
+	end;
+
+	call p.lookup(ptr+pt.tlen);								//	store possibly alterred
+	do i=pt.tlen to pt.llen+1;									//	user settings in case limited by sound file length
+		write(mdi)=misc.buf(i);
+	end;
+
+end HANDLE.LENGTH.ENTRY;
+
+PRINT.ASSIGNMENT.MENU: proc swapable;						//	draws the frame for the ASSIGNMENT MENU
+	call clear.term;
+	call PRINT.SCREEN.FRAME(7,'SOUND FILE "PATCH" DISPLAY');
+
+	call cpos(11,0); call DRAW.HOR(80);
+
+	if vt100<>0 then call CH.SET(norm);
+	call cpos(1,3);
+	call ps('1.  Use this screen to create Patch Lists.  Press ? for more instructions.');
+	call cpos(2,3);
+	call ps('2.  Select Partial Timbre from button panel or by pressing space bar.');
+	call cpos(3,3);
+	call ps('3.  Press  <CTRL-C>  to view directory of Sound Files in Current Catalog.');
+	call cpos(4,14);
+	call ps('<CTRL-E>  to enter a different Subcatalog.');
+   call cpos(5,14);
+   call ps('<CTRL-N>  to view long file names.');
+	call cpos(6,14);
+	call ps('<RETURN>  to view Keyboard Display.');
+	call cpos(7,13);
+	if vt100<>0 then	call ps(' <ENTER>  ');
+	else					call ps('<ESC><ESC>');
+	call ps(' when done with this screen.');
+
+	call cpos( 9,2); call ps('Keyboard Timbre:');
+	call cpos(10,2); call ps(curcat.str);
+	call PRINT.CURRENT.CATNAME(1);
+
+	if d44_present
+	then call plot.mouse.hole(mouse.hole.lowerx,mouse.hole.lowery);
+
+	/*	Set new.ABLE.timbre.info to create a screen event that will	*/
+	/*	refresh the entire screen on startup:								*/
+
+	new.ABLE.timbre.info = new.ABLE.timbre.info \ 1;
+end PRINT.ASSIGNMENT.MENU;
+
+/*	$SUBTITLE  Routine to Print Assignment Menu Instructions	*/
+
+ASSIGNMENT.MENU.INSTRUCTIONS: proc swapable;
+	call clear.term;
+	call PRINT.SCREEN.FRAME(21,'HOW TO USE THE SOUND FILE "PATCH" DISPLAY');
+
+	call cpos(2,0);
+	if vt100<>0 then do; call CH.SET(alt); call DRAW.TEE(t.left); end;
+	else call pc("174");
+	call DRAW.HOR(78);
+	if vt100<>0 then do; call DRAW.TEE(t.right); call CH.SET(norm); end;
+
+	call cpos(1,11);
+	call PRINT.EXIT.SCREEN.PROMPT; call ps('  -->');
+
+	/*	now fill box with up to 20 lines of instructions	*/
+	call cpos( 3,2); call ps('The Sound File "PATCH" Display combines the features of earlier');
+	call cpos( 4,2); call ps('"PATCH" software for creating Patch Lists with all the features of');
+	call cpos( 5,2); call ps('the Synclavier Real Time System.  A Patch List is a list of Sound');
+	call cpos( 6,2); call ps('Files on discrete regions of the keyboard.  Patch List Partials may');
+	call cpos( 7,2); call ps('now be combined with Synthesized or Resynthesized Partials in the');
+	call cpos( 8,2); call ps('same timbre if desired.');
+	call cpos(10,2); call ps('   1.  Select the desired Partial Timbre using the Button Panel or');
+	call cpos(11,2); call ps('       by pressing the space bar at the terminal.');
+	call cpos(12,2); call ps('   2.  Move the cursor and enter information as required.  Press');
+	call cpos(13,2); call ps('       <RETURN> after each entry.');
+	call cpos(14,2); call ps('   3.  Moving the cursor down when at the bottom of a Patch List will');
+	call cpos(15,2); call ps('       create a new line.  The screen will automatically scroll to');
+	call cpos(16,2); call ps('       allow more lines.');
+	call cpos(17,2); call ps('   4.  Several Special Commands are available from the LEFT-MOST column:');
+	call cpos(19,2); call ps('          ');
+	if vt100<>0 then call ps('<DELETE>'); else call ps(' <RUB>  ');
+	call ps('  Delete entire line of patch-list.');
+	call cpos(20,2); call ps('             -      Inserts a line into patch-list before current line.');
+	call PRINT.CCAT;			/*	print current catalog name	*/
+	call cpos(1,57+adm*3);	/*	put cursor back at nice spot	*/
+END ASSIGNMENT.MENU.INSTRUCTIONS;
+
+/*	$SUBTITLE  Routine to Print One Line of Assignment Menu		*/
+
+/*	used for printing of sound file loop lengths/total lengths	*/
+
+pllen:proc(msb,lsb,stereo,khz) swapable;
+	dcl (msb,lsb)	fixed;
+	dcl (i,j,k,l)	fixed;
+	DCL (STEREO	)	FIXED;
+	DCL (KHZ		)	FIXED;
+	DCL (SECS	)	FIXED;
+	DCL (MSECS	)	FIXED;
+	DCL (MCSECS	)	FIXED;
+
+	/*	msb and lsb are sample #'s	*/
+	/*	correct for sampling rate	*/
+	/*	and stereo to compute a		*/
+	/*	32-bit # of microseconds	*/
+
+	BITMSB=msb; BITLSB=lsb;		/*	GET SAMPLE #	*/
+	CALL ratio_multiply(20*500,SHL(KHZ,STEREO));	/*	CORRECT FOR SAMPLING RATE	*/
+	msb=BITMSB; lsb=BITLSB;								/*	32 BIT # OF MICROSECONDS	*/
+
+	load lsb; uload msb;			/*	get 32-BIT SAMPLE #	*/
+	div 10000;						/*	get seconds * 100		*/
+
+	secs=res; msecs=rem;			/*	get seconds * 100, milliseconds*1000		*/
+
+	load msecs; div 1000;		/*	now get milli & microseconds					*/
+	mcsecs=rem; msecs=res;
+
+	load secs; div 100;			/*	now get seconds, hundredths of a second	*/
+	secs =res;
+	msecs=msecs+(rem*10);
+
+	if secs>99 then secs=99;	/*	limit to two digits	*/
+	if secs>=10 then do;			/*	two digit				*/
+		load secs; div 10; secs=rem;
+		call pc(asc.0+res);		/*	print tens digit		*/
+	end;
+	else call pc(sp);
+	call pc(asc.0+secs);			/*	print ones digit		*/
+	call pc(dot);					/*	period					*/
+
+	do l=2 to 4;					/*	print digits	*/
+		load msecs;					/*	milliseconds	*/
+		div powers(l);				/*	get digit		*/
+		msecs=rem;					/*	save remainder	*/
+		call pc(asc.0+res);
+	end;
+
+	call ps(' ');
+
+	do l=2 to 4;					/*	microseconds	*/
+		load mcsecs;				/*	microseconds	*/
+		div powers(l);				/*	get digit		*/
+		mcsecs=rem;					/*	save remainder	*/
+		call pc(asc.0+res);
+	end;
+	call ps('  ');					/*	two spaces		*/
+
+end pllen;
+
+PRINT.ASSIGNMENT.LINE: proc(line) swapable;			/*	LINE # 0-9	*/
+	dcl (line,i,j,k)	fixed;
+	dcl (tbuf) (33)	fixed;
+	DCL (STEREO	)		FIXED;
+	DCL (KHZ		)		FIXED;
+	dcl str (2)			fixed;	/*	used for printing pitches	*/
+
+	dcl srscale	proc(fixed,fixed,fixed) returns(fixed) external;
+
+	erasech:proc(n);				/*	erase earlier characters by overwriting with spaces	*/
+		dcl (i,n)	fixed;
+		do i=1 to n; call pc(sp); end;
+	end erasech;
+
+	if (new.timbre.info		 <> 0)
+	or (new.ABLE.timbre.info <> 0)
+	then return;					/*	abort printing if timbre recalled	*/
+
+	if base.line+line >= num.frames then return;	/*	can not print off of end	*/
+	i=find.frame(find.partial,base.line+line+1);
+
+	p.lookup(i);									//	Point md to the stuff we want to copy
+	write(reg_dst|r13) = addr(tbuf(0));		//	Point r13 to our buffer
+	rpc 26;											//	Rapidly repeat the next single instruction 26 times
+	write(mem_dst|incr|r13) = read(mdi);	//	Copy extmem to buffer then incr both 
+
+	STEREO=P.LOOKUP(i+PT.STEREO);
+	KHZ	=P.LOOKUP(i+PT.KHZ	);
+	IF (STEREO<>0 ) and (STEREO<>1	) THEN STEREO=0;
+	IF (KHZ ILT 10) OR  (KHZ IGT 2000) THEN KHZ	 =500;
+
+	i=basex+2+line;										/*	get line to print on	*/
+
+	call cpos(i,0);										/*	patch line number		*/
+	if (base.line+line ilt 9) pc(a.space);			//	print leading space for 1-9
+	pnum(base.line+line+1,0); pc(a.period);
+
+	call cpos(i,filey);									/*	file name	*/
+
+   if (SHOW.NAME == 0) {
+      // Erase possible unicode name
+      call erasech(skeyy-filey);                /*	erase up to skey field	*/
+      
+      call cpos(i,filey);                       /*	file name	*/
+
+      do j=pt.name to pt.name+3;                // Name will take up less than 8 positions if unicode
+         k=(tbuf(j)&255);
+         if k>sp then call pc( k);
+         else			 call pc(sp);
+         k=(shr(tbuf(j),8));
+         if k>sp then call pc( k);
+         else			 call pc(sp);
+      end;
+      
+      // Reposition the cursor in case the 8 character file name had some unicode characters in it. What a guy.
+      call cpos(i,skeyy);
+
+      call CONV.KEY#.TO.STR(tbuf(pt.skey),str);		/*	starting key	*/
+      call ps(str);
+      call erasech(ekeyy-skeyy-3);
+
+      call CONV.KEY#.TO.STR(tbuf(pt.ekey),str);		/*	ending key	*/
+      call ps(str);
+      call erasech(voly-ekeyy-3);
+
+      call pnum(tbuf(pt.vol),1);							/*	volume		*/
+      call erasech(tray-voly);
+
+      call cpos(i,tray);									/*	transpose	*/
+      if tbuf(pt.tra)<>0 then do;
+         call CONV.KEY#.TO.STR((tbuf(pt.tra)&255),str);		/*	starting key	*/
+         call ps(str);
+      end;
+      else {
+         //	Let's not be pussies.  If there is no user-specified transpose key, then
+         //	we'll display the "effective" transpose key based on the SFM Ocatve Base.
+         pc(a.lparen);	//	Enclose the pitch in partenthesis to let the user know this is the effective pitch but is not yet defined
+         CONV.KEY#.TO.STR(sync.middle.c+9+srscale(tbuf(pt.pitch),3,256),str);
+         //	If the ending key was only two characters (i.e., no sharp), nuke the trailing space
+         if (byte(str,2) == a.space) str(0) = 2;
+         ps(str);
+         pc(a.rparen);
+      }
+      call erasech(tuny-tray);
+
+      call cpos(i,tuny);									/*	tuning correction	*/
+      if tbuf(pt.tun)<>0 then do;
+         if (tbuf(pt.tun)>(-1000)) and (tbuf(pt.tun)<(+1000)) then call pc(sp);
+         if tbuf(pt.tun)>0 then call pc(asc.plus);
+         else						  call pc(asc.min);
+         if (tbuf(pt.tun)>( -100)) and (tbuf(pt.tun)<( +100)) then call pc(asc.0);
+         if tbuf(pt.tun)>0 then call pnum(	 tbuf(pt.tun) ,2);
+         else						  call pnum(abs(tbuf(pt.tun)),2);
+      end;
+      else call ps('  0.00');
+      call erasech(tleny-tuny);
+
+      if inc.poly<>0 then do;
+         call cpos(i,tleny);
+         call pllen(tbuf(pt.tlen),tbuf(pt.tlen+1),stereo,khz);		/*	tot  length	*/
+         call pc(sp);
+         call pllen(tbuf(pt.llen),tbuf(pt.llen+1),stereo,khz);		/*	loop length	*/
+      end;
+   }
+
+   // Display long file name
+   else {
+      // Erase possible unicode name
+      call erasech(80-filey);                   /*	erase up to end of line */
+      
+      call cpos(i,filey);                       /*	file name	*/
+
+      i=find.frame(find.partial,base.line+line+1);
+      
+      // No long name
+      if ((p.lookup(i+CLEN  ) <= PT.LEN+2)
+      ||  (p.lookup(i+PT.LEN) == 0       )) {
+         do j=pt.name to pt.name+3;
+            k=(tbuf(j)&255);
+            if k>sp then call pc( k);
+            else			 call pc(sp);
+            k=(shr(tbuf(j),8));
+            if k>sp then call pc( k);
+            else			 call pc(sp);
+         end;
+      }
+      
+      else {
+         j = p.lookup(i+PT.LEN);                // Get string length of long file name
+         j = shr(j+3,1);                        // Get word length of long file name
+         if (j > 33)
+            j = 33;
+         write(reg_dst|r13) = addr(tbuf(0));		//	Point r13 to our buffer
+         rpc j;											//	Rapidly repeat the next single instruction 26 times
+         write(mem_dst|incr|r13) = read(mdi);	//	Copy extmem to buffer then incr both
+         
+         if (tbuf(0)>64)
+            tbuf(0) = 64;
+         
+         ps(tbuf);
+      }
+      
+      call cpos(basex+2+line,filey);                       /*	file name	*/
+   }
+
+   if line.limit<line+3 then line.limit=line+3;	/*	number of lines printed	*/
+end PRINT.ASSIGNMENT.LINE;
+
+/*	$SUBTITLE  Some Miscellaneous Routines	*/
+
+POS.ASSIGNMENT.CURSOR: PROC swapable;				/*	SET UP FOR INPUT	*/
+	CALL CPOS(BASEX+2+#ypos,cursor.col(#xpos));	/*	position cursor at file name	*/
+	IF TOKEN(0)<>0 THEN DO;								/*	REPOSITION CURSOR IF IN MIDDLE OF INPUT STRING	*/
+		CALL PS(TOKEN);									/*	REWRITE INPUT STRING TO POSITION CURSOR	*/
+	END;
+	POS.TOKLEN=CURSOR.COL(#xpos+1)-CURSOR.COL(#xpos);	/*	SET MAX INPUT STRING LENGTH	*/
+	SPACE.TYPED=0;
+	TDS.LINE#=BASE.LINE+#YPOS;							/*	KEEP UP TO DATE	*/
+END POS.ASSIGNMENT.CURSOR;
+
+SELECT.ASSIGNMENT:PROC swapable;					/*	CHECK FOR PARAMETER ASSIGNMENT	*/
+	if synth.typ.look(TIM.HEAD.LOOKUP(0,tim.synth.typ+find.partial))=0 then do;		/*	is not a patch list timbre	*/
+		IF (ACTIVE.PARMS(1)&255)=( PTTUN.L-PAR.L)	/*	PT TUNING - DESELECT	*/
+		THEN CALL CLEAR.PARAMETERS;					/*	OTHERS - LEAVE AS COEFF SELECTED IF SO	*/
+	END;
+	ELSE IF (#xpos>=5) THEN DO;						/*	MOVING TO TUNING, LENGTH, LOOP FIELDS	*/
+		TDS.LINE#=BASE.LINE+#ypos;
+		IF #xpos=5 THEN CALL SELECT.PARAMETER(PTTUN.L-PAR.L);				/*	TUNE	*/
+		ELSE				 CALL SELECT.PARAMETER(COEF.L+(#xpos-6)-PAR.L);	/*	LOOP	*/
+	END;
+	ELSE DO;													/*	NO LONGER ON THE KNOB-CHANGEABLE FIELDS	*/
+		IF ACTIVE.PARMS(0)<>0 THEN CALL CLEAR.PARAMETERS;
+	END;
+END SELECT.ASSIGNMENT;
+
+ERASE.BASEX.LINE:PROC(X);
+	DCL X	FIXED;
+	CALL ERASE.REST.OF.LINE(BASEX+X,0);
+END ERASE.BASEX.LINE;
+
+ERASE.BASEX:PROC(FIRST,ENDING);
+	DCL (I,FIRST,ENDING)	FIXED;
+	DO I=FIRST TO ENDING-1;			/*	ERASE EARLIER LINES	*/
+		CALL ERASE.BASEX.LINE(I);
+	END;
+END ERASE.BASEX;
+
+REDRAW:PROC swapABLE;		/*	REDRAW 10 LINES	*/
+	DCL I	FIXED;
+	do i=0 to 9; call PRINT.ASSIGNMENT.LINE(i); end;	/*	display up to 10 file names	*/
+END REDRAW;
+
+PRINT.PATCH.KNOB.INFO: proc swapable;		/*	redraw semitones & lengths		*/
+	dcl (i,j)		fixed;						/*	called upon new.tim.info & 1	*/
+	DCL (STEREO	)	FIXED;
+	DCL (KHZ		)	FIXED;
+
+	i=next.event.info;							/*	get bits form new prm info		*/
+
+	if (i&32)=0 then return;					/*	no change in patch list stuff	*/
+
+	if (new.timbre.info		 <> 0)
+	or (new.ABLE.timbre.info <> 0)
+	then return;									/*	abort printing if timbre recalled	*/
+
+	if synth.typ.look(TIM.HEAD.LOOKUP(0,tim.synth.typ+find.partial))=0
+	then return;					/*	if a synthesized timbre	*/
+
+	if (base.line+#ypos)>=num.frames then return;	/*	can not print off of end	*/
+	j=find.frame(find.partial,base.line+#ypos+1);
+	i=p.lookup(j+PT.TUN);									/*	get info from timbre	*/
+
+	call cpos(basex+2+#ypos,tuny);						/*	tuning correction		*/
+	if i<>0 then do;
+		if (i>(-1000)) and (i<(+1000)) then call pc(sp);
+		if i>0								 then call pc(asc.plus);
+		else											call pc(asc.min);
+		if (i>( -100)) and (i<( +100)) then call pc(asc.0);
+		if i>0								 then call pnum(	  i ,2);
+		else											call pnum(abs(i),2);
+	end;
+	else call ps('  0.00');
+
+	do i=tuny to (tleny-1); call pc(sp); end;
+
+	if inc.poly<>0 then do;
+		STEREO=P.LOOKUP(j+PT.STEREO);
+		KHZ	=P.LOOKUP(j+PT.KHZ	);
+		IF (STEREO<>0 ) and (STEREO<>1	) THEN STEREO=0;
+		IF (KHZ ILT 10) OR  (KHZ IGT 2000) THEN KHZ	 =500;
+		call cpos(basex+2+#ypos,tleny);
+		call pllen(p.lookup(j+pt.tlen),p.lookup(j+pt.tlen+1),stereo,khz);		/*	tot  length	*/
+		call pc(sp);
+		call pllen(p.lookup(j+pt.llen),p.lookup(j+pt.llen+1),stereo,khz);		/*	loop length	*/
+	end;
+
+	call POS.ASSIGNMENT.CURSOR;
+end PRINT.PATCH.KNOB.INFO;
+
+/*	$SUBTITLE  Routine to Print Out the Memory Left for Attack Buffers	*/
+
+dcl (lastmfree )	fixed;
+dcl (last.index)	fixed;
+
+PRINT.MEM.LEFT:PROC swapable;
+	dcl (i,j,k,l,newsiz)	fixed;
+	dcl (str)	(40)		fixed;
+	dcl (tmp)	(1)		fixed;
+
+	if inc.poly<>0 then do;								/*	poly memory	*/
+		if (input.state=s.assign.synth)
+		or (input.state=s.assign.patch)
+		then do;												/*	print message if assignment menu	*/
+			if polynums <= 1 then do;					/*	1 bin: print memory left	*/
+				call set.cur.bin(0);						/*	point data structures at this bin	*/
+				call COPY32(psfree,tmp);				/*	space in bin 0	*/
+				call cpos(memlx,tray);
+				do i=tray to 78; call pc(32); end;	/*	erase earlier memory size	*/
+				call cpos(memlx,tray);
+				call ps('Memory Left: ');				/*	express amount of memory left in megabytes	*/
+				load	tmp(lw#lsb);
+				uload	tmp(lw#msb);
+				div 2048;
+				i=res; j=rem;
+				load j; mul 10;
+				j=res;
+				div 2048;
+				j=res;
+				if rem ige 1024 then do;				/*	round up by .05 megabyte	*/
+					j=j+1;
+					if j=10 then do;
+						j=0; i=i+1;
+					end;
+				end;
+				call print.parm(i,0,0,2,0); call pc(dot); call print.parm(j,0,0,1,0);
+				call ps(' Megabytes');
+			end;
+			else do;											/*	multi-bin system	*/
+				call cpos(memlx,skeyy);
+				do i=skeyy to 78; call pc(32); end;	/*	erase earlier memory size	*/
+
+				call COPY.STRING('Preferred Bin:  ',str);
+				call pbyte(str, str(0)-1, asc.1 + TRK.HEAD.LOOKUP(0, thd.poly));
+				call cpos(memlx,skeyy);
+				call ps(str);
+
+				call COPY.STRING('Memory Available (Mb):',str);
+
+				do k = 0 to 2;							/*	append megabytes in each bin		*/
+
+					call set.cur.bin(k);				/*	point data structures at this bin	*/
+					call COPY32(psfree, tmp);		/*	get in handy temp						*/
+					load	tmp(lw#lsb);				/*	get sectors of poly mem avail		*/
+					uload	tmp(lw#msb);
+
+					div 2048;							/*	compute megabytes avail in this	*/
+					i=res; j=rem;						/*	bin to .1 megabyte accurately		*/
+					load j; mul 10;
+					j=res;
+					div 2048;
+					j=res;								/*	round up by .05 mb					*/
+					if rem ige 1024 then j = j + 1;
+
+					i = i*10 + j;						/*	get tenths of Mb						*/
+
+					call CONV.FIXED.TO.STR(i,1,5,cf#unsigned\cf#right\cf#spfill\cf#appendmask,str);
+
+					if k < 2 then call APPEND.TO.STR(str,',');
+				end;
+
+				call cpos(memlx,tray);
+				call ps(str);
+			end;
+		end;
+	end;
+
+	/*	$page	*/
+
+	else if inc.mono<>0 then do;		/*	mono - print buffer size, re-allocate memories	*/
+		if  (msfree igt lastmfree)		/*	more memory is available	*/
+		and (abuf.index<>0)				/*	and 100 sector buffers not being used	*/
+		then do;								/*	check for reload				*/
+			newsiz=abuf.index;			/*	start with this size			*/
+			next:i=newsiz-1;				/*	back up a buffer size		*/
+			if i<0 then i=0;				/*	limit to end of table		*/
+			j=0;								/*	count how much memory needed to bring buffers up to spec	*/
+			k=msfirst;
+			do while k<>mslast;			/*	check each attack buffer	*/
+				write(mam)=k;				/*	load ex mem ptrs				*/
+				l=read(mdi);				/*	get block length, advance to users	*/
+				if  (read(mdi)<>0)		/*	if file is being used		*/
+				and (l=abuf.data(abuf.index))		/*	and block is current size	*/
+				then do;									/*	then assume there may be more to file	*/
+					j=j+abuf.data(i)-abuf.data(abuf.index);	/*	this much more storage needed	*/
+				end;
+				k=k+l;
+			end;
+			if msfree ige j				/*	enough free storage for bigger buffers	*/
+			then do;							/*	reallocate them	*/
+				newsiz=i;					/*	at least go to this size	*/
+				if i<>0 then goto next;	/*	try for an even larger one, unless we reach 100	*/
+			end;
+			if  (newsiz=0)					/*	if we backed up to 100	*/
+			or  (newsiz<=abuf.index-2)	/*	or two larger		*/
+			then do;							/*	get larger buffer	*/
+				if (input.state=s.assign.synth)
+				or (input.state=s.assign.patch)
+				then do;						/*	print message if assignment menu	*/
+					call cpos(memlx,ekeyy);
+					do i=ekeyy to 78;		/*	erase earlier memory size	*/
+						call pc(32);
+					end;
+					call cpos(memlx,ekeyy);
+					call ps('Reloading Attack Buffers...      ');
+				end;
+				call dealloc.all;
+				mslast=msfirst;
+				msfree=msmax-mslast;		/*	free up all attack buffer storage	*/
+				abuf.index=newsiz;		/*	start at what we know will fit	*/
+				call alloc.all.timbres;	/*	read in them files	*/
+			end;
+		end;
+		if (input.state=s.assign.synth)
+		or (input.state=s.assign.patch)
+		then do;								/*	print message if assignment menu	*/
+			call cpos(memlx,ekeyy);
+			do i=ekeyy to 78;				/*	erase earlier memory size	*/
+				call pc(32);
+			end;
+			call cpos(memlx,ekeyy);
+			call ps	('Buffer Size: ');
+			call pnum(abuf.data(abuf.index),0);
+			call ps	(' Sectors     ');
+			if inc.poly=0 then do;		/*	display mono memory if just mono	*/
+				call ps('Total Memory: ');
+				call pnum(msmax-msfirst,0);
+				call ps(' Sectors');
+			end;
+		end;
+		last.index=abuf.index;
+	end;
+
+	lastmfree=msfree;
+END PRINT.MEM.LEFT;
+
+/*	$SUBTITLE  Prints Assignment Info for Selected Partial	*/
+
+PRINT.PARTIAL.INFO:PROC swapable;			/*	PRINT INFO FOR SELECTED PARTIAL	*/
+	DCL (I,PMAX)	FIXED;						/*	ONLY CALLED WHEN A NEW TIMBRE HAS APPEARED	*/
+	TOKEN(0)=0;										/*	WHEN CHANGING PARTIALS	*/
+	CALL PRINT.TIMBRE.NAME(kbdtx,kbdty);	/*	REDRAW NAME ON POSSIBLE TIMBRE RECALL	*/
+	I=FIND.PARTIAL;								/*	GET SELECTED PARTIAL - MAY BE DIFFERENT THAN WE STARTED?	*/
+	if synth.typ.look(TIM.HEAD.LOOKUP(0,tim.synth.typ+i))=0 then do;		/*	is not a patch list timbre			*/
+		INPUT.STATE=S.ASSIGN.SYNTH;			/*	LOOK FOR RETURN ONLY	*/
+		CALL ERASE.BASEX(0,LINE.LIMIT);		/*	ERASE POSSIBLE EARLIER TIMBRE	*/
+		CALL PRINT.MEM.LEFT;						/*	AFTER ERASING LINE	*/
+		CALL CPOS(BASEX+1,0);
+		CALL PS('Partial #'); call PNUM(I+1,0);
+		PTPTR=TIM.HEAD.LOOKUP(0,TIM.PARTIAL.POINTERS+I);	/*	POINT TO TIMBRE INFO	*/
+		IF  (((P.LOOKUP(PTPTR+P.EPEAKL)\P.LOOKUP(PTPTR+P.ESUSTL))&1023)=0)
+		THEN CALL PS(' is empty.');
+		ELSE CALL PS(' contains an FM or Synthesized sound.');
+		CALL CPOS(BASEX+2,0);
+		CALL PS('Press <RETURN> to erase this partial and create a patch list');
+		CALL CPOS(BASEX+3,0);
+		CALL PS('for Partial #');
+		CALL PNUM(I+1,0);
+		CALL PS(' --');
+		LINE.LIMIT=4;
+	END;
+	ELSE DO;											/*	DISPLAY PATCH LIST	*/
+		INPUT.STATE=S.ASSIGN.PATCH;			/*	ACCEPT TERMINAL INPUT NOW	*/
+		num.frames=count.timbre.frames(i);	/*	see how many frames in this patch list.  SAVE FOR FUTURE USE.	*/
+		pmax=line.limit;							/*	save how many lines were previously displayed	*/
+		call erase.basex(0,4);					/*	erase possible earlier instruction lines	*/
+		call cpos(BASEX,0);
+		call ps ('Partial # '); call pnum(I+1,0); CALL PS(':');
+		call print.mem.left;
+		call cpos(basex+1,filey);
+		call ps ('File      Start  End  Volume  Transpose  Tuning');
+		if inc.poly then call ps('  Total Length Loop Length');
+		line.limit=2;
+		call redraw;								/*	display all 10 lines (if there) - we know there is one	*/
+		call erase.basex(line.limit,pmax);	/*	erase earlier, non-overwritten lines	*/
+		call POS.ASSIGNMENT.CURSOR;			/*	set up for input	*/
+	END;
+END PRINT.PARTIAL.INFO;
+
+/*	$SUBTITLE  Routine to Turn a Synth Partial into a Patch List Partial	*/
+
+create.patch.list: proc swapable;	/*	create a new patch list from old synclavier timbre	*/
+	call create.patch.partial(find.partial,'');	/*	create a patch partial	*/
+
+	NUM.FRAMES=1;							/*	SET MAX TO 1	*/
+	#ypos=0; #xpos=0; BASE.LINE=0;	/*	START AT FILE POSITION 0		*/
+	TDS.LINE#=0;							/*	INITIALIZE IN CASE BUTTON USED	*/
+end create.patch.list;
+
+/*	$SUBTITLE  Routine to Deposit a New Value on the Assignment Screen	*/
+
+ASSIGNMENT.DEPOSIT: proc swapable;
+	dcl (i,j,k,l)	fixed;
+	dcl (insmsg)	fixed;
+
+	//	Emit "<FILENAME> Active on <TDS.PATCH.STR>" to VK Window.  (The only reason for doing this is
+	//	to replace a possible previous message, from a B-page load or an L-page selection for example,
+	//	that has just been rendered incorrect by the deposit being made here.)
+	EMIT.VK.MESSAGE: proc;
+		dcl index			fixed;
+		dcl filename(4)	fixed;
+
+		if ((new.pan != 0) && (held.psel.buttons == 0)) {
+			p.lookup(find.frame(find.partial,TDS.LINE#+1)+pt.name);	//	Point md to the filename
+			write(reg_dst|r13) = addr(filename(1));						//	Point r13 to the character part of our filename string
+			rpc 4;																	//	Rapidly repeat the next single instruction 4 times
+			write(mem_dst|incr|r13) = read(mdi);							//	Copy extmem to filename then incr both 
+			filename(0) = 8;														//	Make filename a valid XPL string
+			do index = 1 to 7;													//	Assuming the file name contains at least one character
+				if (byte(filename,index) == 0) pbyte(filename,index,a.space);	//	Pad with spaces rather than nulls
+			end;
+			BUILD.TDS.PATCH.STR();
+			CLEAR.PARAMETERS(); CLEAR.DISPLAY();
+			EMIT.STRING( 0,filename);
+			EMIT.STRING( 9,'Active on '); 
+			EMIT.STRING(19,TDS.PATCH.STR);  
+			both.display = true;
+		}
+	end EMIT.VK.MESSAGE;
+
+	if (err.displayed<>0) then call remove.err;
+
+	if token(0)=0 then return;		/*	no string - no change	*/
+
+	j=find.partial;					/*	get partial # of interest	*/
+	k=find.frame(j,base.line+#ypos+1);	/*	and pointer to it	*/
+
+	if (p.lookup(k)<>mor)			/*	make sure patch list	*/
+	or (p.lookup(k+type)<>pt.type)
+	then return;
+
+	call dealloc(0);					/*	free up buffers, etc. for old files	*/
+	tok.ptr=0;							/*	init pointer	*/
+	j=find.partial;					/*	get partial # of interest	*/
+	k=find.frame(j,base.line+#ypos+1);	/*	and pointer to it	*/
+
+	do case (#xpos);					/*	branch according to field dtype	*/
+		do;	//	0: filename
+			do i=token(0) to 7; call pbyte(token,i,0); end;				//	zero fill
+			do i=0 to 3; call p.store(k+pt.name+i,token(i+1)); end;	//	copy name
+
+			if (p.lookup(k+clen) IGT pt.event)								//	provided patch frame is big enough...
+			{																			//	delete unaccessable ram event information
+				p.store(k+pt.insofs,	0);										//	when changing sound file name.  e.g. re-lookup
+				p.store(k+pt.inwofs,	0);										//	original mark start/mark end when file name is typed
+				p.store(k+pt.event,	0);										//	in
+			}
+
+         // Erase long file name
+         if (p.lookup(k+clen) IGT pt.len) {
+            i = pt.len;
+            do while (i < p.lookup(k+clen));
+               p.store(k+i, 0);
+               i = i+1;
+            end;
+         }
+		end;	//	filename
+
+		do;	//	1 - starting key
+			i=conv.str.to.key#(token);
+			if ertyp=0 then do;
+				call p.store(k+pt.skey,i);
+				if p.lookup(k+pt.ekey)<i then call p.store(k+pt.ekey,i);	//	smart limits required here
+				EMIT.VK.MESSAGE();
+			end;
+		end;
+
+		do;	//	2 - ending key
+			i=conv.str.to.key#(token);
+			if ertyp=0 then do;
+				call p.store(k+pt.ekey,i);
+				if p.lookup(k+pt.skey)>i then call p.store(k+pt.skey,i);	//	smart limits required here
+				EMIT.VK.MESSAGE();
+			end;
+		end;
+
+		do;	//	3 - volume
+			i=parse.synclavier.parm(0,p.esustl);								//	read volume in same format as SUSTAIN
+			if i igt 1000 then do;
+				call format.error; i=1000;
+			end;
+			if ertyp=0 then call p.store(k+pt.vol,i);
+		end;
+
+		do;	//	4 - transposition
+			i=conv.str.to.key#(token);
+			if ertyp=0 then do;
+				p.store(k+pt.tra,i\256);
+				EMIT.VK.MESSAGE();
+			end;
+		end;
+
+		do;	//	5 - tuning correction
+			//	read a tuning correction value in semitones*100 +4800 to -4800
+			i=parse.synclavier.parm(0,PTTUN.L-PAR.L);	//	read SEMITONES in same format as INDIVIDUAL TONE BEND DEPTH
+			if ertyp=0 then call p.store(k+pt.tun,i);
+			call select.parameter(pttun.l-par.l);		//	select param & display it
+			reset.bits=reset.bits\r.freqs;				//	reset frequencies
+			new.kbd.pre=1;										//	recompute keyboard look up table
+		end;
+
+		if inc.poly<>0 then do;								//	LOOP LENGTH
+			call HANDLE.LENGTH.ENTRY(k,pt.tlen);
+			call select.parameter(coef.l-par.l);		//	select param & display it
+			reset.bits=reset.bits\r.loopl;				//	reset loops
+		end;
+
+		if inc.poly<>0 then do;
+			call HANDLE.LENGTH.ENTRY(k,pt.llen);
+			call select.parameter(coef.l+1-par.l);		//	select param & display it
+			reset.bits=reset.bits\r.loopl;				//	reset loops
+		end;
+	end;	/*	of do case	*/
+
+	if (#xpos == 0) {	//	new file name
+		if (input.state=s.assign.patch)					/*	if assignment (vs sfm startup)	*/
+		and (token(0)<>0) and (token(1)<>0)          /*	and actual file name	*/
+		then do i=token(0) to 7; call pc(sp); end;	/*	erase rest of prior file name for display during long sound file load	*/
+
+      if  (inc.poly) & (ertyp=0)							/*	if poly, no errors	*/
+		and (error.y(input.state-s.assign.synth)<>0)	/*	okay to print on screen	*/
+		and (token(0)<>0) and (token(1)<>0) then do; /*	and actual file name	*/
+			call cpos(error.y(input.state-s.assign.synth),error.x(input.state-s.assign.synth));
+			call ps('Installing Sound File "'); call ps(token); call ps('"');
+			insmsg=1;
+		end;
+	}
+
+	call SETUP.FLOPPY.CACHE;						/*	check floppy if needed	*/
+	CALL MOUNT.OPTICAL.VOLUME;						/*	ALSO CACHE OPT DISK IF NEEDED	*/
+
+	l=alloc.timbre(0);								/*	reinitialize stuff for new file names, starting keys, etc	*/
+
+	floppy.cache.valid=0;
+	call disable_cache(floppy.cache.num);		/*	disable cache	*/
+	OPTICAL.DISK.READY=0;
+
+	if insmsg<>0 then do;
+		call erase.rest.of.line(error.y(input.state-s.assign.synth),error.x(input.state-s.assign.synth));
+	end;
+
+	if (#xpos == 0) {	//	new file name
+		if (num.frames == 1) then do;	/*	initialize parameters from sound file if only one	*/
+			i=TIM.HEAD.LOOKUP(0,tim.partial.pointers+j);	/*	get pointer to base frame	*/
+			if p.lookup(i+p.efdecay)=0
+			then call p.store(i+p.efdecay  ,p.lookup(k+pt.keytc ));
+			if p.lookup(i+p.vibrate)=0
+			then call p.store(i+p.vibrate  ,p.lookup(k+pt.vrate ));
+			if p.lookup(i+p.vibdepth)=0
+			then call p.store(i+p.vibdepth ,p.lookup(k+pt.vdepth));
+			if p.lookup(i+p.vibattack)=0
+			then call p.store(i+p.vibattack,p.lookup(k+pt.vat	 ));
+
+			if (l=0) and (ertyp=0)
+			then call display.par;			/*	present new parameter if no errors	*/
+
+			call compute.env.params(0);	/*	set up for final decay usage	*/
+		end;
+		if (ertyp == 0) EMIT.VK.MESSAGE();
+	}	
+
+	if input.state=s.assign.patch
+	then call PRINT.ASSIGNMENT.LINE(#ypos);	/*	redraw current line	*/
+	token(0)=0;											/*	clear it out	*/
+end ASSIGNMENT.DEPOSIT;
+
+/*	$SUBTITLE  Routine to Draw Keyboard Patch List Display	*/
+
+PRINT.PATCH.DISPLAY: proc swapable;
+	dcl keydata1	data ('CCDDEFFGGAAB');
+	dcl keydata2	data (' # #  # # # ');
+	dcl partial		fixed;
+	dcl (i,j,k,l)	fixed;
+
+	call clear.term;
+	if vt100<>0 then call CH.SET(alt);
+	call DRAW.BOX(0,0,23,79);
+	call cpos(1,0);
+	if vt100<>0 then call DRAW.TEE(t.left); else call pc("174");
+	call DRAW.HOR(28);
+	if vt100<>0
+	then do; call DRAW.TEE(t.right); call CH.SET(norm); end;
+	else call pc(asc.min);
+	call ps('  KEYBOARD DISPLAY  ');
+	if vt100<>0
+	then do; call CH.SET(alt); call DRAW.TEE(t.left); end;
+	else call pc(asc.min);
+	call DRAW.HOR(28);
+	if vt100<>0 then call DRAW.TEE(t.right);
+	call cpos(5,0);
+	if vt100<>0 then call DRAW.TEE(t.left); else call pc("174");
+	call DRAW.HOR(78);
+	if vt100<>0 then call DRAW.TEE(t.right);
+
+	if vt100<>0 then call CH.SET(norm);
+	call cpos(2, 5);
+	call ps('1.  Select Partial Timbre from button panel or by typing 1,2,3, or 4.');
+	call cpos(3, 5);
+	call ps('2.  Press  <RETURN>  to return to Sound File "PATCH" Display.');
+	call cpos(4, 5);
+	call ps('3.  Press ');
+	if vt100<>0 then call ps(' <ENTER>  '); else call ps('<ESC><ESC>');
+	call ps(' to return to Main Menu.  --->');
+
+	if d44_present
+	then call plot.mouse.hole(mouse.hole.lowerx,mouse.hole.lowery);
+
+	call cpos(6, 2);
+	call ps('Timbre:'); call PRINT.TIMBRE.NAME(6,11);
+	call cpos(6,46);
+	call ps('Selected Partial:  #'); call pc(asc.1+find.partial);
+
+	partial=find.partial;
+	if synth.typ.look(TIM.HEAD.LOOKUP(0,tim.synth.typ+partial))=0 then do;	/*	is not a patch list timbre	*/
+		call cpos( 9,3);
+		call ps('***  This Partial Timbre is a Synthesized or Resynthesized Partial    ***');
+		call cpos(10,3);
+		call ps('***  and uses no Sound Files.  Keyboard Patch Display not available.  ***');
+	end;
+	else do;
+		call cpos(8,10); call DRAW.FRAME(25,' OCTAVE ',35);
+		call cpos(10,2); call DRAW.HOR(6);
+		do i=1 to 7;
+			call cpos(10,i*10); call DRAW.HOR(8);
+		end;
+
+		call cpos(7,46); call ps('"PATCH" Display');
+
+		call cpos(9,2); call ps('PITCH');
+		do i=1 to 7;
+			call cpos(9,i*10);
+			call pc(asc.c); call pc(asc.0+i-1);	call pc(sp); call pc(asc.min);
+			call pc(sp);	 call pc(asc.b);		call pc(asc.0+i-1);
+		end;
+
+		do i=0 to 11;
+			call cpos(11+i,4);
+			call pc(byte(keydata1,i)); call pc(byte(keydata2,i));
+			call pc(sp); call pc("72");
+		end;
+
+		/*	$PAGE	*/
+
+		/*	NOW FILL IN THE TABLE	*/
+		do j=0 to 6;						/*	loop over octaves	*/
+			do k=0 to 11;					/*	loop over pitch classes	*/
+				if  (new.timbre.info		  = 0)
+				and (new.ABLE.timbre.info = 0)
+				then do;						/*	continue unless timbre recalled during printing	*/
+					l=TIM.HEAD.LOOKUP(0,TIM.KBDTAB.PTR+PARTIAL);			/*	look up pointer	*/
+					if l<>0 then do;							/*	make sure table allocated	*/
+						write(mam)=tim.ptr+l-1;				/*	point to table	*/
+						write(mal)=(j*12+k)*klt.size+klt.patch.tim.ptr;	/*	index by key number*table size	*/
+						if read(mdi)<>0 then do;			/*	if entry exists, print it	*/
+							sfile.base(lw#msb)=read(mdi)&base#only;	/*	get msb's of file base w/o stereo flag	*/
+							sfile.base(lw#lsb)=read(md);	/*	get sector of ext/poly memory	*/
+
+							if  (inc.mono<>0)					/*	mono compilation	*/
+							and (TIM.HEAD.LOOKUP(0,tim.synth.typ+partial)=tim#mono) then do;	/*	mono patch list	*/
+								call ms.extract;				/*	info ms.extract	*/
+							end;
+
+							if  (inc.poly<>0)					/*	poly included	*/
+							and (TIM.HEAD.LOOKUP(0,tim.synth.typ+partial)=tim#poly) then do;	/*	poly patch list	*/
+								call ps.extract;				/*	info from poly memory	*/
+							end;
+
+							do l=0 to 3;
+								token(l+1)=misc.buf(bl.fname+l);	/*	copy name to token for printing	*/
+							end;
+
+							token(0)=8;
+							do while	(token(0)<>0)
+							and		(byte(token,token(0)-1)=0);
+								token(0)=token(0)-1;
+							end;
+
+							call cpos(11+k,(j+1)*10); call ps(token);
+
+							token(0)=0;		/*	clean out token array for consistency	*/
+						end;		/*	of entry exists		*/
+					end;			/*	of table exists		*/
+				end;				/*	of timbre/partial not changed	*/
+			end;					/*	of loop over pitches	*/
+		end;						/*	of loop over octave	*/
+	end;
+	call cpos(4,55);	/*	reposition cursor at a nice spot on screen	*/
+end PRINT.PATCH.DISPLAY;
+
+/*	$SUBTITLE  Routine to Process Input Chars on Assignment Menu	*/
+
+ASSIGNMENT.MENU.INPUT:PROC(in.cmd,in.arg) swapABLE;
+	dcl (in.cmd,in.arg)	fixed;
+	DCL (I,J,K)				FIXED;	/*	PASS THE INPUT CHARACTER	*/
+
+	do case (in.cmd);								/*	do depending upon input command	*/
+		do;											/*	0: character input	*/
+			if in.arg="20" then do;				/*	CTRL-P: print hardcopy of screen	*/
+				if D40_PRESENT<>0					/*	if device available	*/
+				then call SCREEN_DUMP;
+				else call no.printer;
+				call POS.ASSIGNMENT.CURSOR;	/*	position cursor for correct entry	*/
+				return;
+			end;
+
+			if (in.arg<>esc) and (err.displayed<>0) then do;
+				call remove.err;
+			end;
+
+			if in.arg=cret then do;                /*	return	*/
+				if input.state=s.assign.synth then do;	/*	waiting for CRET to create patch list	*/
+					if  (new.timbre.info		  = 0)
+					and (new.ABLE.timbre.info = 0)
+					then do;									/*	no recall during run.syn.loop while erasing error	*/
+						if (active.parms(0)<>0)			/*	clear params if any	*/
+						then call clear.parameters;	/*	best to remove parameters here	*/
+						call create.patch.list;			/*	make a whole new patch list. goto state 2 of ok allocate, else redraw screen	*/
+						call print.partial.info;		/*	display stuff for this partial, set input state to 2 if successful allocate	*/
+					end;
+				end;
+				else do;	/*	state 2 - already have a patch list	*/
+					if token(0)=0 then do;
+						goto.this.screen=s.patch;
+						exit.my.screen=true;
+					end;
+					else do;
+						call ASSIGNMENT.DEPOSIT;		/*	remove errors, store this token, set up for next	*/
+						call SELECT.ASSIGNMENT;			/*	select/deselect knob parameter (maybe)	*/
+						call POS.ASSIGNMENT.CURSOR;	/*	restart input in same column after return	*/
+					end;
+				end;
+			end;
+			else if in.arg=esc							/*	ESC: return to Main Menu	*/
+			then call RETURN.TO.PREV.STATE;
+			else if in.arg=asc.quest then do;		/*	?:  instructions/command	*/
+				goto.this.screen=s.assign.instr;
+				exit.my.screen=true;
+			end;
+			else if (in.arg=sp)							/*	SPACE: step to next partial	*/
+			and	  ((#xpos<6)							/*	first 5 columns					*/
+			or			(space.typed<>0))					/*	or second one in a row			*/
+			then do;
+				i=find.partial+1;
+				if i=4 then i=0;
+				if synth.typ.look(TIM.HEAD.LOOKUP(0,tim.synth.typ+i)) then do;			/*	is a patch list timbre				*/
+					num.frames=count.timbre.frames(i);	/*	see how many frames in this patch list. SAVE FOR FUTURE USE.	*/
+					if base.line+#ypos>=num.frames		/*	off bottom of screen					*/
+					then do;										/*	code will blow up if no frames	*/
+						do while base.line>=num.frames;
+							if base.line<5 then base.line=0;
+							else base.line=base.line-5;
+						end;
+						#ypos=num.frames-base.line-1;
+						tds.line#=base.line+#ypos;
+					end;
+				end;
+				call SELECT.PARTIAL(i);
+				call PRINT.PARTIAL.INFO;
+			end;
+			else if (in.arg=3)							/*	CTRL-C:  View catalog		*/
+			and (input.state<>s.assign.synth) then do;	/*	not a synth partial	*/
+				call RECALL.SOUND.FILE.SCREEN(find.partial,base.line+#ypos+1,1);
+				call PRINT.ASSIGNMENT.MENU;			/*	present new patch list display, stay in this state	*/
+			end;
+			else if in.arg=5 then do;					/*	CTRL-E:  Enter subcatalog	*/
+				call SUBCAT.DIRECTORY.SCREEN(0);
+				call PRINT.ASSIGNMENT.MENU;			/*	present new patch list display, stay in this state	*/
+			end;
+         else if in.arg=14 then do;					/*	CTRL-N:  show long file name	*/
+            SHOW.NAME = SHOW.NAME XOR 1;
+            call PRINT.ASSIGNMENT.MENU;
+            #xpos=0;
+            token(0)=0;
+         end;
+			else if input.state=s.assign.synth then return;	/*	no other chars allowed in state 1			*/
+
+			/*	$PAGE	*/
+
+			else if (in.arg="36") then do;	/*	home	*/
+				call ASSIGNMENT.DEPOSIT;		/*	remove errors , deposit token		*/
+				if base.line<>0 then do;		/*	back up screen	*/
+					base.line=0;
+					call redraw;					/*	replace them with top of screen	*/
+				end;
+				#ypos=0; #xpos=0;
+				call SELECT.ASSIGNMENT;                   /*	select/deselect knob parameter (maybe)	*/
+				call POS.ASSIGNMENT.CURSOR;               /*	position cursor for correct entry	*/
+			end;
+			else if (in.arg="14") then do;               /*	right arrow		*/
+            if (SHOW.NAME == 0) {
+               call ASSIGNMENT.DEPOSIT;
+               if #xpos=(5+inc.poly*2) then #xpos=0;	/*	right edge, go to file name	*/
+               else #xpos=#xpos+1;							/*	advance up row	*/
+               call SELECT.ASSIGNMENT;						/*	select knob parameter (maybe)	*/
+               call POS.ASSIGNMENT.CURSOR;				/*	start input		*/
+            }
+			end;
+
+			else if (in.arg="10")				/*	left cursor	*/
+			then do;
+            if (SHOW.NAME == 0) {
+               call ASSIGNMENT.DEPOSIT;
+               if #xpos=0 then #xpos=(5+inc.poly*2);	/*	from file name, go right edge	*/
+               else #xpos=#xpos-1;							/*	back up row	*/
+               call SELECT.ASSIGNMENT;						/*	select knob parameter (maybe)	*/
+               call POS.ASSIGNMENT.CURSOR;				/*	start input	*/
+            }
+			end;
+			else if (in.arg="13") then do;	/*	up arrow	*/
+				call ASSIGNMENT.DEPOSIT;
+				if (#ypos=0) then do;			/*	top row already	*/
+					if base.line<>0 then do;	/*	back up screen		*/
+						base.line=base.line-5;
+						call redraw;				/*	replace them with top of screen		*/
+						#ypos=4;						/*	advance up to what was earlier line	*/
+					end;								/*	else leave row at zero	*/
+				end;
+				else #ypos=#ypos-1;				/*	else back up one row		*/
+				call SELECT.ASSIGNMENT;			/*	select knob parameter (maybe)	*/
+				call POS.ASSIGNMENT.CURSOR;
+			end;
+
+			else if (in.arg="12") then do;	/*	line feed/down	*/
+				call ASSIGNMENT.DEPOSIT;
+				if #ypos=9 then do;				/*	scroll screen	*/
+					base.line=base.line+5;
+					j=line.limit; line.limit=2;
+					call redraw;					/*	replace them with top of screen	*/
+					call erase.basex(line.limit,j);
+					#ypos=4;
+				end;
+				if (new.timbre.info		 <> 0)
+				or (new.ABLE.timbre.info <> 0)
+				then return;								/*	before going further - check for recall during output	*/
+				j=find.partial;							/*	get partial # of interest	*/
+				if (#ypos+base.line+1)=num.frames	/*	new frame needed	*/
+				then do;
+					if create.patch.frame(j,num.frames+1,0)=0 then do; /*	out of room          */
+						call nomem.error;                               /*	no re allocation needed on create of empty record	*/
+						call POS.ASSIGNMENT.CURSOR;                     /*	leave cursor as was	*/
+						return;
+					end;
+					num.frames=num.frames+1;
+					call PRINT.ASSIGNMENT.LINE(#ypos+1);	/*	display new line	*/
+					#xpos=0;											/*	go to left column if creating new frame	*/
+				end;
+				#ypos=#ypos+1;										/*	advance to next (possibly new) row	*/
+				call SELECT.ASSIGNMENT;							/*	select knob parameter (maybe)	*/
+				call POS.ASSIGNMENT.CURSOR;
+			end;
+
+			/*	$PAGE	*/
+
+			else if (in.arg=del)
+			and	  (#xpos=0)
+			and	  (token(0)=0)	/*	delete from left most column, file name - trash the line	*/
+			then do;
+				j=find.partial;					/*	get partial # of interest	*/
+				k=find.frame(j,base.line+#ypos+1);	/*	and pointer to start of frame to delete	*/
+				if  (#ypos=0)						/*	if at top of screen	*/
+				and (base.line=0)					/*	no more on earlier scroll	*/
+				and (num.frames=1)				/*	and we are the only one	*/
+				then do;								/*	leave 1 empty patch record for simplification	*/
+					token(0)=1; token(1)=0;		/*	provide file name of nulls	*/
+					call ASSIGNMENT.DEPOSIT;			/*	store that away in column 0	*/
+				end;
+				else do;										/*	delete frame	*/
+					if (new.timbre.info		 <> 0)
+					or (new.ABLE.timbre.info <> 0)
+					then return;							/*	before going further - check for recall during output	*/
+					call dealloc(0);						/*	must reallocate keyboard timbre on delete of file line	*/
+					call delete.patch.frame(j,k);		/*	zap frame	*/
+					call alloc.timbre(0);				/*	set up new revised info	*/
+					num.frames=num.frames-1;			/*	reduce length	*/
+					if num.frames=(base.line+#ypos)	/*	end most frame deleted - back up row	*/
+					then do;
+						if #ypos=0 then do;
+							base.line=base.line-5;
+							#ypos=4;							/*	advance up to what was earlier line	*/
+							call redraw;
+						end;
+						else do;
+							call erase.basex.line(#ypos+2);	/*	toss line		*/
+							#ypos=#ypos-1;
+							line.limit=#ypos+3;					/*	set new limit	*/
+						end;
+					end;
+					else do;									/*	slide up later frames	*/
+						j=line.limit; line.limit=2;	/*	redraw stuff, computing new line.limit	*/
+						do k=#ypos to 9; call PRINT.ASSIGNMENT.LINE(k); end;
+						call erase.basex(line.limit,j);
+					end;
+				end;
+				call SELECT.ASSIGNMENT;					/*	select knob parameter (maybe)	*/
+				call POS.ASSIGNMENT.CURSOR;			/*	position cursor and start input	*/
+			end;
+
+			else if (in.arg=asc.min)					/*	minus from left column	*/
+			and	  (#xpos=0)
+			and	  (token(0)=0)							/*	- from left most column, file name - insert	*/
+			then do;
+				if (new.timbre.info		 <> 0)
+				or (new.ABLE.timbre.info <> 0)
+				then return;                                             /*	before going further - check for recall during output	*/
+				j=find.partial;                                          /*	get partial # of interest	*/
+				k=find.frame(j,base.line+#ypos+1);                       /*	get pointer to start of frame. insert new partial before this one	*/
+				call dealloc(0);                                         /*	must reallocate stuff since it moves		*/
+				if create.patch.frame(j,base.line+#ypos+1,0)=0 then do;  /*	out of room	*/
+					call alloc.timbre(0);                                 /*	call alloc before we do a run.syn.loop!	*/
+					call nomem.error;
+				end;
+				else do;
+					call alloc.timbre(0);						/*	call alloc before we do a run.syn.loop!	*/
+					num.frames=num.frames+1;
+					#xpos=0;											/*	go to left column if creating new frame	*/
+					do j=#ypos to 9;call PRINT.ASSIGNMENT.LINE(j); end;	/*	redraw new line, + others	*/
+				end;
+				call SELECT.ASSIGNMENT;							/*	select knob parameter (maybe)	*/
+				call POS.ASSIGNMENT.CURSOR;
+			end;
+
+			/*	$PAGE	*/
+
+			else if (in.arg=DEL) or (in.arg="32") then do;	/*	delete/z	*/
+				if token(0)=0 then return;	/*	no character to delete	*/
+				token(0)=token(0)-1;
+				if token(0)=0 then do;
+					call PRINT.ASSIGNMENT.LINE(#ypos);	/*	restore row in case deleting all 8 new file name charcters	*/
+				end;
+				else do;
+					call pc(sp); call pc(bs);
+				end;
+				call SELECT.ASSIGNMENT;						/*	select knob parameter (maybe)	*/
+				call POS.ASSIGNMENT.CURSOR;
+			end;
+			else if (in.arg>=SP) and (token(0)<POS.TOKLEN) then do;	/*	store char in line if ascii character	*/
+            if (SHOW.NAME == 0) {
+               if (LOWER.A<=in.arg) and (in.arg<=LOWER.Z) then in.arg=in.arg-"40";	/*	up the case	*/
+               call pbyte(token,token(0),in.arg);		/*	store character in word	*/
+               token(0)=token(0)+1;
+               call SELECT.ASSIGNMENT;				/*	select knob parameter (maybe)	*/
+               call POS.ASSIGNMENT.CURSOR;
+               if in.arg=sp then space.typed=1;	/*	second space in a row will select partial even in colums 6, 7	*/
+            }
+			end;
+			else call POS.ASSIGNMENT.CURSOR;		/*	unprocessed character	*/
+		end;												/*	of character input		*/
+
+		DO;	/*	ABSOLUTE SELECT	*/
+			call ASSIGNMENT.DEPOSIT;
+         if (SHOW.NAME == 0)
+            #xpos = shr(in.arg,8);
+			#ypos = (in.arg & 255);
+			call SELECT.ASSIGNMENT;
+			call POS.ASSIGNMENT.CURSOR;
+		END;
+		;												/*	2: scroll down	*/
+		;												/*	3: scroll up	*/
+		call RETURN.TO.PREV.STATE;				/*	4: return to previous screen	*/
+	end;												/*	of do depending upon input command	*/
+END ASSIGNMENT.MENU.INPUT;
+
+ASSIGNMENT.MENU.MOUSE.POS: proc(x,y) swapable;		/*	Patch (Synth) Display Mouse Positioner*/
+	dcl (x,y,i)	fixed;
+
+	if mouse.hole(x,y) then do;				/*	if cursor over mouse hole	*/
+		call assignment.menu.input(in.rtps,0);
+		return;
+	end;
+
+	/*	convert the mouse pixel coordinates to screen coordinates	*/
+	x=CONVERT.MOUSE.X(x);	/*	0-79	*/
+	y=CONVERT.MOUSE.Y(y);	/*	0-23	*/
+
+	//	if within sound file patch area - most common case
+	//	if ((y ige 14) && (y ile 23) && (num.frames != 0)) {	//	Must use this with the old versions of TPOS.X() and TPOS.Y()
+	if ((y ige 14) && (num.frames != 0)) {							//	The new versions are friendlier
+		i = 0;
+		while ((x >= cursor.col(i+1)) && (i != 7)) i = i+1;	//	find the column
+		y = y-14; write("313") = num.frames-base.line-1;
+		if (y igt read("313")) y = read("313");					//	restrict the row so as not to go past the end of the list
+		ASSIGNMENT.MENU.INPUT(in.abss,shl(i,8)|y);
+	}
+
+	//	else if over the current timbre display
+	else if ((y == 9) && (x ile 45)) {
+		TIMBRE.DIRECTORY.SCREEN(0);			//	Link to A-page
+		PRINT.ASSIGNMENT.MENU();				//	and back
+	}
+	//	else if over the current catalog display
+	else if ((y == 10) && (x <= 30)) {
+		ASSIGNMENT.MENU.INPUT(in.chin,5);	//	do the same as <CTRL-E>
+	}
+
+	//	else if within the instruction area
+	else if ((y ige 3) && (y ile 7) && (x ige 13) && (x ile 22)) {
+		do case y - 3;
+			call ASSIGNMENT.MENU.INPUT(in.chin,3);		/*	<CTRL-C>	*/
+         call ASSIGNMENT.MENU.INPUT(in.chin,5);		/*	<CTRL-E>	*/
+         call ASSIGNMENT.MENU.INPUT(in.chin,14);	/*	<CTRL-N>	*/
+			call ASSIGNMENT.MENU.INPUT(in.chin,cret);	/*	<RETURN>	*/
+			call ASSIGNMENT.MENU.INPUT(in.rtps,0);		/*	<ENTER>	*/
+		end;
+	}
+end ASSIGNMENT.MENU.MOUSE.POS;

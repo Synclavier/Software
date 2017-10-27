@@ -1,0 +1,1117 @@
+/*	:SYNSOU:ROUTMOD:ROUTSOU  $TITLE  Multichannel Distributor Output Routines
+
+Modified:
+2000/11/17 - TY  - Disabled a very troublesome part of MULTI.TRACK.ROUTING.SNAP.SHOT()
+					  - Fixed bug: When incrementing the routing using the space key, the VK window did not update.
+2000/11/16 - TY  - Minor change to SET.MULTI.CHANNEL.ROUTING() allowing users to disable multichannel routing
+						 by typing 0 or pressing the DELETE key.
+1989/06/25 - PF  - Inserted PRODCL
+1988/07/27 - cj  - Fixed mc/dtd bug with keyboard timbres
+1988/06/23 - MWH - Remove unused inserts
+1988/03/03 - CJ  - THD.CUE.OUT Dynamic Output Allocation Display
+1987/12/10 - MWH - Allow poly bin change even if no multi-channel hardware
+1987/09/08 - MWH - Use THD.POLY to store poly bin
+1987/09/01 - MWH - Add poly bin column to multichannel
+1987/02/26 - BSW - put these routines into a module
+*/
+
+Module ROUTMOD;
+	insert ':-xpl:intrprtr';
+
+	insert ':synlits:comlits';		/*	compilation literals	*/
+	insert ':synlits:asciilit';	/*	ASCII literals	*/
+	insert ':synlits:globlits';	/*	good globals	*/
+	insert ':synlits:statelit';	/*	screen state literals	*/
+	insert ':synlits:syslits';		/*	if d40_present	*/
+	insert ':synlits:thdlits';		/*	track head and note segment literal definitions	*/
+	insert ':synlits:timlits';		/*	timbre head literal definitions	*/
+	insert ':synlits:prmlits';		/*	literals for timbre data structure	*/
+	insert ':synlits:lpnlits';		/*	literals used for logical parameters used in button/parameter code	*/
+
+	insert ':synauxs:routlits';	/*	multichannel and midi literals	*/
+	insert ':synauxs:dtdlits';		/*	dtd lits									*/
+
+	insert ':synmods:globdcl';		/*	global routines	*/
+	insert ':synmods:ttydcl';		/*	terminal i/o routines	*/
+	insert ':synmods:scrndcl';		/*	screen design primitives	*/
+	insert ':synmods:errdcl';		/*	error routines	*/
+	insert ':synmods:d40dcl';		/*	for screen_dump	*/
+	insert ':synmods:polydcl';		/*	for polynums (number of bins)	*/
+	insert ':synmods:moussdcl';	/*	mouse routines	*/
+	insert ':synmods:plotdcl';		/*	needed for clear.term (must erase mouse hole)	*/
+	insert ':synmods:tprimdcl';	/*	general terminal routines	*/
+	insert ':synmods:tformdcl';	/*	terminal formatting routines	*/
+	insert ':synmods:xmemdcl';		/*	external memory routines	*/
+	insert ':synmods:getvdcl';		/*	globals for get.next.event	*/
+	insert ':synmods:getdcl';		/*	for next.event.info	*/
+	insert ':synmods:parmdcl';		/*	routines and data for knob	*/
+	insert ':synmods:loddcl';		/*	get # of lod voices			*/
+	insert ':synmods:prodcl';		/*	for midinet	*/
+
+	insert ':synrdcls:03-pdcls';
+	insert ':synrdcls:04-sdcls';
+	insert ':synrdcls:05-bdcls';
+	insert ':synrdcls:10-intdc';
+	insert ':synrdcls:11-tdcls';
+	insert ':synlits:synclits';	/*	get rtp literals	*/
+
+	dcl MIDI.PARAM.ID	fixed external;
+
+	dcl routing.display.type		fixed;	/*	display screen type	*/
+	dcl prev.routing.display.type	fixed;	/*	previous screen type	*/
+	dcl route.pos						fixed;	/*	index of current timbre number (0-31)	*/
+	dcl prev.route.pos				fixed;	/*	previous value of ROUTE.POS	*/
+	dcl group.pos						fixed;	/*	0 if tracks 1-20, 1 if tracks 21-32	*/
+	dcl prev.group.pos				fixed;
+	dcl field.pos						fixed;	/*	field position	*/
+	dcl field.max						fixed;	/*	maximum number of fields	*/
+	dcl prev.field.pos				fixed;	/*	previous field position	*/
+	dcl #ypos							fixed;	/*	y position on the screen	*/
+
+	/*	forward declaration	*/
+	dcl pos.track.cursor proc recursive;
+
+	/*	$page - snap shot routines	*/
+
+	/*	This routine takes a snap shot of the multi channel routine information
+		for the tracks that are displayed.  This information is stored in
+		TRD.PTR, offset = 0	*/
+
+	/*	if the track is a cue track, then the THD.CUE.OUT entry is taken.	*/
+	/*	Otherwise, if the track is non-empty, then the THD.TROU entry		*/
+	/*	is taken.  Otherwise, the greater of the two entries is taken.		*/
+	/*	this provides for the best user interface if the user decides to	*/
+	/*	do his output assignments for cue tracks before placing cues on	*/
+	/*	the track																			*/
+
+	//	NOTE: The "best user interface" behavior described above was never actually realized.
+	//	Upon depositing a routing number onto a track with no notes, this procedure always interpreted the deposited channel
+	//	as an MC routing number but then often interpreted the opposite channel as a DtoD channel, unless certain conditions
+	//	not obvious to the user were met.  The overall effect was a confusing and highly frustrating user interface.
+	//
+	//	I propose that for tracks with no notes, we simply interpret all routings as MC routings (unless MULTI.THERE == false).
+	//	If The user later places cues	on those tracks, the DtoD routings that take over will still match those MC routings.
+
+	MULTI.TRACK.ROUTING.SNAP.SHOT: proc swapable;	/*	takes snap shot of keyboard and sequencer multichannel routing for 32 buttons	*/
+		dcl (i,j,k,l)	fixed;
+
+		do i=0 to num.kbd.tracks+num.track.buttons-1;	/*	loop over tracks in system	*/
+
+			if i<num.kbd.tracks then j = 0;			/*	keyboard routing	*/
+			else do;											/*	sequencer routing	*/
+				write(mam)=tbut.ptr;
+				write(mal)=(i-num.kbd.tracks);		/*	index to trak but	*/
+				j=read(md)&255;							/*	get track #			*/
+			end;
+
+			if  (j >= First.Lod.Track)					/*	check L1 - L16		*/
+			and (j <  Last.Lod.Track )
+			then do;
+
+				k = 0;										/*	assume no routing	*/
+				l = j - First.Lod.Track;				/*	get trk#				*/
+
+				if  (DTD.Max.Secs	<>	0)					/*	see if we got the	*/
+				and (DTD.Cue#		=	0)					/*	track directory	*/
+				and ((DTD.Avail.Trks & bits(l)) <> 0)
+				then do;
+
+					write(mam) = Scsi.Ptr;				/*	look up tdir info	*/
+					write(mal) = l*mtrk.blen + trout.off;
+					k = read(md) & 255;
+
+					if k > DTD.Num.Voices				/*	if invalid voice	*/
+					then k = 0;								/*	then delete it		*/
+
+					if k <> 0								/*	convert to Routing	*/
+					then k = 128 \ (k-1);				/*	format				*/
+
+					k = k \ shl(k,8);						/*	both halves			*/
+				end;
+			end;
+
+			else if TRK.HEAD.LOOKUP(j,THD.CUE.TRACK)<>0	/*	cue track			*/
+			then k=TRK.HEAD.LOOKUP(j,THD.CUE.OUT);			/*	get dtd output #	*/
+
+			else if (j = 0)		//	if keyboard or non-empty, non-cue track
+			or (TRK.HEAD.LOOKUP(j,THD.NN.MSB) | TRK.HEAD.LOOKUP(j,THD.NN.LSB)) != 0
+			then k=TRK.HEAD.LOOKUP(j,THD.TROU);				/*	get m/c output #	*/
+
+			else do;					//	empty track (i.e., no notes)
+				if (MULTI.THERE == true) k = TRK.HEAD.LOOKUP(j,THD.TROU);		/*	get m/c output #	*/
+				else							 k = TRK.HEAD.LOOKUP(j,THD.CUE.OUT);	/*	get dtd output #	*/
+
+				#if (false)
+					//	NOTE this block allows mixed up routings, i.e. DtoD on one channel - M/C on the other
+					l = TRK.HEAD.LOOKUP(j,THD.CUE.OUT);			/*	get dtd output #	*/
+					m = TRK.HEAD.LOOKUP(j,THD.TROU);				/*	get m/c output #	*/
+					if l = 0 then k = m;								/*	no m/c - get dtd	*/
+					else if m = 0 then k = l;						/*	no dtd - get m/c	*/
+					else do;												/*	get largest			*/
+						if (l&63) > (m&63)							/*	dtd is >				*/
+						then k = l&255;
+						else k = m&255;
+
+						if (l&(shl(63,8))) > (m&(shl(63,8)))
+						then k = k \ (l&"177400");
+						else k = k \ (m&"177400");
+					end;
+				#endif
+
+			end;
+
+			write(mam)=trd.ptr;	/*	store in snap shot area	*/
+			write(mal)=i;
+			write(md )=k;
+
+		end;
+	end MULTI.TRACK.ROUTING.SNAP.SHOT;
+
+	/*	$page	*/
+
+	/*	poly bin snap shot looks up the THD.POLY entry from the respective
+		track heads and stores this information in trd.ptr, offset = Poly.Bin.Offset	*/
+
+	POLY.BIN.SNAP.SHOT: proc swapable;	/*	takes snap shot of prefered poly bin for each track	*/
+		dcl (i,j)	fixed;
+
+		do i=0 to num.kbd.tracks+num.track.buttons-1;	/*	loop over tracks in system	*/
+			if i<num.kbd.tracks then j=0;						/*	keyboard routing	*/
+			else do;													/*	sequencer routing	*/
+				write(mam)=tbut.ptr;
+				write(mal)=i-num.kbd.tracks;
+				j=read(md)&255;									/*	get abs track #	*/
+			end;
+
+			write(mam)=trk.head;
+			write(mal)=j;											/*	does this track head exist?	*/
+			if read(md)=0 then j=-1;							/*	no - so no poly bin		*/
+			else do;
+				write(mam)=read(md);								/*	yes - get the header...	*/
+				write(mal)=thd.poly;
+				j=read(md);											/*	...and get poly bin #	*/
+			end;
+
+			write(mam)=trd.ptr;
+			write(mal)=i+poly.bin.offset;
+			write(md )=j;
+		end;	/*	of loop over tracks	*/
+	end POLY.BIN.SNAP.SHOT;
+
+	/*	track number snap shot - this routine reads the current track
+		button assignment list (from tbut.ptr) and stores a copy of
+		this information in TRD.PTR at offset TRACK.NUMBERS.OFFSET.
+		This information is later printed on the terminal.	*/
+
+	TRACK.NUMBER.SNAP.SHOT: proc swapable;	/*	takes a snap shot of the current track numbers associated with the buttons	*/
+		dcl (i,j)	fixed;
+		dcl trk#		fixed;
+
+		do i=0 to num.kbd.tracks+num.track.buttons-1;	/*	loop through the buttons and find the associated track numbers	*/
+			if i<num.kbd.tracks then do;						/*	if keyboard	*/
+				write(mam)=trd.ptr;
+				write(mal)=track.numbers.offset+i;
+				write(md)=i;
+			end;
+			else do;													/*	if button number	*/
+				write(mam)=tbut.ptr;
+				write(mal)=i-num.kbd.tracks;
+				trk#=read(md)&255;								/*	find track number	*/
+				write(mam)=trd.ptr;								/*	save it in snap shot area	*/
+				write(mal)=track.numbers.offset+i;
+				write(md)=trk#;
+			end;
+		end;
+
+	end TRACK.NUMBER.SNAP.SHOT;
+
+	/*	$page	*/
+
+	/*	This routine takes a snap shot of the timbre names that are associated
+		with the tracks that are to be displayed.  The information is
+		stored in TRD.PTR+1 from which it will be printed later	*/
+
+	TIMBRE.NAME.SNAP.SHOT: proc swapable;	/*	takes snap shot of timbre names for keyboard and 32 track buttons	*/
+		dcl (i,j,k)							fixed;
+		dcl (ptr,abs.trk#,abs.tim#)	fixed;
+		dcl no.name							data ('*Unnamed Timbre*');
+		dcl no.split						data ('* No Split Kbd *');
+		dcl unavail							data ('* Unavailable  *');
+
+		do i=0 to num.kbd.tracks+num.track.buttons-1;	/*	loop over kbd + track buttons	*/
+
+			if (i=1) and (split.keyboard=0) then do;		/*	look for timbre name in split keyboard	*/
+				j=i*tname.length;									/*	compute pointer	*/
+				write(mam)=trd.ptr+1+shr(j,8); write(mal)=j&255;
+				do j=1 to tname.length; write(mdi)=no.split(j); end;	/*	copy string to snap area	*/
+			end;
+
+			else do;	/*	get normal (non-split) timbre name	*/
+				if i<num.kbd.tracks then do;					/*	keyboard		*/
+					j=TRK.HEAD.LOOKUP(0,thd.ctimb);			/*	always 0??	*/
+					ptr=TIM.HEAD.LOOKUP(j,tim.tinfo.pointer);
+					abs.trk#=0;										/*	for keyb		*/
+					abs.tim#=i;										/*	0 or 1		*/
+				end;
+				else do;												/*	sequencer	*/
+					write(mam)=tbut.ptr;
+					write(mal)=i-num.kbd.tracks;
+					abs.trk#=read(md)&255;						/*	get track #	*/
+					abs.tim#=TRK.HEAD.LOOKUP(abs.trk#,thd.ctimb);	/*	current timbre #	*/
+					if (abs.tim#<>0)								/*	if timbre is assigned	*/
+					or ((recd<>0)&(abs.trk#=recd.trk))
+					or (keyboard.timbre.control=abs.trk#)	/*	currently sharing kbd timbre (abs.tim#=0)	*/
+					then do;
+						ptr=TIM.HEAD.LOOKUP(abs.tim#,tim.tinfo.pointer);
+					end;
+					else ptr=0;
+				end;
+
+				if  (abs.trk# >= First.Lod.Track)
+				and (abs.trk# <  Last.Lod.Track )
+				then do;
+
+					/*	assume no name available	*/
+
+					do j = 0 to tname.length-1;
+						misc.buf(j) = unavail(j+1);
+					end;
+
+					if  (DTD.Max.Secs	<>	0)					/*	see if we got the	*/
+					and (DTD.Cue#		=	0)					/*	track directory	*/
+					and ((DTD.Avail.Trks & bits(abs.trk# - First.Lod.Track)) <> 0)
+					then do;
+
+						write(mam) = Scsi.Ptr;
+						write(mal) = (abs.trk# - First.Lod.Track)*mtrk.blen;
+						do j = 0 to tname.length-1;
+							misc.buf(j) = read(mdi);
+						end;
+
+					end;
+
+					j=i*tname.length;		/*	compute pointer	*/
+					write(mam)=trd.ptr+1+shr(j,8); write(mal)=j&255;
+					do j=0 to tname.length - 1;
+						write(mdi)=misc.buf(j);
+					end;
+
+				end;
+
+				/*	handle non-live tracks	*/
+
+				else do;
+
+					if ptr <> 0 then do;	/*	tinfo area exists						*/
+						k=0;					/*	assume timbre name is all spaces	*/
+						do j=0 to 7;		/*	see if name contains any non-space chars	*/
+							if p.lookup(ptr+ti.name+j)<>(sp\shl(sp,8)) then k=1;
+						end;
+						if k=0 then ptr=0;		/*	all spaces = treat as no name		*/
+					end;
+
+					if ptr=0 then do;				/*	no timbre name	*/
+						if (i>=num.kbd.tracks)	/*	looking at recorder track	*/
+						and (abs.tim#=0)			/*	no timbre (i.e. empty)	*/
+						then begin;					/*	not a keyboard timbre & empty track	*/
+							j=i*tname.length;		/*	compute pointer	*/
+							write(mam)=trd.ptr+1+shr(j,8); write(mal)=j&255;
+							do j=1 to tname.length; write(mdi)=0; end;	/*	zero fill	*/
+						end;
+						else do;						/*	no pointer, but actual timbre being used	*/
+							call lookup.timbre.name(abs.tim#,misc.buf);
+							if misc.buf(0)<>0		/*	see if we found a patch name	*/
+							then do;
+								do j=misc.buf(0) to 15;	/*	space fill for us		*/
+									call pbyte(misc.buf,j,sp);
+								end;
+								j=i*tname.length;	/*	compute pointer	*/
+								write(mam)=trd.ptr+1+shr(j,8); write(mal)=j&255;
+								do j=1 to 8; write(mdi)=misc.buf(j); end;
+								write(mdi)=0; write(mdi)=0; write(mdi)=0;
+							end;
+							else do;					/*	use no name			*/
+								j=i*tname.length;	/*	compute pointer	*/
+								write(mam)=trd.ptr+1+shr(j,8); write(mal)=j&255;
+								do j=1 to tname.length; write(mdi)=no.name(j); end;	/*	copy string to snap area	*/
+							end;
+						end;
+					end;
+					else do;					/*	copy name to snap area	*/
+						do j=0 to 7; misc.buf(j)=p.lookup(ptr+ti.name+j); end;
+						j=i*tname.length;	/*	compute pointer	*/
+						write(mam)=trd.ptr+1+shr(j,8); write(mal)=j&255;
+						do j=0 to 7; write(mdi)=misc.buf(j); end;
+						write(mdi)=0; write(mdi)=0; write(mdi)=0;
+					end;
+				end;
+			end;
+		end;
+	end TIMBRE.NAME.SNAP.SHOT;
+
+	/*	Set.Track.Number is called when the user types a number into the
+		track column.  If that track is displayed, the cursor moves to
+		that track.  Otherwise, the group of 8 tracks that surround
+		the new value is positioned in the group of 8 lines that correspond
+		to where the number was typed in	*/
+
+	SET.TRACK.NUMBER: proc (t#,num) swapable;	/*	updates track button table	*/
+		dcl t#				fixed;	/*	logical track number (0-34)	*/
+		dcl num				fixed;	/*	physical track number (1-200)	*/
+		dcl i					fixed;
+		dcl j					fixed;
+		dcl val				fixed;	/*	track number in track button array	*/
+		dcl found			fixed;	/*	if numeric value already displayed on screen (found in tbut array)	*/
+		dcl first.button	fixed;
+		dcl last.button	fixed;
+
+		if t#>=num.kbd.tracks then do;		/*	if not changing keyboard	*/
+
+			/*	see if the number typed is already on the screen	*/
+			found=0; i=0;
+			do while (i ile num.track.buttons-1) and (found=0);
+				write(mam)=tbut.ptr;
+				write(mal)=i;
+				val=(read(md)&255)-num.kbd.tracks+1;
+				if val=num			/*	if the same	*/
+				then found=1;		/*	indicate that we found it	*/
+				else i=i+1;			/*	otherwise look at next	*/
+			end;
+			if found=1 then do;	/*	if typed track value is on screen move cursor to that location	*/
+				prev.route.pos=route.pos;
+				prev.group.pos=group.pos;
+				route.pos=i+num.kbd.tracks;
+				if route.pos>21
+				then group.pos=1;
+				else group.pos=0;
+			end;
+			else do;					/*	otherwise update the tbut array and resequence group of buttons	*/
+				/*	determine the range of buttons value in which value falls	*/
+				if t#<=9 then do;							/*	first tier of buttons	*/
+					first.button=num.kbd.tracks;
+					last.button=9;
+				end;
+				else if t#<=17 then do;					/*	second tier of buttons	*/
+					first.button=10;
+					last.button=17;
+				end;
+				else if t#<=25 then do;					/*	third tier of buttons	*/
+					first.button=18;
+					last.button=25;
+				end;
+				else do;										/*	fourth tier of buttons	*/
+					first.button=26;
+					last.button=num.track.buttons+1;
+				end;
+
+				/*	resequence button values within the group of 8 buttons	*/
+
+				j=((num-1)&"177770")+1;					/*	make starting number a multiple of 8	*/
+
+				do i=first.button to last.button;	/*	resequence	*/
+					write(mam)=tbut.ptr;					/*	update track button table	*/
+					write(mal)=i-num.kbd.tracks;
+					write(md)=(read(md)&"177400")\(j-1+num.kbd.tracks);
+					if j=num then do;
+						prev.route.pos=route.pos;
+						prev.group.pos=group.pos;
+						route.pos=i;
+						if route.pos>21
+						then group.pos=1;
+						else group.pos=0;
+					end;
+					j=j+1;
+				end;
+
+			if (upper.disp == tpan.disp)
+				present.tpan.display();
+			end;
+		end;
+
+		CALL DISPLAY.TRACK.BUTTONS;
+
+	end SET.TRACK.NUMBER;
+
+	/*	$SUBTITLE  Code Prints track numbers, timbre names, routings, and poly bins	*/
+
+	/*	Print Route Channel prints the routing number for a particular track	*/
+
+	PRINT.ROUTE.CHANNEL: proc (trk,channel) swapable;	/*	prints left or right channel number for track routing	*/
+		dcl trk		fixed;	/*	physical track number			*/
+		dcl channel	fixed;	/*	left (0) or right (1) channel	*/
+		dcl (i,val)	fixed;
+
+		if trk<>1 then do;						/*	exclude split keyboard		*/
+			write(mam)=trd.ptr; write(mal)=trk;
+			if channel=0
+			then val=(shr(read(md),8)&255);	/*	get left channel routing	*/
+			else val=(read(md)&255);			/*	get right channel routing	*/
+
+			if trk=0 then i=0;					/*	if keyboard	*/
+			else i=trk-num.kbd.tracks+1;		/*	map track number to physical location	*/
+
+			if channel=0 then do;				/*	if left channel	*/
+				if i<21
+				then call cpos(kbd.loc+i,23);
+				else call cpos(kbd.loc+(i-12),64);
+			end;
+			else do;									/*	right channel	*/
+				if i<21
+				then call cpos(kbd.loc+i,28);
+				else call cpos(kbd.loc+(i-12),69);
+			end;
+
+			if (val&128) <> 0 then	call ps('*');	/*	use *01* for dtd voices	*/
+			else							call ps(' ');	/*	use  01  for m/c voices	*/
+
+			if val<>0 then call print.parm((val&"77")+1,0,0,2,0);	/*	print value	*/
+			else call ps('  ');
+
+			if (val&128) <> 0 then	call ps('*');	/*	use *01* for dtd voices	*/
+			else							call ps(' ');	/*	use  01  for m/c voices	*/
+
+		end;	/*	of exclude split keyboard	*/
+	end PRINT.ROUTE.CHANNEL;
+
+
+	PRINT.TNUM: proc (trk) swapable;	/*	prints track number for 32 buttons	*/
+		dcl trk	fixed;	/*	track number (0-34)	*/
+		dcl I		fixed;
+
+		if trk>=num.kbd.tracks then do;	/*	do not print if pointing to keyboard or split keyboard	*/
+			i=trk-num.kbd.tracks+1;			/*	get user track # 1-k	*/
+			if i<21
+			then call cpos(kbd.loc+i,1);
+			else call cpos(kbd.loc+(i-12),42);
+			write(mam)=tbut.ptr;
+			write(mal)=(trk-num.kbd.tracks);
+			trk=(read(md)&255);				/*	get abs track #		*/
+			if  (trk>=first.lod.track)
+			and (trk< last.lod.track )
+			then do;
+				call ps('L');
+				call print.parm(trk-first.lod.track+1,0,0,2,0);
+			end;
+			else call print.parm(trk-num.kbd.tracks+1,0,0,3,0);
+		end;
+	end PRINT.TNUM;
+
+	PRINT.TIM.NAME: proc (trk) swapable;	/*	prints name of timbre on given track	*/
+		dcl (trk,i,j)	fixed;					/*	index (0-34) to desired track	*/
+
+		do i=0 to tname.length-1;				/*	loop over words of timbre name	*/
+			j=trk*tname.length+i;				/*	compute pointer	*/
+			write(mam)=trd.ptr+1+shr(j,8);
+			write(mal)=j&255;
+			j=read(md);
+			if  (j&255)>sp then call pc(j&255);		else call pc(sp);
+			if shr(j,8)>sp then call pc(shr(j,8));	else call pc(sp);
+		end;
+	end PRINT.TIM.NAME;
+
+	PRINT.POLY.BIN: proc (trk) swapable;	/*	prints poly bin number for the track	*/
+		dcl trk		fixed;	/*	physical track number	*/
+		dcl (i,val)	fixed;
+
+
+		if trk<>1 then do;						/*	exclude split keyboard	*/
+			write(mam)=trd.ptr;
+			write(mal)=trk+poly.bin.offset;
+			val=read(md)+1;						/*	read(md): -1 => don't print; 0-3 => poly bin 1-4	*/
+
+			if trk=0 then i=0;					/*	if keyboard	*/
+			else i=trk-num.kbd.tracks+1;		/*	map track number to physical location	*/
+
+			if i<21
+			then call cpos(kbd.loc+i,34);
+			else call cpos(kbd.loc+(i-12),75);
+			if val<>0 then call print.parm(val,0,0,2,0);	/*	print bin# (1-4)	*/
+			else call ps('  ');
+		end;	/*	of exclude split keyboard	*/
+	end PRINT.POLY.BIN;
+
+	/*	$Subtitle Routines to Set Multichannel Parameters	*/
+
+	SET.MULTI.CHANNEL.ROUTING: proc (t#,num) swapable;
+		dcl t#	fixed;	/*	track number	*/
+		dcl num	fixed;	/*	value	*/
+
+		dcl mcnum	fixed;
+		dcl dtdnum	fixed;
+		dcl fnum		fixed;
+		dcl i			fixed;
+
+		fnum = bits(field.pos);		/*	see what field user typed value in	*/
+
+		/*	get absolute track number	*/
+
+		if route.pos<num.kbd.tracks then t# = 0;			/*	if keyboard		*/
+		else do;
+			write(mam)=tbut.ptr;
+			write(mal)=t#-num.kbd.tracks;
+			t#=read(md)&255;
+		end;
+
+		if  (t# >= First.Lod.Track)							/*	check L1 - L16		*/
+		and (t# <  Last.Lod.Track )
+		then do;
+
+			dtdnum = num;
+			if (dtdnum > Dtd.Num.Voices) then dtdnum = Dtd.Num.Voices;
+
+			if Lod.Running <> 0 then do;
+
+				call send.to.lod(dtd.select.track,0);		/*	select track dir	*/
+
+				write(mam)=Scsi.Ptr;
+				write(md) =t# - First.Lod.Track;
+				call send.to.lod(dtd.set.screen.line,2);	/*	set the track number (0-15)	*/
+
+				write(mam) = scsi.ptr;
+				write(md)  = dtdnum;
+				call send.to.lod(dtd.track.doa, 2);
+
+			end;
+
+			return;
+
+		end;
+
+		if t#<>0 then do;				/*	allocate track header if needed		*/
+			WRITE(MAM)=TRK.HEAD;
+			WRITE(MAL)=t#;
+
+			if read(md) = 0			/*	if no trk head, then get one			*/
+			then do;
+
+				if num = 0				/*	assigning value of 0 with no THD -	*/
+				then return;			/*	basically, we are all done				*/
+
+				if ALLOCATE.TRK.HEADER(t#) = 0
+				then return;
+				call COPY.TIMBRE(ALWAYS.EMPTY.TRACK, t#);		/*	place null timbre on track	*/
+				fnum = bits(1) \ bits(2);	/*	set both fields when allocating track header	*/
+			end;
+		end;
+
+		/*	store m/c value if m/c is there	*/
+
+		if (multi.there <> 0) & (multi.max <> 0) then do;
+
+			mcnum = num;						/*	allow only valid entries now		*/
+//			if mcnum = 0 then mcnum = 1;	/*	so real time code does not crash	*/
+
+			//	Don't let the comment on the previous line scare you!
+			//	Because of the bug documented in the 2000/11/16 entry of :SYNRSOU:04-SEQ:164-SEQ4, multichannel routings
+			//	have been left zeroed for decades and I've never experienced a system crash resulting from it.
+
+			if (mcnum igt multi.max) then mcnum = multi.max;
+
+			if (mcnum != 0) mcnum = 64+(mcnum-1);		/*	always set this 64 bit		*/
+
+			/*	update value depending if left or right routing	*/
+			if (fnum & 2) <> 0								/*	if left routing channel	*/
+			then call TRK.HEAD.STORE(t#,thd.trou,(TRK.HEAD.LOOKUP(t#,thd.trou)&"000377")\shl(mcnum,8));
+			if (fnum & 4) <> 0								/*	if right routing channel	*/
+			then call TRK.HEAD.STORE(t#,thd.trou,(TRK.HEAD.LOOKUP(t#,thd.trou)&"177400")\mcnum);
+		end;
+
+		/*	store dtd value if m/c is there	*/
+
+		if (Dtd.Num.Voices <> 0) then do;
+
+			dtdnum = num;
+			if (dtdnum > Dtd.Num.Voices) then dtdnum = Dtd.Num.Voices;
+
+			if dtdnum <> 0
+			then dtdnum = 128 + (dtdnum - 1);			/*	set 128 bit for dtd	*/
+
+			/*	store dtd value in both halves for now	*/
+
+			call TRK.HEAD.STORE(t#,THD.CUE.OUT,dtdnum \ shl(dtdnum,8));
+
+			NEW.MOTION				  = 1;	/*	SEND NEW CUE TRACK CONSTANTS			*/
+			NEW.CUE.TRACK.SETTINGS = 1;	/*	OVER AFTER NEW ROUTING ASSIGNMENT	*/
+
+		end;
+
+	end SET.MULTI.CHANNEL.ROUTING;
+
+	SET.POLY.BIN: proc (t#,num) swapable;
+		dcl t#	fixed;	/*	track number	*/
+		dcl num	fixed;	/*	value	*/
+
+		if num<1 then num=1;								/*	force value in range	*/
+		else if num>polynums then num=polynums;
+
+		/*	get absolute track number	*/
+		if route.pos<num.kbd.tracks then t#=0;		/*	if keyboard	*/
+		else do;
+			write(mam)=tbut.ptr;
+			write(mal)=t#-num.kbd.tracks;
+			t#=read(md)&255;
+		end;
+		call TRK.HEAD.STORE(t#,thd.poly,num-1);	/*	store poly bin for this track	*/
+
+	end SET.POLY.BIN;
+
+	ADVANCE.CHANNEL.ROUTING: proc (trk,channel) swapable;	/*	increase the channel routing by one	*/
+		dcl trk		fixed;	/*	physical track number			*/
+		dcl channel	fixed;	/*	left (0) or right (1) channel	*/
+		dcl val		fixed;
+		dcl j			fixed;
+
+		if inc.mult=0 then return;
+
+		if trk<>1 then do;						/*	exclude split keyboard	*/
+
+			if trk<num.kbd.tracks then j = 0;		/*	keyboard routing	*/
+			else do;											/*	sequencer routing	*/
+				write(mam)=tbut.ptr;
+				write(mal)=(trk-num.kbd.tracks);		/*	index to trak but	*/
+				j=read(md)&255;							/*	get track #			*/
+			end;
+
+			/*	look up max wrap point based upon	*/
+			/*	whether track is a cue track or		*/
+			/*	not											*/
+
+			if  (j >= First.Lod.Track)							/*	check L1 - L16		*/
+			and (j <  Last.Lod.Track )
+			then j = Dtd.Num.Voices;
+
+			else if TRK.HEAD.LOOKUP(j,THD.CUE.TRACK)<>0	/*	cue track			*/
+			then j = Dtd.Num.Voices;							/*	limit to this #	*/
+
+			else if (TRK.HEAD.LOOKUP(j,THD.NN.MSB)<>0)	/*	non-empty, non-Q	*/
+			or		  (TRK.HEAD.LOOKUP(j,THD.NN.LSB)<>0)	/*	track: get mc #	*/
+			or		  (j = 0)										/*	or keyboard			*/
+			then j = Multi.Max;
+
+			else do;
+				if Dtd.Num.Voices > Multi.Max
+				then j = Dtd.Num.Voices;
+				else j = Multi.Max;
+			end;
+
+			write(mam)=trd.ptr; write(mal)=trk;
+			if channel=0
+			then val=shr(read(md),8);	/*	get left channel routing	*/
+			else val=read(md)&255;		/*	get right channel routing	*/
+
+			/*	increment value	*/
+			//	also convert from (64 + (zero-based value)) to (one-based value)
+			if val = 0 then val = 1;	//	increment from "off" to 1
+			else val=(val&"77")+2;		//	increment by 2 since we're converting from zero-based to one-based
+			if val igt j then val = 0;	//	wrap to "off"
+
+			call SET.MULTI.CHANNEL.ROUTING(trk,val);
+			if (TBUT.MAPPING(trout.trk#) ilt First.Lod.Track) DISPLAY.PAR();	//	redisplay value in the window
+		end;
+	end ADVANCE.CHANNEL.ROUTING;
+
+	ADVANCE.POLY.BIN: proc (trk) swapable;	/*	increase the poly bin by one	*/
+		dcl trk	fixed;	/*	physical track number	*/
+		dcl val	fixed;
+
+		if inc.mult=0 then return;
+
+		if trk<>1 then do;						/*	exclude split keyboard	*/
+			write(mam)=trd.ptr;
+			write(mal)=trk+poly.bin.offset;
+			val=read(md)+1;						/*	get poly bin number (make 1=first)	*/
+			if val>0 then do;						/*	if there is a valid entry to bump	*/
+				val=val+1;							/*	bump to next	*/
+				if val>polynums then val=1;	/*	wrap around	*/
+				call SET.POLY.BIN(trk,val);
+			end;
+		end;
+	end ADVANCE.POLY.BIN;
+
+	SELECT.MULTI.PARM: proc swapable;
+
+		if  ((active.parms(1)&255)<>(tname.l -par.l))		/*	timbre name not active	*/
+		and (((active.parms(1)&255)<>(trrout.l-par.l))		/*	parm not active	*/
+		or   (((trout.trk#+num.kbd.tracks)<>route.pos)		/*	or is possibly active button	*/
+		and  (route.pos<>prev.route.pos)))						/*	new trk selected from terminal	*/
+		then do;
+			if (trout.trk#<>-1) or (route.pos<>0) then do;	/*	if not both the keyboard	*/
+				if route.pos<num.kbd.tracks
+				then trout.trk#=-1;
+				else trout.trk#=route.pos-num.kbd.tracks;		/*	select track from terminal	*/
+				if TBUT.MAPPING(trout.trk#) < First.Lod.Track
+				then call SELECT.PARAMETER(trrout.l-par.l);	/*	select new parm	*/
+			end;
+		end;
+	end SELECT.MULTI.PARM;
+
+	/*	$SUBTITLE  Routine to Fill In Multi-Channel Out Display	*/
+
+	FILL.MULTI.OUT.SCREEN: proc	fixed swapable;	/*	fills in current routing	*/
+		dcl (left,right)	fixed;	/*	left and right channel routing values	*/
+		dcl x					fixed;
+		dcl change			fixed;
+		dcl (i,j,k)			fixed;
+
+		if inc.mult=0 then return;
+
+		if  (DTD.Max.Secs <> 0)					/*	if DTD up and running, then	*/
+		then do;										/*	get track directory info		*/
+			write(mam) = Scsi.Ptr;
+			write(md ) = 39;						/*	144:39 to get track dir			*/
+			dtd.cue#   = -1;						/*	initialize							*/
+			call Send.To.Lod(144,2);
+		end;
+
+		call MULTI.TRACK.ROUTING.SNAP.SHOT;	/*	take a snap shot of the current routing	*/
+		call TRACK.NUMBER.SNAP.SHOT;			/*	take a snap shot of the current track numbers	*/
+		call TIMBRE.NAME.SNAP.SHOT;			/*	take a snap shot of the timbre names on the current tracks	*/
+		call POLY.BIN.SNAP.SHOT;				/*	take a snap shot of the poly bin numbers for each track	*/
+
+		/*	compare routing tracks in snap shot to routing tracks in display area	*/
+		change=0;									/*	assume no changes will take place	*/
+
+		do i=0 to num.kbd.tracks+num.track.buttons-1;	/*	loop over tracks in system	*/
+
+			/*	compare track numbers	*/
+			write(mam)=trd.ptr; write(mal)=track.numbers.offset+i;
+			x=read(md);
+			write(mam)=trd.ptr+3; write(mal)=track.numbers.offset+i;
+			if x<>read(md) then do;
+				change=1;
+				call PRINT.TNUM(i);
+			end;
+
+			/*	compare timbre names	*/
+			x=0;										/*	assume both names are the same	*/
+			j=i*tname.length;						/*	compute pointer	*/
+
+			write(mam)=trd.ptr+1+shr(j,8); write(mal)=j&255;	/*	look at snap shot	*/
+			do k=0 to tname.length-1;
+				misc.buf(k)=read(mdi);
+			end;
+			write(mam)=trd.ptr+4+shr(j,8); write(mal)=j&255;
+			do k=0 to tname.length-1;
+				if misc.buf(k)<>read(mdi)		/*	compare snapshot to display area	*/
+				then x=1;
+			end;
+
+			if (x<>0) and (i<>1) then do;		/*	names differ and not split keyboard - timbre name update necessary	*/
+
+				change=1;
+				if i=0 then j=0;
+				else j=i-num.kbd.tracks+1;		/*	map to physical location of track	*/
+
+				if j<21
+				then call cpos(kbd.loc+j,5);	/*	set to instrument name location for left group	*/
+				else call cpos(kbd.loc+(j-12),47);
+
+				call PRINT.TIM.NAME(i);			/*	print instrument name on track exclude split keyboard	*/
+			end;
+
+			/*	compare routing info	*/
+			write(mam)=trd.ptr; write(mal)=i;	/*	look up routing info from snap shot	*/
+			x=read(md);
+			write(mam)=trd.ptr+3; write(mal)=i;	/*	look up routing info from display	*/
+			if x != read(md) then do;	/*	the two routings are different - do update	*/
+///////////////////////////////////////////////	START DEBUG
+//	send 'track =',i;
+//	write("313") = shr(read(md),8);
+//	send ' display  =', read("313")&128, read("313")&64, read("313")&63,', ', read(md)&128, read(md)&64, read(md)&63;
+//	write("313") = shr(x,8);
+//	send ' snapshot =', read("313")&128, read("313")&64, read("313")&63,', ', x&128, x&64, x&63;
+///////////////////////////////////////////////	END DEBUG
+				change=1;
+				call PRINT.ROUTE.CHANNEL(i,0);	/*	print left channel value	*/
+				call PRINT.ROUTE.CHANNEL(i,1);	/*	print right channel value	*/
+			end;
+
+			/*	compare poly bin numbers	*/
+
+			write(mam)=trd.ptr;
+			write(mal)=poly.bin.offset+i;
+			x=read(md);
+			write(mam)=trd.ptr+3;
+			write(mal)=poly.bin.offset+i;
+			if x<>read(md) then do;
+				change=1;
+				call PRINT.POLY.BIN(i);
+			end;
+
+		end;	/*	of loop over tracks	*/
+
+		/*	copy values from snap shot area to display area when done	*/
+		if change<>0								/*	did some kind of update	*/
+		then call COPY.EXT.MEM.SEC(trd.ptr,trd.ptr+3,3);
+
+		return change;
+
+	end FILL.MULTI.OUT.SCREEN;
+
+	/*	$SUBTITLE  Routine to Parse New Multi-Channel Routing Assignment	*/
+
+	MULTI.DEPOSIT: proc swapable;
+		dcl (i,num)	fixed;
+		dcl ch		fixed;
+		dcl live		fixed;	/*	if a live track or a Synclavier track	*/
+
+		if (err.displayed<>0) then do;
+			call remove.err;
+			if multi.errs=0 then call PRINT.CCAT;			/*	reprint current cat name	*/
+		end;
+
+		if token(0)=0 then return;								/*	no string - no change	*/
+
+		if ((active.parms(1)&255)<>(trrout.l-par.l))		/*	parm not active	*/
+		then do;
+			if route.pos<num.kbd.tracks
+			then trout.trk#=-1;
+			else trout.trk#=route.pos-num.kbd.tracks;		/*	select trk from terminal	*/
+			if TBUT.MAPPING(trout.trk#) < First.Lod.Track
+			then call SELECT.PARAMETER(trrout.l-par.l);	/*	select new parm	*/
+		end;
+
+		live=0;		/*	assume not a live track	*/
+		if inc.dtd and (field.pos=0) and (byte(token,0)=asc.l) then do;	/*	if L for Live track	*/
+			i=1;
+			num=0;
+			do while i<token(0);	/*	find the live track number	*/
+				ch=byte(token,i);
+				load num; mul 10;
+				num=res+(ch-asc.0);
+				i=i+1;
+			end;
+			num=num+200;	/*	convert to live track number between 201 and 216	*/
+			live=1;			/*	indicate that it is a live track	*/
+		end;
+		else num=CONV.STR.TO.FIXED(token,0,0);		/*	convert token to numeric value	*/
+
+		if (field.pos>0) and (field.pos<3)			/*	if changing channel routing		*/
+		then call SET.MULTI.CHANNEL.ROUTING(route.pos,num);
+
+		else if field.pos=3 then call SET.POLY.BIN(route.pos,num);
+
+		else if (field.pos=0) then do;
+			if  (live <> 0)
+			and (Lod.Running = 0)
+			then do;
+				if (err.displayed<>0) then call remove.err;
+				call cpos(23,0);
+				call REVERSE.VIDEO(1);
+				call DRAW.MESSAGE('NOTE: Direct-To-Disk Live Tracks are not available.');
+				call REVERSE.VIDEO(0);
+			end;
+
+			else if (live				<>	0	)
+			and	  (DTD.Max.Tracks	<=	8	)
+			and	  (num				>	208)
+			then do;
+				if (err.displayed<>0) then call remove.err;
+				call cpos(23,0);
+				call REVERSE.VIDEO(1);
+				call DRAW.MESSAGE('NOTE: Live Tracks 9 - 16 are not available.');
+				call REVERSE.VIDEO(0);
+			end;
+
+			else do;
+				if (((num<1) or (num>200)) and (live=0))		/*	if not a live track these are the bounds	*/
+				or ((live<>0) and ((num<201) or (num>216)))	/*	the bounds for a live track	*/
+				then call overflow.error;
+				else call SET.TRACK.NUMBER(route.pos,num);
+			end;
+		end;
+
+		token(0)=0;												/*	reset token to zero length	*/
+		if TBUT.MAPPING(trout.trk#) < First.Lod.Track
+		then call DISPLAY.PAR;								/*	redisplay value in the window	*/
+		reset.bits=reset.bits\r.multi;					/*	force update of synth info	*/
+		call FILL.MULTI.OUT.SCREEN;						/*	update display to reflect change	*/
+		call POS.TRACK.CURSOR;
+	end MULTI.DEPOSIT;
+
+	insert ':synsou:routmod:routsoua';	/*	midi routines	*/
+	insert ':synsou:routmod:routsoub';	/*	all purpose routing routines	*/
+
+	/*	$Subtitle Activate Multichannel Display	*/
+
+	MULTICHANNEL.DISPLAY: PROC(arg) PUBLIC SWAPABLE;	/*	call to activate DTD track display	*/
+		dcl arg		fixed;	/*	reserved for future use	*/
+		dcl (code)	fixed;
+
+		if inc.mult=0 then do;
+			call feature.not.available;
+			return (-1);
+		end;
+
+		if arg<>1 then do;						/*	pass 1 if screen is already drawn (tab key)	*/
+			prev.routing.display.type=(-1);
+			routing.display.type=0;				/*	indicate multichannel routing display	*/
+
+			call DRAW.TRACK.SCREEN;
+			call FILL.MULTI.OUT.SCREEN;
+		end;
+		call POS.TRACK.CURSOR;
+
+		EXIT.MY.SCREEN   = 0;
+		GOTO.THIS.SCREEN = 0;
+
+		call ENABLE_SEVERAL_GETS(get.in.char,				/*	get in.chars		*/
+										 get.mouse.button,		/*	get mouse buttons	*/
+										 get.new.timbre.info,	/*	new kbd timbre/partial	*/
+										 get.new.seq.info);		/*	new seq notes/constants	*/
+
+		call ENABLE_SEVERAL_GETS(get.prm.info,				/*	timbre parameter change	*/
+										 get.dtd.info,				/*	direct-to-disk stuff	*/
+										 get.ertyp,					/*	error messages	*/
+										 0);
+
+		do while exit.my.screen=0;
+
+			code = GET.NEXT.EVENT;						/*	get event						*/
+
+			if (code = get.in.char) then do;			/*	input character received	*/
+				if next.event.info >= asc.call.convert
+				then call RETURN.TO.PREV.STATE;
+				else call TRACK.ROUTING.INPUT(in.chin,next.event.info);	/*	Track Display input handler	*/
+			end;
+
+			else if (code = get.mouse.button) then do;
+				if next.event.info=2			/*	look for release of middle button	*/
+				then do;
+					call TRACK.ROUTING.MOUSE.POS(mouse(release.x),mouse(release.y));
+				end;
+			end;
+
+			else if (code = get.new.timbre.info)	/*	new timbre info				*/
+			or		  (code = get.prm.info)				/*	timbre parameter change		*/
+			or		  (code = get.dtd.info)				/*	dtd info							*/
+			then do;
+				if FILL.MULTI.OUT.SCREEN<>0			/*	redraw multi routing info	*/
+				then call POS.TRACK.CURSOR;			/*	reposition cursor				*/
+			end;
+
+			else if (code = get.new.seq.info) then do;
+				if (next.event.info&(1\2\8))<>0 then do;	/*	new seq info (recall, new name)	*/
+					if FILL.MULTI.OUT.SCREEN<>0				/*	redraw multi routing info	*/
+					then call POS.TRACK.CURSOR;				/*	reposition cursor				*/
+				end;
+			end;
+
+			else if (code = get.ertyp) then do;	/*	error message to display	*/
+				call Handle.System.Error.Codes(next.event.info);
+				call POS.TRACK.CURSOR;		/*	position the cursor on the selected field	*/
+			end;
+
+		end;	/*	of loop	*/
+
+		call DISABLE_SEVERAL_GETS(get.in.char,				/*	get in.chars		*/
+										  get.mouse.button,		/*	get mouse buttons	*/
+										  get.new.timbre.info,	/*	new kbd timbre/partial	*/
+										  get.new.seq.info);		/*	new seq notes/constants	*/
+
+		call DISABLE_SEVERAL_GETS(get.prm.info,			/*	timbre parameter change	*/
+										  get.dtd.info,			/*	direct-to-disk stuff	*/
+										  get.ertyp,				/*	error messages	*/
+										  0);
+
+		EXIT.MY.SCREEN = 0;	/*	clear flag after loop	*/
+
+		return GOTO.THIS.SCREEN;
+
+	end MULTICHANNEL.DISPLAY;
+
+	/*	$Subtitle Activates Midi Routing Display	*/
+
+   #if (0)
+      DCL MIDI_NOTE_ONS  FIXED EXTERNAL;
+      DCL MIDI_NOTE_OFFS FIXED EXTERNAL;
+   #endif
+
+	MIDI.DISPLAY: PROC(arg) PUBLIC SWAPABLE;	/*	call to activate DTD track display	*/
+		dcl arg		fixed;	/*	reserved for future use	*/
+		dcl (code)	fixed;
+
+		if inc.midi=0 then do;
+			call feature.not.available;
+			return (-1);
+		end;
+
+		if arg<>1 then do;				/*	draw screen if not re-entry	*/
+			routing.display.type=1;		/*	indicate midi display	*/
+			prev.routing.display.type=(-1);
+			call DRAW.TRACK.SCREEN;
+			call FILL.MIDI.SCREEN;		/*	fill out screen initially	*/
+         #if (0)
+            send MIDI_NOTE_ONS, MIDI_NOTE_OFFS;
+         #endif
+		end;
+		call POS.TRACK.CURSOR;
+
+		EXIT.MY.SCREEN   = 0;
+		GOTO.THIS.SCREEN = 0;
+
+		call ENABLE_SEVERAL_GETS(get.in.char,				/*	get in.chars		*/
+										 get.mouse.button,		/*	get mouse buttons	*/
+										 get.new.timbre.info,	/*	new kbd timbre/partial	*/
+										 get.new.seq.info);		/*	new seq notes/constants	*/
+
+		call ENABLE_SEVERAL_GETS(get.prm.info,				/*	timbre parameter change	*/
+										 get.dtd.info,				/*	direct-to-disk stuff	*/
+										 get.ertyp,					/*	error messages	*/
+										 0);
+
+		do while exit.my.screen=0;
+
+			code = GET.NEXT.EVENT;						/*	get event	*/
+
+			if (code = get.in.char) then do;			/*	input character received	*/
+				if next.event.info >= asc.call.convert
+				then call RETURN.TO.PREV.STATE;
+				else call TRACK.ROUTING.INPUT(in.chin,next.event.info);	/*	Track Display input handler	*/
+			end;
+
+			else if (code = get.mouse.button) then do;
+				if next.event.info=2		/*	look for release of middle button	*/
+				then do;
+					call TRACK.ROUTING.MOUSE.POS(mouse(release.x),mouse(release.y));
+				end;
+			end;
+
+			else if (code = get.new.timbre.info)	/*	new timbre info			*/
+			or		  (code = get.prm.info)				/*	timbre parameter change	*/
+			or		  (code = get.dtd.info)				/*	dtd info						*/
+			then do;
+				if FILL.MIDI.SCREEN<>0					/*	update midi screen		*/
+				then call POS.TRACK.CURSOR;			/*	reposition cursor			*/
+			end;
+
+			else if (code = get.new.seq.info) then do;
+				if (next.event.info&(1\2\8))<>0 then do;	/*	new seq info (recall, names)	*/
+					if FILL.MIDI.SCREEN<>0				/*	update midi screen		*/
+					then call POS.TRACK.CURSOR;		/*	reposition cursor			*/
+				end;
+			end;
+
+			else if (code = get.ertyp) then do;		/*	error message to display	*/
+				call Handle.System.Error.Codes(next.event.info);
+				call POS.TRACK.CURSOR;	/*	position the cursor on the selected field	*/
+			end;
+		end;	/*	of loop	*/
+
+		call DISABLE_SEVERAL_GETS(get.in.char,				/*	get in.chars		*/
+										  get.mouse.button,		/*	get mouse buttons	*/
+										  get.new.timbre.info,	/*	new kbd timbre/partial	*/
+										  get.new.seq.info);		/*	new seq notes/constants	*/
+
+		call DISABLE_SEVERAL_GETS(get.prm.info,			/*	timbre parameter change	*/
+										  get.dtd.info,			/*	direct-to-disk stuff	*/
+										  get.ertyp,				/*	error messages	*/
+										  0);
+
+		EXIT.MY.SCREEN = 0;	/*	clear flag after loop	*/
+
+		return GOTO.THIS.SCREEN;
+
+	end MIDI.DISPLAY;
+end ROUTMOD;
+

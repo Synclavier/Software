@@ -1,0 +1,748 @@
+/* PLOTLIB  $TITLE  Plotting Procedures */
+
+/* Copyright 1982 by New England Digital Corporation */
+/* Copyright 1983 by New England Digital Corporation */
+
+/* fix to boundary clipping    21 November 1983 
+.  added DQ640 code            11 April    1984  [KJC]
+.  added MG600 code             8 August   1985  [KJC]
+.  added Macintosh code        28 December 1988  [DSY]
+.  add   gpos.x, gpos.y        30 October  1996  [CWJ]
+*/
+
+/* This module contains all the routines for plotting on
+.  a Retrographics VT640 plotter. 
+.
+.  To access this module, INSERT ':-XPL:PLOTLIB';.  In addition,
+.  insert :-XPL:TERMUTIL (if you want interrupts enabled) or
+.  :-XPL:TERMUT (if you want interrupts disabled). */
+
+module PLOTTING_LIBRARY;
+configuration modelC, MULDIV; /* HARDCOPY won't work on modelA; #TRANSMIT_COORDS won't work without the MULDIV */
+
+insert ':-xpl:asciidef';
+insert ':-xpl:syslits'; /* terminal definitions */
+insert ':-xpl:termrout'; /* get TERMUTIL procedure definitions */
+
+/* GLOBAL VARIABLE DECLARATIONS */
+
+dcl #mode              fixed public; /* 0=transparent,1=alpha,2=vector, 3=point */
+dcl #initialize        fixed public; /* flag to mark first point in point or vector sequence */
+
+dcl #phys.limits       data (0,1023,0,779); /* physical device limits (same as TEK10) */
+dcl (#lastx,#lasty)    fixed; /* coordinates of last point */
+dcl #data.level        fixed; /* 0 for white, 1 for black, 2 for complemented  */
+dcl #line.type         fixed; /* save line type */
+dcl #char.size         fixed; /* save character size */
+dcl #window.limits (3) floating; /* problem coords for floating pt conversions */
+dcl #iwindow.limits(3) fixed; /* user units */ 
+dcl #view.limits   (3) fixed; /* plotter units of viewport */
+dcl (#xnum,#ynum)      fixed; /* numerator to scale point */
+dcl (#xden,#yden)      fixed; /* denominator to scale point */
+dcl (#px,#py)          fixed; /* user's plot units */
+dcl mg600              boolean; /* TRUE if this is an MG600 terminal */
+
+dcl #xwbase      lit '#iwindow.limits(0)'; /* x axis base in user coordinates */
+dcl #ywbase      lit '#iwindow.limits(2)'; /* y axis base in user coordinates */
+dcl #xvbase      lit '#view.limits(0)';    /* x axis base of viewport */
+dcl #yvbase      lit '#view.limits(2)';    /* y axis base of viewport */
+
+dcl #transparent lit '0';
+dcl #alpha       lit '1';
+dcl #vector      lit '2';
+dcl #point       lit '3';
+
+dcl #punits proc(fixed,fixed); /* routines used for initialization */
+dcl #map    proc;
+
+begin; /* initial setup */
+   dcl punits lit 'call #punits';
+   dcl i fixed;  
+
+   do i=0 to 3;
+      #iwindow.limits(i)=#phys.limits(i);
+      #window.limits (i)=#phys.limits(i);
+      #view.limits   (i)=#phys.limits(i);
+   end;  
+   punits(#phys.limits(1),#phys.limits(3));
+   call #map;
+   #mode=#transparent;
+   #data.level=0; /* white */
+   mg600=(terminal.model=t#mg600) or (terminal.model=t#macintosh); /* TRUE if Monterey MG600 */
+end; /* of initialize */
+
+/* $SUBTITLE  Device Dependent Code Section:  for VT-640 */
+
+dcl (#highy,#lowy,#highx) fixed; /* last coordinates transmitted */         
+
+dcl point_mode       lit 'do;control.seq=1;wchar("34");#mode=#point;#initialize=1;end;';    // FS
+dcl vector_mode      lit 'do;control.seq=1;wchar("35");#mode=#vector;#initialize=1;end;';   // GS
+dcl transparent_mode lit 'if #mode<>#transparent then do;control.seq=0;wchar("30");#mode=#transparent;end;'; // CAN
+dcl alpha_mode       lit 'do;control.seq=1;wchar("37");#mode=#alpha;end;'; // US
+
+/*  CLEAR  */
+
+#clear:proc public; /* clear screen, leave in transparent mode */
+   /* normal tek10 = esc,ff,cr  */
+   vector_mode;
+   wchar(esc);
+   wchar(ff);
+   transparent_mode;
+   pos(0,0); /* move back to the top of the screen */
+end #clear;
+dcl CLEAR lit 'call #clear';
+
+/*  C H A R _ S I Z E  */
+
+#char_size:proc(i) public; /* char size 0 - 80 per line;  1-40 per line */
+  dcl i fixed;  
+
+  if (i<0) or (i>3) then return;
+  wchar(ESC);
+  wchar(ASC.0+i);
+  #char.size=i;
+end #char_size;
+dcl CHAR_SIZE lit 'call #char_size';
+
+/*  D A T A _ L E V E L  */
+
+#data_level:proc(i) public; /* sets line to on, off, or complement */
+  dcl i fixed;
+
+  if (i<0) or (i>2) then return; /* error return */
+
+  wchar(ESC);  wchar(SLASH);
+  do case i;
+    wchar(ASC.0); /* dots on */
+    wchar(ASC.1); /* dots off */
+    wchar("062"); /* dots complemented */
+  end;  
+  wchar("144");
+  #data.level=i; /* save value */
+end #data_level;
+dcl DATA_LEVEL lit 'call #data_level';
+
+/*  L I N E _ T Y P E  */
+
+#line_type:proc(i) public; /* sets line type */
+  dcl i fixed;           
+
+  if (i<0) or (i>4) then return; /* user defined types not implemented */
+
+  wchar(ESC);
+  do case i;
+    wchar("140"); /* normal line, note 140 not 134 */
+    wchar("141"); /* dotted line */
+    wchar("142"); /* dot-dashed line */
+    wchar("143"); /* short-dashed line */
+    wchar("144"); /* long-dashed line */
+  end;  
+  #line.type=i; /* save value */
+end #line_type;
+dcl LINE_TYPE lit 'call #line_type';
+
+/* $PAGE */
+
+#hardcopy: proc public; /* dumps from the screen to the I.D.S. */
+
+   dcl gon      lit 'character(03)';
+   dcl goff     lit 'gon,character(02)';
+   dcl linefeed lit 'gon,character(14)';
+   dcl formfeed lit 'gon,character(ff)';
+
+   dcl storage ((((1024 + 3)/4)*4 + 1)/2) fixed; /* this is just (GROUPS*4 + 1)/2 for largest screen (and N) supported */
+
+   dcl bit      fixed;
+   dcl last_byt fixed;
+
+   read_screen: proc(y, groups, screen_width, n);
+
+      map_bits: proc(c, byt, bits); /* map screen bits to printer bits */
+         dcl c    fixed; /* character to map */
+         dcl byt  fixed; /* byte position in mapped printer array */
+         dcl bits fixed; /* number of bits in C that are valid */
+         dcl j    fixed;
+
+         if mg600 then c = rot(c, 16 - bits); /* bits are in reverse order on MG600 */
+
+         if c <> 0 /* don't waste time if C = 0 */
+         then do j = 0 to bits; /* map all bits that are valid */
+            byt = byt - 1;
+            if c then do; /* if the bit is set, map it onto the printer */
+               call pbyte(storage, byt, (byte(storage, byt) or bit));
+               if last_byt < byt then last_byt = byt; /* look for the end */
+            end;
+            if mg600 /* if MG600 */
+            then c = rot(c, 1); /* take next bit from top */
+            else c = shr(c, 1); /* look at the next bit (from bottom) */
+         end; /* of mapping bits */
+      end map_bits;
+
+      dcl y                 fixed; /* Y position of line to read */
+      dcl groups            fixed; /* number of 5-pixel or 6-pixel groups in line */
+      dcl screen_width      fixed; /* width (in pixels) of screen */
+      dcl n                 fixed; /* number of bits in a group */
+      dcl buf (((1024 + 3)/4 + 1)/2) fixed; /* input buffer (size is # groups for largest screen (and N) supported) */
+      dcl byt               fixed; /* byte position in printer array */
+      dcl c                 fixed; /* next character from screen */
+      dcl count             fixed; /* number of consecutive bytes */
+      dcl last_bit          fixed; /* last bit on line */
+      dcl (i, j)            fixed;
+
+      if mg600 then do; /* if an MG600 */
+         i = shr(y, 5) + 32; j = (y and "37") + 96; /* high y, low y */
+         wchar(esc); pstring ('}9'); wchar(i); wchar(j); wchar(i); wchar(j); /* ask for line Y */
+      end; /* of MG600 */
+      else do; /* VT640 or DQ640 */
+         wchar (esc); pstring ('"0;'); pnum (y, 0); wchar(scolon); /* ask for line Y */
+
+         if dq640 then do; /* for DQ640 */
+            pnum (screen_width, 0); wchar (asc.c);
+         end;
+         else do; /* for VT640 */
+            pnum (groups, 0); wchar (lower.c);
+         end;
+      end; /* of VT640 or DQ640 */
+
+      i = 0; /* start reading bytes at byte zero */
+      buf (0) = groups; /* there are GROUPS bytes in the buffer */
+
+      do while (i <= groups - 1); /* read all bytes */
+         c = rchar; /* get next character */
+         if c = asc.dollr then do; /* repeating bytes of all zeroes */
+            c = 0; /* pattern is all zeros */
+            count = (rchar & "077"); /* get count */
+         end; /* of repeating zeroes */
+         else if c = percent then do; /* repeating bytes of all ones */
+            c = "077"; /* pattern is all ones */
+            count = (rchar & "077"); /* get count */
+         end; /* of repeating ones */
+         else if c = asc.amp then do; /* repeating bytes of an arbitrary pattern */
+            c = rchar; /* get the pattern */
+            count = (rchar & "077"); /* and the count */
+         end; /* of repeating pattern */
+         else count = 1; /* just a single byte */
+
+         do j = 1 to count; /* save the bytes */
+            call pbyte(buf, i, c); /* save this character */
+            i = i + 1; /* advance screen counter */
+         end; /* of saving bytes */
+      end; /* of reading all bytes */
+      c = rchar; /* read trailer */
+
+      last_bit = ((screen_width - 1) mod n); /* last bit on line */
+      byt = 0; /* start at beginning of printer array */
+
+      do i = 0 to groups - 1; /* map the screen bytes onto the printer */
+         if i = groups - 1 then do; /* make sure we don't map too many bits on last byte */
+            byt = byt + last_bit + 1; /* advance printer counter */
+            call map_bits (byte(buf, i), byt, last_bit); /* map bits */
+         end; /* of mapping bits on last pass */
+         else do; /* no need to be careful the rest of the time */
+            byt = byt + n; /* advance printer counter */
+            call map_bits (byte(buf, i), byt, n - 1); /* map bits */
+         end; /* of rest of the time */
+      end; /* of mapping screen bytes onto printer */
+   end read_screen;
+
+   dcl screen_width  fixed; /* width of screen in pixels */
+   dcl screen_height fixed; /* height of screen in pixels */
+   dcl groups        fixed; /* width of screen in 6-pixel units */
+   dcl swaths        fixed; /* height of screen in swaths (7-pixel units) */
+   dcl save          fixed;
+   dcl (i,j,k,n,y)   fixed;
+
+   save = read("314"); /* save interrupt status */
+   vector_mode;
+   disable; send gon,; write("314") = save; write("1") = save; /* turn printer graphics on */
+
+   if mg600 then do; /* mg600 */
+      screen_width = 1024; /* for MG600 */
+      screen_height = 780;
+      n = 4; /* readback is in 4-pixel groups */
+   end;
+   else if dq640 then do; /* dq640 */
+      screen_width = 800; /* for DQ640 */
+      screen_height = 480;
+      n = 6; /* readback is in 6-pixel groups */
+   end;
+   else do; /* vt640 */
+      screen_width = 640; /* for VT640 */
+      screen_height = 480;
+      n = 5; /* readback is in 5-pixel groups */
+   end;
+
+   groups = (screen_width + (n - 1))/n; /* round up to nearest N-pixel boundary */
+   swaths = (screen_height + 6)/7; /* round up to nearest 7-pixel boundary */
+   
+   do i = 0 to swaths - 1;
+      do j = 0 to (groups*n + 1)/2; storage (j) = 0; end;
+      last_byt = -1; bit = 1;
+
+      if i = swaths - 1 then k = ((screen_height - 1) mod 7); /* restrict last swath to screen size */
+      else k = 6; /* not last swath - create all 7 swath lines */
+
+      do j = 0 to k;
+         y = (screen_height - 1) - i*7 - j; /* calculate next line address */
+         call read_screen (y, groups, screen_width, n);
+         bit = shl(bit, 1);
+      end;
+
+      disable;
+      do j = 0 to last_byt;
+         k = byte(storage, j);
+         if k = 3 then send gon,;
+         send character(k),;
+      end;
+      send linefeed,;
+      write("314") = save; write("1") = save; /* restore interrupt status */
+   end;
+
+   transparent_mode;
+   disable; send goff,; write("314") = save; write("1") = save; /* turn printer graphics off */
+
+end #hardcopy;
+dcl HARDCOPY lit 'call #hardcopy';
+
+/* $PAGE */
+
+/* Some Internal Procedures */
+
+#greater:proc(a,b) fixed; /* returns 1 if a>b, in range -32768,+32767 */
+   dcl (a,b)   fixed;
+   dcl (g1,g2) fixed;
+
+   g1=((a&"100000")=0); /* test to see if positive number */
+   g2=((b&"100000")=0);
+
+   if (g1 xor g2) then return g1;
+   if a>b then return 1;
+   return 0;
+end #greater;
+
+#converty:proc(y) fixed;
+   dcl (y,sign) fixed;
+
+   sign=0;
+   if #greater(y,#ywbase) then write(5)=y-#ywbase;
+   else do;
+      sign=1;
+      write(5)=#ywbase-y;
+   end;
+   write(6)=#ynum; y=read(5); write(7)=#yden; /* compute (y-base)*num/den */
+   if sign then return #yvbase-read(5);
+   else         return #yvbase+read(5);
+end #converty;
+
+#convertx:proc(x) fixed;
+   dcl (x,sign) fixed;
+
+   sign=0;
+   if #greater(x,#xwbase) then write(5)=x-#xwbase;
+   else do;
+      sign=1;
+      write(5)=#xwbase-x;
+   end;
+   write(6)=#xnum; x=read(5); write(7)=#xden; /* compute (x-base)*num/den */
+   if sign then return #xvbase-read(5);
+   else         return #xvbase+read(5);
+end #convertx;
+
+dcl #convert_x lit 'x=#convertx(x)';
+dcl #convert_y lit 'y=#converty(y)';
+dcl #convert_coordinates lit '#convert_x;#convert_y';
+
+#fconvert_x:proc(x) fixed;
+   dcl x floating;
+   return int((x-#window.limits(0))*#xnum/(#window.limits(1)-#window.limits(0))+#xvbase);
+end #fconvert_x;
+
+#fconvert_y:proc(y) fixed;
+   dcl y floating;
+   return int((y-#window.limits(2))*#ynum/(#window.limits(3)-#window.limits(2))+#yvbase);
+end #fconvert_y;
+
+#transmit_coords:proc(x,y); /* emit vector coordinates according to protocol */
+   dcl (x,y)                   fixed;                            
+   dcl (highy,lowy,highx,lowx) fixed;
+   dcl (ebyte)                 fixed;
+
+   /* scale from user's punits to physical plotter units */
+   write(5)=x;
+   write(6)=#phys.limits(1);
+   x=read(5); /* this is needed because of a 4567 bug */
+   write(7)=#px;
+   x=read(5);
+   if (dq640 and (read(4) >= shr(#px + 1, 1))) then x = x + 1; /* round up */
+
+   write(5)=y;
+   write(6)=#phys.limits(3);
+   y=read(5); /* this is needed because of a 4567 bug */
+   write(7)=#py;
+   y=read(5);
+   if (dq640 and (read(4) >= shr(#py + 1, 1))) then y = y + 1; /* round up */
+  
+   if ( (y < 1024) and (x < 1024) ) then do;
+      highy=(shr(y,5)+32); /* high y */
+      lowy=((y&"37")+96);  /* low  y */
+      highx=(shr(x,5)+32); /* high x */
+      lowx=((x&"37")+64);  /* low  x */
+
+      if #initialize then do; /* must write all bytes */
+         #initialize=0;
+         wchar(highy); wchar(lowy); wchar(highx);
+      end;
+      else do; /* conditionally write bytes */
+         if #highy<>highy then wchar(highy);
+         if #highx<>highx then do;
+            wchar(lowy); wchar(highx);
+         end;
+         else if #lowy<>lowy then wchar(lowy);
+      end;
+   
+      wchar(lowx);
+
+      #highy=highy;  #lowy=lowy;  #highx=highx; /* keep track of last values */
+   end;
+   else do;
+      ebyte= (shl(y and 3,2)) + (x and 3) + 96;  /* extra byte for 12bit mode */
+      highy=(shr(y,7)+32);          /* high y */
+      lowy=((shr(y,2)&"37")+96);    /* low  y */
+      highx=(shr(x,7)+32);          /* high x */
+      lowx=((shr(x,2)&"37")+64);    /* low  x */
+      wchar(highy);  wchar(ebyte); wchar(lowy);
+      wchar(highx);  wchar(lowx);
+      #initialize = 1;                 /* sent 12bit, so reset 10 bitmode */
+   end;
+end #transmit_coords;
+
+/* end device dependent code */
+
+/* $SUBTITLE  Non Device Dependent Code */
+
+/* MORE INTERNALS */
+
+#code:proc(x,y) fixed; /* endpoint codes for 9 regions of screen */
+   dcl (x,y) fixed;
+   dcl c     fixed;
+
+   c=0; /* initialize */
+   if      #greater(#view.limits(0),x) then c=1;
+   else if #greater(x,#view.limits(1)) then c=2;
+   if      #greater(#view.limits(2),y) then c=c+4;
+   else if #greater(y,#view.limits(3)) then c=c+8;
+   return c;
+end #code;
+
+#move:proc(h,v) fixed; /* begin new vector drawing sequence at (h,v), return 1 if out of bounds */
+   dcl (h,v) fixed;
+
+   #lastx=h;
+   #lasty=v;
+   if #mode<>#point then vector_mode;
+   if #code(h,v)<>0 then return 1;
+   call #transmit_coords(h,v);
+   return 0;
+end #move;
+
+#draw:proc(x,y); /* called to draw vector to or put point at (x,y) */             
+   dcl (x,y) fixed;
+   dcl flag  fixed; /* to indicate that (x,y) has been clipped */
+
+   /* CLIP is derived from the procedure on page 66 of Newman and Sproull */
+
+   clip:proc(x1,y1,x2,y2); /* clips vector from (x1,y1) to (x2,y2) at viewport */
+      dcl (x1,y1,x2,y2) fixed; 
+      dcl (c,c1,c2)     fixed;
+      dcl (x,y)         fixed;
+   
+      c1=#code(x1,y1);  c2=#code(x2,y2);  flag=0;
+
+      do while (c1+c2)<>0;
+         if (c1&c2)<>0 then return; /* line is off screen */
+
+         c=c1; if c=0 then c=c2;
+         if (c&1)>0 then do; /* crosses left edge */
+            y=(y2-y1)*(#view.limits(0)-x1)/(x2-x1);
+            y=y+y1;
+            x=#view.limits(0);
+         end;  
+         else if (c&2)>0 then do; /* crosses right edge */
+            y=(y2-y1)*(#view.limits(1)-x1)/(x2-x1);
+            y=y+y1;
+            x=#view.limits(1);
+         end;
+         else if (c&4)>0 then do; /* crosses bottom edge */
+            x=(x2-x1)*(#view.limits(2)-y1)/(y2-y1);
+            x=x+x1;
+            y=#view.limits(2);
+         end;  
+         else if (c&8)>0 then do; /* crosses top edge */
+            x=(x2-x1)*(#view.limits(3)-y1)/(y2-y1);
+            x=x+x1;
+            y=#view.limits(3);
+         end;
+         if c=c1 then do;
+            x1=x;
+            y1=y;
+            c1=#code(x,y);
+         end;  
+         else do;
+            x2=x;
+            y2=y;
+            c2=#code(x,y);
+            flag=1; /* end of vector is out */
+         end;  
+      end; /* of do while */
+      
+      if (x1<>#lastx) or (y1<>#lasty) then call #move(x1,y1); /* begin new vector if start of vector has been clipped */
+      call #transmit_coords(x2,y2);
+   end clip;
+
+   if #mode=#point then do;
+      if #code(x,y)=0 then call #transmit_coords(x,y);
+      #lastx=x;
+      #lasty=y;
+   end;
+   else if #mode<>#vector then call #move(x,y);
+   else do;  
+      call clip(#lastx,#lasty,x,y);
+      #lastx=x;
+      #lasty=y;
+   end;
+end #draw;
+ 
+#map:proc; /* computes numerator and denominator for scaling */
+   #xnum=#view.limits(1)   -#view.limits(0);  
+   #ynum=#view.limits(3)   -#view.limits(2);
+   #xden=#iwindow.limits(1)-#iwindow.limits(0);
+   #yden=#iwindow.limits(3)-#iwindow.limits(2);
+end #map;
+
+#frame:proc(vector,x1,x2,y1,y2); /* to store viewport or window coordinates */
+   dcl vector        fixed array;     
+   dcl (x1,x2,y1,y2) fixed;
+
+   vector(0)=x1;
+   vector(1)=x2;
+   vector(2)=y1;
+   vector(3)=y2;
+end #frame;
+
+/*  P S  */
+
+#plotstring:proc(string) public; /* plots string in TEK4010 alpha characters */
+   dcl string fixed array; /* string to be printed */
+
+   if (#mode<>#alpha) and (#mode<>#transparent) then alpha_mode;
+
+   pstring(string);
+end #plotstring;  
+dcl PS lit 'call #plotstring';
+
+/*  P N  */
+
+#plotnum:proc(num) public; /* plots number in TEK4010 alpha characters */
+   dcl num fixed; /* number to plot */
+
+   if (#mode<>#alpha) and (#mode<>#transparent) then alpha_mode;
+
+   pnum(num,0);
+end #plotnum;
+dcl PN lit 'call #plotnum';
+
+/*  I P L O T  */
+
+#iplot:proc(x,y) public; /* continues vector sequence to (x,y) in user units */
+   dcl (x,y) fixed;  
+
+   #convert_coordinates;
+
+   if (#mode=#vector) or (#mode=#point) then call #draw(x,y);
+   else                                      call #move(x,y);
+end #iplot;
+dcl IPLOT lit 'call #iplot';
+
+/*  P L O T  */
+
+#plot:proc(x,y) public; /* continues vector sequence to FLOATING POINT problem (x,y) coord's */
+   dcl (x,y) floating;  
+
+   if (#mode=#vector) or (#mode=#point) then call #draw(#fconvert_x(x),#fconvert_y(y));
+   else                                      call #move(#fconvert_x(x),#fconvert_y(y));
+end #plot;
+dcl PLOT lit 'call #plot';
+
+/*  I M O V E _ T O  */
+
+#imove_to:proc(x,y) fixed public; /* begin vector sequence at user's (x,y), return 1 if out  */
+   dcl (x,y) fixed;
+   
+   #convert_coordinates;
+
+   return #move(x,y);
+end #imove_to;
+dcl IMOVE_TO lit 'call #imove_to';
+
+/*  M O V E _ T O  */
+
+#move_to:proc(x,y) fixed public; /* begin vector sequence at FLOATING POINT problem (x,y) coords, return 1 if out  */
+   dcl (x,y) floating;
+  
+   return #move(#fconvert_x(x),#fconvert_y(y));
+end #move_to;
+dcl MOVE_TO lit 'call #move_to';
+
+/*  I C O N N E C T  */
+
+#iconnect:proc(a,b,c,d) public; /* connects users (a,b) to (c,d) */
+   /* moves to (a,b) with pen in present state and  
+   then connects (a,b) with (c,d) and leaves pen up at the end */
+   dcl (a,b,c,d) fixed;
+
+   call #imove_to(a,b);
+   call #iplot (c,d);
+end #iconnect;
+dcl ICONNECT lit 'call #iconnect';
+
+/*  C O N N E C T  */
+
+#connect:proc(a,b,c,d) public; /* connects FLOATING POINT problem (a,b) to (c,d) */
+   /* moves to (a,b) with pen in present state and  
+   then connects (a,b) with (c,d) and leaves pen up at the end */
+   dcl (a,b,c,d) floating;
+
+   call #move_to(a,b);
+   call #plot (c,d);
+end #connect;
+dcl CONNECT lit 'call #connect';
+
+/*  I A X E S  */
+
+#iaxes:proc(x,y) public; /* axes through (x,y) */ 
+   dcl (x,y) fixed;
+
+   iconnect(x,#iwindow.limits(3),  x,#iwindow.limits(2));
+   iconnect(#iwindow.limits(0),y,  #iwindow.limits(1),y); 
+end #iaxes;
+dcl IAXES lit 'call #iaxes';
+
+/*  A X E S  */
+
+#axes:proc(x,y) public; /* axes through FLOATING POINT problem (x,y) */ 
+   dcl (x,y) floating;
+
+   connect(x,#window.limits(3),  x,#window.limits(2));
+   connect(#window.limits(0),y,  #window.limits(1),y); 
+end #axes;
+dcl AXES lit 'call #axes';
+
+/*  B O R D E R  */
+
+#border:proc public; /* draw border around viewport */
+
+   call #move(#view.limits(0),#view.limits(2));
+   call #draw(#view.limits(1),#view.limits(2));
+   call #draw(#view.limits(1),#view.limits(3));
+   call #draw(#view.limits(0),#view.limits(3));
+   call #draw(#view.limits(0),#view.limits(2));
+end #border;
+dcl BORDER lit 'call #border';
+
+/*  C H A R _ B O U N D */
+
+#char_bound:proc(x,y,xsize,ysize) returns (fixed) public; /* check to see if char can be plotted */
+   dcl (x,y,xsize,ysize) fixed;
+   
+   #convert_coordinates;
+   if x < 0 \ x > #px-xsize then return (false);
+   if y < 0 \ y > #py-ysize then return (false);
+   return (true);
+
+end #char_bound;
+dcl CHAR_BOUND lit '#char_bound';
+
+/*  P U N I T S  */
+
+#punits:proc(x,y) public; /* user units for viewports */
+   /* for VT640, call with ( 639,479) */
+   /* for DQ640, call with ( 799,479) */
+   /* for MG600, call with (1023,779) */
+   dcl (x,y) fixed;
+
+   #px=x;
+   #py=y;
+end #punits;
+dcl PUNITS lit 'call #punits';
+
+/*  I W I N D O W  */
+
+#iwindow:proc(x1,x2,y1,y2) public; /* set plot limits in user units */
+   dcl (x1,x2,y1,y2) fixed;  
+
+   call #frame(#iwindow.limits,x1,x2,y1,y2); /* sets window limits */
+   call #map; /* update scaling */
+end #iwindow;
+dcl IWINDOW lit 'call #iwindow';
+
+/*  W I N D O W  */
+
+#window:proc(x1,x2,y1,y2) public; /* set plot limits in floating user units */
+   dcl (x1,x2,y1,y2) floating;
+
+   #window.limits(0)=x1;
+   #window.limits(1)=x2;
+   #window.limits(2)=y1;
+   #window.limits(3)=y2;
+end #window;
+dcl WINDOW lit 'call #window';
+
+/*  V I E W P O R T  */
+
+#viewport:proc(x1,x2,y1,y2) public; /* set plot limits in plotter units */
+   dcl (x1,x2,y1,y2) fixed;
+   
+   call #frame(#view.limits,x1,x2,y1,y2); /* set view limits */
+   call #map; /* update scaling */
+end #viewport;
+dcl VIEWPORT lit 'call #viewport';
+
+/*  G P O S . X ,   G P O S . Y */
+
+#gpos.x: proc (x) returns (fixed) public; /* maps transparent x-coord to graphics pixel pos */
+   dcl x fixed; /* horizontal char pos * 100 (can be + or - ) */
+
+   if MG600 then do;
+      x = (x * 12 / 100) + 23;
+      if read(4) ige 50 then x = x + 1;
+   end;
+   else do; /* vt640 */
+      x = (x * 75 / 1000) + 8;
+      if read(4) ige 500 then x=x+1;
+   end;
+
+   if      x < 0    then x = 0;
+   else if x > 1023 then x = 1023;
+
+   return x;
+end #gpos.x;
+
+#gpos.y: proc (y) returns (fixed) public; /* maps transparent y-coord to graphics pixel pos */
+   dcl y fixed; /* vertical char pos * 100 (can be + or - ) */
+
+   if MG600 then do;
+      y = ((2300-y) * 30 / 100) + 42;
+      if read(4) ige 50 then y = y + 1;
+   end;
+   else do; /* vt640 */
+      y = ((2300-y) * 20 / 100);
+      if read(4) ige 50 then y = y + 1;
+   end;
+
+   if      y < 0   then y = 0; /* limit coord to screen bounds */
+   else if y > 780 then y = 780;
+
+   return y;
+end #gpos.y;
+
+end PLOTTING_LIBRARY;

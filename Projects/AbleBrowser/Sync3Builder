@@ -1,0 +1,140 @@
+#BASH Script to build Synclavier Real Time Software for Synclavier3
+
+# ------------------------------------------
+# Setup
+# ------------------------------------------
+
+#Go there
+cd "${AbleFldr}"
+
+# ------------------------------------------
+# Subroutines
+# ------------------------------------------
+
+com ()
+{
+   /usr/local/bin/XPLCompiler -md "${AbleFldr}" -od "${XPLFolder}" "${XPLOptions}" "${1}" "${2}" "${3}" "${4}" "${5}" "${6}" "${7}" "${8}" "${9}"
+
+    if [ $? -ne 0 ]; then
+        exit 1
+    fi
+}
+
+tool ()
+{
+    /usr/local/bin/AbleDiskTool -s 5 -file "${DestFolder3}${the_wo_img}" "${1}" "${2}" "${3}" "${4}" "${5}" "${6}" "${7}" "${8}" "${9}"
+
+    if [ $? -ne 0 ]; then
+        exit 1
+    fi
+}
+
+# ------------------------------------------
+# Delete old object files
+# ------------------------------------------
+
+rm -f "${DestFolder3}${the_wo_img}"
+
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/tmp"
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/-XPL/LIBS"
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/DIAGBINS"
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/LOD"
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/LOD/LODLIBS"
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/MPLT/RELOC"
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/SYNLIBS"
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/SYNLITS"
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/SYNRLIBS"
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/SYNRSOU/03-PRIM"
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/SYNRSOU/04-SEQ"
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/SYNRSOU/05-BUTT"
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/SYNRSOU/09-GUIT"
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/SYNRSOU/10-INT"
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/SYNTLIBS"
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/SYNMAINS"
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/UTILCAT/LIBS"
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/W0"
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/W0 MPLT Files"
+"${PROJECT_DIR}/DoDeleteBASH" "${XPLFolder}/W0 XPL Files"
+"${PROJECT_DIR}/DoDeleteBASH" "${DestFolder3}"
+
+#Done for clean
+if [ "${ACTION}" = "clean" ]; then
+   echo "Sync3 Clean Complete"
+   exit 0
+fi
+
+# ------------------------------------------
+# Copy starting folders into place
+# ------------------------------------------
+
+cp -rf "${AbleFldr}/W03/"           "${XPLFolder}W0/"
+cp -rf "${AbleFldr}/W0 MPLT Files/" "${XPLFolder}W0 MPLT Files/"
+cp -rf "${AbleFldr}/W0 XPL Files/"  "${XPLFolder}W0 XPL Files/"
+
+#Set size of .SYSTEM folder
+echo 'large, 6000' > "${XPLFolder}W0/*SYSTEM/__SIZE__"      #CD Release (incl. Music Printing & XPL)
+
+# ------------------------------------------
+# Build things
+# ------------------------------------------
+
+source "${AbleFldr}/XPL/COMALL"         #Build -xpl
+source "${AbleFldr}/NEWDIAGS/COMPILE"   #Build DIAGBINS
+source "${AbleFldr}/MONCAT/COM"         #Build monitor
+source "${AbleFldr}/SEDCAT/COM"         #Build screen editor
+source "${AbleFldr}/UTILCAT/COMALL"     #Build utilities
+source "${AbleFldr}/OPUTIL/COMALL"      #Build optical utilities
+source "${AbleFldr}/SCRIPT/COM"         #Build script
+source "${AbleFldr}/SFMCAT/COMPILE"     #Build sfm
+source "${AbleFldr}/MPLT/COMPILE"       #Build Music Printing
+source "${AbleFldr}/LOD/COM"            #Build lod
+source "${AbleFldr}/SYNMAINS/GENGTR"    #Build guitar version
+source "${AbleFldr}/SYNMAINS/GENVK"     #Build VK version
+
+source "${AbleFldr}/ASM/COM"            #Build asm
+source "${AbleFldr}/XPL611/COM"         #Build xpl
+
+# ------------------------------------------
+# Make release folder
+# ------------------------------------------
+
+#Create a new W0; zero it out
+let itsSize=7*1024*1024
+/usr/local/bin/AbleDiskTool -create "${DestFolder3}${the_wo_img}" $itsSize -zero
+
+#Put WINBOOT in place
+cp -f "${XPLFolder}W0/*SYSTEM/WINBOOT.sprg" "${DestFolder3}WINBOOT.sprg"
+
+#Export Monitor, .SYSTEM
+tool -e "${XPLFolder}W0/MONITOR.sprg"                       "W0:MONITOR"
+tool -e "${XPLFolder}W0/*SYSTEM/"                           "W0:.SYSTEM"
+
+#Export PROFILE, RTP, RTPG
+tool -e "${XPLFolder}W0/PROFILE-5.3"                        "W0:PROFILE"
+tool -e "${XPLFolder}W0/${rtp}.sprg"                        "W0:${rtp}"
+tool -e "${XPLFolder}W0/${rtpg}.sprg"                       "W0:${rtpg}"
+
+#Export XPL
+tool -e "${XPLFolder}W0 XPL Files/*asm-7.sprg"              "W0:.system:.asm-7"
+tool -e "${XPLFolder}W0 XPL Files/*p1-7.sprg"               "W0:.system:.p1-7"
+tool -e "${XPLFolder}W0 XPL Files/*p2-7.sprg"               "W0:.system:.p2-7"
+tool -e "${XPLFolder}W0 XPL Files/*p3-7.sprg"               "W0:.system:.p3-7"
+tool -e "${XPLFolder}W0 XPL Files/DUMP.sprg"                "W0:.system:DUMP"
+tool -e "${XPLFolder}W0 XPL Files/*RTC-7.sdat"              "W0:.system:.RTC-7"
+tool -e "${XPLFolder}W0 XPL Files/*RTD-7.sdat"              "W0:.system:.RTD-7"
+tool -e "${XPLFolder}W0 XPL Files/*ST-7.sdat"               "W0:.system:.ST-7"
+
+#Export MPLT
+tool -e "${XPLFolder}W0 MPLT Files/*SAUX-7.sdat"            "W0:.system:.SAUX-7"
+tool -e "${XPLFolder}W0 MPLT Files/*SCWT-7.sdat"            "W0:.system:.SCWT-7"
+tool -e "${XPLFolder}W0 MPLT Files/*SFRM-7.sdat"            "W0:.system:.SFRM-7"
+tool -e "${XPLFolder}W0 MPLT Files/*SLIB-7.sdat"            "W0:.system:.SLIB-7"
+tool -e "${XPLFolder}W0 MPLT Files/*SPRO-7"                 "W0:.system:.SPRO-7"
+tool -e "${XPLFolder}W0 MPLT Files/*SPLT-7.sprg"            "W0:.system:.SPLT-7"
+
+#Demo file
+tool -e "${AbleFldr}/W0 Demo Files/CLARA3.ssnd"             "W0:"
+tool -e "${AbleFldr}/W0 Demo Files/CLARA4.ssnd"             "W0:"
+
+#Export DIAGBINS
+tool -e "${XPLFolder}DIAGBINS/"                             "W0:DIAGBINS"

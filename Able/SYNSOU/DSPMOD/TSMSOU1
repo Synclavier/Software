@@ -1,0 +1,572 @@
+/* $Title TSMSOU1
+   Routines for DSP70 servicing
+   7/31/89 - sjs - author
+*/
+
+dcl xfer.size      lit '256'; /* transfer one sector at a whack */
+
+check.options: proc (alg,in.len,out.len,options) swapable;
+   dcl alg          fixed;
+   dcl in.len       array;
+   dcl out.len      array;
+   dcl options      array;
+
+   dcl xin.len(1)   fixed;
+   dcl xout.len(1)  fixed;
+
+   if alg = dsp#ac_tsm then do; /* if doing tsm */
+      if options(tsm.opt#ratio) = 0 then do;
+         call DRAW.MESSAGE('Cannot Perform Time Scale with ratio of 1.0000');
+         return 0;  /* no compression or expansion desired */
+      end;
+      if not TSMData_There then do; /* global var */
+         call DRAW.MESSAGE('System Error - Time Scale data file is missing');
+         return 0;  /* could not find data tables for 56000 */
+      end;
+
+      call copy32(in.len,xin.len);          /* cannot reference automatic globals in proc */
+      if xin.len (0) ige 256 then do;
+         call DRAW.MESSAGE('Sound File is too long for Time Scale Modification');
+         return 0;                          /* input  file too long (> 32 MB) */
+      end;
+      call copy32(out.len,xout.len);          /* cannot reference automatic globals in proc */
+      if xout.len(0) ige 256 then do;
+         call DRAW.MESSAGE('Sound File is too long for Time Scale Modification at this ratio');
+         return 0; /* output file too long (> 32 MB) */
+      end;
+   end;
+
+   return 1; /* return 1 if successful */
+end check.options;
+
+Send.24Bit.Value: proc (high,low); /* sends 3 bytes to DSP70 (discards high byte of 32 bit) */
+   dcl high fixed;           /* high and low words to send */
+   dcl low  fixed;
+
+   write(DSPCtl) = DSPWrite|DSP32SE;
+   write(DSPData) = low;
+   write(DSPData) = high;
+
+end Send.24Bit.Value;
+
+Init.Algorithm: proc (alg, in.len, out.len, opts); /* load values according to algorithm */
+   dcl alg         fixed;
+   dcl in.len      array;
+   dcl out.len     array;
+   dcl opts        array;
+
+   dcl xout.len(1) fixed;
+
+   call Copy32(out.len,xout.len); /* make a local copy */
+
+   if alg = dsp#ac_src then do; /* sample rate conversion */
+      call Send.24bit.Value(0, opts(src.opt#stereo));
+      call Send.24bit.Value(0, opts(src.opt#ratio)); /* integer value */
+      call Send.24bit.Value(shr(opts(src.opt#ratio+1),8), shl(opts(src.opt#ratio+1),8)); /* fractional value */
+      call Send.24Bit.Value(shr(xout.len(0),8),shl(xout.len(0),8)|shr(xout.len(1),8)); /* 24-bit sector length */
+      call Send.24Bit.Value(0,xout.len(1) & "hff"); /*  8-bit word length */
+   end;
+
+   else if alg = dsp#ac_tsm then do; /* time compression */
+      if (opts(tsm.opt#stereo) <> 0) then do;
+         call SHR32(xout.len,1);
+      end;
+
+      call Send.24Bit.Value(0,(opts(tsm.opt#c.or.e) <> 0));
+      call Send.24Bit.Value(shr(opts(tsm.opt#ratio),9),shl(opts(tsm.opt#ratio),7));
+      call Send.24Bit.Value(0,(opts(tsm.opt#stereo)<>0));
+      call Send.24Bit.Value(shr(xout.len(0),8),shl(xout.len(0),8)|shr(xout.len(1),8)); /* 24-bit sector length */
+      call Send.24Bit.Value(0,xout.len(1) & "hff"); /*  8-bit word length */
+
+      call DownLoad.TSM.Data;           
+   end;
+
+end Init.Algorithm;
+
+Read.Audio.From.DSP70: proc (base, ptr, limit, stereo) swapable;
+   dcl base       array;
+   dcl ptr        fixed;
+   dcl limit      fixed;
+   dcl stereo     fixed;
+   dcl inc        fixed;
+   dcl (i,j,k)    fixed;
+
+   if ptr ile (limit-1) then do;   /* get sector of audio */
+      if (stereo) then do;
+
+         call dsp.write(icr,dsp#read.ack.set);/* get in sync with the DSP70 */
+         write(DSPCtl) = DSPRead | DSP16SE; /* set data transfer mode */
+         call psmwrite(base, ptr, 0);
+         disable;
+         call Select.DSP70;
+
+         do i = 0 to 255 by xfer.size;     /* get left channel */
+            do j = 1 to xfer.size by 8;
+               write(psd) = read(DSPData); /* write left sample */
+               write(psd) = 0;
+               write(psd) = read(DSPData);
+               write(psd) = 0;
+               write(psd) = read(DSPData);
+               write(psd) = 0;
+               write(psd) = read(DSPData);
+               write(psd) = 0;
+               write(psd) = read(DSPData);
+               write(psd) = 0;
+               write(psd) = read(DSPData);
+               write(psd) = 0;
+               write(psd) = read(DSPData);
+               write(psd) = 0;
+               write(psd) = read(DSPData);
+               write(psd) = 0;
+            end;
+         end;
+         call dsp.write(icr,dsp#read.ack.clr);
+
+         /* assume the DSP70 will send the right sector */
+         call dsp.write(icr,dsp#read.ack.set);/* get in sync with the DSP70 */
+         write(DSPCtl) = DSPRead | DSP16SE; /* set data transfer mode */
+         do k = 0 to 1; /* get right sector and merge with left */
+            call psmread(base, ptr+k, 0);
+            disable;
+            call Select.DSP70;
+
+            write("313") = addr(misc.buf(0));
+            RPC 256;
+            write("373") = read(psd); /* get one sector */
+
+            write("313") = addr(misc.buf(1));
+            do i = 0 to 255 by 16;     /* get 1/2 sector of right channel */
+               write("373") = read(DSPData); /* get one right sample from DSP70 */
+               write("324") = read("333");
+               write("373") = read(DSPData);
+               write("324") = read("333");
+               write("373") = read(DSPData);
+               write("324") = read("333");
+               write("373") = read(DSPData);
+               write("324") = read("333");
+               write("373") = read(DSPData);
+               write("324") = read("333");
+               write("373") = read(DSPData);
+               write("324") = read("333");
+               write("373") = read(DSPData);
+               write("324") = read("333");
+               write("373") = read(DSPData);
+               write("324") = read("333");
+            end;
+            call psmwrite(base, ptr+k, 0);
+            disable;
+            call Select.DSP70;
+            write("313") = addr(misc.buf(0));
+            RPC 256;
+            write(psd) = read("373");
+         end;
+         call dsp.write(icr,dsp#read.ack.clr);
+      end;
+
+      else do; /* mono */
+         call psmwrite(base, ptr, 0);
+         disable;
+         call Select.DSP70;
+
+         call dsp.write(icr,dsp#read.ack.set);/* get in sync with the DSP70 */
+         write(DSPCtl) = DSPRead | DSP16SE; /* set data transfer mode */
+         do i = 0 to 255 by xfer.size;     /* get sector */
+            RPC xfer.size;
+            write(psd) = read(DSPData);
+         end;
+         call dsp.write(icr,dsp#read.ack.clr);
+      end;
+      inc = true;
+   end;
+
+   else do;                           /* toss extra data */
+      if (stereo) then do;
+         call dsp.write(icr,dsp#read.ack.set);/* get in sync with the DSP70 */
+         write(DSPCtl) = DSPRead | DSP16SE; /* set data transfer mode */
+         RPC xfer.size;
+         write("324") = read(DSPData);
+         call dsp.write(icr,dsp#read.ack.clr);
+
+         call dsp.write(icr,dsp#read.ack.set);/* get in sync with the DSP70 */
+         write(DSPCtl) = DSPRead | DSP16SE; /* set data transfer mode */
+         RPC xfer.size;
+         write("324") = read(DSPData);
+         call dsp.write(icr,dsp#read.ack.clr);
+      end;
+
+      else do; /* mono */
+         call dsp.write(icr,dsp#read.ack.set);/* get in sync with the DSP70 */
+         write(DSPCtl) = DSPRead | DSP16SE; /* set data transfer mode */
+         RPC xfer.size;
+         write("324") = read(DSPData);
+         call dsp.write(icr,dsp#read.ack.clr);
+      end;
+      inc = false;
+   end;
+
+   return inc;
+end Read.Audio.From.DSP70;
+
+/* $Page routine to write data to the DSP70 */
+
+Write.Audio.To.DSP70: proc (base, in.len, ptr, limit, stereo) swapable;
+   dcl base         array;
+   dcl in.len       array; /* need this for partial last sector */
+   dcl ptr          fixed;
+   dcl limit        fixed;
+   dcl stereo       fixed;
+
+   dcl inc          fixed;
+   dcl (i,j,k)      fixed;
+   dcl ui(127)      fixed;
+
+   if ptr ilt (limit-1) then do;   /* send sector of audio */
+      /* send audio */
+      if (stereo) then do;
+         call psmread(base, ptr, 0);
+         disable;
+         call Select.DSP70;
+
+         call dsp.write(icr,dsp#write.ack.set);/* get in sync with DSP70 */
+         write(DSPCtl) = DSPWrite|DSP16SE; /* set mods for xfer */
+         do i = 0 to 255 by xfer.size;     /* send left channel */
+            do j = 1 to xfer.size by 8;
+               write(DSPData) = read(psd); /* send left sample  */
+               write("324")   = read(psd); /* skip right sample */
+               write(DSPData) = read(psd);
+               write("324")   = read(psd);
+               write(DSPData) = read(psd);
+               write("324")   = read(psd);
+               write(DSPData) = read(psd);
+               write("324")   = read(psd);
+               write(DSPData) = read(psd);
+               write("324")   = read(psd);
+               write(DSPData) = read(psd);
+               write("324")   = read(psd);
+               write(DSPData) = read(psd);
+               write("324")   = read(psd);
+               write(DSPData) = read(psd);
+               write("324")   = read(psd);
+            end;
+         end;
+         call dsp.write(icr,dsp#write.ack.clr);/* clear flags init port */
+
+         call psmread(base, ptr,0);
+         disable;
+         call Select.DSP70;
+
+         call dsp.write(icr,dsp#write.ack.set);/* get in sync with DSP70 */
+         write(DSPCtl) = DSPWrite|DSP16SE; /* set mods for xfer */
+         do i = 0 to 255 by xfer.size;     /* send right sector */
+            do j = 1 to xfer.size by 8;
+               write("324")   = read(psd); /* skip left sample  */
+               write(DSPData) = read(psd); /* send right sample */
+               write("324")   = read(psd);
+               write(DSPData) = read(psd);
+               write("324")   = read(psd);
+               write(DSPData) = read(psd);
+               write("324")   = read(psd);
+               write(DSPData) = read(psd);
+               write("324")   = read(psd);
+               write(DSPData) = read(psd);
+               write("324")   = read(psd);
+               write(DSPData) = read(psd);
+               write("324")   = read(psd);
+               write(DSPData) = read(psd);
+               write("324")   = read(psd);
+               write(DSPData) = read(psd);
+            end;
+         end;
+         call dsp.write(icr,dsp#write.ack.clr);/* clear flags init port */
+      end;
+
+      else do; /* mono sound file */
+         call psmread(base, ptr,0);
+         disable;
+         call Select.DSP70;
+
+         call dsp.write(icr,dsp#write.ack.set);/* get in sync with DSP70 */
+         write(DSPCtl) = DSPWrite|DSP16SE; /* set mods for xfer */
+         do i = 0 to 255 by xfer.size;
+            RPC xfer.size;
+            write(DSPData) = read(psd);
+         end;
+         call dsp.write(icr,dsp#write.ack.clr);/* clear flags init port */
+      end;
+      inc = true;
+   end;
+
+   else if ptr=(limit-1) then do;   /* send last sector - partial */
+      if (stereo) then do;
+         call psmread(base, ptr, 0);
+         disable;
+         call Select.DSP70;
+
+         call dsp.write(icr,dsp#write.ack.set);/* get in sync with DSP70 */
+         write(DSPCtl) = DSPWrite|DSP16SE; /* set mods for xfer */
+         i = 0;j = shr(in.len(1) & "hff",1);
+         do while i ilt j;
+            write(DSPData) = read(psd); /* send last of the data */
+            write("324")   = read(psd);
+            i = i + 1;
+         end;
+         RPC (256 - j);
+         write(DSPData) = 0; /* pad with zeros */
+         call dsp.write(icr,dsp#write.ack.clr);/* clear flags init port */
+
+         call dsp.write(icr,dsp#write.ack.set);/* get in sync with DSP70 */
+         write(DSPCtl) = DSPWrite|DSP16SE; /* set mods for xfer */
+         i = 0;
+         do while i ilt j;
+            write("324")   = read(psd);
+            write(DSPData) = read(psd); /* send last of the data */
+            i=i+1;
+         end;
+         RPC (256 - j);
+         write(DSPData) = 0; /* pad with zeros */
+         call dsp.write(icr,dsp#write.ack.clr);/* clear flags init port */
+      end;
+
+      else do; /* mono sound file */
+         call psmread(base, ptr, 0);
+         disable;
+         call Select.DSP70;
+
+         call dsp.write(icr,dsp#write.ack.set);/* get in sync with DSP70 */
+         write(DSPCtl) = DSPWrite|DSP16SE; /* set mods for xfer */
+         i = 0;j = in.len(1) & "hff";
+         /*do while i ilt j;
+            write(DSPData) = read(psd);
+         end;*/
+         if j <> 0 then do;
+            RPC j;
+            write(DSPData) = read(psd);
+         end;
+         RPC (256 - j);
+         write(DSPData) = 1; /* pad with zeros */
+         call dsp.write(icr,dsp#write.ack.clr);/* clear flags init port */
+      end;
+      inc = true;
+   end;
+
+   else do;                           /* send zeros */
+      if (stereo) then do;
+         call dsp.write(icr,dsp#write.ack.set);/* get in sync with DSP70 */
+         write(DSPCtl) = DSPWrite|DSP16SE; /* set mods for xfer */
+         do i = 0 to 255 by xfer.size;
+            RPC xfer.size;
+            write(DSPData) = 0;
+         end;
+         call dsp.write(icr,dsp#write.ack.clr);/* clear flags init port */
+
+         call dsp.write(icr,dsp#write.ack.set);/* get in sync with DSP70 */
+         write(DSPCtl) = DSPWrite|DSP16SE; /* set mods for xfer */
+         do i = 0 to 255 by xfer.size;
+            RPC xfer.size;
+            write(DSPData) = 0;
+         end;
+         call dsp.write(icr,dsp#write.ack.clr);/* clear flags init port */
+      end;
+
+      else do; /* mono sound file */
+         call Select.DSP70;
+         call dsp.write(icr,dsp#write.ack.set);/* get in sync with DSP70 */
+         write(DSPCtl) = DSPWrite|DSP16SE; /* set mods for xfer */
+         do i = 0 to 255 by xfer.size;
+            RPC xfer.size;
+            write(DSPData) = 5;
+         end;
+         call dsp.write(icr,dsp#write.ack.clr);/* clear flags init port */
+      end;
+      inc = false;
+   end;
+
+   return inc;
+
+end Write.Audio.To.DSP70;
+
+/* $Page Modify.Samples is a more general procedure to service the DSP70 */
+
+Modify.Samples: proc(in.base,i.len,out.base,o.len,stereo,dsp.alg,mod.options) public swapable;
+   dcl in.base            array;
+   dcl i.len              array; /* 32 bit sample number */
+   dcl out.base           array;
+   dcl o.len              array; /* 32 bit sample number */
+   dcl stereo             fixed;
+   dcl dsp.alg            fixed;
+   dcl mod.options        array;
+
+   dcl timer              fixed static;
+   dcl in.len(1)          fixed static;
+   dcl out.len(1)         fixed static;
+   dcl (rptr, wptr)       fixed static; /* sector pointer for reading and writing */
+   dcl (rlimit, wlimit)   fixed static;
+   dcl interrupts         fixed;
+
+   dcl abort              fixed;
+   dcl done               fixed;
+   dcl LastDspTime        fixed;
+   dcl LastPercent        fixed;
+   dcl DSP70.Event        fixed;
+   dcl ext.cmd            fixed;
+
+   dcl saved.run.syn      fixed;
+   dcl run.syn            fixed external;
+   dcl (i,j,k)            fixed;
+   dcl ui(127)            fixed;
+
+   timercheck: proc;             /* routine to keep local time base */
+      if read(3) <> 0 then do;   /* approximately up to date        */
+         write(3) = 0;
+         timer = timer + 5;
+      end;
+	  timeshare_with_host();
+   end timercheck;
+
+   /* $Page */
+
+   if inc.dsp.code=0    then return 0;
+
+   if check.options(dsp.alg,in.len,out.len,mod.options) <> 1
+   then return 0; /* check for options errors for specified alg */
+
+   call copy32(i.len,in.len);        /* make local copy of length */
+   call copy32(o.len,out.len);       /* make local copy of length */
+
+   rptr = 0;
+   rlimit=shl(in.len(0),8)+shr(in.len(1),8);              /* original sector len */
+   if (in.len(1) & "hff") <> 0 then rlimit = rlimit +1;   /* round up */
+
+   wptr = 0;
+   wlimit=shl(out.len(0),8)+shr(out.len(1),8);          /* processed sector len */
+   if (out.len(1) & "hff") <> 0 then wlimit = wlimit +1; /* round up */
+
+   saved.run.syn=run.syn;    /* save current value */
+   run.syn=0;                /* turn off real time loop for TSM processing */
+
+   /*
+      Process to perform Modification on a set of samples:
+         1.  send wakeup command to DSP70 subsystem
+         2.  initialize algorithm
+         3.  transfer sectors as directed
+   */
+
+   /* 1.  send wakeup command to DSP70 subsystem */
+
+   /* Turn off interrupts while talking to the DSP70 */
+   interrupts = read("1") & interrupt_mask;
+   disable;
+
+   if not Select.DSP70 then do;
+      run.syn=saved.run.syn;                  /* restore to prior values */
+      if interrupts <> 0 then enable;
+      call DRAW.MESSAGE('DSP70 hardware is not available');
+      return 0;   /* could not find DSP70 */
+   end;
+
+   call dsp.write(icr,"h82");                 /* set for init function    */
+   call dsp.write(cvr,"h92");                 /* host command exception $12 */
+
+   /*  2.  initialize algorithm */
+   call Init.Algorithm(dsp.alg, in.len, out.len, mod.options);
+
+   /*  3.  transfer sectors as directed */
+
+   abort = 0; done = false;
+   LastDspTime = timer;
+   LastPercent = timer - 3000;
+
+   do while (done = false)
+   and      (abort = 0);
+
+      DSP70.Event = DSP.Read(isr);         /* find out what it needs        */
+
+      if (DSP70.Event & dsp#event.mask) = dsp#read.audio
+      then do;
+         if Read.Audio.From.DSP70(out.base, wptr, wlimit, stereo)
+         then wptr = wptr + 1 + stereo;
+
+         call timercheck;
+         LastDSPTime = timer;
+      end;
+
+      else if (DSP70.Event & dsp#event.mask) = dsp#write.audio
+      then do;
+         if Write.Audio.To.DSP70(in.base, in.len, rptr, rlimit, stereo)
+         then rptr = rptr + 1 + stereo;
+
+         call timercheck;
+         LastDSPTime = timer;
+      end;
+
+      else if (DSP70.Event & dsp#event.mask) = dsp#extended.cmd
+      then do;
+         call dsp.write(icr,dsp#ext.ack.set);
+         ext.cmd = dsp.read(isr);
+
+         if (ext.cmd & dsp#event.mask) = dsp#done
+         then do;
+            call dsp.write(icr,"h03");
+             /* #### close up shop */
+             done = true;
+         end;
+      end;
+	  
+	  // Else DSP doesn't need any service
+	  else
+	  	interp_run_host_non_timer();
+		
+      call timercheck;
+
+      /* Check for timeout: */
+
+      if (timer - LastDspTime) IGT 2000
+      then abort = 0;                   /* (#### for debug) board has smashed */
+
+      /* Check for break: */
+
+      if (Read("51")&2) <> 0 then do;   /* see if character typed */
+         if Read("50") = 0              /* break typed to us      */
+         then abort = 2;
+      end;
+
+      if  (num.of.d50.in.chars <> 0)    /* d50 char got in during PSMREAD */
+      and (next.d50.in.char = ASC.CALL.TERMINATE)
+      then do;
+         enable;
+         call get.next.d50.in.char;
+         disable;
+         call Select.DSP70;
+         abort = 2;
+      end;
+
+      /* print out percentage every 5 seconds: */
+
+      if (timer - LastPercent) IGT 5000
+      then do;
+         enable;
+         call DRAW.MESSAGE('Percent Completed: ');
+         i = wptr; /* #### */
+         load 100; mul i; mwait; div wlimit;
+         call pnum(res,0); call ps('%');
+         call tty_wait;
+         disable;
+         call Select.DSP70;
+         LastPercent = timer;
+      end;
+   end; /* of do while */
+
+   run.syn=saved.run.syn;                  /* restore to prior values */
+   if interrupts <> 0 then enable;
+
+   if abort = 0
+   then call ERASE.MESSAGE;                /* done with time scale    */
+
+   else if abort = 1
+   then call DRAW.MESSAGE('System Error (timeout) with process - check sound file');
+
+   else if abort = 2
+   then call DRAW.MESSAGE('Process halted - check sound file');
+
+   return 1;                  /* finished time scale modification successfully */
+end Modify.Samples;

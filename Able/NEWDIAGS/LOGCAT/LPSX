@@ -1,0 +1,606 @@
+/*
+
+Title           : LPSX   -  Poly memory test program inserted in LOGGER
+Project Engineer: William Leathers
+Project Start   : Feb 1986
+New England Digital Corporation
+
+   Iteration 0 - tracking interference 
+   Iteration 1 - random   interference 
+   Iteration 2 - no       interference 
+
+   Modified:
+
+    02/20/89   WSL - Converted PSXMBTE to a module for LOGGER. Mods previous
+                     to this date were done to PSXMBT(E) by WSL or DGM.
+    12/07/88   DGM - added extended sector addressing, DGM. PSXMBT becomes
+                     PSXMBTE.
+    11/22/88   DGM - fixed addressing test (was not writing incrementing
+                      numbers to memory).
+    04/08/88   DGM - added wait states for testing refresh, DGM.
+    12/20/87   WSL - General clean-up and user interface
+                   - Tests multiple poly bin systems (one at a time)
+
+*/
+
+/***************************************************************************/
+/**********     Required for stand - alone compilation     *****************/
+/*
+insert ':newdiags:datelit';
+insert ':-xpl:asciidef';
+insert ':-xpl:termutil'; 
+insert ':-xpl:intrprtr';
+insert ':NEWDIAGS:sysinit';
+insert ':NEWDIAGS:dtdchk';
+
+dcl milliseconds fixed;
+when d03int then milliseconds = milliseconds + 5;
+
+dcl iteration_number fixed;
+
+dcl status_line1 lit '18,10';  dcl status_line2 lit '19,10'; 
+dcl status_line3 lit '20,10';  dcl status_line4 lit '21,10'; 
+
+dcl erase_status_lines lit 'call clr_status';
+clr_status: proc;
+  pos(status_line4); erase_line;  pos(status_line3); erase_line;
+  pos(status_line2); erase_line;  pos(status_line1); erase_line;
+end clr_status;
+
+*/
+/***************************************************************************/
+/*************     GLOBAL DECLARATIONS     *********************************/
+dcl poly_memory_errors(psmaxbins) fixed;
+
+dcl (randomlsb,randommsb) fixed;       /* seed for random number generator */
+dcl last_seed_msb         fixed;       /* copy of last seed                */
+dcl last_seed_lsb         fixed;       /* copy of last seed                */
+
+
+dcl test_poly_memory lit 'call #test_poly_memory';
+#test_poly_memory: proc(bin#);
+  dcl bin# fixed;
+  dcl bin_base fixed;
+
+/***************************************************************************/
+/***************************************************************************/
+/*                        LITERALS                                         */
+
+/* D4567 Hardware Multiply/Divide Board Literals */
+dcl load lit 'write(5)='; dcl mul  lit 'write(6)=';
+dcl div  lit 'write(7)='; dcl res  lit 'read(5)';
+
+/* bit masks to isolate certain banks of memory */
+
+/***************************************************************************/
+/*                       VARIABLE DECLARATIONS                             */
+
+dcl interference_mode fixed;       /* 0-tracking, 1-random, 2-none     */
+
+dcl data_read        fixed;
+dcl (buf,buf1) (255) fixed;        /* two buffers                          */
+
+dcl low_sector       fixed;        /* sector low boundary                  */
+dcl high_sector      fixed;        /* sector high boundary                 */
+dcl low_xsector      fixed;        /* extended sector low boundary         */
+dcl high_xsector     fixed;        /* extended sector high boundary        */
+dcl wrd              fixed;        /* current word being tested            */
+dcl xwrd             fixed;        /* current xsec and word being tested   */
+dcl sec              fixed;        /* current sector being tested          */
+dcl xsec             fixed;        /* extended sector being tested         */
+dcl loop             fixed;        /* test loop flag                       */
+dcl (i,j,k)          fixed;
+
+/***************************************************************************/
+/* writes from addr pointed to by R13 to ext mem */
+
+dcl w1  lit 'write(psd)=read("373")';
+dcl write_256_words_to_ext_mem lit 'rpc 256;w1';
+
+/* copies from ext mem to addr pointed to by R13 */
+dcl r1  lit 'write("373")=read(psd)';
+dcl read_256_words_from_ext_mem lit 'rpc 256;r1';
+
+/***************************************************************************/
+
+/***************************************************************************/
+dcl log_error lit 'call error_log';
+error_log: proc(xsector,sector,word,#wrote,#read,code);
+   dcl (xsector,sector,word,#wrote,#read,code) fixed;
+   dcl mbyte fixed;
+
+   mbyte = 32 * xsector;             /* display mbyte being written    */
+   load sector; div 2048;            /* mbyte = sec/2048 + (32 * xsec) */
+   mbyte = mbyte + res;
+
+   pos(status_line4); erase_line;
+   pstring('    - Error in Mbyte #'); pnum(mbyte,0);
+   pstring(':   Wrote '); hnum(#wrote,4);
+   pstring(',  read '); hnum(#read,4);
+   pos(status_line4); flush_term;
+   flush_term;
+   Really.Run.Host();
+
+   if poly_memory_errors(bin#) <> "HFFFF"
+      then poly_memory_errors(bin#) = poly_memory_errors(bin#) + 1;
+
+      #if (0)
+         dbug 'Error',code, xsector, sector, word, #wrote, #read;
+         if (1) {
+            dcl i fixed;
+            dcl xbuf(255) fixed;
+            call pbmread(bin#,sector,0);     /* set ptrs to start of ext mem  */
+            write("313") = addr(xbuf(0));    /* load R13 with ptr to BUF */
+            read_256_words_from_ext_mem;     /* read from ext mem to temp array */
+            call pbmread(bin#,sector,0);     /* set ptrs to start of ext mem  */
+            do i = 0 to 255;
+               send i, read(psd), xbuf(i);
+            end;
+            stop(0);
+         }
+      #endif
+end error_log;
+
+/***************************************************************************/
+dcl generate_random_numbers lit 'call #gen_randoms';
+#gen_randoms: proc(count);
+  dcl count fixed;                 /* how many to generate */
+  dcl (rnd#,rnd_temp)       fixed;
+  dcl i fixed;
+  dcl root lit '16807';
+
+/*  A linear congruential generator with multiplier 16807 and modulus
+    2**31-1.  These are the same values as the IMSL routine GGUBS,
+    and the same logic is used, but RANDOMGEN is implemented in 
+    fixed point.  RANDOMMSB and RANDOMLSB are the most and least 
+    significant bits of the seed. */
+
+    do i = 1 to count;
+      load root; mul randomlsb;  rnd_temp = read(4);   randomlsb = res; /*a*/
+      load root; mul randommsb;  randommsb = rnd_temp+res;             /*b*/
+      if randommsb ILT res then rnd_temp = shl(read(4)+1,1);  /* carry */
+      else rnd_temp=shl(read(4),1);                           /* no carry */
+      rnd_temp=rnd_temp+((randommsb&"100000")<>0); /* add most sig. bit of msb */
+      randomlsb=randomlsb+rnd_temp;                         /* adjust modulus by multiple of 2**31-1 */
+      if randomlsb ILT rnd_temp then randommsb=randommsb+1; /* carry */
+      randommsb=randommsb&"077777";                         /* mod 2**31 */
+      write("373")=(shl(randommsb,1)+((randomlsb&"100000")<>0));
+    end;
+
+end #gen_randoms;
+
+/***************************************************************************/
+initialize_seed:  proc; /* initializes random number generator seed */
+   randommsb=1; randomlsb=57921; /* initialize seed to 123457 */
+   last_seed_msb=randommsb; last_seed_lsb=randomlsb; /* save seed */
+end initialize_seed;
+
+/***************************************************************************/
+waiting: proc;   /* wait to test refresh */
+   dcl i fixed;
+   pos(status_line3); erase_line;
+   pstring('    Performing refresh test ');
+   flush_term;
+   Really.Run.Host();
+
+   do i = 0 to 19;
+     pstring('.'); flush_term;
+     disable;
+     milliseconds = 0;
+     enable;
+     do while milliseconds < 1000;
+         if Really.Peek() <> (-1) then return;
+         interp_run_host_at_level();
+     end;
+   end;
+
+   Really.Run.Host();
+end waiting;
+
+/***************************************************************************/
+diagnostic_test: proc(bin#);   /* A basic diagnostic check for major probs */
+  dcl bin# fixed;
+  dcl read_array(32) fixed;
+  dcl (i,bin_base) fixed;
+
+  bin_base = bin# * 64;
+
+  bin_base = bin# * 64;
+  pos(status_line2); erase_line;
+  pstring('  - Diagnostic Test ... '); 
+  pos(status_line4); flush_term;
+  flush_term;
+  Really.Run.Host();
+
+  xsec = low_xsector; sec = low_sector; loop = 1;
+  do while loop;                               /* loop over memory sectors */
+    if Really.Peek() <> (-1) then return;
+
+     xwrd = shl(xsec,8);   /* convert extended sector  */
+
+     call pbmwrite(bin#,sec,xwrd);        /* Set poly memory write address  */
+     write(psd) =  0;                     /* write and then read all 0s    */
+     write(psd) = "HFFFF";                /* write a 2nd word to avoid bug */
+
+     call pbmread(bin#,sec,xwrd);         /* Set poly memory read address   */
+     data_read  = read(psd);              /* Get word back                 */
+     if data_read <> 0 
+     then log_error(xsec,sec,xwrd,0,data_read,0);
+
+     call pbmwrite(bin#,sec,xwrd);       /* Set poly memory write address  */
+     write(psd) = "HFFFF";                /* write and then read all 1s    */
+     write(psd) = 0;                   /* write a second word to avoid bug */
+
+     call pbmread(bin#,sec,xwrd);        /* Set poly memory read address   */
+     data_read  = read(psd);                 /* Get word back              */
+     if data_read <> "HFFFF" 
+     then log_error(xsec,sec,xwrd,"HFFFF",data_read,1);
+
+     call pbmwrite(bin#,sec,xwrd);       /* Set poly memory write address  */
+     write(psd) = "HAAAA";                /* write and then read a pattern */
+     write(psd) = 0;                   /* write a second word to avoid bug */
+
+     call pbmread(bin#,sec,xwrd);        /* Set poly memory read address   */
+     data_read = read(psd);
+     if data_read <> "HAAAA"
+     then log_error(xsec,sec,xwrd,"HAAAA",data_read,2);
+
+     if ((xsec = high_xsector) & ((high_sector - sec) ILT 1024))
+           then loop = 0; 
+     else do;
+        sec = sec + 1024;                 /* jump to the next bank */
+        if sec ILT 1024 then do;
+           xsec = xsec + 1;                      
+           if (xsec & "17") = 0 then loop = 0;
+        end;
+     end;
+     Really.Run.Host();
+  end;
+ end diagnostic_test;
+
+/***************************************************************************/
+addressing_test: proc(bin#);
+  dcl bin# fixed;
+  dcl bin_base fixed;
+  dcl (mbyte,mbyte_count) fixed;
+  dcl (i,j) fixed;
+
+  bin_base = bin# * 64;
+
+/* 1.  First fill each location of memory with its own address mod 64K */
+
+    pos(status_line2); erase_line;
+    pstring('  - Addressing Test with ');
+    do case interference_mode;
+       pstring('tracking');
+       pstring('random');
+       pstring('no');
+    end; /*case*/
+    pstring(' interference: ');
+    flush_term;
+    Really.Run.Host();
+
+  mbyte_count = -1;
+  xwrd = shl(low_xsector,8);  /* convert xsec  */
+  call pbmwrite(bin#,low_sector,xwrd);   /* set ptrs to start of ext mem  */
+
+  xsec = low_xsector; sec = low_sector; loop = 1;  
+  do while loop;                               /* loop over memory sectors  */
+    mbyte = 32 * xsec;                /* display mbyte being written    */
+    load sec;    div 2048;            /* mbyte = sec/2048 + (32 * xsec) */
+    mbyte = mbyte + res;
+    if mbyte <> mbyte_count then do;
+       mbyte_count = mbyte;
+       pos(status_line3); erase_line;
+       pstring('    Writing to Mbyte ');
+       pnum(mbyte_count,0); pstring(' ... ');
+       pos(status_line4); flush_term;
+       flush_term;
+       Really.Run.Host();
+    end;
+
+    xwrd = shl(xsec,8);  /* convert xsec  */
+    if interference_mode = 0 then do;         /* tracking interference     */
+       do i = 0 to (iteration_number&31);
+         write(psc) = bin_base + i;  /* set up interference to mostly this */
+         write(psf) = psba;          /*  sector. psba- Wave table base addr*/
+         write(psd) = sec;
+         write(psd) = xwrd;           /* keep it in the extended sector  */
+       end;
+       write(psc) = bin_base;        /* restore chan   */
+       write(psf) = 18;              /* restore CWDATA func code  */
+    end;
+
+    if Really.Peek() <> (-1) then return;
+
+    do i = 0 to 255;          /* load BUF with 256 addresses numbers */
+       buf(i) = shl(sec,8)+i;
+    end;
+    write("313") = addr(buf(0));   /* reset R13 to start of BUF */
+    write_256_words_to_ext_mem;  /* dump from BUF to ext memory */
+
+    if ((xsec = high_xsector) & (sec = high_sector)) then loop = 0;
+    else do;
+       if ((sec&63)==63) Really.Run.Host();
+       sec = sec + 1;
+       if sec = 0 then do;
+          xsec = xsec + 1;                      
+          if (xsec & "17") = 0 then loop = 0;
+       end;
+    end;
+  end;
+
+  /* 2.  Now read external memory to make sure data is still correct */
+
+  call waiting;  /* add wait state to test refresh */
+
+  mbyte_count = -1;
+  xwrd = shl(low_xsector,8);           /* convert xsec  */
+  call pbmread(bin#,low_sector,xwrd);  /* set ptrs to start of ext mem  */
+
+  xsec = low_xsector; sec = low_sector; loop = 1; 
+  do while loop;                               /* loop over memory sectors  */
+
+    mbyte = 32 * xsec;                /* display mbyte being read       */
+    load sec;    div 2048;            /* mbyte = sec/2048 + (32 * xsec) */
+    mbyte = mbyte + res;
+    if mbyte <> mbyte_count then do;
+       mbyte_count = mbyte;
+       pos(status_line3); erase_line;
+       pstring('    Reading Mbyte ');
+       pnum(mbyte_count,0); pstring(' ... ');
+       pos(status_line4); flush_term;
+       flush_term;
+       Really.Run.Host();
+    end;
+
+    xwrd = shl(xsec,8);                      /* convert xsec  */
+    if interference_mode=0 then do;          /* tracking interference     */
+      do i = 0 to (iteration_number&31);
+        write(psc) = bin_base + i; /* set up interference to    */
+        write(psf) = psba;        /* mostly this sector        */
+        write(psd) = sec;
+        write(psd) = xwrd;            /* keep it in the extended sector  */
+      end;
+      write(psc) =  bin_base;     /* restore chan   */
+      write(psf) = 22;            /* restore  CRDATA func code  */
+    end;
+
+    if Really.Peek() <> (-1) then return;
+
+    write("313") = addr(buf(0));   /* load R13 with ptr to BUF */
+    read_256_words_from_ext_mem; /* read from ext mem to temp array */
+
+    do i = 0 to 255;          /* compare data read to data written */
+      if buf(i) <> (shl(sec,8)+i)
+      then log_error(xsec,sec,i,(shl(sec,8)+i),buf(i),3);
+    end;
+
+    if ((xsec = high_xsector) & (sec = high_sector)) then loop = 0; 
+    else do;
+       if ((sec&63)==63) Really.Run.Host();
+       sec = sec + 1;
+       if sec = 0 then do;
+          xsec = xsec + 1;                      
+          if (xsec & "17") = 0 then loop = 0;
+       end;
+    end;                                  
+  end;
+end addressing_test; 
+
+/***************************************************************************/
+random_test: proc(bin#);       /* Fill external memory with random numbers */
+  dcl bin# fixed;
+  dcl bin_base fixed;
+  dcl (mbyte,mbyte_count) fixed;
+
+  bin_base = bin# * 64;
+
+    pos(status_line2); erase_line;
+    pstring('  - Random number test, seed = ');
+    hnum(randommsb,4); hnum(randomlsb,4);
+    pstring(', ');
+    do case interference_mode;
+       pstring('tracking');
+       pstring('random');
+       pstring('no');
+    end; /*case*/
+    pstring(' interference: ');
+
+    pos(status_line3); erase_line; 
+    pstring('    Writing Mbyte ');   pnum(mbyte_count,0);
+    pstring(' ... ');
+    pos(status_line4); flush_term;
+    flush_term;
+    Really.Run.Host();
+
+
+  last_seed_msb = randommsb; last_seed_lsb = randomlsb; /* save last seed */
+
+  xwrd = shl(low_xsector,8);  /* convert xsec  */
+  call pbmwrite(bin#,low_sector,xwrd); /* set ptrs to start of ext mem  */
+
+  mbyte_count = -1;
+  xsec = low_xsector; sec = low_sector; loop = 1; 
+  do while loop;                               /* loop over memory sectors  */
+
+    mbyte = 32 * xsec;                /* display mbyte being written    */
+    load sec;    div 2048;            /* mbyte = sec/2048 + (32 * xsec) */
+    mbyte = mbyte + res;
+    if mbyte <> mbyte_count then do;
+       mbyte_count = mbyte;
+       pos(status_line3); erase_line;
+       pstring('    Writing to Mbyte ');
+       pnum(mbyte_count,0); pstring(' ... ');
+       pos(status_line4); flush_term;
+       flush_term;
+       Really.Run.Host();
+    end;
+
+     xwrd = shl(xsec,8);  /* convert xsec  */
+     if interference_mode = 0 then do;          /* tracking interference     */
+        do i = 0 to (iteration_number&31);
+          write(psc) = bin_base + i;          /* set up interference to    */
+          write(psf) = psba;                  /* mostly this sector        */
+          write(psd) = sec;
+          write(psd) = xwrd;            /* keep it in the extended sector  */
+        end;
+        write(psc) = bin_base;                /* restore chan  */
+        write(psf) = 18;                      /* restore cwdata func code  */
+     end;
+
+     if Really.Peek() <> (-1) then return;
+
+     write("313") = addr(buf(0));     /* set R13 to start of BUF */
+     generate_random_numbers(256);    /* load BUF with 256 random #'s */
+     write("313") = addr(buf(0));     /* reset R13 to start of BUF */
+     write_256_words_to_ext_mem;      /* dump from BUF to ext memory */
+
+     if ((xsec = high_xsector) & (sec = high_sector)) then loop = 0; 
+     else do;
+        if ((sec&63)==63) Really.Run.Host();
+        sec = sec + 1;
+        if sec = 0 then do;
+           xsec = xsec + 1;                      
+           if (xsec & "17") = 0 then loop = 0;
+        end;
+     end;                                     
+  end;
+
+  /* 4.  Read memory and make sure it contains the same random numbers as above */
+
+  call waiting;   /* add wait state to test refresh */
+
+  randommsb = last_seed_msb; randomlsb = last_seed_lsb;   /* restore seed */
+  xwrd = shl(low_sector,8);   /* convert xsec  */
+  call pbmread(bin#,low_sector,xwrd);   /* reset ptrs to start of ext mem  */
+  mbyte_count = -1;
+  xsec = low_xsector; sec = low_sector; loop = 1;  
+  do while loop;                               /* loop over memory sectors  */
+
+    mbyte = 32 * xsec;                /* display mbyte being read       */
+    load sec;    div 2048;            /* mbyte = sec/2048 + (32 * xsec) */
+    mbyte = mbyte + res;
+    if mbyte <> mbyte_count then do;
+       mbyte_count = mbyte;
+       pos(status_line3); erase_line;
+       pstring('    Reading Mbyte ');
+       pnum(mbyte_count,0); pstring(' ... ');
+       pos(status_line4); flush_term;
+       flush_term;
+       Really.Run.Host();
+    end;
+
+     xwrd = shl(xsec,8);  /* convert xsec */
+     if interference_mode=0 then do;          /* tracking interference     */
+        do i = 0 to (iteration_number&31);
+          write(psc) = bin_base;              /* set up interference to    */
+          write(psf) = psba;                  /* mostly this sector        */
+          write(psd) = sec;
+          write(psd) = xwrd;            /* keep it in the extended sector */
+        end;
+        write(psc) = bin_base;                /* restore chan */
+        write(psf) = 22;                      /* restore CRDATA func code */
+     end;
+
+     if Really.Peek() <> (-1) then return;
+
+     write("313") = addr(buf(0));   /* load R13 with ptr to BUF */
+     generate_random_numbers(256); /* load BUF with 256 random numbers */
+
+     write("313") = addr(buf1(0));  /* now load R13 with ptr to BUF1 */
+     read_256_words_from_ext_mem; /* copy from ext mem to temp array */
+     do i=0 to 255;                              /* compare the two arrays */
+       if buf(i) <> buf1(i)
+       then log_error(xsec,sec,i,buf(i),buf1(i),4);
+     end;
+
+     if ((xsec = high_xsector) & (sec = high_sector)) then loop = 0; 
+     else do;
+        if ((sec&63)==63) Really.Run.Host();
+        sec = sec + 1;
+        if sec = 0 then do;
+           xsec = xsec + 1;                      
+           if (xsec & "17") = 0 then loop = 0;
+        end;
+     end;                                    
+  end;
+end random_test;
+
+/***************************************************************************/
+/********************     MAIN PROGRAM     *********************************/
+/***************************************************************************/
+  interference_mode = (iteration_number-1) mod 3;  /* 0-tracking, 1-random, 2-none     */
+
+  if Really.Peek() <> -1 then return;
+  if iteration_number = 1 then call initialize_seed;   /* set random number generator seed                */
+  call polyinit;  /* initialize channels at start of test */
+
+  pos(status_line1); pstring('Testing '); pnum(#_poly_mbytes(bin#),0);
+  pstring(' Mbytes of Poly memory in bin ');
+  pnum(bin#+1,1); pstring(' ... ');
+  flush_term;
+  Really.Run.Host();
+
+  low_xsector = 0;  high_xsector = 0;
+  low_sector = 0;   high_sector= 0;
+
+  do i = 0 to #_poly_mbytes(bin#) - 1;
+    high_sector = high_sector + 2048;
+    if high_sector = 0 then high_xsector = high_xsector + 1;
+  end;
+  if high_sector = 0 then do;
+    high_xsector = high_xsector - 1;
+    high_sector = "HFFFF";
+  end;
+  else high_sector = high_sector - 1;
+
+  if interference_mode<2 then do;       /* types 0,1 - turn on channels */
+      // Tun all 32 channels on at 50 khz.
+      // We design the read timing to allow poly reading even in that absurd case.
+      // Interpreter could check for how many channels were on and slow down reads accordingly.
+      // I will save that as an exercise for the reader CJ 3/16/2015.
+      do i=0 to (iteration_number&31);
+        write("313")=addr(j);                /* set up r13 pointing to variable j */
+        generate_random_numbers(1);          /* generate & store 1 random number */
+        write(psc) = bin_base + i;
+        write(psf) = pswl;
+        write(psd) = -5*256; write(psd)=0;    /* 5 sector wave table length  */
+        write(psd) = j; write(psd)=shl(xsec,8); /* random base address  */
+        write(psd) = -5*256; write(psd)=0;    /* loop length                 */
+        write(psd) = 0; write(psd)=i+1;       /* 1   phase incr              */
+        write(psd) = 128-i;                   /* increment of 255-i          */
+        write(psd) = 0;                       /* modulus      256            */
+        write(psd) = 3;                       /* channel on with loop        */
+      end;
+   end;
+
+   call diagnostic_test(bin#);
+   Really.Run.Host();
+   call addressing_test(bin#);
+   Really.Run.Host();
+   call random_test(bin#);
+   Really.Run.Host();
+end #test_poly_memory;
+
+/***************************************************************************/
+/*
+begin;
+   dcl (i,chr) fixed;
+   iteration_number = 1;
+
+   clear_screen;
+   do forever;
+     if peek <> -1 then do;
+       chr = rchar;
+       if chr = 0 then call exit(0);
+     end;
+     do i = 0 to #_poly_bins - 1;
+        test_poly_memory(i);
+        crlf;  crlf;
+        unum(poly_memory_errors(i),5);
+     end;
+     iteration_number = iteration_number + 1;
+  end;
+end;
+*/

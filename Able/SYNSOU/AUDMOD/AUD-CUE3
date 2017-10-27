@@ -1,0 +1,380 @@
+/*	:SYNSOU:AUDMOD:AUD-CUE3 - more cue/shuttle editor
+
+Modified:
+2001/02/19 - TY  - Make modifications needed for 24 hour wrap.
+1989/06/14 - cj  - modified handle cue place;  created handle cue replace
+1989/05/03 - TSS - Merged changes for Optical disk to DTD transfer project
+1988/10/24 - cj  - fixed bug with name scrolling from TSM panel
+1988/09/07 - MWH - Add "real" DSP user interface
+1988/08/16 - CJ  - check for negative numbers from take.system.sequence.time
+1988/08/01 - cj  - used take.system.sequence.time for take buttons
+*/
+
+/*	place functions from cue/shuttle editor			*/
+
+/*	called from both cue editor and shuttle editor	*/
+
+Handle.Place.Track.Change:proc swapable;
+	dcl p.y	fixed;
+	dcl t.y	fixed;
+	dcl dir	fixed;
+
+	p.y = mouse(press.y);								/*	if click is in upper	*/
+	t.y = tpos.y(p.y);									/*	half of the transp	*/
+	if p.y > gpos.y(t.y*100-50) then	dir = +1;	/*	row, then dir is up	*/
+	else										dir = -1;
+
+	if dir > 0 then call INCREMENT.PLACE.TRACK;
+	else				 call DECREMENT.PLACE.TRACK;
+
+end Handle.Place.Track.Change;
+
+/*	called from cue editor, shuttle editor, and optical transfer group	*/
+
+/*	old routine (unused now) to place simple cue trigger:						*/
+
+Old.Place.Code: proc swapable;
+	dcl tmp(17-1)	fixed;
+	dcl i				fixed;
+
+	write(mam) = Current.Cue.Ptr;
+	write(mal) = CUE.NAME;
+	call COPY.IN(addr(tmp(0)), 17);
+
+	i = LOCATE.DTD.CUE(tmp);
+
+	if (i=0)
+	or (Current.Cue.Mod <> 0)
+	then do;
+		call Display.Notice(NT#MustSaveCueBeforePlace,ATTR#Reverse,NulStr,0,0,0);
+		return;
+	end;
+
+	i = PLACE.CUE.IN.SEQUENCE(i,GID(Cue.Place.Track),Cue.Trig.Time,0);
+
+	call Display.Place.Error(i,GID(Cue.Place.Track)-1);
+
+end Old.Place.Code;
+
+/*	Routine to place complex cue event from information in cue editor:	*/
+
+/*	subroutine - handles cue place, or cue replace								*/
+
+Handle.AEE.Cue.Place: proc (Replpointer, code) public swapable;
+	dcl Replpointer	array;	/*	pointer into sequence for replace		*/
+	dcl code				fixed;	/*	0 = place,  1 = replace						*/
+
+	/*	Present error messages for Audio Event Editor	*/
+
+	do case PLACE.DTD.CUE.IN.SEQUENCER(Replpointer, code);
+		call Display.Notice(NT#EventPlaced,					ATTR#Normal,NulStr,GID(Cue.Place.Track)-1,0,0);
+		call Display.Notice(NT#NoEventForReplace,			ATTR#Reverse,NulStr,0,0,0);
+		call Display.Notice(NT#MustSaveCueBeforePlace,	ATTR#Reverse,NulStr,0,0,0);
+		call Display.Notice(NT#EventTracksDontMatch,		ATTR#Reverse,NulStr,0,0,0);
+		call Display.Notice(NT#VersionDoesntMatch,		ATTR#Reverse,NulStr,0,0,0);
+		call Display.Notice(NT#MustSaveCueBeforePlace,	ATTR#Reverse,NulStr,0,0,0);
+		call Display.Notice(NT#BadPlaceTrack,				ATTR#Reverse,NulStr,0,0,0);
+		call Display.Notice(NT#NoRoomForPlace,				ATTR#Reverse,NulStr,0,0,0);
+		call Display.Notice(NT#CueListIsFull,				ATTR#Reverse,NulStr,GID(Cue.Place.Track)-1,0,0);
+		call Display.Notice(NT#SystemError,					ATTR#Reverse,NulStr,0,0,0);
+	end;
+
+end Handle.AEE.Cue.Place;
+
+/*	other routines:	*/
+
+Handle.New.Cue.Name:proc (group) PUBLIC swapable;
+	dcl group		fixed;
+	dcl tmp(17-1)	fixed;
+	dcl i				fixed;
+
+	if group = Cue.Group then do;
+		call Fetch.String(Cue.Name.Id, tmp);
+	end;
+	else if group = Record.Group then do;
+		call Fetch.Graphics.String(Record.TSM.Name.Id, tmp);
+	end;
+	else do;
+		call Fetch.String(Shuttle.Name.Id, tmp);
+	end;
+
+	call clean.cue.name(tmp);
+
+	call Set.DTD.Scroll.Range(Default.CM.Display.Switch + GID(Saved.CM.Display.Switch));
+	i = Locate.DTD.Cue(tmp);
+
+	if group = Record.Group then do;	/*	record group - special case	*/
+		if i <> 0							/*	if cue exists - call it up		*/
+		then call RECALL.CURRENT.CUE.BY.ID (i,1,Zero.Zero);
+		else do;								/*	else get next one (maybe)		*/
+			DTD.Cue# = 0;					/*	in case of failure	*/
+			call Send.To.Lod(24,0);		/*	Next alpha cue			*/
+			if DTD.Cue# <> 0				/*	one exists				*/
+			then call RECALL.CURRENT.CUE.BY.ID (DTD.Cue#,1,Zero.Zero);
+			else call Store.New.Cue.Name(tmp);
+		end;
+	end;
+
+	else do;
+		if i <> 0 then call Get.Cue.Dialog(group,9);
+		call Store.New.Cue.Name(tmp);
+	end;
+
+end Handle.New.Cue.Name;
+
+/*	$page - handle assorted take buttons	*/
+
+/*	cue take in buttons - both cue edit and shuttle	*/
+
+Handle.Cue.Take.In.Button:proc swapable;
+	dcl tmp(1)	fixed;
+
+	if (Most.Recent.AEE.Activity = 0)	/*	if we just triggered	*/
+	or (Current.Cue.Audition	  = 0)	/*	or not audit mode		*/
+	then do;										/*	trigger time			*/
+		if DTD.Play.State <> 0
+		then call Take.Current.Shuttle.Time(tmp);			/*	if playing, get time	*/
+		else call COPY32(AEE.Shuttle.Anchor.Time,tmp);	/*	else get anchor		*/
+		if COM16(zero.time,tmp) = lw#igt then tmp(1) = zero.time;		//	THIS SHOULD NEVER HAPPEN
+		call HANDLE.ANY.NEW.CUE.IN.TIME(tmp, 2, 1);
+	end;
+	else do;
+		call TAKE.SYSTEM.REAL.TIME(tmp);	/*	get sequencer or smpte time			*/
+		if (tmp(0) < 0) wrap_24_hours(tmp);
+		if (com16(zero.time,tmp) == lw#igt) STR32(0, zero.time, tmp);	//	THIS SHOULD NEVER HAPPEN
+		call HANDLE.ANY.NEW.CUE.IN.TIME(tmp, 1, 1);
+	end;
+
+	if Cue.Group	  <> 0 then call Update.Object(Cue.In.Time.Id);
+	if Shuttle.Group <> 0 then call Update.Object(Shuttle.Cue.In.Time.Id);
+	call Set.Anchor.Time(Cue.In.Time,0);
+
+end Handle.Cue.Take.In.Button;
+
+Handle.Cue.Take.Edit.In.Button:proc swapable;
+	dcl tmp(1)	fixed;
+
+	if (Most.Recent.AEE.Activity = 0)	/*	if we just triggered	*/
+	or (Current.Cue.Audition	  = 0)	/*	or not audit mode		*/
+	then do;										/*	trigger time			*/
+		if DTD.Play.State <> 0
+		then call Take.Current.Shuttle.Time(tmp);			/*	if playing, get time	*/
+		else call COPY32(AEE.Shuttle.Anchor.Time,tmp);	/*	else get anchor		*/
+		if COM16(zero.time,tmp) = lw#igt then tmp(1) = zero.time;
+		call HANDLE.ANY.NEW.EDIT.IN.TIME(tmp, 2, 1);
+	end;
+	else do;
+		call TAKE.SYSTEM.REAL.TIME(tmp);	/*	get sequencer or smpte time			*/
+		if (tmp(0) < 0) wrap_24_hours(tmp);
+		if (com16(zero.time,tmp) == lw#igt) STR32(0, zero.time, tmp);	//	THIS SHOULD NEVER HAPPEN
+		call HANDLE.ANY.NEW.EDIT.IN.TIME(tmp, 1, 1);
+	end;
+
+	if Shuttle.Group <> 0 then call Update.Object(Shuttle.Edit.In.Time.Id);
+	call Set.Anchor.Time(Cue.Edit.In.Time,0);
+
+end Handle.Cue.Take.Edit.In.Button;
+
+/*	handle sync lock function from both shuttle and cue editor	*/
+
+Handle.Sync.Lock.Button:proc (Id) swapable;
+	dcl Id	fixed;
+
+	Current.Sync.Locked = Current.Sync.Locked xor 1;
+
+	call DEPOSIT.SYNC.FIELD.ATTRIBUTES;
+
+	if Current.Sync.Locked <> 0
+	then call Select.New.Cur.Obj(Id,-1,-1);
+	else call Select.New.Cur.Obj(Corner.Label,-1,-1);
+
+	call Update.Object(Id);
+
+end Handle.Sync.Lock.Button;
+
+Handle.Source.Table.Id:proc swapable;
+	dcl i	fixed;
+
+	i = Current.Cue.Drive.Bits xor bits(8*Screen.Event.Table.Row+Screen.Event.Table.Col);
+	i = i & DTD.AVAIL.TRKS;
+	call ASSIGN.NEW.DRIVE.BITS.TO.REEL (Current.Cue.Ptr, i);
+
+	call Set.DTD.Play.Tracks(Current.Cue.Drive.Bits);
+	call Display.Drive.Select.Bits;
+
+	call Set.Shuttle.Flags.And.Edits;	/*	redraw symbols on drive change	*/
+
+	/*	do not mark cue modified since user is probably	*/
+	/*	just soloing tracks										*/
+end Handle.Source.Table.Id;
+
+/*	cue take out buttons - both cue edit and shuttle	*/
+
+Handle.Cue.Take.Out.Button:proc swapable;	/*	from either cue or shuttle		*/
+	dcl tmp(1)	fixed;
+
+	if (Most.Recent.AEE.Activity = 0)	/*	if we just triggered	*/
+	or (Current.Cue.Audition	  = 0)	/*	or not audit mode		*/
+	then do;										/*	trigger time			*/
+		if DTD.Play.State <> 0 then do;
+			call Stop.DTD.Playback;			/*	stop right here		*/
+			call Send.To.Lod(23,0);			/*	Just to get current position updated	*/
+			call COPY32(loc(addr(cur.DTD.ms.msb)),tmp);
+		end;
+		else call COPY32(AEE.Shuttle.Anchor.Time,tmp);	/*	else get anchor			*/
+		if COM16(zero.time,tmp) = lw#igt then tmp(1) = zero.time;
+		call HANDLE.ANY.NEW.CUE.OUT.TIME(tmp, 2, 1, 0);
+	end;
+	else do;
+		call TAKE.SYSTEM.REAL.TIME(tmp);	/*	get sequencer or smpte time				*/
+		if (tmp(0) < 0) wrap_24_hours(tmp);
+		if (com16(zero.time,tmp) == lw#igt) STR32(0, zero.time, tmp);	//	THIS SHOULD NEVER HAPPEN
+		call HANDLE.ANY.NEW.CUE.OUT.TIME(tmp, 1, 1, 0);
+	end;
+	if Cue.Group	  <> 0 then call Update.Object(Cue.Out.Time.Id);
+	if Shuttle.Group <> 0 then call Update.Object(Shuttle.Cue.Out.Time.Id);
+	call Set.Anchor.Time(Cue.Out.Time,0);
+
+end Handle.Cue.Take.Out.Button;
+
+Handle.Cue.Take.Edit.Out.Button:proc swapable;	/*	from either cue or shuttle	*/
+	dcl tmp(1)	fixed;
+
+	if (Most.Recent.AEE.Activity = 0)	/*	if we just triggered	*/
+	or (Current.Cue.Audition	  = 0)	/*	or not audit mode		*/
+	then do;										/*	trigger time			*/
+		if DTD.Play.State <> 0 then do;
+			call Stop.DTD.Playback;			/*	stop right here		*/
+			call Send.To.Lod(23,0);			/*	Just to get current position updated	*/
+			call COPY32(loc(addr(cur.DTD.ms.msb)),tmp);
+		end;
+		else call COPY32(AEE.Shuttle.Anchor.Time,tmp);	/*	else get anchor			*/
+		if COM16(zero.time,tmp) = lw#igt then tmp(1) = zero.time;
+		call HANDLE.ANY.NEW.EDIT.OUT.TIME(tmp, 2, 1, 0);
+	end;
+	else do;
+		call TAKE.SYSTEM.REAL.TIME(tmp);	/*	get sequencer or smpte time				*/
+		if (tmp(0) < 0) wrap_24_hours(tmp);
+		if (com16(zero.time,tmp) == lw#igt) STR32(0, zero.time, tmp);	//	THIS SHOULD NEVER HAPPEN
+		call HANDLE.ANY.NEW.EDIT.OUT.TIME(tmp, 1, 1, 0);
+	end;
+	if Shuttle.Group <> 0 then call Update.Object(Shuttle.Edit.Out.Time.Id);
+	call Set.Anchor.Time(Cue.Edit.Out.Time,0);
+
+end Handle.Cue.Take.Edit.Out.Button;
+
+Handle.Cue.Out.Switch:proc swapable;	/*	only from cue group	*/
+	dcl time_or_dur	fixed;
+	dcl cueformat		fixed;
+
+	time_or_dur = Fetch.Switch(Cue.Out.Switch);
+
+	if (Current.Cue.Audition == false)
+	then	cueformat = AEE.Time.Format|O#MSEC.RealTime|O#MSEC.Alt.Offset;	//	audition off:				show alt offset (relative to DtoD)
+	else
+	{	if (time_or_dur == 0)															//	audition on, time:		show seq offset and allow negative input
+			cueformat = AEE.Time.Format|O#MSEC.RealTime|O#MSEC.Allow.Minus;
+		else																					//	audition on, duration:	show seq offset but disallow negative input
+			cueformat = AEE.Time.Format|O#MSEC.RealTime;
+	}
+
+	call PID(Saved.AEE.Cue.Out.Switch,Fetch.Switch(Cue.Out.Switch));
+	call Set.32Bit.MSEC.Display.Format(Cue.Out.Time.Id,	 cueformat, time_or_dur, cf#default, cf#default);
+	call Set.32Bit.MSEC.Display.Format(Cue.Offset.Time.Id, cueformat, time_or_dur, cf#default, cf#default);
+	call DEPOSIT.CUE.TIMES.DISPLAY;
+	call Update.Object(Cue.Out.Time.Id);			/*	so length/duration shows up quickly	*/
+	if Current.Cue.Sync.Mode=1
+	then call Update.Object(Cue.Offset.Time.Id);	/*	so length/duration shows up quickly	*/
+
+end Handle.Cue.Out.Switch;
+
+Handle.Shuttle.Cue.Out.Switch:proc swapable;		/*	only from shuttle group	*/
+	dcl time_or_dur	fixed;
+	dcl cueformat		fixed;
+
+	time_or_dur = Fetch.Switch(Shuttle.Cue.Out.Switch);
+
+	if (Current.Cue.Audition == false)
+	then	cueformat = AEE.Time.Format|O#MSEC.RealTime|O#MSEC.Alt.Offset;	//	audition off:				show alt offset (relative to DtoD)
+	else
+	{	if (time_or_dur == 0)															//	audition on, time:		show seq offset and allow negative input
+			cueformat = AEE.Time.Format|O#MSEC.RealTime|O#MSEC.Allow.Minus;
+		else																					//	audition on, duration:	show seq offset but disallow negative input
+			cueformat = AEE.Time.Format|O#MSEC.RealTime;
+	}
+
+	call PID(Saved.AEE.Shuttle.Cue.Out.Switch,Fetch.Switch(Shuttle.Cue.Out.Switch));
+	call Set.32Bit.MSEC.Display.Format(Shuttle.Cue.Out.Time.Id, cueformat, time_or_dur, cf#default, cf#default);
+	call DEPOSIT.CUE.TIMES.DISPLAY;
+	call Update.Object(Shuttle.Cue.Out.Time.Id);	/*	so length/duration shows up quickly	*/
+
+end Handle.Shuttle.Cue.Out.Switch;
+
+Handle.Shuttle.Edit.Out.Switch:proc swapable;	/*	only from shuttle group	*/
+	dcl time_or_dur	fixed;
+	dcl cueformat		fixed;
+
+	time_or_dur = Fetch.Switch(Shuttle.Edit.Out.Switch);
+
+	if (Current.Cue.Audition == false)
+	then	cueformat = AEE.Time.Format|O#MSEC.RealTime|O#MSEC.Alt.Offset;	//	audition off:				show alt offset (relative to DtoD)
+	else
+	{	if (time_or_dur == 0)															//	audition on, time:		show seq offset and allow negative input
+			cueformat = AEE.Time.Format|O#MSEC.RealTime|O#MSEC.Allow.Minus;
+		else																					//	audition on, duration:	show seq offset but disallow negative input
+			cueformat = AEE.Time.Format|O#MSEC.RealTime;
+	}
+
+	call PID(Saved.AEE.Shuttle.Edit.Out.Switch,Fetch.Switch(Shuttle.Edit.Out.Switch));
+	call Set.32Bit.MSEC.Display.Format(Shuttle.Edit.Out.Time.Id, cueformat, time_or_dur, cf#default, cf#default);
+	call DEPOSIT.CUE.TIMES.DISPLAY;
+	call Update.Object(Shuttle.Edit.Out.Time.Id);	/*	so length/duration shows up quickly	*/
+
+end Handle.Shuttle.Edit.Out.Switch;
+
+Handle.Cue.Take.Offs.Button:proc swapable;	/*	only from cue group		*/
+	dcl tmp (1)	fixed;
+
+	if (Current.Cue.Sync.Mode = 1)
+	then do;												/*	only if showing offset	*/
+		if (Most.Recent.AEE.Activity = 0)		/*	if we just triggered		*/
+		or (Current.Cue.Audition	  = 0)		/*	or not audit mode			*/
+		then do;											/*	trigger time				*/
+			if DTD.Play.State <> 0
+			then call Take.Current.Shuttle.Time(tmp);			/*	if playing, get time	*/
+			else call COPY32(AEE.Shuttle.Anchor.Time,tmp);	/*	else get anchor		*/
+			if COM16(zero.time,tmp) = lw#igt then tmp(1) = zero.time;
+			call HANDLE.ANY.NEW.EDIT.IN.TIME(tmp, 2, 1);
+		end;
+		else do;	/*	audition mode, trig not happening	*/
+			call TAKE.SYSTEM.REAL.TIME(tmp);		/*	get sequencer or smpte time		*/
+			if (tmp(0) < 0) wrap_24_hours(tmp);
+			if (com16(zero.time,tmp) == lw#igt) STR32(0, zero.time, tmp);	//	THIS SHOULD NEVER HAPPEN
+			call HANDLE.ANY.NEW.EDIT.IN.TIME(tmp, 1, 1);
+		end;
+		call Update.Object(Cue.Offset.Time.Id);
+		call Set.Anchor.Time(Cue.Offs.Time,0);
+	end;
+
+end Handle.Cue.Take.Offs.Button;
+
+Handle.STM.Transfer:proc (group) swapable;
+	dcl group	fixed;
+
+	call Stop.DTD.PLayback;
+
+	if GET.CUE.DIALOG (group,8)
+	then do;
+		call REMOVE.ERR;									/*	remove prior msg							*/
+		call DISPLAY.NOTICE (NT#TransferringCueToPoly,ATTR#Reverse,NulStr,0,0,0);
+		write(mam) = Current.Cue.Ptr;					/*	store projectr sampling rate here	*/
+		write(mal) = Cue.Srate;							/*	for transfer routine						*/
+		write(md ) = AEE.Current.Project.Rate;
+		call LOAD.DTD.TEMP.CUE(Current.Cue.Ptr);	/*	store current cue in temp area		*/
+		call TRANSFER.CUE.TO.POLY(0);					/*	and now copy it to poly					*/
+
+		if ertyp=0 then call DISPLAY.NOTICE (NT#TransferComplete,ATTR#Normal,NulStr,0,0,0);
+		else				 call DISPLAY.NOTICE (NT#EraseNotice,ATTR#Normal,NulStr,0,0,0);
+	end;
+end Handle.STM.Transfer;
+
