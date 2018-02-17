@@ -10,7 +10,7 @@
 #ifndef mac_scsi_osx_h                			/* include ourselves only once!	*/
 #define mac_scsi_osx_h
 
-#include    "SCSILib.h"
+#include    "ScsiLib.h"
 
 // Handy struct to encapsulate information about a block storage device connected to mac.
 // Implemented for RATOC FR1x

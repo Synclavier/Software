@@ -5,18 +5,18 @@
 /*	Created:	11/09/96 - C. Jones												*/
 
 // Std C Includes
-#include <StdIO.h>
-#include <String.h>
-#include <StdLib.h>
-#include <StdArg.h>
-#include <Signal.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include <signal.h>
 
 // Local includes
 #include "XPL.h"
 #include "XPLRuntime.h"
 
 #include "syslits.h"
-#include "SCSILib.h"
+#include "ScsiLib.h"
 #include "Utility.h"
 #include "catrtns.h"
 #include "CustomPrintf.h"

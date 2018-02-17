@@ -1563,7 +1563,10 @@ static	fixed	create_reloc()					/* create a relocatable binary file				*/
 		print("%s", "Symbol table:   [");unum (r [l__st]     ); print("%s", " ]: ");unum (r [l_s_names_len]);
 		print("%s", "    Keys used:      [");unum (65535     ); print("%s", " ]: ");unum (r [l_key]        ); print("\n");
 		print("%s", "Stack used:     [");unum (r [l__sk]     ); print("%s", " ]: ");unum (r [l_stack_used] );
-		print("%s", "    Alt Keys used:  [");unum (65535     ); print("%s", " ]: ");unum (r [l_altkey]     ); print("\n");
+		print("%s", "Symbol table:   [");unum (r [l__st]        ); print("%s", " ]: ");unum (r [l_s_names_len]);
+		print("%s", "    Keys used:      [");unum ((fixed) 65535); print("%s", " ]: ");unum (r [l_key]        ); print("\n");
+		print("%s", "Stack used:     [");unum (r [l__sk]        ); print("%s", " ]: ");unum (r [l_stack_used] );
+		print("%s", "    Alt Keys used:  [");unum ((fixed) 65535); print("%s", " ]: ");unum (r [l_altkey]     ); print("\n");
 		print("%s", "First file:     [");unum ((INTER_FILE_WORD_SIZE - INTER_FILE_1_START) / 256); print("%s", " ]: ");unum (r [l_iflng]      );
 		print("%s", "    Second file:    [");unum (r [l__if2]    ); print("%s", " ]: ");unum (r [l_if2lng]     ); print("\n");
 		print("%s", "Blocks used:    [");unum (r [l__bl]     ); print("%s", " ]: ");unum (r [l_get_blocks] );
@@ -6249,11 +6252,11 @@ static	fixed	pass3()							/* create object file							*/
 			}
 				
 			if (max_keys >= 256)			/* now get in words								*/
-				max_keys = 65535;
+				max_keys = (fixed) 65535;
 			else max_keys = shl(max_keys, 8);
 				
 			if (max_alts >= 256)
-				max_alts = 65535;
+				max_alts = (fixed) 65535;
 			else max_alts = shl(max_alts, 8);
 				
 			set_extmem (0, altflag_ptr + shr(r [l_altkey], 10) + 1, 0);	/* zero out what we need						*/
