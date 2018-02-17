@@ -1560,9 +1560,6 @@ static	fixed	create_reloc()					/* create a relocatable binary file				*/
 		print("\n");
 		print("%s", "Relocatable binary length: ");unum (objlng); print("\n");
 		print("\n");
-		print("%s", "Symbol table:   [");unum (r [l__st]     ); print("%s", " ]: ");unum (r [l_s_names_len]);
-		print("%s", "    Keys used:      [");unum (65535     ); print("%s", " ]: ");unum (r [l_key]        ); print("\n");
-		print("%s", "Stack used:     [");unum (r [l__sk]     ); print("%s", " ]: ");unum (r [l_stack_used] );
 		print("%s", "Symbol table:   [");unum (r [l__st]        ); print("%s", " ]: ");unum (r [l_s_names_len]);
 		print("%s", "    Keys used:      [");unum ((fixed) 65535); print("%s", " ]: ");unum (r [l_key]        ); print("\n");
 		print("%s", "Stack used:     [");unum (r [l__sk]        ); print("%s", " ]: ");unum (r [l_stack_used] );
