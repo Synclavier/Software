@@ -1,4 +1,4 @@
-/*  SCSILib.h                                                               */
+/*  ScsiLib.h                                                               */
 
 /*  Created:                                                                */
 /*      06/18/96        C. Jones                                            */

@@ -1,7 +1,7 @@
 /* AliasUtilities.c */
 
 //	Std C Includes
-#include <String.h>
+#include <string.h>
 
 // Mac OS
 #include <CoreServices/CoreServices.h>

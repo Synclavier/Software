@@ -5,7 +5,7 @@
 // User space interface to the PCI-1 kernel extension
 
 // Std C
-#include <StdIO.h>
+#include <stdio.h>
 
 // Unix
 #include <sys/mman.h>

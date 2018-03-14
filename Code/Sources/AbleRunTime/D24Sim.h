@@ -3,7 +3,7 @@
 #ifndef d24sim_h
 #define d24sim_h
 
-#include    "SCSILib.h"
+#include    "ScsiLib.h"
 
 extern	void	D24Sim_Initialize(struct PCI1AccessorStruct* itsStruct, void (*threadYielder)(), bool isInterpreter);
 extern	void	D24Sim_CleanUp                 ();

@@ -6,9 +6,9 @@
 /* computer SCSI port...													*/
 
 // Std C includes
-#include	<StdLib.h>
-#include	<StdIO.h>
-#include 	<String.h>
+#include	<stdlib.h>
+#include	<stdio.h>
+#include 	<string.h>
 
 // Able includes
 #include	"Standard.h"

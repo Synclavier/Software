@@ -6,7 +6,7 @@
 /*  Contents:                                                               */
 /*      Routines to issue individual SCSI commands                          */
 
-#include    "SCSILib.h"
+#include    "ScsiLib.h"
 #include    "Utility.h"
 #include    "ScsiChip.h"
 #include    "XPL.h"
@@ -14,7 +14,7 @@
 #include    "catrtns.h"
 #include    "SynclavierFileReference.h"
 
-#include	<StdIO.h>
+#include	<stdio.h>
 
 #define		PRINT_ACTIVITY		g_scsi_print_basic_opt
 #define		PRINT_ALL_ACTIVITY	g_scsi_print_all_opt

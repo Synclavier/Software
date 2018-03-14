@@ -14,7 +14,7 @@
 #define 	scsichip_h
 
 #include    "Standard.h"
-#include    "SCSILib.h"
+#include    "ScsiLib.h"
 
 // Generic Entry
 chip_error_code issue_scsi_command  				(scsi_device& the_device, scsi_command& the_command);

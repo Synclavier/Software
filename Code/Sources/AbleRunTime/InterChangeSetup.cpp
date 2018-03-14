@@ -3,15 +3,15 @@
 // Prefs utilities: Read & write prefs file
 
 //	Std C Includes
-#include <StdIO.h>
-#include <String.h>
+#include <stdio.h>
+#include <string.h>
 
 //	Local Includes
 #include "Standard.h"
 #include "XPL.h"
 
 #include "InterChange.h"
-#include "SCSILib.h"
+#include "ScsiLib.h"
 #include "Version.h"
 #include "SynclavierFileReference.h"
 

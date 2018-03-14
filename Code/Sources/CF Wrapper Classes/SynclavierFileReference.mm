@@ -6,8 +6,6 @@
 //
 //
 
-#include "Synclavier3Constants.h"
-//#include "InterChange.h"
 #include <CoreServices/CoreServices.h>
 
 #include "SynclavierFileReference.h"

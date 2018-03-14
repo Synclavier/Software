@@ -9,7 +9,7 @@
 #undef printf
 
 #include    "Standard.h"
-#include    "SCSILib.h"
+#include    "ScsiLib.h"
 #include    "ScsiChip.h"
 #include    "Utility.h"
 

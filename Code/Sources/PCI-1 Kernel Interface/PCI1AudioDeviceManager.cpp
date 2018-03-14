@@ -8,7 +8,7 @@
 #endif
 
 // Std C
-#include <StdIO.h>
+#include <stdio.h>
 
 // Local
 #include "PCI1AudioDeviceManager.h"

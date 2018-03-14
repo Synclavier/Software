@@ -5,7 +5,7 @@
 
 // Our inclues
 #include    "ScsiChip.h"
-#include    "SCSILib.h"
+#include    "ScsiLib.h"
 #include    "Utility.h"
 #include    "MacFileSim.h"
 #include    "XPL.h"
@@ -14,9 +14,9 @@
 #include    "catrtns.h"
 
 // Mac inculdes
-#include 	<String.h>
-#include	<StdLib.h>
-#include	<StdIO.h>
+#include 	<string.h>
+#include	<stdlib.h>
+#include	<stdio.h>
 
 // Callback for detecting sequence callup
 MacFileSimCallback  mac_file_sim_sequence_file_accessed_proc;

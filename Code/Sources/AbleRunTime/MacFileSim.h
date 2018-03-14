@@ -10,7 +10,7 @@
 #ifndef mac_scsi_file_sim_h                			/* include ourselves only once!	*/
 #define mac_scsi_file_sim_h
 
-#include    "SCSILib.h"
+#include    "ScsiLib.h"
 
 // Entry for simulated file access
 chip_error_code issue_mac_file_sim_scsi_command  	(scsi_device& the_device, scsi_command& the_command);

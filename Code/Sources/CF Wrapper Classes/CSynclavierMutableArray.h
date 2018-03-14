@@ -8,17 +8,7 @@
 #ifndef __SynclavierCP__SyncCFWrappers__
 #define __SynclavierCP__SyncCFWrappers__
 
-#include "Synclavier3Constants.h"
-
-// We define our own set of foundation classes. For OSX they are
-// based upon Core Foundation
-
-// The intent is to use our own classes so that future migration
-// to Windows might be easier.
-
-// Log to terminal screen
-int	 SyncDebugPrintf(const char * __restrict, ...) __printflike(1, 2);
-
+#include "SynclavierTypes.h"
 
 // CSynclavierMutableArray is a wrapper class that embodies basic mutable array functionality.
 // It is designed to be easy to port to other platforms.

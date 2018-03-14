@@ -2,7 +2,7 @@
 
 /*	Driver to allow running AbleDisk as an MPW tool		*/
 
-#include <StdIO.h>
+#include <stdio.h>
 
 extern int		AbleDiskTool(int argc, const char *argv[]);
 extern int      sync_prefs_grab_one_pref(const char* which);

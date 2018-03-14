@@ -5,7 +5,7 @@
 
 // Our inclues
 #include    "ScsiChip.h"
-#include    "SCSILib.h"
+#include    "ScsiLib.h"
 #include    "Utility.h"
 #include    "XPL.h"
 #include    "MacSCSIOSx.h"
@@ -13,9 +13,9 @@
 #include    "MacFileSim.h"
 
 // Mac inculdes
-#include 	<String.h>
-#include	<StdLib.h>
-#include	<StdIO.h>
+#include 	<string.h>
+#include	<stdlib.h>
+#include	<stdio.h>
 
 // Branch on simulated VS real scsi port
 chip_error_code initialize_scsi_chip()
