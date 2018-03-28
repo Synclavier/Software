@@ -14,20 +14,16 @@ int main(int argc, char *argv[])
 {
     // Debug
     if (0) {
-		argc = 13;
-		argv[0] = (char *)"XPLCompiler";
+		argc = 9;
+		argv[0] = (char *)"/usr/local/bin/XPLCompiler";
 		argv[1] = (char *)"-md";
 		argv[2] = (char *)"/Volumes/CJ Data/Dropbox/Projects/SDC/Synclavier Development 5.2/Projects/AbleBrowser/../../Able";
 		argv[3] = (char *)"-od";
 		argv[4] = (char *)"/Volumes/CJ Cache/XPL Build Products/";
 		argv[5] = (char *)"-q";
-		argv[6] = (char *)":synmains:bld-daee";
+		argv[6] = (char *)":oputil:OPLIST";
 		argv[7] = (char *)"-of";
-		argv[8] = (char *)":W0:SYN-5.3G";
-        argv[9] = (char *)"-q";
-        argv[10] = (char *)"-p3";
-        argv[11] = (char *)"-m";
-        argv[12] = (char *)"-d";
+		argv[8] = (char *)":W0:*SYSTEM:oplist";
     }
 
 	return (compiler_main(argc, argv));

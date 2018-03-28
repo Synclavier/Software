@@ -506,7 +506,7 @@ void	print(const char *format, ...)
         XPLPrinter(format, vaList);
     else if (printChar)
         parse_printf(printChar, format, vaList);
-    else if (strstr(format, "%a") || strstr(format, "%p"))
+    else if (strstr(format, "%a") || strstr(format, "%1p"))
         parse_printf(out_char, format, vaList);
     else
         vprintf(format, vaList);
@@ -747,6 +747,7 @@ fixed	able_core(fixed  where)
 
 fixed	host_core(fixed *where)
 {
+    // Handle case where 'where' is likely a pointer into the able memory word space instead of a host-native fixed*.
 	if (((ptrtyp) where) < _ABLE_MEM_WORD_SIZE)
 	{
 		printf("XPL Run Time: bad location passed to host_core (0x%p)\n", where);
@@ -772,6 +773,7 @@ void	set_able_core(fixed  where, fixed value)
 
 void	set_host_core(fixed *where, fixed value)
 {
+    // Handle case where 'where' is likely a pointer into the able memory word space instead of a host-native fixed*.
 	if (((ptrtyp) where) < _ABLE_MEM_WORD_SIZE)
 	{
 		printf("XPL Run Time: bad location passed to set_host_core (0x%p)\n", where);

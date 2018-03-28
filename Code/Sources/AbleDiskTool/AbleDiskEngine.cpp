@@ -5194,7 +5194,7 @@ int AbleDiskTool( int argc, const char *argv[])
 		{
 			if (0)
 			{
-				print("name:%p   f_ms_sector %d   f_ls_sector %d  f_ms_length %d \n   f_ls_length %d  f_words %d  f_type %d\n",
+                print("name:%1p   f_ms_sector %d   f_ls_sector %d  f_ms_length %d \n   f_ls_length %d  f_words %d  f_type %d\n",
 				f_name, f_ms_sector, f_ls_sector, f_ms_length, f_ls_length, f_words, f_type);
 			}
 

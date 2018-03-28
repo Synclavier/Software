@@ -5276,7 +5276,7 @@ static	void	handle_print()
 					
 				case t_locat:
 				case t_arr:
-					put_symbol("%a");
+					put_symbol("%1p");
 					break;
 					
 				case t_octal:

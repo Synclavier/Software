@@ -3,7 +3,7 @@
 /*	Created:	03/09/97 - C. Jones										                  	*/
 
 // Custom printf to handle printf style output
-// Includes %a for able string printout
+// Includes %a for able string printout; also %1p to work around compiler warnings
 // Currently lacks long long output
 
 // Handle kernel or user space applications
@@ -240,11 +240,19 @@ static char * parse_format(const char * format_string, va_list arg, print_format
 		
 		case 'p':
 			
-			f.argument_options = pointer_argument;
-			f.alternate_form   = 1;
-			f.conversion_char  = 'x';
-			f.precision        = 16;
-			
+            // Detect %1p for able string
+            if (f.field_width == 1) {
+                f.conversion_char  = 'a';
+                f.field_width      = 0;
+            }
+            
+            else {
+                f.argument_options = pointer_argument;
+                f.alternate_form   = 1;
+                f.conversion_char  = 'x';
+                f.precision        = 16;
+            }
+            
 			break;
 			
 		case 'c':
@@ -520,9 +528,6 @@ int parse_printf(void (*out_routine)(char it), const char * format_str, va_list 
 				break;
 
             case 'a':																/* able string */
-            case 'A':
-            case 'p':																/* able string */
-            case 'P':
 				
 				able_ptr = va_arg(arg, fixed*);				/* get pointer 	*/
 				

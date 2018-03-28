@@ -1667,11 +1667,11 @@ static	void	er_usr(							/* tell the user he did something wrong			*/
 		
 	if ((lib != 0) && (lib != main_lib)) {		/* skip for library of zero and skip MAIN		*/
 		if (dlib != 0) { print("\n");print("%s", " ");}	/* try to be neat								*/
-		print("%s%p", " in ", _location_(&(lib_name [name_lib [lib]])));
+		print("%s%1p", " in ", _location_(&(lib_name [name_lib [lib]])));
 	}
 		
 	if (dlib != 0)								/* output the defining library if necessary		*/
-		print("%s%p%s", " (defined in ", _location_(&(lib_name [name_lib [dlib]])), ")");
+		print("%s%1p%s", " (defined in ", _location_(&(lib_name [name_lib [dlib]])), ")");
 		
 	print(".\n");
 	
@@ -1690,7 +1690,7 @@ static	void	er_usra(						/* tell the user he did something wrong			*/
 	print("%s", message);
 	
 	if (details [0] != 0)						/* don't output the null string					*/
-		print("%s%p", " ", details);
+		print("%s%1p", " ", details);
 		
 	if (idetail != 0)							/* don't output details of zero					*/
 		print("%6d", idetail);
@@ -1700,11 +1700,11 @@ static	void	er_usra(						/* tell the user he did something wrong			*/
 		
 	if ((lib != 0) && (lib != main_lib)) {		/* skip for library of zero and skip MAIN		*/
 		if (dlib != 0) { print("\n");print("%s", " ");}	/* try to be neat								*/
-		print("%s%p", " in ", _location_(&(lib_name [name_lib [lib]])));
+		print("%s%1p", " in ", _location_(&(lib_name [name_lib [lib]])));
 	}
 		
 	if (dlib != 0)								/* output the defining library if necessary		*/
-		print("%s%p%s", " (defined in ", _location_(&(lib_name [name_lib [dlib]])), ")");
+		print("%s%1p%s", " (defined in ", _location_(&(lib_name [name_lib [dlib]])), ")");
 		
 	print(".\n");
 	
@@ -2165,7 +2165,7 @@ static	void	sym_dump()						/* dump the symbol table (used for debugging and dia
 	print("pubext  loc     argloc  lineno  type    storage  name      symlen\n");
 	for (i = 0; i < nextsym; i++) {
 		print("%6d%s%6d%s%6d%s%6d%s%6d%s", pubext_sym (i), "  ", loc_sym (i), "  ", loc_args (i), "  ", lnum_sym (i), "  ", type_sym (i), "  ");
-		print("%6d%s%p%s%6d\n", store_sym (i), "   >", _location_(get_sym (ptr_sym (i))), "<  ", stable (ptr_sym (i)));
+		print("%6d%s%1p%s%6d\n", store_sym (i), "   >", _location_(get_sym (ptr_sym (i))), "<  ", stable (ptr_sym (i)));
 	}
 }
 	
@@ -2301,7 +2301,7 @@ static	void	resolve(						/* collect library data and try to resolve references	
 		
 		if ((i = readlib()) != et_revision) {	/* is this the correct revision IF?				*/
 			print("\n");
-			print("%s%p%s", "Library \"", _location_(&(lib_name [name_lib [current_lib]])), "\" incompatible with current compiler.\n");
+			print("%s%1p%s", "Library \"", _location_(&(lib_name [name_lib [current_lib]])), "\" incompatible with current compiler.\n");
 			printf("info: %d %d %x %x\n", i, et_revision, i, et_revision);
 			er_ftl ((char *) "Please recompile it");		/* abort										*/
 		}										/* of wrong revision							*/

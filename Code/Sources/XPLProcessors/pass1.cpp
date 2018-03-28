@@ -281,13 +281,13 @@ static	void	er_emes1(						/* format one - for undef/dupl ersymb			*/
 	
 	if (in_text)
 	{
-		print("%s%s%p%s %d\n", str, " \'", ersymb, "\' at line", line_no);
+		print("%s%s%1p%s %d\n", str, " \'", ersymb, "\' at line", line_no);
 		
 		report_error_string (global_cpb, line_no, in_text - * (char **) in_base, &in_spec);
 	}
 	else
 	{
-		print("### %s%s%p%s %d%s%s\n", str, " \'", ersymb, "\' at line", line_no, cfnmes, cfname);
+		print("### %s%s%1p%s %d%s%s\n", str, " \'", ersymb, "\' at line", line_no, cfnmes, cfname);
 		
 		if (cfname[0])
 			printf("open '%s'; line %d\n", cfname, line_no);
