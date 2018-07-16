@@ -1,1 +1,169 @@
-/* 25-RECOR  $TITLE  Module to Handle Create Command *//* Copyright 1985 by New England Digital Corporation */initialize_recording:proc(sectors) fixed swap; /* create file, prepare for sampling */   dcl sectors           fixed array; /* desired number of sectors to sample for */                   dcl temp(2)           fixed;    dcl fp                floating;   dcl fcb(f#name_len-1) fixed;   dcl (i,p)             fixed;   dcl level             lit '1';   file1; /* set pointers */   record.flag=0;   period.index=current.per.index; /* set for time_to_index */   if ((sectors(0)&"377")=0) and (sectors(1)=0) then do; /* special case - compute maximum size */      call read_catalog('', level); /* get catalog */      p = findfile(recordfile.name); /* look for .DATA */      if p <> -1 then do; /* delete .DATA if it exists */         call get_fcb(p,fcb); /* get entry */         /* modify entry to show no use */         do i = 0 to f#name_len-1; fcb(f#nm+i)=0; end; /* zero out name */         fcb(f#wd) = 0; /* zero word length, but sector length intact */         call put_fcb(p,fcb); /* (note:  #of sectors holder is not wiped out of CATALOG) */      end;      call findmax; /* find maximum contiguous space */      if f#ms_length IGT 0 then do; /* space is longer than 32M */         sectors(0)=sectors(0)&"177400"; /* zero top bits of length */         sectors(1)=60000; /* set length to 32M */      end;      else sectors(1)=f#ls_length; /* set to length of hole */      sectors(2)=0; /* word length to zero */      if sectors(1) ILT 4 then do; /* not enough room for a new sound file */         error.flag=e.no.room;         return 1;      end;      sectors(1)=sectors(1)-3; /* subtract off area for header */   end; /* of compute maximum size */   if new_file(sectors) then return 1; /* create sound file of specified size */   period.index  =current.per.index; /* save in heading area */   nyquist.freq  =int(clock.rate*500./period.index);   file.data.type=sampled.data;   call index_to_time(temp,location(total.data),period.index); /* get total recording time */   call initialize_env(temp,0); /* draw envelope */   vector_mode;   call #transmit_coords(290+72*dq640,421);   ps('Maximum time at ');   call fprint(clock.rate*1./period.index,2,3);   ps(' kHz is ');   call print_time(temp,2,1);nl;   vector_mode;   call #transmit_coords(290,405);   transparent_mode;   call tty_wait;   record.flag=1; /* indicate that we are ready to record */   return 0;   end initialize_recording;   /* $SUBTITLE  Initiate the Sampling */record:proc(flag) fixed swap; /* perform the sampling, or zero out file */   dcl flag      fixed; /* 1 to sample or 0 to zero out file */   dcl length(2) fixed;   dcl temp(2)   fixed;               dcl (i,new.i) fixed;   if record.flag<>1 then return 1; /* not ready to record */   if flag then do; /* actually sample */      if not winchester (shr(f.drive,8)) then do; /* on a floppy */         error.flag=e.cannot.play; return 1;      end;      if winadc(period.index,location(f.data.index),location(total.data),                databuf1,buf1.len,location(valid.data)) then return 1;   end;   else do; /* prepare to generate by zeroing out file */      do i=0 to sector.size*buf1.len-1; databuf1(i)=0; end; /* zero the buffer */      call copy_vector(location(valid.data),zero.vector,3); /* init valid.data */      i=0;      do while (not break.rcvd) /* loop over sectors */      and (compare_vectors(location(total.data),location(valid.data),3)>0);          call sub_len_from_len(location(total.data),location(valid.data),length); /* length to write out */         if ((length(0) IGT 0)         or ((length(0)=0) and (length(1) IGT buf1.len))) then do;            length(0)=0; length(1)=buf1.len; length(2)=0; /* limit to buffer size */         end;         call add_len_to_addr(location(valid.data),location(f.data.index),temp); /* temporary address to read from */         call writedata(temp(0),temp(1),databuf1,length(1)*sector.size); /* write out zeroed buffer */         call add_len_to_len(length,location(valid.data),location(valid.data)); /* update location */         new.i=i+length(1); /* compute position after write */         do while i < new.i; /* loop over positions up to new.i */            i=i+1;            if (i&"3")=0 then call plot_env(0,0);  /* plot every 4 sectors */         end;       end; /* of loop over sectors */   end; /* of zero out file */   /* $PAGE */   temp(0)=0; temp(1)=0; temp(2)=0;   call copy_vector(cursor.time,temp,3); /* put cursor on plot */   call pixel_and_port(cursor.time);   call env_cursor(x.pixel,port.number);      transparent_mode;   /* fill in beginning and end symbols */   if compare_vectors(temp,location(valid.data),2)=0 then do; /* no data collected */      error.flag=e.no.data;   end;   else do;      call add_symbol(temp,'Origin');      call copy_vector(mark.start,temp,3); /* copy into start pointer */      temp(2)=1;      call sub_len_from_len(location(valid.data),temp,temp);       call index_to_time(location(data.end),temp,period.index);      call add_symbol(location(data.end),'End');      call copy_vector(mark.end,location(data.end),3); /* copy to end pointer */      call add_len_to_len(location(valid.data),data.offset.vector,location(f.tlength));  /* compute length of file */      if not file.truncate(recordfile.name,f.type,f.tlen.low) then do;          error.flag=e.sys.error;         return 1;      end;         else if (d66.status&"1000")<>0 then error.flag=e.overrun;      else if flag<>0                then error.flag=s.finished;   end;   call cursor_restore;   call copy_vector(location(total.data),location(valid.data),3); /* in truncated file, these are equal */   if flag then do; /* mark as sampled or generated */      call caption_assign('Sampled data');      file.data.type=sampled.data;   end;   else do;      call caption_assign('Generated data');      file.data.type=created.data;   end;   call writedata(f.drive,f.sector,location(f.headptr),                  (heading.length+symbol.sectors)*sector.size);   record.flag=2; /* finished recording */   return 0;end record;
+/* 25-RECOR  $TITLE  Module to Handle Create Command */
+
+/* Copyright 1985 by New England Digital Corporation */
+
+initialize_recording:proc(sectors) fixed swap; /* create file, prepare for sampling */
+   dcl sectors           fixed array; /* desired number of sectors to sample for */
+   dcl temp(2)           fixed;
+   dcl fp                floating;
+   dcl fcb(f#name_len-1) fixed;
+   dcl (i,p)             fixed;
+   dcl level             lit '1';
+
+   file1; /* set pointers */
+   record.flag=0;
+   period.index=current.per.index; /* set for time_to_index */
+
+   if ((sectors(0)&"377")=0) and (sectors(1)=0) then do; /* special case - compute maximum size */
+      call read_catalog('', level); /* get catalog */
+
+      p = findfile(recordfile.name); /* look for .DATA */
+      if p <> -1 then do; /* delete .DATA if it exists */
+         call get_fcb(p,fcb); /* get entry */
+         /* modify entry to show no use */
+         do i = 0 to f#name_len-1; fcb(f#nm+i)=0; end; /* zero out name */
+         fcb(f#wd) = 0; /* zero word length, but sector length intact */
+         call put_fcb(p,fcb); /* (note:  #of sectors holder is not wiped out of CATALOG) */
+      end;
+
+      call findmax; /* find maximum contiguous space */
+      if f#ms_length IGT 0 then do; /* space is longer than 32M */
+         sectors(0)=sectors(0)&"177400"; /* zero top bits of length */
+         sectors(1)=60000; /* set length to 32M */
+      end;
+      else sectors(1)=f#ls_length; /* set to length of hole */
+      sectors(2)=0; /* word length to zero */
+
+      if sectors(1) ILT 4 then do; /* not enough room for a new sound file */
+         error.flag=e.no.room;
+         return 1;
+      end;
+      sectors(1)=sectors(1)-3; /* subtract off area for header */
+   end; /* of compute maximum size */
+
+   if new_file(sectors) then return 1; /* create sound file of specified size */
+
+   period.index  =current.per.index; /* save in heading area */
+   nyquist.freq  =int(clock.rate*500./period.index);
+   file.data.type=sampled.data;
+
+   call index_to_time(temp,location(total.data),period.index); /* get total recording time */
+   call initialize_env(temp,0); /* draw envelope */
+
+   vector_mode;
+   call #transmit_coords(290+72*dq640,421);
+   ps('Maximum time at ');
+   call fprint(clock.rate*1./period.index,2,3);
+   ps(' kHz is ');
+   call print_time(temp,2,1);nl;
+
+   vector_mode;
+   call #transmit_coords(290,405);
+   transparent_mode;
+   call tty_wait;
+
+   record.flag=1; /* indicate that we are ready to record */
+   return 0;
+end initialize_recording;
+
+/* $SUBTITLE  Initiate the Sampling */
+
+record:proc(flag) fixed swap; /* perform the sampling, or zero out file */
+   dcl flag      fixed; /* 1 to sample or 0 to zero out file */
+   dcl length(2) fixed;
+   dcl temp(2)   fixed;
+   dcl (i,new.i) fixed;
+
+   if record.flag<>1 then return 1; /* not ready to record */
+
+   if flag then do; /* actually sample */
+      if not winchester (shr(f.drive,8)) then do; /* on a floppy */
+         error.flag=e.cannot.play; return 1;
+      end;
+
+      i = winadc(period.index,location(f.data.index),location(total.data),
+                databuf1,buf1.len,location(valid.data));
+
+      // Reset SFM disk mode in all cases
+      interp_activate_real_time(false); // Inform interpreter that real time loop is now running.
+      interp_set_rtp_is_running(false); // Can load sound files
+
+      if i then return 1;
+   end;
+   else do; /* prepare to generate by zeroing out file */
+      do i=0 to sector.size*buf1.len-1; databuf1(i)=0; end; /* zero the buffer */
+      call copy_vector(location(valid.data),zero.vector,3); /* init valid.data */
+
+      i=0;
+      do while (not break.rcvd) /* loop over sectors */
+      and (compare_vectors(location(total.data),location(valid.data),3)>0);
+
+         call sub_len_from_len(location(total.data),location(valid.data),length); /* length to write out */
+         if ((length(0) IGT 0)
+         or ((length(0)=0) and (length(1) IGT buf1.len))) then do;
+            length(0)=0; length(1)=buf1.len; length(2)=0; /* limit to buffer size */
+         end;
+
+         call add_len_to_addr(location(valid.data),location(f.data.index),temp); /* temporary address to read from */
+         call writedata(temp(0),temp(1),databuf1,length(1)*sector.size); /* write out zeroed buffer */
+         call add_len_to_len(length,location(valid.data),location(valid.data)); /* update location */
+
+         new.i=i+length(1); /* compute position after write */
+         do while i < new.i; /* loop over positions up to new.i */
+            i=i+1;
+            if (i&"3")=0 then call plot_env(0,0);  /* plot every 4 sectors */
+         end;
+      end; /* of loop over sectors */
+   end; /* of zero out file */
+
+   /* $PAGE */
+
+   temp(0)=0; temp(1)=0; temp(2)=0;
+
+   call copy_vector(cursor.time,temp,3); /* put cursor on plot */
+   call pixel_and_port(cursor.time);
+   call env_cursor(x.pixel,port.number);
+
+   transparent_mode;
+
+   /* fill in beginning and end symbols */
+   if compare_vectors(temp,location(valid.data),2)=0 then do; /* no data collected */
+      error.flag=e.no.data;
+   end;
+   else do;
+      call add_symbol(temp,'Origin');
+      call copy_vector(mark.start,temp,3); /* copy into start pointer */
+      temp(2)=1;
+      call sub_len_from_len(location(valid.data),temp,temp);
+      call index_to_time(location(data.end),temp,period.index);
+
+      call add_symbol(location(data.end),'End');
+      call copy_vector(mark.end,location(data.end),3); /* copy to end pointer */
+
+      call add_len_to_len(location(valid.data),data.offset.vector,location(f.tlength));  /* compute length of file */
+
+      if not file.truncate(recordfile.name,f.type,f.tlen.low) then do;
+         error.flag=e.sys.error;
+         return 1;
+      end;
+      else if (d66.status&"1000")<>0 then error.flag=e.overrun;
+      else if flag<>0                then error.flag=s.finished;
+   end;
+
+   call cursor_restore;
+   call copy_vector(location(total.data),location(valid.data),3); /* in truncated file, these are equal */
+
+   if flag then do; /* mark as sampled or generated */
+      call caption_assign('Sampled data');
+      file.data.type=sampled.data;
+   end;
+   else do;
+      call caption_assign('Generated data');
+      file.data.type=created.data;
+   end;
+
+   call writedata(f.drive,f.sector,location(f.headptr),
+                  (heading.length+symbol.sectors)*sector.size);
+   record.flag=2; /* finished recording */
+   return 0;
+end record;

@@ -1,1 +1,113 @@
-/* 24-KEY  $TITLE  Old Clavier Keyboard Polling and Sound File Playback Routines *//* Copyright 1985 by New England Digital Corporation */setup_to_play: proc(start.time,stop.time); /* loads attack buffer for current sound file */  dcl start.time    fixed array; /* time to begin playing from */  dcl stop.time     fixed array; /* time to play to */  dcl temp      (2) fixed;  ready.to.play=0; /* init to not ready state */  if not winchester(shr(f.drive,8)) then return; /* must be a winchester */  /* start or end time is messed up */  if (compare_vectors(location(data.end),stop.time,3)<0)  or (compare_vectors(start.time,stop.time,3)>0) then error.flag=e.times;  else do; /* finish up setup */     call time_to_index(start.time,startsamp,period.index); /* convert seconds to samples */     call time_to_index(stop.time, stopsamp, period.index); /* convert seconds to samples */     call add_len_to_addr(startsamp,location(f.data.index),temp);  /* compute addr of first sample to play */     call copy_vector(startsamp,temp,3);     call add_len_to_addr(stopsamp,location(f.data.index),temp);  /* compute addr of last sample to play */     call copy_vector(stopsamp,temp,3);     call zero_drives(startsamp); /* position drive heads over best tracks */     call load_attack_buffer(startsamp,stopsamp); /* setup attack buffers for sound file */     ready.to.play=1; /* sound is ready to play */  end;end setup_to_play;play:  proc(period); /* play current sound file at specified playback rate */  dcl period fixed; /* sampling period to use on playback */  if ready.to.play<>0 /* play the samples */  then call windac(period,startsamp,stopsamp,databuf1,buf1.len);end play;/* $SUBTITLE  Routine to Create Keyboard Tuning Scale */set_scale:proc; /* computes keyboard.scale and keyboard.mask for given octave base */   dcl ratio   floating;   dcl p       floating; /* note:  pitch 3.09=a440 */                 dcl (i,j,k) fixed;   call copy_vector(location(addr(p)),location(octave),2); /* put octave base from set menu into local var */   if p=0 then p=3.09; /* use a440 as a default */   i=int(p);   p=i+(p-i)/.12;   p=p-1;   p=exp(log.of.2*p)*period.index;   ratio=exp(-log.of.2/12.);   do i=0 to 11; /* generate bottom octave sample periods */      keyboard.scale(i)=int(p+.5); p=p*ratio;   end;   do j=1 to num.octaves-2; /* loop over upper octaves */     do i=0 to 11;          /* loop over keys in upper octaves */       keyboard.scale(j*12+i)=shr(keyboard.scale(12*(j-1)+i),1);     end;   end;   keyboard.scale((num.octaves-1)*12)=shr(keyboard.scale((num.octaves-2)*12),1);   do j=0 to (num.octaves-1)*12; /* zero out illegal pitches */      if (keyboard.scale(j) ILT (clock.rate/max.sampling.rate)) /* too high of a sampling rate */      or (keyboard.scale(j) IGT max.period)                     /* too low  of a sampling rate */      then keyboard.scale(j)=0;   end;   call setup_to_play(mark.start,mark.end); /* initialize attack buffer */end set_scale;/* $SUBTITLE  Play New Notes Pressed on Clavier Keyboard */playkeyboard:  proc; /* start new notes from keyboard */   dcl j       fixed;   dcl v.s.min lit '20'; /* velocity sensitivity minimum  */   dcl v.s.con lit '25'; /* velocity sensitivity constant */   active.note.key=(-1); /* init to no active key */   do while (new.note.ptr<=new.note.list(0))&(active.note.key=(-1)); /* loop over key changes */      if new.note.list(new.note.ptr)=1 /* have a new note */      then do;         j=new.note.key#(new.note.ptr)-12;         if vel.kbd<>0 then do;            if (j>=0) and (j<61) and (keyboard.scale(j)<>0) then do;               active.note.key=j; /* save its key # */               active.note.vel=v.s.min; /* not using velocity info */               /*active.note.vel=new.note.vel(new.note.ptr)-v.s.min;*/ /* and its velocity */               /* map transit time to volume - t=0 yields 255 volume, at t=512, volume=13 */               if active.note.vel<v.s.min then active.note.vel=v.s.min; /* limit to defined range */               load (1+v.s.con); mul 255; j=res;               div (active.note.vel+v.s.con-v.s.min+1); /* 255 * (min+const)/(time+const) - offset hyperbola */               active.note.vel=res; /* store velocity mapping to volume for new note */            end;         end;         else if keyboard.scale(j)<>0 then do;            active.note.key=j;   /* save its key # */            active.note.vel=255; /* always use max volume */         end;      end;      new.note.ptr=new.note.ptr+1;   end;   new.note.list(0)=0; /* done with list */   if  active.note.key<>(-1)                         /* have a new note to play */   then call windac(keyboard.scale(active.note.key), /* play at correct pitch */                    startsamp,stopsamp,databuf1,buf1.len);end playkeyboard;
+/* 24-KEY  $TITLE  Old Clavier Keyboard Polling and Sound File Playback Routines */
+
+/* Copyright 1985 by New England Digital Corporation */
+
+setup_to_play: proc(start.time,stop.time); /* loads attack buffer for current sound file */
+  dcl start.time    fixed array; /* time to begin playing from */
+  dcl stop.time     fixed array; /* time to play to */
+  dcl temp      (2) fixed;
+
+  ready.to.play=0; /* init to not ready state */
+  if not winchester(shr(f.drive,8)) then return; /* must be a winchester */
+
+  /* start or end time is messed up */
+  if (compare_vectors(location(data.end),stop.time,3)<0)
+  or (compare_vectors(start.time,stop.time,3)>0) then error.flag=e.times;
+  else do; /* finish up setup */
+     call time_to_index(start.time,startsamp,period.index); /* convert seconds to samples */
+     call time_to_index(stop.time, stopsamp, period.index); /* convert seconds to samples */
+     call add_len_to_addr(startsamp,location(f.data.index),temp);  /* compute addr of first sample to play */
+     call copy_vector(startsamp,temp,3);
+     call add_len_to_addr(stopsamp,location(f.data.index),temp);  /* compute addr of last sample to play */
+     call copy_vector(stopsamp,temp,3);
+     call zero_drives(startsamp); /* position drive heads over best tracks */
+     call load_attack_buffer(startsamp,stopsamp); /* setup attack buffers for sound file */
+     ready.to.play=1; /* sound is ready to play */
+  end;
+end setup_to_play;
+
+play:  proc(period); /* play current sound file at specified playback rate */
+  dcl period fixed; /* sampling period to use on playback */
+
+  if ready.to.play<>0 /* play the samples */
+  then call windac(period,startsamp,stopsamp,databuf1,buf1.len);
+  interp_activate_real_time(false); // Inform interpreter that real time loop is now running.
+  interp_set_rtp_is_running(false); // Can load sound files
+end play;
+
+/* $SUBTITLE  Routine to Create Keyboard Tuning Scale */
+
+set_scale:proc; /* computes keyboard.scale and keyboard.mask for given octave base */
+   dcl ratio   floating;
+   dcl p       floating; /* note:  pitch 3.09=a440 */              
+   dcl (i,j,k) fixed;
+
+   call copy_vector(location(addr(p)),location(octave),2); /* put octave base from set menu into local var */
+   if p=0 then p=3.09; /* use a440 as a default */
+
+   i=int(p);
+   p=i+(p-i)/.12;
+   p=p-1;
+   p=exp(log.of.2*p)*period.index;
+   ratio=exp(-log.of.2/12.);
+
+   do i=0 to 11; /* generate bottom octave sample periods */
+      keyboard.scale(i)=int(p+.5); p=p*ratio;
+   end;
+
+   do j=1 to num.octaves-2; /* loop over upper octaves */
+     do i=0 to 11;          /* loop over keys in upper octaves */
+       keyboard.scale(j*12+i)=shr(keyboard.scale(12*(j-1)+i),1);
+     end;
+   end;
+   keyboard.scale((num.octaves-1)*12)=shr(keyboard.scale((num.octaves-2)*12),1);
+
+   do j=0 to (num.octaves-1)*12; /* zero out illegal pitches */
+      if (keyboard.scale(j) ILT (clock.rate/max.sampling.rate)) /* too high of a sampling rate */
+      or (keyboard.scale(j) IGT max.period)                     /* too low  of a sampling rate */
+      then keyboard.scale(j)=0;
+   end;
+   call setup_to_play(mark.start,mark.end); /* initialize attack buffer */
+end set_scale;
+
+/* $SUBTITLE  Play New Notes Pressed on Clavier Keyboard */
+
+playkeyboard:  proc; /* start new notes from keyboard */
+   dcl j       fixed;
+   dcl v.s.min lit '20'; /* velocity sensitivity minimum  */
+   dcl v.s.con lit '25'; /* velocity sensitivity constant */
+
+   active.note.key=(-1); /* init to no active key */
+
+   do while (new.note.ptr<=new.note.list(0))&(active.note.key=(-1)); /* loop over key changes */
+      if new.note.list(new.note.ptr)=1 /* have a new note */
+      then do;
+         j=new.note.key#(new.note.ptr)-12;
+         if vel.kbd<>0 then do;
+            if (j>=0) and (j<61) and (keyboard.scale(j)<>0) then do;
+               active.note.key=j; /* save its key # */
+               active.note.vel=v.s.min; /* not using velocity info */
+               /*active.note.vel=new.note.vel(new.note.ptr)-v.s.min;*/ /* and its velocity */
+
+               /* map transit time to volume - t=0 yields 255 volume, at t=512, volume=13 */
+               if active.note.vel<v.s.min then active.note.vel=v.s.min; /* limit to defined range */
+               load (1+v.s.con); mul 255; j=res;
+               div (active.note.vel+v.s.con-v.s.min+1); /* 255 * (min+const)/(time+const) - offset hyperbola */
+               active.note.vel=res; /* store velocity mapping to volume for new note */
+            end;
+         end;
+         else if keyboard.scale(j)<>0 then do;
+            active.note.key=j;   /* save its key # */
+            active.note.vel=255; /* always use max volume */
+         end;
+      end;
+      new.note.ptr=new.note.ptr+1;
+   end;
+   new.note.list(0)=0; /* done with list */
+
+   if  active.note.key<>(-1)                         /* have a new note to play */
+   then call windac(keyboard.scale(active.note.key), /* play at correct pitch */
+                    startsamp,stopsamp,databuf1,buf1.len);
+   interp_activate_real_time(false); // Inform interpreter that real time loop is now running.
+   interp_set_rtp_is_running(false); // Can load sound files
+end playkeyboard;

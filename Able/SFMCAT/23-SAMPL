@@ -1,1 +1,1501 @@
-/* 23-SAMPL  $TITLE  Main Sampling and Desampling Routines *//* Copyright 1985 by New England Digital Corporation */dcl d66    lit '"66"';dcl d67    lit '"67"';dcl d105   lit '"105"';dcl d106   lit '"106"';dcl d107   lit '"107"'; dcl r1     lit '"301"';dcl mr1i   lit '"361"';dcl r2     lit '"302"';dcl noper  lit 'write(r0)=read(r0)'; /* no operation */dcl rconverter     lit 'read(d67)';  /* ADC interface address */dcl wconverter     lit 'write(d67)'; /* DAC interface address *//* D66 REGISTER SELECT LITERALS */dcl select      lit 'write(d66)'; /* write command to D66 */dcl card0       lit '"10"';       /* card 0 bits */dcl data.reg    lit '0';          /* data register */dcl control.reg lit '1';          /* control register */dcl divisor.reg lit '2';          /* time base divisor register - 12 bit number is 30 nsec periods-2 periods. (598 = 50 kHz sample rate) */dcl volume.reg  lit '3';          /* DAC volume register */dcl outptr.reg  lit '4';          /* output buffer pointer register */dcl inptr.reg   lit '5';          /* input  buffer pointer register */dcl outlim.reg  lit '6';          /* output buffer limit   register */dcl inlim.reg   lit '7';          /* input  buffer limit   register *//*  Control Register Bits:.     0  Run Input  Buffer (enable ADC).     1  Run Output Buffer (enable DAC) .     2  Copy (copy ADC into DAC).     5  Initialize ADC (must reset to 0).     6  Initialize DAC (must reset to 0) .     7  Disable time base.     8  Enable input  interrupt when data available.     9  Enable output interrupt when data available*/dcl d66.status     fixed; /* current state of D66 */dcl stop_sampling  lit 'do;select=card0+control.reg;wconverter=0;sampling=0;end;'; /* force stop condition *//* globals used to play back a sound file */dcl new.note.ptr    fixed; /* index to current position in NEW.NOTE.LIST */dcl ready.to.play   fixed; /* 1 if okay to call PLAY, otherwise 0 */dcl active.note.key fixed; /* key # of currently playing sound, (-1) if no key active */dcl active.note.vel fixed; /* velocity of active note (0-255 range) */dcl startsamp   (2) fixed; /* absolute disk addr of first sample to play */dcl stopsamp    (2) fixed; /* absolute disk addr of last  sample to play */dcl ms.size         fixed; /* temporary storage of sector size of current physical drive */dcl ls.size         fixed;dcl play.rel        fixed; /* true when key being played is released */dcl keyboard.scale((num.octaves-1)*12) fixed; /* holds sampling rate for each key */dcl rte.max     lit '225';dcl dr          lit '"130"';dcl cr          lit '"131"';dcl ad          lit '"163"';/* $SUBTITLE Winchester Disk Routines *//*  For speed reasons, readdata and writedata cannot be used in WINDAC    and WINADC.  So-this duplicates the logic in readdata and writedata */dcl use.scsi                fixed; /* 1 for SCSI hardware, 0 for d107 */dcl current.interface       fixed; /* d107 or d24 select    */dcl current.id              fixed; /* target id for SCSI    */dcl current.drive           fixed; /* drive # 0 or 1        */dcl ms.current.sector       fixed; /* selected physical sector on current drive */dcl ls.current.sector       fixed;dcl (ms.current.low, ls.current.low)  fixed; /* sector limits of current drive */dcl (ms.current.high,ls.current.high) fixed;controller_and_drive:proc(sector); /* determine drive and controller for given sector */   dcl sector     fixed array; /* desired sector */   dcl config.ptr fixed; /* ptr into configuration area for drive */   set_error: proc; /* sets error conditions */      current.interface = 7; current.drive = 7;      ms.current.sector = -1; ls.current.sector = -1;      ms.current.high = 0; ls.current.high = 0;      ms.current.low  = 0; ls.current.low  = 0;   end set_error;   if find_device(1) = 0 then do; /* if device is not configured */      call set_error; return;   end;         config.ptr = mapsector((sector(0)&"377"),sector(1),shr(sector(0),8)); /* get physical sector and drive */   if config.ptr = 0 then do; /* logical sector too large to be mapped to device */      call set_error; return;   end;   use.scsi=shr(core(config.ptr+s#devtyp),8)&3; /* look up scsi info in case winchester */   current.interface = core(config.ptr + s#devadr)&"17"; /* controller */   current.drive = core(config.ptr + s#devadr)&"007400"; /* drive */   if use.scsi then do;      current.id = current.interface; /* scsi target id */      current.interface = shr(core(config.ptr + s#devadr),4)&"17"; /* controller */   end;   ms.current.high = (sector(0)&"377") + RemSecMSW; /* logical sector end of this drive */   ls.current.high = sector(1) + RemSecLSW;   if ls.current.high ILT sector(1) then ms.current.high = ms.current.high + 1;   if ls.current.high = 0 then ms.current.high = ms.current.high - 1;   ls.current.high = ls.current.high-1;   ms.current.low = (sector(0)&"377") - PhySecMSW; /* logical sector start of this drive */   if sector(1) ILT PhySecLSW then ms.current.low = ms.current.low - 1;   ls.current.low = sector(1) - PhySecLSW;   ms.current.sector = PhySecMSW; /* physical current sector location */   ls.current.sector = PhySecLSW;end controller_and_drive;/* $page */zero_drives:  proc(sector); /* set heads at start of each disk drive (except drive containing 'sector') */   dcl sector      fixed array; /* starting sector for later operation */   dcl devtyp      fixed; /* device ID code for desired logical drive */   dcl ms.next.sec fixed; /* sector number of first sector on next drive */   dcl ls.next.sec fixed;   dcl buf (0)     fixed; /* dummy buffer */   dcl config.ptr  fixed; /* ptr into configuration area */      call readdata(sector(0),sector(1),buf,1); /* force seek to desired track */   config.ptr=find_device(1);                  /* look up ptr to correct config block */   devtyp    =core(config.ptr+s#devtyp)&"377"; /* save device ID code for this drive */   load core(config.ptr+s#seccyl);    /* compute sectors on this drive */   mul  core(config.ptr+s#totcyl);   ms.next.sec=read(4);               /* NEXT.SEC holds sec # of first sec on next drive */   ls.next.sec=res;   config.ptr=config.ptr+s#blklen;    /* step to next config block */   do while (config.ptr ILT (c#contab+c#strend))        /* not at end of config table */   and      (devtyp=(core(config.ptr+s#devtyp)&"377")); /* still on same logical device */      if ((ms.next.sec IGT (sector(0)&"377")) or ((ms.next.sec IEQ (sector(0)&"377")) and (ls.next.sec IGT sector(1))))      then call readdata(((sector(0)&"177400") or ms.next.sec),ls.next.sec,buf,1); /* force seek to track zero */      load core(config.ptr+s#seccyl); /* compute size of this next disk */      mul  core(config.ptr+s#totcyl);      ms.next.sec=ms.next.sec+read(4); /* keep track of first sector on next disk */      ls.next.sec=ls.next.sec+res;      if ls.next.sec ILT res then ms.next.sec=ms.next.sec+1;      config.ptr=config.ptr+s#blklen; /* step to next config block */   end;end zero_drives;/* $SUBTITLE  Sample to Winchester Disk Routine *//* This preliminary version has the following shortcomings:.     1. It only works with one logical winchester disk drive (drive 0)..     2. There is no threshold dectection to initiate sampling.  The.        sampling starts as soon as the procedure is called..     3. If an error is encountered (such as the Winchester Disk is.        not turned on) the program will print an error message and.        then stop.   Better error recovery should be integrated into.        the user program..     4. These procedures disable interrupts when they are active. */ winadc:proc(period,startarr,numsecarr,buf,bufsec,validarr) fixed SWAP; /* adc to winchester */  dcl period      fixed; /* period between samples, units of 1/30 of a microsecond */  dcl startarr    array; /* starting disk address for new file */  dcl numsecarr   array; /* length of new file */  dcl buf         array; /* use this buffer */  dcl bufsec      fixed; /* number of sectors in passed buffer */  dcl validarr    array;   dcl sector(2)    fixed; /* current sector */  dcl lastsec(2)   fixed; /* last sector to process */  dcl inptr        fixed; /* input ptr to buffer */  dcl outptr       fixed; /* output ptr to buffer */  dcl inlength     fixed; /* number of words in rotary buffer */  dcl ptrmax       fixed; /* end of buffer */  dcl stopadc      fixed;  dcl ms.scsicount fixed;  dcl ls.scsicount fixed;  dcl max                 fixed;  dcl max.len             lit '10';  dcl max.list(max.len-1) fixed;  dcl (max.in,max.out)    fixed; /* in & out ptrs */  dcl max.ctr             fixed; /* counter */  dcl (i,j,k)             fixed;  dcl a  lit 'write(d107)=read(mr0i)'; /* mr0i to d107 */  dcl b  lit 'a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;';  dcl c  lit 'write(ScsiWord)=read(mr0i)';  dcl d  lit 'c;c;c;c;c;c;c;c;c;c;c;c;c;c;c;c;';   dcl q0 lit 'write("201")=rconverter'; /* D67 -> LOA1  */   dcl q1 lit 'write(mr0i)=read("301")'; /* R1 -> MR0i */                  dcl q2 lit 'write("337")=read("201")'; /* Im(1) -> RTPL */  dcl q3 lit 'write("221")=read("277")'; /* Im(-1) -> XOR1 */  dcl q4 lit 'write("255")=read("302")'; /* r2 -> TSUB1 */  dcl q5 lit 'write("333")=read("201")'; /* Im(1) -> RTMI */  dcl q6 lit 'write("302")=read("301")'; /* R1 -> r2 */  dcl q7 lit 'write(mr0i)=rconverter'; /* D14 -> MR0i */  dcl q  lit 'q0;q1;q2;q3;q4;q5;q6;q7;q7;q7'; /* 4 transfers, one max value check */  dcl p  lit 'q;q;q;q'; /* 16 transfers, 4 max checks */  dcl r  lit 'q;q7;q7;q7;q7;q7;q7;q7;q7;q7;q7;q7;q7'; /* 16 transfers, 1 max check */  /* $SUBTITLE Initialization Code */  do i=0 to 2; sector(i)=startarr(i); end;  if systyp<>1 then do; /* make sure this is a winchester system */    error.flag=e.winch; return 1;  end;  disable;  call zero_drives(sector);          /* position heads at start of disk for other drives */  call controller_and_drive(sector); /* lookup controller and drive */  select=card0 + control.reg;  wconverter="170"; /* send out initialize lines */  select=card0 + inptr.reg;  wconverter=0; /* zero the input pointers */  select=card0 + inlim.reg;  wconverter=384; /* set input limit - 1.5 sectors at a time */  select=card0 + divisor.reg;  wconverter=period-2; /* set sampling rate */  select=card0 + control.reg;  wconverter=1; /* run input buffer (enable ADC) */  j=rconverter; j=rconverter; j=rconverter; /* TOSS FIRST FEW TRASH SAMPLES */  do j=0 to 255;        /* read in first 256 samples here to start ball rolling */     buf(j)=rconverter; /* use hang mode */  end;  inptr=256; outptr=0; inlength=256; /* initialize pointers */  lastsec(0) = sector(0) + (numsecarr(0)&"377"); /* compute last sector number */  lastsec(1) = sector(1) + numsecarr(1);  if lastsec(1) ILT sector(1) then lastsec(0)=lastsec(0) + 1;  d66.status=0;         /* initialize */  stopadc=0;  ptrmax=shl(bufsec,8); /* get number of words in rotary buffer */  max.in=0; max.out=0;  /* no maxes in max.list */  max.ctr=0;            /* initialize counter */  max=0;                /* initialize max */  /* $SUBTITLE  Main Sampling Loop */  if use.scsi<>0 then do;         /* issue long scsi write command here */     i = S$DeviceBusy;     do while (i = S$DeviceBusy) or (i = S$ArbFailed) or (i = S$BadBusState);        i = ScsiConnect(current.interface, S.Initiator, current.id, shr(current.drive,8));        if i = S$BadBusState then do;          /* Clear bus if it is out of whack */           error.flag=e.winch;            call ScsiAbort;        end;     end;     if i <> S$GoodConnect then do;        error.flag=e.winch; enable; return 1;     end;     /* Send SCSI Command */     ms.scsicount = ms.current.high-(sector(0)&"377"); /* number of sectors left on this drive */     if ls.current.high ILT sector(1) then ms.scsicount = ms.scsicount-1;     ls.scsicount = ls.current.high-sector(1);      ls.scsicount = ls.scsicount + 1; /* boundary condition */     if ls.scsicount = 0 then ms.scsicount = ms.scsicount + 1;     if ((ms.scsicount > 0) or ((ms.scsicount = 0) and (ls.scsicount IGT 32))) then do;        ms.scsicount = 0; ls.scsicount = 32; /* limit count to 32 sectors */     end;     write(ScsiByte) = S$ExtendedWrite;      /* SCSI Operation Code */     write(ScsiByte) = shr(current.drive,8 - 5); /* Target LUN */     write(ScsiWord) = ms.current.sector;    /* Logical Block Address (MSW) */     write(ScsiWord) = ls.current.sector;    /* Logical Block Address (LSW) */     write(ScsiByte) = 0;                    /* Reserved */     write(ScsiWord) = ls.scsicount;         /* this many blocks */     write(ScsiByte) = 0;                    /* Control byte */     do while (read(ScsiBus)&S$Req)=0; end;       if (read(ScsiBus)&S$SigMask)<>S$DataOut then do;  /* make sure data out */        i=read(ScsiWord);        error.flag=e.winch; enable; return 1;     end;  end;  do while (((sector(0) ILT lastsec(0)) or  ((sector(0) IEQ lastsec(0)) and (sector(1) ILT lastsec(1)))) and (stopadc=0)); /* loop until stop or last sector */     /* note - at this point in the loop,  we now that REQ is low        and SCSI is in the DATA OUT phase                          */    if use.scsi=0 then do;         /* d107 */       write(d105)=current.interface; /* select drive 0 */       if (read(d105)&8)=0 then do; /* test if controller present */         error.flag=e.sys.error; enable; return 1;       end;         do while read(d106)<>0; end;    /* wait for rdy to return from earlier write */       write(d107)="13"+current.drive; /* write command */       /* NOTE:  380 MICROSECONDS AVAILABLE HERE EVERY SECTOR */       write(d107)=ls.current.sector; /* sector number */       /* NOTE:  200 MICROSECONDS AVAILABLE HERE EVERY SECTOR */       if read("51") then do; /* output check */         write("51")=0; if idle.tty=0 then call boot_tty;       end;       do i=0 to 15;          write(r0)=addr(buf(outptr)); /* dump from buf(outptr) */          b;           outptr=outptr+16;       end;    end;    else do;                           /* scsi */       do i=0 to 15;          write(r0)=addr(buf(outptr)); /* dump from buf(outptr) */          d;                           /* write data to scsi    */          outptr=outptr+16;       end;    end;    /* NOTE: 5 & 1/4" WINCH HAS 2.1 MILLISECONDS AVAILABLE HERE */    /* now that the winchester is off & running, we have some time to compute */    if outptr=ptrmax then outptr=0; /* rotary buffer                */    inlength=inlength-256;          /* fewer words in rotary buffer */    sector(1)=sector(1)+1;          /* advance to next sector */    if sector(1)=0 then sector(0)=sector(0)+1;    ls.scsicount=ls.scsicount-1;          /* in case scsi           */    validarr(1)=validarr(1)+1;      /* count how many sectors read */    if validarr(1)=0 then validarr(0)=validarr(0)+1;    if read("51") then do;    /* output check */      write("51")=0; if idle.tty=0 then call boot_tty;    end;    if (inlength<256)  /* if less than full sector in rotary buffer */    or ((inlength<=ptrmax-384)&((read(d66)&256)<>0)) /* or if room in buffer and */    then do; /* we won't hang reading converter */      if (break.rcvd)&((read(d66)&256)=0) then stopadc=1;      else do; /* LOOP TIME 2.06 MS. FOR 384 WORD TRANSFER ADC TO MEMORY WITH MAX CHECK */        if (inlength&63)<>0 then do; /* bring up to multiple of 64 */          j=inlength;                /* save for later computation */          d66.status = d66.status\read(d66);          do while (inlength&63)<>0; /* bring up to multiple of 64 words */            write(r0)=addr(buf(inptr)); /* get address of input buffer */            write(r2)=max;            r; /* 16 transfers, 1 max check */            max=read(r2);            inptr=inptr+16; /* 16 words transferred */            inlength=inlength+16;          end;          if inptr=ptrmax then inptr=0;          max.ctr=max.ctr+inlength-j; /* max from 64 words has been computed */          if max.ctr>=1024 then do; /* store max for later plotting */            max.list(max.in)=max;            max=0;            max.in=max.in+1;            if max.in=max.len then max.in=0;            max.ctr=max.ctr-1024;          end;        end;        d66.status = d66.status\read(d66); /* or in overrun status - check at end */        do j=0 to 5; /* transfer 384 words from adc to memory */          write(r0)=addr(buf(inptr));          write(r2)=max;          r; r; r; r; /* 64 transfers (4 max checks) */          max=read(r2);          inptr=inptr+64; /* 64 words transferred */          if inptr=ptrmax then inptr=0;          inlength=inlength+64;          max.ctr=max.ctr+64; /* max from 64 words has been computed */          if max.ctr>=1024 then do; /* store max for later plotting */            max.list(max.in)=max;            max=0;            max.in=max.in+1;            if max.in=max.len then max.in=0;            max.ctr=max.ctr-1024;          end;          if read("51") then do; /* output check */            write("51")=0; if idle.tty=0 then call boot_tty;          end;        end; /* of transfer 384 words */      end;    end;    else do; /* we are caught up - draw ENV display (2.0 ms. to draw line) */      if (read("51")&2)<>0 then do; /* must check char from terminal */        j=read("50")&"177";        if (j=0) or (j=A.S) or (j=A.S+32) then break.rcvd=1; /* test for break char */        if break.rcvd then do; /* stop recording */          select=card0 + control.reg; /* control register */          wconverter=0; /* stop the adc */        end;        end;      if max.in<>max.out then do; /* set up for plotting */        call plot_env(-max.list(max.out),max.list(max.out));         max.out=max.out+1;        if max.out=max.len then max.out=0;      end;    end; /* of draw ENV display */        /* NOTE: 130 MICROSECONDS AVAILABLE BETWEEN WRITES FOR 5 & 1/4 */    do while 1; /* loop here - wait for disk ready - use goto for fast exit */      if use.scsi=0 then do;         if (read("106")&2)<>0 then GOTO DISK_READY; /* read return code */      end;      else do;         if (read(ScsiBus)&S$Req)<>0 then GOTO DISK_READY;      end;      if (inlength<>ptrmax)&((read(d66)&256)<>0) then do; /* if 384 words in adc, let's read some in unless rotary buffer is filled */        d66.status = d66.status\read(d66);        k=addr(buf(inptr)); /* get address of input buffer */        if use.scsi=0 then do;           if (read("106")&2)<>0 then GOTO DISK_READY; /* read return code */        end;        else do;           if (read(ScsiBus)&S$Req)<>0 then GOTO DISK_READY;        end;        write(r0)=k;        write(r2)=max;        r; /* 16 words, 1 max check */        max=read(r2);        inptr=inptr+16; /* 16 words transferred */        if inptr=ptrmax then inptr=0;        inlength=inlength+16;        max.ctr=max.ctr+16; /* max from 64 words has been computed */        if max.ctr>=1024 then do; /* store max for later plotting */          max.list(max.in)=max;          max=0;          max.in=max.in+1;          if max.in=max.len then max.in=0;          max.ctr=max.ctr-1024;        end;      end;      if use.scsi=0 then do;         if (read("106")&2)<>0 then GOTO DISK_READY; /* read return code */      end;      else do;         if (read(ScsiBus)&S$Req)<>0 then GOTO DISK_READY;      end;      if read("51") then do; /* check for terminal input */        write("51")=0;        if idle.tty=0 then do;          if rptr=sptr then idle=1;          else do;            write("50")=out.buf(rptr);            rptr=(rptr+1)&(out.buf1.len-1);            idle=0;          end;          end;          end; /* of terminal input check */    end; /* of do while 1 */    DISK_READY:    if use.scsi=0 then do;       j=read(d107)&255; /* get return code */       if j<>0 then do; /* write error */         error.flag=e.winch; if (j&128)<>0 then break.rcvd=1; /* halt if fatal error */       end;    end;    if ((sector(0) ILT lastsec(0)) or ((sector(0) IEQ lastsec(0)) and (sector(1) ILT lastsec(1)))) then do; /* more to go - set up for it */       if ((((sector(0)&"377") IGT ms.current.low) or (((sector(0)&"377") IEQ ms.current.low) and (sector(1) IGE ls.current.low))) /* greater than low limit */       and (((sector(0)&"377") ILT ms.current.high) or (((sector(0)&"377") IEQ ms.current.high) and (sector(1) ILE ls.current.high))) /* less than high limit */       and ((use.scsi=0) or ((ms.scsicount<>0) or (ls.scsicount<>0))))       then do;          ms.current.sector=(sector(0)&"377")-ms.current.low;          if sector(1) ILT ls.current.low then ms.current.sector=ms.current.sector-1;          ls.current.sector=sector(1)-ls.current.low; /* offset on same drive */          if use.scsi<>0 then do;             if (read(ScsiBus)&S$SigMask)<>S$DataOut then do; /* make sure data out */                i=read(ScsiWord);                error.flag=e.winch; enable; return 1;             end;          end;       end;       else do;          call controller_and_drive(sector); /* must look up drive */          if use.scsi then do;             i = read(ScsiWord);             /* get status from last write */             if i<>0 then do;                /* bad */                error.flag=e.winch; enable; return 1;             end;             i = S$DeviceBusy;             do while (i = S$DeviceBusy) or (i = S$ArbFailed) or (i = S$BadBusState);                i = ScsiConnect(current.interface, S.Initiator, current.id, shr(current.drive,8));                if i = S$BadBusState then do;          /* Clear bus if it is out of whack */                   error.flag=e.winch;                    call ScsiAbort;                end;             end;             if i <> S$GoodConnect then do;                error.flag=e.winch; enable; return 1;             end;             /* Send SCSI Command */             ms.scsicount = ms.current.high-(sector(0)&"377"); /* number of sectors left on this drive */             if ls.current.high ILT sector(1) then ms.scsicount = ms.scsicount-1;             ls.scsicount = ls.current.high-sector(1);              ls.scsicount = ls.scsicount + 1; /* boundary condition */             if ls.scsicount = 0 then ms.scsicount = ms.scsicount + 1;             if ((ms.scsicount > 0) or ((ms.scsicount = 0) and (ls.scsicount IGT 32))) then do;                ms.scsicount = 0; ls.scsicount = 32; /* limit count to 32 sectors */             end;             write(ScsiByte) = S$ExtendedWrite;      /* SCSI Operation Code */             write(ScsiByte) = shr(current.drive,8 - 5); /* Target LUN */             write(ScsiWord) = ms.current.sector;    /* Logical Block Address (MSW) */             write(ScsiWord) = ls.current.sector;    /* Logical Block Address (LSW) */             write(ScsiByte) = 0;                    /* Reserved */             write(ScsiWord) = ls.scsicount;         /* this many blocks */             write(ScsiByte) = 0;                    /* Control byte */             do while (read(ScsiBus)&S$Req)=0; end;               if (read(ScsiBus)&S$SigMask)<>S$DataOut then do;  /* make sure data out */                i=read(ScsiWord);                   /* must be in status phase - read it */                error.flag=e.winch; enable; return 1;             end;          end;          /* of another drive (scsi) */       end;             /* sector is off drive     */    end;                /* sector in range         */  end; /* of loop over sectors */  if use.scsi=0 then do;     do while read(d106)<>0; end; /* wait for rdy to return */  end;  else do;     do while ls.scsicount<>0;       /* finish off 32 sector scsi write command */        do i=0 to 255;           write(ScsiWord)=0;        end;        do while (read(ScsiBus)&S$Req)=0; end;          ls.scsicount=ls.scsicount-1;        if ls.scsicount<>0 then do;            /* make sure in data out phase */           if (read(ScsiBus)&S$SigMask)<>S$DataOut then do;  /* make sure data out */              i=read(ScsiWord);                   /* must be in status phase - read it */              error.flag=e.winch; enable; return 1;           end;        end;     end;     i=read(ScsiWord);     if i<>0 then do;        error.flag=e.winch; enable; return 1;     end;  end;  select=card0 + control.reg; /* select control register */  wconverter="170"; /* turn off adc */  break.rcvd=0;  enable;  return 0; /* good status */end winadc;/* $SUBTITLE  Desampling Routines *//* NOTE: Passed Play Buffer must be larger than ATTACK.BUF.SECTORS-8) */dcl attack.buf.sectors                              lit '22'; /* use 1 attack buffer, 26 secs long */dcl attack.buffer(attack.buf.sectors*sector.size-1) fixed; /* attack buf storage */dcl attack.buf.len                                  fixed; /* number of words in attack buffer */load_attack_buffer:proc(start,stop); /* set attack buffer contents */  dcl start     fixed array; /* sector - offset format */  dcl stop      fixed array;  dcl ms.numsec fixed;   dcl ls.numsec fixed;   dcl numwords  fixed;  dcl (i, j)    fixed;  ms.numsec=(stop(0)&"377")-(start(0)&"377"); /* number of sectors to play (includes entire first & last sectors) */  if stop(1) ILT (start(1)+1) then ms.numsec=ms.numsec-1;  ls.numsec=stop(1)-start(1)+1;  if (ms.numsec IGT 0) or (ls.numsec IGT attack.buf.sectors)  then do; /* limit to buffer size */     ms.numsec=0; ls.numsec=attack.buf.sectors;  end;  attack.buf.len=shl(attack.buf.sectors,8); /* useful data in buffer */  numwords=shl(ls.numsec,8);  call readdata(start(0),start(1),attack.buffer,numwords);  if start(2)<>0 then do; /* not on integral sector boundary - throw away first few words */    numwords=numwords-start(2);    attack.buf.len=attack.buf.len-start(2);    do i=0 to numwords-1; /* shift contents of attack buffer */      attack.buffer(i)=attack.buffer(i+start(2));    end;     end;  i=start(0)+ms.numsec;  j=start(1)+ls.numsec-1;  if j ILT (ls.numsec-1) then i=i+1;  if ((i=stop(0)) and (j=stop(1))) then do; /* segment shorter than attack buffer - fill with zeros */    do i=numwords-256+stop(2)+1 to attack.buf.len-1; /* zero out samples not to be played */      attack.buffer(i)=0;    end;  end;end load_attack_buffer;/* $page */windac:proc(period,startarr,endsecarr,play.buf,play.buf.sec) SWAP; /* Winchester to DAC */  dcl period       fixed; /* period between samples, units of 1/30 of a microsecond */  dcl startarr     array; /* disk addr to start playing from */  dcl endsecarr    array; /* disk addr to stop  playing at */  dcl play.buf     array; /* temporary play buffer */  dcl play.buf.sec fixed; /* number of sectors here */  dcl (play.rp,play.sp)    fixed; /* pointers for rotary buffer */  dcl (play.min,play.max)  fixed; /* start and end pointers */  dcl (play.num,play.nlf)  fixed; /* number in buffer & room left */  dcl group.size           lit '256';  dcl sector(2)            fixed; /* starting sector */  dcl period.range         fixed;  dcl clock.limit          fixed;  dcl current.period       fixed;  dcl vibrato.phase.inc    fixed;  dcl vibrato.phase        fixed;  dcl vibrato.depth.factor fixed;  dcl vibrato.ramp         fixed;  dcl p.milliseconds       fixed; /* previous clock */  dcl volume               fixed; /* current value of keyboard envelope */  dcl ms.scsicount         fixed;  dcl ls.scsicount         fixed;  dcl (i,j,k,l,m)          fixed;  dcl a  lit 'write(mr1i)=read(mr0i)';   /* memory to memory */  dcl b  lit 'a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a';  dcl e  lit 'write(mr0i)=read(d107)';   /* d107 to memory */  dcl f  lit 'e;e;e;e;e;e;e;e;e;e;e;e;e;e;e;e';  dcl s.e  lit 'write(mr0i)=read(ScsiWord)';   /* d107 to memory */  dcl s.f  lit 's.e;s.e;s.e;s.e;s.e;s.e;s.e;s.e;s.e;s.e;s.e;s.e;s.e;s.e;s.e;s.e';  dcl g  lit 'wconverter=read(mr0i)';    /* mr0i to converter */  dcl h  lit 'g;g;g;g;g;g;g;g;g;g;g;g;g;g;g;g'; /* 16 mroi to dac */  dcl z  lit 'wconverter=0';  dcl zz lit 'z;z;z;z;z;z;z;z;z;z;z;z;z;z;z;z'; /* 16 zeroes to converter */  /* $SUBTITLE  Clavier and Terminal Polling Routine */  poll:  proc; /* poll keyboard and break key */     dcl i fixed;      if any.kbd<>0 then do; /* have a keyboard in system */        call scan.new.notes; /* look for changes in keyboard */        new.note.ptr=1;      /* reset ptr to start of list */        do while (new.note.ptr<=new.note.list(0))&(play.rel=0)&(break.rcvd=0);           /* if key being played is released, set play.rel   = 1 */           /* if another new keys is pressed,  set break.rcvd = 1 */           if new.note.list(new.note.ptr)=2 then do; /* have a new release */              if (new.note.key#(new.note.ptr)-12)=active.note.key               then play.rel=1; /* set flag to start note decay */              new.note.ptr=new.note.ptr+1; /* step to next change */           end;           else break.rcvd=1; /* have a new.note */        end;        if play.rel<>0 then do while (new.note.ptr<=new.note.list(0))&(break.rcvd=0);           if new.note.list(new.note.ptr)=1  /* have a new key */           then break.rcvd=1;                /* bust out of loop immediately */           else new.note.ptr=new.note.ptr+1; /* step to next change */        end;        call scan.analog.inputs;        rtepedalpos=240-pedal2.pos; /* read real-time effects pedal */        if rtepedalpos<0       then rtepedalpos=0;        if rtepedalpos>rte.max then rtepedalpos=rte.max;        if vel.kbd<>0 then volpedalpos=rte.max; /* no volume pedal on velocity kbd */        else do;           volpedalpos=240-pedal1.pos; /* read volume pedal */           if volpedalpos<0       then volpedalpos=0;           if volpedalpos>rte.max then volpedalpos=rte.max;        end;     end; /* of have a keyboard in system */     if (read("51")&2)<>0 then do; /* check for terminal input */        j=read("50")&"177"; /* get char */        if (j=0) or (j=A.S) or (j=A.S+"40") then break.rcvd=1;     end;  end poll;  /* $SUBTITLE Decay Update Routine */  decay_ramp:  proc; /* update volume for decay and for pedal, perform vibrato, pitch bend update */     dcl (i,j,k) fixed;     if (read(3))<>0 then do; /* time to update clock tick counter */       write(3)=0; milliseconds=milliseconds+clock.inc;     end;     i=milliseconds-p.milliseconds; /* compute time since last update */     if i<>0 then do; /* time for new update */       vibrato.phase=vibrato.phase+vibrato.phase.inc*i;       vibrato.ramp =vibrato.ramp +i;       call angle(vibrato.phase&"177700");       if vibrato.ramp ILT vibrato.attack then do; /* correct for vib attack time */          write(5)=vibrato.depth.factor;          write(6)=vibrato.ramp;          cosine=read(5);          write(7)=vibrato.attack;          cosine=read(5);          sine=sine%cosine;       end;       else do; /* max vib depth has been reached */          sine=sine%vibrato.depth.factor;          vibrato.ramp=vibrato.attack;       end;          if play.rel<>0 then do; /* key has been released */          write(5)=0; write(4)=25; write(7)=25+keyboard.decay.number;          j=-read(5);       /* get time constant */          do k=5 to i by 5; /* loop for each 5 milliseconds */             write(5)=j; write(6)=volume; volume=read(4);          end;       end; /* of decay ramp */       p.milliseconds=milliseconds; /* store new time mark */     end; /* of time to do update */     select=card0 + volume.reg; /* prepare to write new volume */     if any.kbd=0 then wconverter=shr(volume,8); /* no pedals, can write vol directly */     else do; /* must update for pedals */        load volpedalpos; mul volume; i=res; div rte.max; /* scale vol by pedal position */        wconverter=shr(res,8); /* write vol here */        select=card0 + divisor.reg; /* prepare to update for pitch bend */        i=knob.pos-knob.base; /* determine change in knob */        if i<0 then i=(-i); /* take absolute value */        i=i-1; /* +1/-1 unit dead band */        if i<0  then i=0; /* keep value non-negative */        if i>25 then i=25; /* limit to expected max change */        write(5)=i; write(6)=period.range; /* compute knobchange*period.range */        i=read(5); write(7)=25; /* divide by max change */        if knob.pos>knob.base then current.period=period-read(5); /* update for pitch bend */        else                      current.period=period+read(5);        current.period=current.period+sine*rtepedalpos/rte.max; /* update for vibrato - must do signed operation here */        if current.period>max.period  then current.period=max.period; /* apply limits */        if current.period<clock.limit then current.period=clock.limit;        wconverter=current.period-2; /* write new period */      end;      select=card0 + data.reg; /* reset for more data */  end decay_ramp;  /* $SUBTITLE Attack Buffer Loading and Desampling Initialization Code */  /* try to assure that output latch is cleared */  select=card0 + outptr.reg;   wconverter=0;   select=card0 + data.reg;  wconverter=0; /* at least one zero is written */  select=card0 + divisor.reg; /* speed up */  wconverter=10;  if systyp<>1 then do; /* make sure this is a winchester system */    error.flag=e.winch; return;  end;  if play.buf.sec<(attack.buf.sectors-7) then do;    error.flag=e.sys.error; return;      /* play buffer must be larger than attack.buf.sectors-8) */  end;  sector(0)=startarr(0); /* compute first sector to desample */  sector(1)=startarr(1)+attack.buf.sectors; /* compute first sector to desample */  if sector(1) ILT attack.buf.sectors then sector(0)=sector(0)+1;  sector(2)=shl(sector(1),8);  call controller_and_drive(sector); /* locate drive */  disable;  if (((sector(0)&"377") ILT (endsecarr(0)&"377"))   or (((sector(0)&"377") IEQ (endsecarr(0)&"377")) and (sector(1) ILE endsecarr(1)))) then do;     if use.scsi=0 then do;        write(d105)=current.interface; /* select controller */        if read(d105)&8=0 then do;     /* controller not present */          error.flag=e.sys.error; enable; return;        end;        write(d107)=2+current.drive;   /* start to read next sector */        write(d107)=ls.current.sector; /* read sector */     end;     else do;        i = S$DeviceBusy;        do while (i = S$DeviceBusy) or (i = S$ArbFailed) or (i = S$BadBusState);           i = ScsiConnect(current.interface, S.Initiator, current.id, shr(current.drive,8));           if i = S$BadBusState then do;          /* Clear bus if it is out of whack */              error.flag=e.winch;               call ScsiAbort;           end;        end;        if i <> S$GoodConnect then do;           error.flag=e.winch; enable; return;        end;        /* Send SCSI Command */        ms.scsicount = ms.current.high-(sector(0)&"377"); /* number of sectors left on this drive */        if ls.current.high ILT sector(1) then ms.scsicount = ms.scsicount-1;        ls.scsicount = ls.current.high-sector(1);         ls.scsicount = ls.scsicount + 1; /* boundary condition */        if ls.scsicount = 0 then ms.scsicount = ms.scsicount + 1;        if ((ms.scsicount > 0) or ((ms.scsicount = 0) and (ls.scsicount IGT 32))) then do;           ms.scsicount = 0; ls.scsicount = 32; /* limit count to 32 sectors */        end;        write(ScsiByte) = S$ExtendedRead;       /* SCSI Operation Code */        write(ScsiByte) = shr(current.drive,8 - 5); /* Target LUN */        write(ScsiWord) = ms.current.sector;    /* Logical Block Address (MSW) */        write(ScsiWord) = ls.current.sector;    /* Logical Block Address (LSW) */        write(ScsiByte) = 0;                    /* Reserved */        write(ScsiWord) = ls.scsicount;         /* this many blocks */        write(ScsiByte) = 0;                    /* Control byte */     end;  end;  else ls.scsicount = (-1);                     /* no command given */  select=card0 + control.reg;  wconverter="370"; noper;  wconverter="200"; noper;  select=card0 + outptr.reg;  wconverter=0; /* zero output pointers */   select=card0 + outlim.reg;  wconverter=2048-group.size; /* output limit */  play.rel=0; /* key has not been released */  volume=shl(dac.volume,8); /* initialize volume variable */  if (volume&"177400")=0 then volume=256; /* to avoid bug */  select=card0 + volume.reg;  if not any.kbd then wconverter=shr(volume,8);  else do; /* if pedals present */    call scan.analog.inputs;    if vel.kbd<>0 then volpedalpos=rte.max; /* no volume pedal on velocity kbd */    else do;       volpedalpos=240-pedal1.pos; /* read volume pedal */       if volpedalpos<0       then volpedalpos=0;       if volpedalpos>rte.max then volpedalpos=rte.max;    end;    if active.note.key<>(-1) then do; /* playing a keyboard note */       load volume; mul active.note.vel; j=res; div 255; /* scale vol by note velocity */       volume=res;    end;    load volume; mul volpedalpos; j=res; div rte.max; /* scale vol by pedal pos */    wconverter=shr(res,8);                            /* write out new volume */    period.range=(57*period/1000)*semitones/100; /* one semitone = 5.7% */     clock.limit =clock.rate/max.sampling.rate;    vibrato.phase.inc   =int(.65536*vibrato.rate);    vibrato.depth.factor=(112*period/1000)*vibrato.depth/100;    sine=0;    p.milliseconds=milliseconds;    vibrato.phase=-32768;    vibrato.ramp =0;  end;  d66.status=0; /* initialize */  /* $PAGE */  select=card0 + data.reg; /* data register */  play.rp =0; play.sp =0; /* zero out read & store pointers */  play.min=0; play.max=shl(play.buf.sec-1,8); /* initial rotary pointer  limits */  play.num=0; play.nlf=play.max;  k=addr(attack.buffer(0)); /* address of attack buffer */  l=addr(     play.buf(0)); /* address of play buffer */  j=0;  do while j <= attack.buf.len-256; /* move 256 word blocks quickly */     if j<2048 then do m=0 to 3; /* load first 8 sectors directly into DAC */       write(r0)=k;       h; h; h; h; /* 64 samples */       k=read(r0);     end;     else do m=0 to 3; /* load data into our rotary buffer */       write(r0)=k;       write(r1)=l;       b; b; b; b; /* 64 samples */       k=read(r0);       l=read(r1);       play.sp=play.sp+64; /* 64 words stored in play buffer */       play.num=play.num+64; play.nlf=play.nlf-64;     end;     j=j+256;     if j=512 then do; /* start DAC after one sector is there */       select=card0 + divisor.reg; /* time base register */       if any.kbd=0 then wconverter=period-2; /* emit selected period */       else do; /* compute pitch bend and emit period */         i=knob.pos-knob.base; /* determine change in knob */         if i<0  then i=(-i); /* take absolute value */         i=i-1; /* +1/-1 unit dead band */         if i<0  then i=0; /* keep value non-negative */         if i>25 then i=25; /* limit to expected max change */         write(5)=i; write(6)=period.range; /* compute knobchange*period.range */         i=read(5); write(7)=25; /* divide by max change */         if knob.pos>knob.base then current.period=period-read(5); /* update for pitch bend */         else                      current.period=period+read(5);         if current.period>max.period  then current.period=max.period; /* apply limits */         if current.period<clock.limit then current.period=clock.limit;         wconverter=current.period-2;       end; /* of compute pitch bend */       select=card0 + control.reg;       wconverter=2; /* start dac running */       select=card0 + data.reg;     end; /* of start DAC */  end; /* of unload attack buffer */  if j<2048 then do j=j to attack.buf.len-1; /* load final samples into dac */     wconverter=core(k); k=k+1;   end;  else do; /* copy into play buffer and DAC */    m=0;    do j=j to attack.buf.len-1;      core(l+m)=core(k+m);      wconverter=play.buf(play.rp+m); /* unload 1 word for 256 multiple */      m=m+1;    end;    play.rp =play.rp +m;    play.sp =play.sp +m;     play.min=play.min+m;    play.max=play.max+m;  end; /* of copy into play buffer and DAC */  /* $SUBTITLE  Main Desampling Loop */  do while (break.rcvd=0)   and      ((volume&"177400")<>0)   and      ((((sector(0)&"377") ILT (endsecarr(0)&"377")))   or        (((sector(0)&"377") IEQ (endsecarr(0)&"377"))   and        ((sector(1)      ) ILE (endsecarr(1)      ))));    call poll; /* we know we have time for 1 poll */    call decay_ramp; /* update decay and vibrato */    sector(1)=sector(1)+1; /* advance to next sector */    if sector(1)=0 then sector(0)=sector(0)+1;    ls.scsicount=ls.scsicount-1; /* decrease sector count for scsi command */    if  (((sector(0)&"377") IGT ms.current.low)     or   (((sector(0)&"377") IEQ ms.current.low)  and (sector(1) IGE ls.current.low)))    and (((sector(0)&"377") ILT ms.current.high)     or   (((sector(0)&"377") IEQ ms.current.high) and (sector(1) ILE ls.current.high))) /* in limits */    then do; /* sector is still on this drive */       ms.current.sector=(sector(0)&"377")-ms.current.low; /* offset on same drive */       if sector(1) ILT ls.current.low then ms.current.sector=ms.current.sector-1;       ls.current.sector=sector(1)-ls.current.low;    end;    else call controller_and_drive(sector); /* must look up next drive */    do while play.nlf<256; /* empty out at least one sector of rotary buffer */      d66.status=d66.status\(read(d66) xor 2048);      write(r0)=addr(play.buf(play.rp));      h; /* 16 words */      play.rp=play.rp+16; if play.rp=play.max then play.rp=play.min;      play.num=play.num-16; play.nlf=play.nlf+16;      if (read(3))<>0 then do; /* update clock tick counter */        write(3)=0; milliseconds=milliseconds+clock.inc;      end;    end;    /* the following loop takes 70 microseconds.  In the loop,  the disk       is checked every 20 microseconds */    k=play.num; /* keep track of number of words written */    do while 1; /* loop here - wait for disk ready - use goto for fast exit */      if use.scsi=0 then do;         if (read("106")&2)<>0   then GOTO DISK_READY;   /* read return code */      end;      else do;         if (read(ScsiBus)&S$REQ)<>0 then GOTO DISK_READY;      end;      if play.num=0           then GOTO DISK_READY;   /* if no words in rotary buffer - wait for disk */      if (read(d66)&1024)<>0 then do;               /* check for space available to write 1 word to dac */        d66.status=d66.status\(read(d66) xor 2048); /* check status */        l=addr(play.buf(play.rp));                  /* look up word to write out */        if use.scsi=0 then do;           if (read("106")&2)<>0   then GOTO DISK_READY;   /* read return code */        end;        else do;           if (read(ScsiBus)&S$REQ)<>0 then GOTO DISK_READY;        end;        write(r0)=l;        g;g;g;g;g;g;g;g;                            /* transfer 8 words */        play.num=play.num-8;                        /* 8 words less in rotary buffer */        play.rp =play.rp +8;                        /* incr pointer */        if play.rp=play.max then play.rp=play.min;  /* rotary buffer */      end;      if use.scsi=0 then do;         if (read("106")&2)<>0   then GOTO DISK_READY;   /* read return code */      end;      else do;         if (read(ScsiBus)&S$REQ)<>0 then GOTO DISK_READY;      end;      if (read(3))<>0 then do;                      /* update clock tick counter */        write(3)=0; milliseconds=milliseconds+clock.inc;      end;    end; /* of do while waiting for disk */    DISK_READY:    if use.scsi=0 then do;       j=read(d107)&255; /* get status code */       if j<>0 then do;  /* read error */          error.flag=e.winch;          if (j&128)<>0 then do;             enable; return; /* fatal error */          end;       end;       write(r0)=addr(play.buf(play.sp));       f; f; f; f; f; f; f; f; f; f; f; f; f; f; f; f; /* 256 transfers */       /* start next command immediately */       if (break.rcvd=0) and ((volume&"177400")<>0) /* start next read if more to go */       and ((sector(0) ILT endsecarr(0)) or ((sector(0) IEQ endsecarr(0)) and (sector(1) ILE endsecarr(1)))) then do;         write(d105)=current.interface;         do while read(d106)<>0; end; /* wait for rdy to return - DO NOT CHANGE THIS STATEMENT */         write(d107)=2+current.drive; /* read command */         /* 380 microseconds available here every sector */         write(d107)=ls.current.sector; /* sector number */       end;       else do while read(d106)<>0; end; /* wait for rdy to return - DO NOT CHANGE THIS STATEMENT */    end;    else do;             /* check for data in phase */      do while (read(ScsiBus)&S$Req)=0; end;  /* wait for req in case play.num = 0 */      if (read(ScsiBus)&S$SigMask)<>S$DataIn then do;  /* make sure data in */         i=read(ScsiWord);         error.flag=e.winch; enable; return;      end;            write(r0)=addr(play.buf(play.sp));      s.f; s.f; s.f; s.f; s.f; s.f; s.f; s.f; s.f; s.f; s.f; s.f; s.f; s.f; s.f; s.f; /* 256 transfers */      if (break.rcvd=0) and ((volume&"177400")<>0) /* start next read if more to go */        and ((sector(0) ILT endsecarr(0)) or ((sector(0) IEQ endsecarr(0)) and (sector(1) ILE endsecarr(1)))) then do;        if ls.scsicount=0 then do;         /* must give another scsi command */           i = read(ScsiWord);             /* get status from last read */           if i<>0 then do;                /* bad */              error.flag=e.winch; enable; return;           end;           i = S$DeviceBusy;           do while (i = S$DeviceBusy) or (i = S$ArbFailed) or (i = S$BadBusState);              i = ScsiConnect(current.interface, S.Initiator, current.id, shr(current.drive,8));              if i = S$BadBusState then do;          /* Clear bus if it is out of whack */                 error.flag=e.winch;                 call ScsiAbort;              end;           end;           if i <> S$GoodConnect then do;              error.flag=e.winch; enable; return;           end;           /* Send SCSI Command */           ms.scsicount = ms.current.high-(sector(0)&"377"); /* number of sectors left on this drive */           if ls.current.high ILT sector(1) then ms.scsicount = ms.scsicount-1;           ls.scsicount = ls.current.high-sector(1);            ls.scsicount = ls.scsicount + 1; /* boundary condition */           if ls.scsicount = 0 then ms.scsicount = ms.scsicount + 1;           if ((ms.scsicount > 0) or ((ms.scsicount = 0) and (ls.scsicount IGT 32))) then do;              ms.scsicount = 0; ls.scsicount = 32; /* limit count to 32 sectors */           end;           write(ScsiByte) = S$ExtendedRead;       /* SCSI Operation Code */           write(ScsiByte) = shr(current.drive,8 - 5); /* Target LUN */           write(ScsiWord) = ms.current.sector;    /* Logical Block Address (MSW) */           write(ScsiWord) = ls.current.sector;    /* Logical Block Address (LSW) */           write(ScsiByte) = 0;                    /* Reserved */           write(ScsiWord) = ls.scsicount;         /* this many blocks */           write(ScsiByte) = 0;                    /* Control byte */        end;      end;    end;      k=k-play.num; /* compute number of words written out above */    do while (k&15)<>0; /* unload rotary buffer to 16 word boundary */      write(r0)=addr(play.buf(play.rp));      g; g; g; g; g; g; g; g; /* transfer 8 words */      k=k+8; play.num=play.num-8; /* eight less in buffer */      play.rp=play.rp+8; /* incr pointer */      if play.rp=play.max then play.rp=play.min;    end;     /* $PAGE */    play.nlf=play.nlf+k; /* indicate more room in rotary buffer */    play.sp =play.sp +256; /* now account for words we just read in */    play.num=play.num+256;    play.nlf=play.nlf-256;    if ((sector(0)=endsecarr(0)) and (sector(1)-1)=endsecarr(1)) /* reading last sector */    then play.num=play.num-256+endsecarr(2)+1;      /* compute actual number of words in buffer */    else if play.sp=play.max then play.sp=play.min; /* check for pointer wrap around */    if (play.num>group.size) and ((read(d66)&1024)<>0) then do; /* copy data if in memory and room in dac */      d66.status=d66.status\(read(d66) xor 2048);      /* 1.400 milliseconds for the following loop:  (320 words to dac) */      do j=0 to (group.size/16-1); /* copy data */        write(r0)=addr(play.buf(play.rp));        h; /* 16 words */        play.rp=play.rp+16; if play.rp=play.max then play.rp=play.min;      end;      play.num=play.num-group.size; play.nlf=play.nlf+group.size;    end;  end; /* of loop over sectors */  j=0; /* finish with disk - clean out rotary buffer */  do while (play.num<>0) and (break.rcvd=0) and ((volume&"177400")<>0); /* flush out buffered data */    if play.num>16 then do; /* unload quickly */      d66.status=d66.status\(read(d66) xor 2048);      write(r0)=addr(play.buf(play.rp));      h; /* 16 words */      play.rp =play.rp +16; if play.rp=play.max then play.rp=play.min;      play.num=play.num-16;    end;    else do while play.num<>0;      wconverter=play.buf(play.rp);      play.rp=play.rp+1; play.num=play.num-1;    end;    j=j+1;    if (j&"17")=0 then do; /* every 256 samples check clavier */      call poll; /* check for key changes */      call decay_ramp; /* update volume register for decay */    end;  end; /* of flush out buffered data */  j=0;  do while (j<8) and (break.rcvd=0) and ((volume&"177400")<>0); /* write out trailing zeroes in one sector blocks */     call poll; /* check for key changes */     call decay_ramp;     d66.status=d66.status\(read(d66) xor 2048); /* check status once more */     if break.rcvd=0 then do i=0 to 4; /* transfer 256 zeroes */        zz; zz; zz; zz; /* 64 zeros */     end;     j=j+1;  end; /* of write out trailing zeros */     if use.scsi<>0 and (ls.scsicount<>(-1)) then do;    /* clean out scsi if one command was given */     do while ls.scsicount<>0;     /* finish off 32 sector scsi read command */        do while (read(ScsiBus)&S$Req)=0; end;  /* wait for req in case play.num = 0 */        if (read(ScsiBus)&S$SigMask)<>S$DataIn then do;  /* make sure data in */           i=read(ScsiWord);           error.flag=e.winch; enable; return;        end;              do i=0 to 255;           write("300")=read(ScsiWord);        end;        ls.scsicount=ls.scsicount-1;     end;     i=read(ScsiWord);     if i<>0 then do;        error.flag=e.winch; enable; return;     end;  end;  select=card0 + volume.reg;  wconverter=0; /* shut down volume dac */  if (read(3))<>0 then write(3)=0; /* clear flag */  write(3)=0; write(3)=0; /* some delay to allow volume to decay */  break.rcvd=0;  if (d66.status&2048)<>0 then do;     error.flag=e.overrun; /* actually an underrun */     enable; return;  end;  enable;end windac;/* $SUBTITLE DAC Test Routine */testdac:proc(period,play.buf); /* Winchester to DAC */  dcl period     fixed; /* period between samples, units of 1/30 of a microsecond */  dcl play.buf   array; /* temporary play buffer */  dcl len        lit '16';  dcl g          lit 'wconverter=read(mr0i)';    /* mr0i to converter */  dcl h          lit 'g;g;g;g;g;g;g;g;g;g;g;g;g;g;g;g'; /* 16 mroi to dac */  dcl group.size lit '256';  dcl (i,j,k,l)  fixed;  select=card0 + outptr.reg;   wconverter=0;   select=card0 + data.reg;  wconverter=0; /* at least one zero is written */  select=card0 + divisor.reg;  wconverter=10; /* speed up */  disable;  select=card0 + control.reg;  wconverter="370";  noper;  wconverter="200";  noper;  select=card0 + outptr.reg; /* zero output pointers */  wconverter=0;   select=card0 + outlim.reg; /* output limit */  wconverter=2048-group.size;  select=card0 + volume.reg;  wconverter=0;  select=card0 + data.reg;  do i=0 to group.size-1; /* compute sine table */     call angle(shl(i,8));      play.buf(i)=sine;  end;  do i=0 to 2048/group.size-1; /* fill up dac */    do j=0 to group.size-1; wconverter=play.buf(j); end;  end;  select=card0 + divisor.reg;  wconverter=period-2;  select=card0 + control.reg;  wconverter=2;  select=card0 + data.reg;    d66.status= 0;  k=0;  do while (break.rcvd=0); /* loop until break */    do while (read(d66)&1024)=0; end; /* wait for room */    d66.status=d66.status\(read(d66) xor 2048);    l=addr(play.buf(0));    do i=0 to group.size/len-1;      write(r0)=l;        h; /* transfer 16 words */      l=read(r0);    end;    if (read("51")&2)<>0 then do;      j=read("50")&"177";      if (j=0) or (j=A.S) or (j=A.S+32) then break.rcvd=1;    end;    if k<255 then do;       select=card0 + volume.reg;       k=k+1;       wconverter=k;       select=card0 + data.reg;    end;     end; /* of loop until break */   break.rcvd=0;  if (d66.status&2048)<>0 then error.flag=e.overrun; /* actually an underrun */  enable;end testdac;
+/* 23-SAMPL  $TITLE  Main Sampling and Desampling Routines */
+
+/* Copyright 1985 by New England Digital Corporation */
+
+dcl d66    lit '"66"';
+dcl d67    lit '"67"';
+dcl d105   lit '"105"';
+dcl d106   lit '"106"';
+dcl d107   lit '"107"';
+  
+dcl r1     lit '"301"';
+dcl mr1i   lit '"361"';
+dcl r2     lit '"302"';
+dcl noper  lit 'write(r0)=read(r0)'; /* no operation */
+
+dcl rconverter     lit 'read(d67)';  /* ADC interface address */
+dcl wconverter     lit 'write(d67)'; /* DAC interface address */
+
+/* D66 REGISTER SELECT LITERALS */
+
+dcl select      lit 'write(d66)'; /* write command to D66 */
+dcl card0       lit '"10"';       /* card 0 bits */
+dcl data.reg    lit '0';          /* data register */
+dcl control.reg lit '1';          /* control register */
+dcl divisor.reg lit '2';          /* time base divisor register - 12 bit number is 30 nsec periods-2 periods. (598 = 50 kHz sample rate) */
+dcl volume.reg  lit '3';          /* DAC volume register */
+dcl outptr.reg  lit '4';          /* output buffer pointer register */
+dcl inptr.reg   lit '5';          /* input  buffer pointer register */
+dcl outlim.reg  lit '6';          /* output buffer limit   register */
+dcl inlim.reg   lit '7';          /* input  buffer limit   register */
+
+/*  Control Register Bits:
+.     0  Run Input  Buffer (enable ADC)
+.     1  Run Output Buffer (enable DAC) 
+.     2  Copy (copy ADC into DAC)
+.     5  Initialize ADC (must reset to 0)
+.     6  Initialize DAC (must reset to 0) 
+.     7  Disable time base
+.     8  Enable input  interrupt when data available
+.     9  Enable output interrupt when data available
+*/
+
+dcl d66.status     fixed; /* current state of D66 */
+dcl stop_sampling  lit 'do;select=card0+control.reg;wconverter=0;sampling=0;end;'; /* force stop condition */
+
+/* globals used to play back a sound file */
+dcl new.note.ptr    fixed; /* index to current position in NEW.NOTE.LIST */
+dcl ready.to.play   fixed; /* 1 if okay to call PLAY, otherwise 0 */
+dcl active.note.key fixed; /* key # of currently playing sound, (-1) if no key active */
+dcl active.note.vel fixed; /* velocity of active note (0-255 range) */
+dcl startsamp   (2) fixed; /* absolute disk addr of first sample to play */
+dcl stopsamp    (2) fixed; /* absolute disk addr of last  sample to play */
+dcl ms.size         fixed; /* temporary storage of sector size of current physical drive */
+dcl ls.size         fixed;
+dcl play.rel        fixed; /* true when key being played is released */
+dcl keyboard.scale((num.octaves-1)*12) fixed; /* holds sampling rate for each key */
+
+dcl rte.max     lit '225';
+dcl dr          lit '"130"';
+dcl cr          lit '"131"';
+dcl ad          lit '"163"';
+
+/* $SUBTITLE Winchester Disk Routines */
+
+/*  For speed reasons, readdata and writedata cannot be used in WINDAC
+    and WINADC.  So-this duplicates the logic in readdata and writedata */
+
+dcl use.scsi                fixed; /* 1 for SCSI hardware, 0 for d107 */
+dcl current.interface       fixed; /* d107 or d24 select    */
+dcl current.id              fixed; /* target id for SCSI    */
+dcl current.drive           fixed; /* drive # 0 or 1        */
+dcl ms.current.sector       fixed; /* selected physical sector on current drive */
+dcl ls.current.sector       fixed;
+
+dcl (ms.current.low, ls.current.low)  fixed; /* sector limits of current drive */
+dcl (ms.current.high,ls.current.high) fixed;
+
+controller_and_drive:proc(sector); /* determine drive and controller for given sector */
+   dcl sector     fixed array; /* desired sector */
+   dcl config.ptr fixed; /* ptr into configuration area for drive */
+
+   set_error: proc; /* sets error conditions */
+      current.interface = 7; current.drive = 7;
+      ms.current.sector = -1; ls.current.sector = -1;
+      ms.current.high = 0; ls.current.high = 0;
+      ms.current.low  = 0; ls.current.low  = 0;
+   end set_error;
+
+   if find_device(1) = 0 then do; /* if device is not configured */
+      call set_error; return;
+   end;
+      
+   config.ptr = mapsector((sector(0)&"377"),sector(1),shr(sector(0),8)); /* get physical sector and drive */
+
+   if config.ptr = 0 then do; /* logical sector too large to be mapped to device */
+      call set_error; return;
+   end;
+   use.scsi=shr(core(config.ptr+s#devtyp),8)&3; /* look up scsi info in case winchester */
+
+   current.interface = core(config.ptr + s#devadr)&"17"; /* controller */
+   current.drive = core(config.ptr + s#devadr)&"007400"; /* drive */
+   if use.scsi then do;
+      current.id = current.interface; /* scsi target id */
+      current.interface = shr(core(config.ptr + s#devadr),4)&"17"; /* controller */
+   end;
+
+   ms.current.high = (sector(0)&"377") + RemSecMSW; /* logical sector end of this drive */
+   ls.current.high = sector(1) + RemSecLSW;
+   if ls.current.high ILT sector(1) then ms.current.high = ms.current.high + 1;
+   if ls.current.high = 0 then ms.current.high = ms.current.high - 1;
+   ls.current.high = ls.current.high-1;
+
+   ms.current.low = (sector(0)&"377") - PhySecMSW; /* logical sector start of this drive */
+   if sector(1) ILT PhySecLSW then ms.current.low = ms.current.low - 1;
+   ls.current.low = sector(1) - PhySecLSW;
+
+   ms.current.sector = PhySecMSW; /* physical current sector location */
+   ls.current.sector = PhySecLSW;
+
+end controller_and_drive;
+
+/* $page */
+
+zero_drives:  proc(sector); /* set heads at start of each disk drive (except drive containing 'sector') */
+   dcl sector      fixed array; /* starting sector for later operation */
+   dcl devtyp      fixed; /* device ID code for desired logical drive */
+   dcl ms.next.sec fixed; /* sector number of first sector on next drive */
+   dcl ls.next.sec fixed;
+   dcl buf (0)     fixed; /* dummy buffer */
+   dcl config.ptr  fixed; /* ptr into configuration area */
+   
+   call readdata(sector(0),sector(1),buf,1); /* force seek to desired track */
+
+   config.ptr=find_device(1);                  /* look up ptr to correct config block */
+   devtyp    =core(config.ptr+s#devtyp)&"377"; /* save device ID code for this drive */
+
+   load core(config.ptr+s#seccyl);    /* compute sectors on this drive */
+   mul  core(config.ptr+s#totcyl);
+   ms.next.sec=read(4);               /* NEXT.SEC holds sec # of first sec on next drive */
+   ls.next.sec=res;
+
+   config.ptr=config.ptr+s#blklen;    /* step to next config block */
+
+   do while (config.ptr ILT (c#contab+c#strend))        /* not at end of config table */
+   and      (devtyp=(core(config.ptr+s#devtyp)&"377")); /* still on same logical device */
+
+      if ((ms.next.sec IGT (sector(0)&"377")) or ((ms.next.sec IEQ (sector(0)&"377")) and (ls.next.sec IGT sector(1))))
+      then call readdata(((sector(0)&"177400") or ms.next.sec),ls.next.sec,buf,1); /* force seek to track zero */
+
+      load core(config.ptr+s#seccyl); /* compute size of this next disk */
+      mul  core(config.ptr+s#totcyl);
+      ms.next.sec=ms.next.sec+read(4); /* keep track of first sector on next disk */
+      ls.next.sec=ls.next.sec+res;
+      if ls.next.sec ILT res then ms.next.sec=ms.next.sec+1;
+
+      config.ptr=config.ptr+s#blklen; /* step to next config block */
+   end;
+end zero_drives;
+
+/* $SUBTITLE  Sample to Winchester Disk Routine */
+
+/* This preliminary version has the following shortcomings:
+.     1. It only works with one logical winchester disk drive (drive 0).
+.     2. There is no threshold dectection to initiate sampling.  The
+.        sampling starts as soon as the procedure is called.
+.     3. If an error is encountered (such as the Winchester Disk is
+.        not turned on) the program will print an error message and
+.        then stop.   Better error recovery should be integrated into
+.        the user program.
+.     4. These procedures disable interrupts when they are active. 
+*/
+ 
+winadc:proc(period,startarr,numsecarr,buf,bufsec,validarr) fixed SWAP; /* adc to winchester */
+  dcl period      fixed; /* period between samples, units of 1/30 of a microsecond */
+  dcl startarr    array; /* starting disk address for new file */
+  dcl numsecarr   array; /* length of new file */
+  dcl buf         array; /* use this buffer */
+  dcl bufsec      fixed; /* number of sectors in passed buffer */
+  dcl validarr    array; 
+
+  dcl sector(2)    fixed; /* current sector */
+  dcl lastsec(2)   fixed; /* last sector to process */
+  dcl inptr        fixed; /* input ptr to buffer */
+  dcl outptr       fixed; /* output ptr to buffer */
+  dcl inlength     fixed; /* number of words in rotary buffer */
+  dcl ptrmax       fixed; /* end of buffer */
+  dcl ms.scsicount fixed;
+  dcl ls.scsicount fixed;
+
+  dcl max                 fixed;
+  dcl max.len             lit '10';
+  dcl max.list(max.len-1) fixed;
+  dcl (max.in,max.out)    fixed; /* in & out ptrs */
+  dcl max.ctr             fixed; /* counter */
+  dcl (i,j,k)             fixed;
+
+  dcl a  lit 'write(d107)=read(mr0i)'; /* mr0i to d107 */
+  dcl b  lit 'a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;';
+  dcl c  lit 'write(ScsiWord)=read(mr0i)';
+  dcl d  lit 'c;c;c;c;c;c;c;c;c;c;c;c;c;c;c;c;';
+ 
+  dcl q0 lit 'write("201")=rconverter'; /* D67 -> LOA1  */ 
+  dcl q1 lit 'write(mr0i)=read("301")'; /* R1 -> MR0i */                
+  dcl q2 lit 'write("337")=read("201")'; /* Im(1) -> RTPL */
+  dcl q3 lit 'write("221")=read("277")'; /* Im(-1) -> XOR1 */
+  dcl q4 lit 'write("255")=read("302")'; /* r2 -> TSUB1 */
+  dcl q5 lit 'write("333")=read("201")'; /* Im(1) -> RTMI */
+  dcl q6 lit 'write("302")=read("301")'; /* R1 -> r2 */
+  dcl q7 lit 'write(mr0i)=rconverter'; /* D14 -> MR0i */
+
+  dcl q  lit 'q0;q1;q2;q3;q4;q5;q6;q7;q7;q7'; /* 4 transfers, one max value check */
+  dcl p  lit 'q;q;q;q'; /* 16 transfers, 4 max checks */
+  dcl r  lit 'q;q7;q7;q7;q7;q7;q7;q7;q7;q7;q7;q7;q7'; /* 16 transfers, 1 max check */
+
+  /* $SUBTITLE Initialization Code */
+
+  do i=0 to 2; sector(i)=startarr(i); end;
+  if systyp<>1 then do; /* make sure this is a winchester system */
+    error.flag=e.winch; return 1;
+  end;
+
+  call zero_drives(sector);          /* position heads at start of disk for other drives */
+
+  // Activate SFM disk logic after finish setup
+  interp_activate_real_time(true); // Inform interpreter that real time loop is now running.
+  interp_set_rtp_is_running(   2); // SFM Sampling
+
+  disable;
+
+  select=card0 + control.reg;
+  wconverter="170"; /* send out initialize lines */
+
+  select=card0 + inptr.reg;
+  wconverter=0; /* zero the input pointers */
+
+  select=card0 + inlim.reg;
+  wconverter=256; /* set limit for status bit */
+
+  select=card0 + divisor.reg;
+  wconverter=period-2; /* set sampling rate */
+
+  select=card0 + control.reg;
+  wconverter=1; /* run input buffer (enable ADC) */
+
+  // Wait for buffer to fill to 256 so we can toss the trash samples
+  do while ((read(d66)&256) == 0);
+    interp_run_host();
+  end;
+
+  j=rconverter; j=rconverter; j=rconverter; /* TOSS FIRST FEW TRASH SAMPLES */
+
+  inptr=0; outptr=0; inlength=0; /* initialize pointers */
+
+  lastsec(0) = sector(0) + (numsecarr(0)&"377"); /* compute last sector number */
+  lastsec(1) = sector(1) + numsecarr(1);
+  if lastsec(1) ILT sector(1) then lastsec(0)=lastsec(0) + 1;
+
+  d66.status=0;         /* initialize */
+  ptrmax=shl(bufsec,8); /* get number of words in rotary buffer */
+  max.in=0; max.out=0;  /* no maxes in max.list */
+  max.ctr=0;            /* initialize counter */
+  max=0;                /* initialize max */
+
+  dcl   needs.scsi.command fixed;
+  dcl   wait.scsi.status   fixed;
+  dcl   send.scsi.data     fixed;
+  dcl   stop.adc           fixed;
+  dcl   eof.reached        fixed;
+
+  needs.scsi.command = true;
+  wait.scsi.status   = false;
+  send.scsi.data     = false;
+  stop.adc           = false;
+  eof.reached        = false;
+
+  do while (stop.adc == false && eof.reached == false);
+    dcl did.work fixed;
+
+    // Init. See if anything needs to be done
+    did.work = false;
+
+    // Bump terminal output
+    if read("51") then do;    /* output check */
+      did.work = true;
+      write("51")=0; if idle.tty=0 then call boot_tty;
+    end;
+
+    // If break received, we leave the last partial sector samples in the adc uncollected.
+    if (read("51")&2)<>0 then do; /* must check char from terminal */
+      j=read("50")&"177";
+      if (j=0) or (j=A.S) or (j=A.S+32) then break.rcvd=true; /* test for break char */
+      if break.rcvd then do; /* stop recording */
+        did.work = true;
+        select=card0 + control.reg; /* control register */
+        wconverter=0; /* stop the adc */
+      end;
+    end;
+
+    // If data in the buffer, bring it into memory if it will fit
+    if (((read(d66)&256)<>0) && (inlength<=ptrmax-256)) {
+      did.work = true;
+      d66.status = d66.status\read(d66); /* or in overrun status - check at end */
+      do j=0 to 3; /* transfer 256 words from adc to memory */
+        write(r0)=addr(buf(inptr));
+        write(r2)=max;
+        r; r; r; r; /* 64 transfers (4 max checks) */
+        max=read(r2);
+        inptr=inptr+64; /* 64 words transferred */
+        if inptr=ptrmax then inptr=0;
+        inlength=inlength+64;
+        max.ctr=max.ctr+64; /* max from 64 words has been computed */
+
+        if max.ctr>=1024 then do; /* store max for later plotting */
+          max.list(max.in)=max;
+          max=0;
+          max.in=max.in+1;
+          if max.in=max.len then max.in=0;
+          max.ctr=max.ctr-1024;
+        end;
+      end; /* of transfer 256 words */
+    end;
+
+    // Issue SCSI command
+    if (needs.scsi.command == true) {
+      dcl ms.left fixed;
+      dcl ls.left fixed;
+      
+      // in all cases
+      did.work           = true;
+      needs.scsi.command = false;
+
+      // Compute sectors left to capture
+      ms.left = lastsec(0) - sector(0);
+      ls.left = lastsec(1) - sector(1);
+      if (lastsec(1) ILT sector(1)) ms.left = ms.left - 1;
+      
+      // See if done with desired capture amount
+      if (ms.left == 0 && ls.left == 0)
+        eof.reached = true;
+      
+      // See if done to where asked to stop
+      else if (break.rcvd == true && inlength < 256)
+        eof.reached = true;
+      
+      // Else issue SCSI command
+      else {
+        // Get where on disk
+        call controller_and_drive(sector); /* lookup controller and drive */
+
+        // See how many sectors on device
+        ms.scsicount = ms.current.high-(sector(0)&"377"); /* number of sectors left on this drive */
+        if ls.current.high ILT sector(1) then ms.scsicount = ms.scsicount-1;
+        ls.scsicount = ls.current.high-sector(1);
+        ls.scsicount = ls.scsicount + 1; /* boundary condition */
+        if ls.scsicount = 0 then ms.scsicount = ms.scsicount + 1;
+        
+        // Limit to end of device if multi-device configuration
+        if ((ms.scsicount IGT 0) or ((ms.scsicount IEQ 0) and (ls.scsicount IGT 32))) then do;
+          ms.scsicount = 0; ls.scsicount = 32; /* limit count to 32 sectors */
+        end;
+
+        // Limit to end of allocated storage
+        if ((ms.scsicount IGT ms.left) or ((ms.scsicount IEQ ms.left) and (ls.scsicount IGT ls.left))) then do;
+          ms.scsicount = 0; ls.scsicount = ls.left;
+        end;
+ 
+        // Limit to break
+        if (break.rcvd == true && ls.scsicount > shr(inlength,8))
+          ls.scsicount = shr(inlength,8);
+        
+        i = S$DeviceBusy;
+        do while (i = S$DeviceBusy) or (i = S$ArbFailed) or (i = S$BadBusState);
+          i = ScsiConnect(current.interface, S.Initiator, current.id, shr(current.drive,8));
+          if i = S$BadBusState then do;          /* Clear bus if it is out of whack */
+             error.flag=e.winch;
+             call ScsiAbort;
+          end;
+        end;
+
+        if i <> S$GoodConnect then do;
+          error.flag=e.winch; enable; return 1;
+        end;
+
+        /* Send SCSI Command */
+        write(ScsiByte) = S$ExtendedWrite;      /* SCSI Operation Code */
+        write(ScsiByte) = shr(current.drive,8 - 5); /* Target LUN */
+        write(ScsiWord) = ms.current.sector;    /* Logical Block Address (MSW) */
+        write(ScsiWord) = ls.current.sector;    /* Logical Block Address (LSW) */
+        write(ScsiByte) = 0;                    /* Reserved */
+        write(ScsiWord) = ls.scsicount;         /* this many blocks */
+        write(ScsiByte) = 0;                    /* Control byte */
+
+        // Req will come back right away in this implementation
+        do while (read(ScsiBus)&S$Req)=0; end;
+
+        if (read(ScsiBus)&S$SigMask)<>S$DataOut then do;  /* make sure data out */
+          i=read(ScsiWord);
+          error.flag=e.winch; enable; return 1;
+        end;
+
+        send.scsi.data = true;
+      }
+    }
+
+    // Send SCSI data
+    if (send.scsi.data == true && ((inlength >= 256) || (break.rcvd == true))) {
+      did.work = true;
+
+      // 256 words from rotary buffer to scsi. Data will be stored in scsi prefetch buffer
+      if (inlength < 256) then do i=0 to 255;
+        write(ScsiWord) = 0;
+      end;
+      else do i=0 to 15;
+        write(r0)=addr(buf(outptr)); /* dump from buf(outptr) */
+        d;                           /* write data to scsi    */
+        outptr=outptr+16;
+      end;
+
+      // Count valid data of full sectors. We have to finish out the write command
+      if (inlength >= 256) {
+        inlength=inlength-256;          /* fewer words in rotary buffer */
+        validarr(1)=validarr(1)+1;      /* count how many sectors read */
+        if validarr(1)=0 then validarr(0)=validarr(0)+1;
+      }
+      
+      // Else buffer is now empty of real data
+      else
+        inlength=0;
+      
+      // Account; outptr was incremented in the loop above
+      if outptr=ptrmax then outptr=0; /* rotary buffer                */
+      sector(1)=sector(1)+1;          /* advance to next sector */
+      if sector(1)=0 then sector(0)=sector(0)+1;
+      ls.scsicount=ls.scsicount-1;          /* in case scsi           */
+      
+      // End of data phase
+      if (ls.scsicount == 0) {
+        wait.scsi.status = true;
+        send.scsi.data   = false;
+      }
+    }
+
+    // Wait for SCSI status phase
+    if (wait.scsi.status == true) {
+      if (interp_is_running == 0 || interp_check_scsi_io(0) == 0) {
+        if ((read(ScsiBus)&S$Req) <> 0) {
+          did.work = true;
+          
+          i = read(ScsiWord);             /* get status from last write */
+          
+          if i<>0 then do;                /* bad */
+            error.flag=e.winch; enable; return 1;
+          end;
+          
+          wait.scsi.status = false;
+          
+          if (break.rcvd == true && inlength < 256)
+            stop.adc = true;
+          else
+            needs.scsi.command = true;
+        }
+      }
+    }
+
+    // Chill if nothing to do
+    if (did.work == false) {
+      // Check for plotting
+      if max.in<>max.out then do; /* set up for plotting */
+        call plot_env(-max.list(max.out),max.list(max.out));
+        max.out=max.out+1;
+        if max.out=max.len then max.out=0;
+      end;
+      
+      else
+        interp_run_host();
+    }
+  
+  end;
+
+
+
+
+
+#if (0)
+
+  /* $SUBTITLE  Main Sampling Loop */
+  if use.scsi<>0 then do;         /* issue long scsi write command here */
+
+
+     /* note - at this point in the loop,  we now that REQ is low
+        and SCSI is in the DATA OUT phase                          */
+    // and there is at least 256 words of sample data in the rotary buffer we have read in from the adc, or if
+    // not, then we have to finish the write with zeroes
+
+    // Begin by pushing 256 samples out to SCSI
+    if use.scsi=0 then do;            /* d107 */
+      write(0)=0;                     // not supported
+    end;
+    else do;                           /* scsi */
+    end;
+
+    /* NOTE: 5 & 1/4" WINCH HAS 2.1 MILLISECONDS AVAILABLE HERE */
+    /* now that the winchester is off & running, we have some time to compute */
+
+
+
+    // See if we need another SCSI command
+    if (ls.scsicount == 0) then do;
+      if (break.rcvd && inlength < 256) then
+        stop.adc=1;
+
+      // Else see if SCSI status is ready
+      else if (interp_is_running == 0 || interp_check_scsi_io(0) == 0) then do;
+        if (((use.scsi == 0) && ((read("106")  &2    ) <> 0))
+        ||  ((use.scsi != 0) && ((read(ScsiBus)&S$Req) <> 0))) then do;
+
+        end;
+      end;
+    end;
+
+    // Else just make sure we are in data out. Will of course happen right away during the prefetch phase
+    else do;
+      do while (read(ScsiBus)&S$Req)=0; end;
+
+      if (read(ScsiBus)&S$SigMask)<>S$DataOut then do;  /* make sure data out */
+        i=read(ScsiWord);
+        error.flag=e.winch; enable; return 1;
+      end;
+    end;
+
+
+
+
+
+// Else we mighe be done
+    else if (break.rcvd && ls.scsicount == 0) then
+      stop.adc=1;
+
+    /* NOTE: 130 MICROSECONDS AVAILABLE BETWEEN WRITES FOR 5 & 1/4 */
+
+    do while 1; /* loop here - wait for disk ready - use goto for fast exit */
+      if use.scsi=0 then do;
+         if (read("106")&2)<>0 then GOTO DISK_READY; /* read return code */
+      end;
+      else if (interp_is_running == 0 || interp_check_scsi_io(0) == 0) then do;
+         if (read(ScsiBus)&S$Req)<>0 then GOTO DISK_READY;
+      end;
+      if (inlength<>ptrmax)&((read(d66)&256)<>0) then do; /* if 384 words in adc, let's read some in unless rotary buffer is filled */
+        d66.status = d66.status\read(d66);
+        k=addr(buf(inptr)); /* get address of input buffer */
+        if use.scsi=0 then do;
+           if (read("106")&2)<>0 then GOTO DISK_READY; /* read return code */
+        end;
+        else if (interp_is_running == 0 || interp_check_scsi_io(0) == 0) then do;
+           if (read(ScsiBus)&S$Req)<>0 then GOTO DISK_READY;
+        end;
+        write(r0)=k;
+        write(r2)=max;
+        r; /* 16 words, 1 max check */
+        max=read(r2);
+        inptr=inptr+16; /* 16 words transferred */
+        if inptr=ptrmax then inptr=0;
+        inlength=inlength+16;
+        max.ctr=max.ctr+16; /* max from 64 words has been computed */
+        if max.ctr>=1024 then do; /* store max for later plotting */
+          max.list(max.in)=max;
+          max=0;
+          max.in=max.in+1;
+          if max.in=max.len then max.in=0;
+          max.ctr=max.ctr-1024;
+        end;
+      end;
+
+      if use.scsi=0 then do;
+         if (read("106")&2)<>0 then GOTO DISK_READY; /* read return code */
+      end;
+      else if (interp_is_running == 0 || interp_check_scsi_io(0) == 0) then do;
+         if (read(ScsiBus)&S$Req)<>0 then GOTO DISK_READY;
+      end;
+      if read("51") then do; /* check for terminal output */
+        write("51")=0;
+        if idle.tty=0 then do;
+          if rptr=sptr then idle=1;
+          else do;
+            write("50")=out.buf(rptr);
+            rptr=(rptr+1)&(out.buf1.len-1);
+            idle=0;
+          end;  
+        end;    
+      end; /* of terminal input check */
+    end; /* of do while 1 */
+
+    DISK_READY:
+    if use.scsi=0 then do;
+       j=read(d107)&255; /* get return code */
+       if j<>0 then do; /* write error */
+         error.flag=e.winch; if (j&128)<>0 then break.rcvd=1; /* halt if fatal error */
+       end;
+    end;
+
+    if ((sector(0) ILT lastsec(0)) or ((sector(0) IEQ lastsec(0)) and (sector(1) ILT lastsec(1)))) then do; /* more to go - set up for it */
+       if ((((sector(0)&"377") IGT ms.current.low) or (((sector(0)&"377") IEQ ms.current.low) and (sector(1) IGE ls.current.low))) /* greater than low limit */
+       and (((sector(0)&"377") ILT ms.current.high) or (((sector(0)&"377") IEQ ms.current.high) and (sector(1) ILE ls.current.high))) /* less than high limit */
+       and ((use.scsi=0) or ((ms.scsicount<>0) or (ls.scsicount<>0))))
+       then do;
+          ms.current.sector=(sector(0)&"377")-ms.current.low;
+          if sector(1) ILT ls.current.low then ms.current.sector=ms.current.sector-1;
+          ls.current.sector=sector(1)-ls.current.low; /* offset on same drive */
+          if use.scsi<>0 then do;
+             if (read(ScsiBus)&S$SigMask)<>S$DataOut then do; /* make sure data out */
+                i=read(ScsiWord);
+                error.flag=e.winch; enable; return 1;
+             end;
+          end;
+       end;
+
+       else do;
+          call controller_and_drive(sector); /* must look up drive */
+          if use.scsi then do;
+             i = read(ScsiWord);             /* get status from last write */
+             if i<>0 then do;                /* bad */
+                error.flag=e.winch; enable; return 1;
+             end;
+             i = S$DeviceBusy;
+             do while (i = S$DeviceBusy) or (i = S$ArbFailed) or (i = S$BadBusState);
+                i = ScsiConnect(current.interface, S.Initiator, current.id, shr(current.drive,8));
+                if i = S$BadBusState then do;          /* Clear bus if it is out of whack */
+                   error.flag=e.winch; 
+                   call ScsiAbort;
+                end;
+             end;
+
+             if i <> S$GoodConnect then do;
+                error.flag=e.winch; enable; return 1;
+             end;
+
+             /* Send SCSI Command */
+
+             ms.scsicount = ms.current.high-(sector(0)&"377"); /* number of sectors left on this drive */
+             if ls.current.high ILT sector(1) then ms.scsicount = ms.scsicount-1;
+             ls.scsicount = ls.current.high-sector(1); 
+             ls.scsicount = ls.scsicount + 1; /* boundary condition */
+             if ls.scsicount = 0 then ms.scsicount = ms.scsicount + 1;
+
+             if ((ms.scsicount > 0) or ((ms.scsicount = 0) and (ls.scsicount IGT 32))) then do;
+                ms.scsicount = 0; ls.scsicount = 32; /* limit count to 32 sectors */
+             end;
+
+             write(ScsiByte) = S$ExtendedWrite;      /* SCSI Operation Code */
+             write(ScsiByte) = shr(current.drive,8 - 5); /* Target LUN */
+             write(ScsiWord) = ms.current.sector;    /* Logical Block Address (MSW) */
+             write(ScsiWord) = ls.current.sector;    /* Logical Block Address (LSW) */
+             write(ScsiByte) = 0;                    /* Reserved */
+             write(ScsiWord) = ls.scsicount;         /* this many blocks */
+             write(ScsiByte) = 0;                    /* Control byte */
+
+             do while (read(ScsiBus)&S$Req)=0; end;  
+
+             if (read(ScsiBus)&S$SigMask)<>S$DataOut then do;  /* make sure data out */
+                i=read(ScsiWord);                   /* must be in status phase - read it */
+                error.flag=e.winch; enable; return 1;
+             end;
+          end;          /* of another drive (scsi) */
+       end;             /* sector is off drive     */
+    end;                /* sector in range         */
+  end; /* of loop over sectors */
+
+  if use.scsi=0 then do;
+     do while read(d106)<>0; end; /* wait for rdy to return */
+  end;
+  else do;
+     do while ls.scsicount<>0;       /* finish off 32 sector scsi write command */
+        do i=0 to 255;
+           write(ScsiWord)=0;
+        end;
+
+        do while (read(ScsiBus)&S$Req)=0; end;  
+
+        ls.scsicount=ls.scsicount-1;
+
+        if ls.scsicount<>0 then do;            /* make sure in data out phase */
+           if (read(ScsiBus)&S$SigMask)<>S$DataOut then do;  /* make sure data out */
+              i=read(ScsiWord);                   /* must be in status phase - read it */
+              error.flag=e.winch; enable; return 1;
+           end;
+        end;
+
+     end;
+     i=read(ScsiWord);
+     if i<>0 then do;
+        error.flag=e.winch; enable; return 1;
+     end;
+  end;
+
+#endif
+
+  select=card0 + control.reg; /* select control register */
+  wconverter="170"; /* turn off adc */
+  break.rcvd=false;
+  enable;
+  return 0; /* good status */
+end winadc;
+
+/* $SUBTITLE  Desampling Routines */
+
+/* NOTE: Passed Play Buffer must be larger than ATTACK.BUF.SECTORS-8) */
+dcl attack.buf.sectors                              lit '22'; /* use 1 attack buffer, 26 secs long */
+dcl attack.buffer(attack.buf.sectors*sector.size-1) fixed; /* attack buf storage */
+dcl attack.buf.len                                  fixed; /* number of words in attack buffer */
+
+load_attack_buffer:proc(start,stop); /* set attack buffer contents */
+  dcl start     fixed array; /* sector - offset format */
+  dcl stop      fixed array;
+  dcl ms.numsec fixed; 
+  dcl ls.numsec fixed; 
+  dcl numwords  fixed;
+  dcl (i, j)    fixed;
+
+  ms.numsec=(stop(0)&"377")-(start(0)&"377"); /* number of sectors to play (includes entire first & last sectors) */
+  if stop(1) ILT (start(1)+1) then ms.numsec=ms.numsec-1;
+  ls.numsec=stop(1)-start(1)+1;
+
+  if (ms.numsec IGT 0) or (ls.numsec IGT attack.buf.sectors)
+  then do; /* limit to buffer size */
+     ms.numsec=0; ls.numsec=attack.buf.sectors;
+  end;
+  attack.buf.len=shl(attack.buf.sectors,8); /* useful data in buffer */
+  numwords=shl(ls.numsec,8);
+  call readdata(start(0),start(1),attack.buffer,numwords);
+
+  if start(2)<>0 then do; /* not on integral sector boundary - throw away first few words */
+    numwords=numwords-start(2);
+    attack.buf.len=attack.buf.len-start(2);
+    do i=0 to numwords-1; /* shift contents of attack buffer */
+      attack.buffer(i)=attack.buffer(i+start(2));
+    end;   
+  end;
+
+  i=start(0)+ms.numsec;
+  j=start(1)+ls.numsec-1;
+  if j ILT (ls.numsec-1) then i=i+1;
+
+  if ((i=stop(0)) and (j=stop(1))) then do; /* segment shorter than attack buffer - fill with zeros */
+    do i=numwords-256+stop(2)+1 to attack.buf.len-1; /* zero out samples not to be played */
+      attack.buffer(i)=0;
+    end;
+  end;
+end load_attack_buffer;
+
+/* $page */
+
+windac:proc(period,startarr,endsecarr,play.buf,play.buf.sec) SWAP; /* Winchester to DAC */
+  dcl period       fixed; /* period between samples, units of 1/30 of a microsecond */
+  dcl startarr     array; /* disk addr to start playing from */
+  dcl endsecarr    array; /* disk addr to stop  playing at */
+  dcl play.buf     array; /* temporary play buffer */
+  dcl play.buf.sec fixed; /* number of sectors here */
+
+  dcl (play.rp,play.sp)    fixed; /* pointers for rotary buffer */
+  dcl (play.min,play.max)  fixed; /* start and end pointers */
+  dcl (play.num,play.nlf)  fixed; /* number in buffer & room left */
+
+  dcl group.size           lit '256';
+  dcl sector(2)            fixed; /* starting sector */
+  dcl period.range         fixed;
+  dcl clock.limit          fixed;
+  dcl current.period       fixed;
+  dcl vibrato.phase.inc    fixed;
+  dcl vibrato.phase        fixed;
+  dcl vibrato.depth.factor fixed;
+  dcl vibrato.ramp         fixed;
+  dcl p.milliseconds       fixed; /* previous clock */
+  dcl volume               fixed; /* current value of keyboard envelope */
+  dcl ms.scsicount         fixed;
+  dcl ls.scsicount         fixed;
+  dcl (i,j,k,l,m)          fixed;
+
+  dcl a  lit 'write(mr1i)=read(mr0i)';   /* memory to memory */
+  dcl b  lit 'a;a;a;a;a;a;a;a;a;a;a;a;a;a;a;a';
+
+  dcl e  lit 'write(mr0i)=read(d107)';   /* d107 to memory */
+  dcl f  lit 'e;e;e;e;e;e;e;e;e;e;e;e;e;e;e;e';
+
+  dcl s.e  lit 'write(mr0i)=read(ScsiWord)';   /* d107 to memory */
+  dcl s.f  lit 's.e;s.e;s.e;s.e;s.e;s.e;s.e;s.e;s.e;s.e;s.e;s.e;s.e;s.e;s.e;s.e';
+
+  dcl g  lit 'wconverter=read(mr0i)';    /* mr0i to converter */
+  dcl h  lit 'g;g;g;g;g;g;g;g;g;g;g;g;g;g;g;g'; /* 16 mroi to dac */
+
+  dcl z  lit 'wconverter=0';
+  dcl zz lit 'z;z;z;z;z;z;z;z;z;z;z;z;z;z;z;z'; /* 16 zeroes to converter */
+
+  /* $SUBTITLE  Clavier and Terminal Polling Routine */
+
+  poll:  proc; /* poll keyboard and break key */
+     dcl i fixed; 
+
+     if any.kbd<>0 then do; /* have a keyboard in system */
+        call scan.new.notes; /* look for changes in keyboard */
+        new.note.ptr=1;      /* reset ptr to start of list */
+
+        do while (new.note.ptr<=new.note.list(0))&(play.rel=0)&(break.rcvd=0);
+           /* if key being played is released, set play.rel   = 1 */
+           /* if another new keys is pressed,  set break.rcvd = 1 */
+
+           if new.note.list(new.note.ptr)=2 then do; /* have a new release */
+              if (new.note.key#(new.note.ptr)-12)=active.note.key 
+              then play.rel=1; /* set flag to start note decay */
+              new.note.ptr=new.note.ptr+1; /* step to next change */
+           end;
+           else break.rcvd=1; /* have a new.note */
+        end;
+        if play.rel<>0 then do while (new.note.ptr<=new.note.list(0))&(break.rcvd=0);
+           if new.note.list(new.note.ptr)=1  /* have a new key */
+           then break.rcvd=1;                /* bust out of loop immediately */
+           else new.note.ptr=new.note.ptr+1; /* step to next change */
+        end;
+
+        call scan.analog.inputs;
+        rtepedalpos=240-pedal2.pos; /* read real-time effects pedal */
+        if rtepedalpos<0       then rtepedalpos=0;
+        if rtepedalpos>rte.max then rtepedalpos=rte.max;
+        if vel.kbd<>0 then volpedalpos=rte.max; /* no volume pedal on velocity kbd */
+        else do;
+           volpedalpos=240-pedal1.pos; /* read volume pedal */
+           if volpedalpos<0       then volpedalpos=0;
+           if volpedalpos>rte.max then volpedalpos=rte.max;
+        end;
+     end; /* of have a keyboard in system */
+
+     if (read("51")&2)<>0 then do; /* check for terminal input */
+        j=read("50")&"177"; /* get char */
+        if (j=0) or (j=A.S) or (j=A.S+"40") then break.rcvd=1;
+     end;
+  end poll;
+
+  /* $SUBTITLE Decay Update Routine */
+
+  decay_ramp:  proc; /* update volume for decay and for pedal, perform vibrato, pitch bend update */
+     dcl (i,j,k) fixed;
+
+     if (read(3))<>0 then do; /* time to update clock tick counter */
+       write(3)=0; milliseconds=milliseconds+clock.inc;
+     end;
+
+     i=milliseconds-p.milliseconds; /* compute time since last update */
+     if i<>0 then do; /* time for new update */
+       vibrato.phase=vibrato.phase+vibrato.phase.inc*i;
+       vibrato.ramp =vibrato.ramp +i;
+       call angle(vibrato.phase&"177700");
+       if vibrato.ramp ILT vibrato.attack then do; /* correct for vib attack time */
+          write(5)=vibrato.depth.factor;
+          write(6)=vibrato.ramp;
+          cosine=read(5);
+          write(7)=vibrato.attack;
+          cosine=read(5);
+          sine=sine%cosine;
+       end;
+       else do; /* max vib depth has been reached */
+          sine=sine%vibrato.depth.factor;
+          vibrato.ramp=vibrato.attack;
+       end;   
+
+       if play.rel<>0 then do; /* key has been released */
+          write(5)=0; write(4)=25; write(7)=25+keyboard.decay.number;
+          j=-read(5);       /* get time constant */
+          do k=5 to i by 5; /* loop for each 5 milliseconds */
+             write(5)=j; write(6)=volume; volume=read(4);
+          end;
+       end; /* of decay ramp */
+       p.milliseconds=milliseconds; /* store new time mark */
+     end; /* of time to do update */
+
+     select=card0 + volume.reg; /* prepare to write new volume */
+     if any.kbd=0 then wconverter=shr(volume,8); /* no pedals, can write vol directly */
+     else do; /* must update for pedals */
+        load volpedalpos; mul volume; i=res; div rte.max; /* scale vol by pedal position */
+        wconverter=shr(res,8); /* write vol here */
+
+        select=card0 + divisor.reg; /* prepare to update for pitch bend */
+        i=knob.pos-knob.base; /* determine change in knob */
+        if i<0 then i=(-i); /* take absolute value */
+        i=i-1; /* +1/-1 unit dead band */
+        if i<0  then i=0; /* keep value non-negative */
+        if i>25 then i=25; /* limit to expected max change */
+        write(5)=i; write(6)=period.range; /* compute knobchange*period.range */
+        i=read(5); write(7)=25; /* divide by max change */
+        if knob.pos>knob.base then current.period=period-read(5); /* update for pitch bend */
+        else                      current.period=period+read(5);
+
+        current.period=current.period+sine*rtepedalpos/rte.max; /* update for vibrato - must do signed operation here */
+
+        if current.period>max.period  then current.period=max.period; /* apply limits */
+        if current.period<clock.limit then current.period=clock.limit;
+        wconverter=current.period-2; /* write new period */
+      end;
+      select=card0 + data.reg; /* reset for more data */
+  end decay_ramp;
+
+  /* $SUBTITLE Attack Buffer Loading and Desampling Initialization Code */
+
+  /* try to assure that output latch is cleared */
+  select=card0 + outptr.reg; 
+  wconverter=0; 
+  select=card0 + data.reg;
+  wconverter=0; /* at least one zero is written */
+  select=card0 + divisor.reg; /* speed up */
+  wconverter=10;
+
+  if systyp<>1 then do; /* make sure this is a winchester system */
+    error.flag=e.winch; return;
+  end;
+  if play.buf.sec<(attack.buf.sectors-7) then do;
+    error.flag=e.sys.error; return;      /* play buffer must be larger than attack.buf.sectors-8) */
+  end;
+
+  sector(0)=startarr(0); /* compute first sector to desample */
+  sector(1)=startarr(1)+attack.buf.sectors; /* compute first sector to desample */
+  if sector(1) ILT attack.buf.sectors then sector(0)=sector(0)+1;
+  sector(2)=shl(sector(1),8);
+  call controller_and_drive(sector); /* locate drive */
+
+  interp_activate_real_time(true); // Inform interpreter that real time loop is now running.
+  interp_set_rtp_is_running(   2); // SFM Sampling
+
+  disable;
+
+  // Issue first disk command
+  if (((sector(0)&"377") ILT (endsecarr(0)&"377")) 
+  or (((sector(0)&"377") IEQ (endsecarr(0)&"377")) and (sector(1) ILE endsecarr(1)))) then do;
+     if use.scsi=0 then do;
+        write(d105)=current.interface; /* select controller */
+        if read(d105)&8=0 then do;     /* controller not present */
+          error.flag=e.sys.error; enable; return;
+        end;
+        write(d107)=2+current.drive;   /* start to read next sector */
+        write(d107)=ls.current.sector; /* read sector */
+     end;
+     else do;
+        i = S$DeviceBusy;
+        do while (i = S$DeviceBusy) or (i = S$ArbFailed) or (i = S$BadBusState);
+           i = ScsiConnect(current.interface, S.Initiator, current.id, shr(current.drive,8));
+           if i = S$BadBusState then do;          /* Clear bus if it is out of whack */
+              error.flag=e.winch; 
+              call ScsiAbort;
+           end;
+        end;
+
+        if i <> S$GoodConnect then do;
+           error.flag=e.winch; enable; return;
+        end;
+
+        /* Send SCSI Command */
+
+        ms.scsicount = ms.current.high-(sector(0)&"377"); /* number of sectors left on this drive */
+        if ls.current.high ILT sector(1) then ms.scsicount = ms.scsicount-1;
+        ls.scsicount = ls.current.high-sector(1); 
+        ls.scsicount = ls.scsicount + 1; /* boundary condition */
+        if ls.scsicount = 0 then ms.scsicount = ms.scsicount + 1;
+
+        if ((ms.scsicount > 0) or ((ms.scsicount = 0) and (ls.scsicount IGT 32))) then do;
+           ms.scsicount = 0; ls.scsicount = 32; /* limit count to 32 sectors */
+        end;
+
+        write(ScsiByte) = S$ExtendedRead;       /* SCSI Operation Code */
+        write(ScsiByte) = shr(current.drive,8 - 5); /* Target LUN */
+        write(ScsiWord) = ms.current.sector;    /* Logical Block Address (MSW) */
+        write(ScsiWord) = ls.current.sector;    /* Logical Block Address (LSW) */
+        write(ScsiByte) = 0;                    /* Reserved */
+        write(ScsiWord) = ls.scsicount;         /* this many blocks */
+        write(ScsiByte) = 0;                    /* Control byte */
+     end;
+  end;
+  else ls.scsicount = (-1);                     /* no command given */
+
+  select=card0 + control.reg;
+  wconverter="370"; noper;
+  wconverter="200"; noper;
+
+  select=card0 + outptr.reg;
+  wconverter=0; /* zero output pointers */
+ 
+  select=card0 + outlim.reg;
+  wconverter=2048-group.size; /* output limit */
+
+  play.rel=0; /* key has not been released */
+  volume=shl(dac.volume,8); /* initialize volume variable */
+  if (volume&"177400")=0 then volume=256; // Min volume of 1 apparently
+  select=card0 + volume.reg;
+  if not any.kbd then wconverter=shr(volume,8);
+  else do; /* if pedals present */
+    call scan.analog.inputs;
+    if vel.kbd<>0 then volpedalpos=rte.max; /* no volume pedal on velocity kbd */
+    else do;
+       volpedalpos=240-pedal1.pos; /* read volume pedal */
+       if volpedalpos<0       then volpedalpos=0;
+       if volpedalpos>rte.max then volpedalpos=rte.max;
+    end;
+    if active.note.key<>(-1) then do; /* playing a keyboard note */
+       load volume; mul active.note.vel; j=res; div 255; /* scale vol by note velocity */
+       volume=res;
+    end;
+    load volume; mul volpedalpos; j=res; div rte.max; /* scale vol by pedal pos */
+    wconverter=shr(res,8);                            /* write out new volume */
+
+    period.range=(57*period/1000)*semitones/100; /* one semitone = 5.7% */ 
+    clock.limit =clock.rate/max.sampling.rate;
+    vibrato.phase.inc   =int(.65536*vibrato.rate);
+    vibrato.depth.factor=(112*period/1000)*vibrato.depth/100;
+    sine=0;
+    p.milliseconds=milliseconds;
+    vibrato.phase=-32768;
+    vibrato.ramp =0;
+  end;
+
+  d66.status=0; /* initialize */
+
+  /* $PAGE */
+
+  select=card0 + data.reg; /* data register */
+  play.rp =0; play.sp =0; /* zero out read & store pointers */
+  play.min=0; play.max=shl(play.buf.sec-1,8); /* initial rotary pointer  limits */
+  play.num=0; play.nlf=play.max;
+  k=addr(attack.buffer(0)); /* address of attack buffer */
+  l=addr(     play.buf(0)); /* address of play buffer */
+
+  #if (0)
+    // Test for operation of limit regiater
+    DCL RPC   LIT 'WRITE("010")=(-1)+';
+    select=card0 + outlim.reg;
+    wconverter=2048-1024; /* output limit */
+    select=card0 + divisor.reg; /* time base register */
+    wconverter=600-2;
+    select=card0 + data.reg; /* data register */
+
+    dcl statii(100) fixed;
+    statii(0)=read(d66);
+
+    write(r0)=k=addr(attack.buffer(0));;
+    rpc 256;
+    wconverter=read(mr0i);
+    k=read(r0);
+
+    statii(1)=read(d66);
+
+    // Turn dac on
+    select=card0 + control.reg;
+    wconverter=2; /* start dac running */
+    select=card0 + data.reg;
+
+    do i = 2 to 80;
+     write(r0)=k=addr(attack.buffer(0));;
+     rpc 256;
+     wconverter=read(mr0i);
+     statii(i)=read(d66);
+    end;
+
+    do i = 0 to 80;
+     send octal(statii(i));
+    end;
+    write(0)=0;
+
+    // 002410   // 4000 == 0 == empty    ; 2000 == 1 ==    room in buffer
+    // 006410   // 4000 == 1 == not empty; 2000 == 1 ==    room in buffer
+    // 006410   // 4000 == 1 == not empty; 2000 == 1 ==    room in buffer
+    // 006410   // 4000 == 1 == not empty; 2000 == 1 ==    room in buffer
+    // 006410   // 4000 == 1 == not empty; 2000 == 1 ==    room in buffer
+    // 004410   // 4000 == 1 == not empty; 2000 == 0 == no room in buffer
+    // 004410
+    // 004410
+    // 004410
+    // 004410
+    // 004410
+    // 004410
+    // 004410
+  #endif
+
+  // The attack buffer is bigger than the dac physical buffer (22) sectors.
+  // So we send the first 2048 samples directly from the attack buffer
+  // to the dac. The rest of the attack buffer gets copied into
+  // the rotary buffer, then we start reading the disk after that.
+
+  // play.buf.sec       is 19 sectors
+  // attack.buf.sectors is 22 sectors
+
+  // Copy full sectors first to hardware, then into our rotary
+  // buffer up to the sector before the end of the attack buffer.
+  j=0;
+  do while j <= attack.buf.len-256; /* move 256 word blocks quickly */
+     if j<2048 then do m=0 to 3; /* load first 8 sectors directly into DAC */
+       write(r0)=k;
+       h; h; h; h; /* 64 samples */
+       k=read(r0);
+     end;
+     else do m=0 to 3; /* load data into our rotary buffer */
+       write(r0)=k;
+       write(r1)=l;
+       b; b; b; b; /* 64 samples */
+       k=read(r0);
+       l=read(r1);
+       play.sp=play.sp+64; /* 64 words stored in play buffer */
+       play.num=play.num+64; play.nlf=play.nlf-64;
+     end;
+     j=j+256;
+
+     if j=512 then do; /* start DAC after two sectors are there */
+       select=card0 + divisor.reg; /* time base register */
+       if any.kbd=0 then wconverter=period-2; /* emit selected period */
+       else do; /* compute pitch bend and emit period */
+         i=knob.pos-knob.base; /* determine change in knob */
+         if i<0  then i=(-i); /* take absolute value */
+         i=i-1; /* +1/-1 unit dead band */
+         if i<0  then i=0; /* keep value non-negative */
+         if i>25 then i=25; /* limit to expected max change */
+         write(5)=i; write(6)=period.range; /* compute knobchange*period.range */
+         i=read(5); write(7)=25; /* divide by max change */
+         if knob.pos>knob.base then current.period=period-read(5); /* update for pitch bend */
+         else                      current.period=period+read(5);
+
+         if current.period>max.period  then current.period=max.period; /* apply limits */
+         if current.period<clock.limit then current.period=clock.limit;
+         wconverter=current.period-2;
+       end; /* of compute pitch bend */
+
+       select=card0 + control.reg;
+       wconverter=2; /* start dac running */
+       select=card0 + data.reg;
+     end; /* of start DAC */
+
+  end; /* of unload attack buffer */
+
+  // Make sure room
+  do while ((read(d66)&1024)==0); interp_run_host(); end;
+
+  // If the attack buffer has a partial sector we copy the final
+  // bit of the attack buffer to the DAC directly
+  if j<2048 then do j=j to attack.buf.len-1; /* load final samples into dac */
+     wconverter=core(k); k=k+1; 
+  end;
+  else do; /* copy into play buffer and DAC */
+    m=0;
+    do j=j to attack.buf.len-1;
+      core(l+m)=core(k+m);
+      wconverter=play.buf(play.rp+m); /* unload 1 word for 256 multiple */
+      m=m+1;
+    end;
+    play.rp =play.rp +m;
+    play.sp =play.sp +m; 
+    play.min=play.min+m;
+    play.max=play.max+m;
+  end; /* of copy into play buffer and DAC */
+
+  /* $SUBTITLE  Main Desampling Loop */
+
+  do while (break.rcvd=0) 
+  and      ((volume&"177400")<>0) 
+  and      ((((sector(0)&"377") ILT (endsecarr(0)&"377"))) 
+  or        (((sector(0)&"377") IEQ (endsecarr(0)&"377")) 
+  and        ((sector(1)      ) ILE (endsecarr(1)      ))));
+
+    call poll; /* we know we have time for 1 poll */
+    call decay_ramp; /* update decay and vibrato */
+
+    sector(1)=sector(1)+1; /* advance to next sector */
+    if sector(1)=0 then sector(0)=sector(0)+1;
+    ls.scsicount=ls.scsicount-1; /* decrease sector count for scsi command */
+
+    if  (((sector(0)&"377") IGT ms.current.low) 
+    or   (((sector(0)&"377") IEQ ms.current.low)  and (sector(1) IGE ls.current.low)))
+    and (((sector(0)&"377") ILT ms.current.high) 
+    or   (((sector(0)&"377") IEQ ms.current.high) and (sector(1) ILE ls.current.high))) /* in limits */
+    then do; /* sector is still on this drive */
+       ms.current.sector=(sector(0)&"377")-ms.current.low; /* offset on same drive */
+       if sector(1) ILT ls.current.low then ms.current.sector=ms.current.sector-1;
+       ls.current.sector=sector(1)-ls.current.low;
+    end;
+    else call controller_and_drive(sector); /* must look up next drive */
+
+    do while play.nlf<256; /* empty out at least one sector of rotary buffer */
+      // Wait for room in DAC
+      do while ((read(d66)&1024)==0); interp_run_host(); end;
+
+      // Check underrun
+      d66.status=d66.status\(read(d66) xor 2048);
+
+      // 16 samples from play buffer to DAC
+      write(r0)=addr(play.buf(play.rp));
+      h; /* 16 words */
+      play.rp=play.rp+16; if play.rp=play.max then play.rp=play.min;
+      play.num=play.num-16; play.nlf=play.nlf+16;
+
+      if (read(3))<>0 then do; /* update clock tick counter */
+        write(3)=0; milliseconds=milliseconds+clock.inc;
+      end;
+    end;
+
+    /* the following loop takes 70 microseconds.  In the loop,  the disk
+       is checked every 20 microseconds */
+
+    k=play.num; // Grab a copy of play.num so we can determine how much was written out
+
+    do while 1; /* loop here - wait for disk ready - use goto for fast exit */
+
+      // See if disk has some data
+      if use.scsi=0 then do;
+         if (read("106")&2)<>0 then GOTO DISK_READY;   /* read return code */
+      end;
+      else if (interp_is_running == 0 || interp_check_scsi_io(0) == 0) then do;
+         if (read(ScsiBus)&S$REQ)<>0 then GOTO DISK_READY;
+      end;
+
+      // Chill if no samples in buffer from disk, or dac buffer is full
+      if ((play.num == 0) || ((read(d66)&1024) == 0))
+         interp_run_host();
+
+      // Else 16 words to DAC
+      else do;
+        d66.status=d66.status\(read(d66) xor 2048); /* check status */
+        l=addr(play.buf(play.rp));                  /* look up word to write out */
+        write(r0)=l;
+        h;
+        play.num=play.num-16;                       /* 16 words less in rotary buffer */
+        play.rp =play.rp +16;                       /* incr pointer */
+        if play.rp=play.max then play.rp=play.min;  /* rotary buffer */
+      end;
+
+      if (read(3))<>0 then do;                      /* update clock tick counter */
+        write(3)=0; milliseconds=milliseconds+clock.inc;
+      end;
+    end; /* of do while waiting for disk */
+
+    DISK_READY:
+    if use.scsi=0 then do;
+       j=read(d107)&255; /* get status code */
+       if j<>0 then do;  /* read error */
+          error.flag=e.winch;
+          if (j&128)<>0 then do;
+             enable; return; /* fatal error */
+          end;
+       end;
+       write(r0)=addr(play.buf(play.sp));
+       f; f; f; f; f; f; f; f; f; f; f; f; f; f; f; f; /* 256 transfers */
+
+       /* start next command immediately */
+
+       if (break.rcvd=0) and ((volume&"177400")<>0) /* start next read if more to go */
+       and ((sector(0) ILT endsecarr(0)) or ((sector(0) IEQ endsecarr(0)) and (sector(1) ILE endsecarr(1)))) then do;
+         write(d105)=current.interface;
+         do while read(d106)<>0; end; /* wait for rdy to return - DO NOT CHANGE THIS STATEMENT */
+         write(d107)=2+current.drive; /* read command */
+         /* 380 microseconds available here every sector */
+         write(d107)=ls.current.sector; /* sector number */
+       end;
+       else do while read(d106)<>0; end; /* wait for rdy to return - DO NOT CHANGE THIS STATEMENT */
+
+    end;
+    else do;             /* check for data in phase */
+      if (read(ScsiBus)&S$SigMask)<>S$DataIn then do;  /* make sure data in */
+         i=read(ScsiWord);
+         error.flag=e.winch; enable; return;
+      end;
+
+      // 256 words from disk
+      write(r0)=addr(play.buf(play.sp));
+      s.f; s.f; s.f; s.f; s.f; s.f; s.f; s.f; s.f; s.f; s.f; s.f; s.f; s.f; s.f; s.f; /* 256 transfers */
+
+      if (break.rcvd=0) and ((volume&"177400")<>0) /* start next read if more to go */
+      and ((sector(0) ILT endsecarr(0)) or ((sector(0) IEQ endsecarr(0)) and (sector(1) ILE endsecarr(1)))) then do;
+
+        if ls.scsicount=0 then do;         /* must give another scsi command */
+           i = read(ScsiWord);             /* get status from last read */
+           if i<>0 then do;                /* bad */
+              error.flag=e.winch; enable; return;
+           end;
+           i = S$DeviceBusy;
+           do while (i = S$DeviceBusy) or (i = S$ArbFailed) or (i = S$BadBusState);
+              i = ScsiConnect(current.interface, S.Initiator, current.id, shr(current.drive,8));
+              if i = S$BadBusState then do;          /* Clear bus if it is out of whack */
+                 error.flag=e.winch;
+                 call ScsiAbort;
+              end;
+           end;
+
+           if i <> S$GoodConnect then do;
+              error.flag=e.winch; enable; return;
+           end;
+
+           /* Send SCSI Command */
+
+           ms.scsicount = ms.current.high-(sector(0)&"377"); /* number of sectors left on this drive */
+           if ls.current.high ILT sector(1) then ms.scsicount = ms.scsicount-1;
+           ls.scsicount = ls.current.high-sector(1); 
+           ls.scsicount = ls.scsicount + 1; /* boundary condition */
+           if ls.scsicount = 0 then ms.scsicount = ms.scsicount + 1;
+
+           if ((ms.scsicount > 0) or ((ms.scsicount = 0) and (ls.scsicount IGT 32))) then do;
+              ms.scsicount = 0; ls.scsicount = 32; /* limit count to 32 sectors */
+           end;
+
+           write(ScsiByte) = S$ExtendedRead;       /* SCSI Operation Code */
+           write(ScsiByte) = shr(current.drive,8 - 5); /* Target LUN */
+           write(ScsiWord) = ms.current.sector;    /* Logical Block Address (MSW) */
+           write(ScsiWord) = ls.current.sector;    /* Logical Block Address (LSW) */
+           write(ScsiByte) = 0;                    /* Reserved */
+           write(ScsiWord) = ls.scsicount;         /* this many blocks */
+           write(ScsiByte) = 0;                    /* Control byte */
+        end;
+      end;
+    end;
+  
+    k=k-play.num; /* compute number of words written out above */
+
+    play.nlf=play.nlf+k; /* indicate more room in rotary buffer */
+    play.sp =play.sp +256; /* now account for words we just read in */
+    play.num=play.num+256;
+    play.nlf=play.nlf-256;
+
+    if ((sector(0)=endsecarr(0)) and (sector(1)-1)=endsecarr(1)) /* reading last sector */
+    then play.num=play.num-256+endsecarr(2)+1;      /* compute actual number of words in buffer */
+    else if play.sp=play.max then play.sp=play.min; /* check for pointer wrap around */
+
+  end; /* of loop over sectors */
+
+  j=0; /* finish with disk - clean out rotary buffer */
+  do while (play.num<>0) and (break.rcvd=0) and ((volume&"177400")<>0); /* flush out buffered data */
+    // Wait for room in DAC
+    do while ((read(d66)&1024)==0); interp_run_host(); end;
+
+    if play.num>16 then do; /* unload quickly */
+      d66.status=d66.status\(read(d66) xor 2048);
+      write(r0)=addr(play.buf(play.rp));
+      h; /* 16 words */
+      play.rp =play.rp +16; if play.rp=play.max then play.rp=play.min;
+      play.num=play.num-16;
+    end;
+
+    else do while play.num<>0;
+      wconverter=play.buf(play.rp);
+      play.rp=play.rp+1; play.num=play.num-1;
+    end;
+
+    j=j+1;
+
+    if (j&"17")=0 then do; /* every 256 samples check clavier */
+      call poll; /* check for key changes */
+      call decay_ramp; /* update volume register for decay */
+    end;
+  end; /* of flush out buffered data */
+
+  // now write out 2048 zeroes so the real audio data makes it to the outside world
+  j=0;
+  do while (j<8) and (break.rcvd=0) and ((volume&"177400")<>0); /* write out trailing zeroes in one sector blocks */
+     call poll; /* check for key changes */
+     call decay_ramp;
+     // Wait for room in DAC
+     do while ((read(d66)&1024)==0); interp_run_host(); end;
+     d66.status=d66.status\(read(d66) xor 2048); /* check status once more */
+     if break.rcvd=0 then do i=0 to 4; /* transfer 256 zeroes */
+        zz; zz; zz; zz; /* 64 zeros */
+     end;
+     j=j+1;
+  end; /* of write out trailing zeros */
+   
+  if use.scsi<>0 and (ls.scsicount<>(-1)) then do;    /* clean out scsi if one command was given */
+     do while ls.scsicount<>0;     /* finish off 32 sector scsi read command */
+
+        do while (read(ScsiBus)&S$Req)=0; end;  /* wait for req in case play.num = 0 */
+        if (read(ScsiBus)&S$SigMask)<>S$DataIn then do;  /* make sure data in */
+           i=read(ScsiWord);
+           error.flag=e.winch; enable; return;
+        end;
+      
+        do i=0 to 255;
+           write("300")=read(ScsiWord);
+        end;
+
+        ls.scsicount=ls.scsicount-1;
+     end;
+
+     i=read(ScsiWord);
+     if i<>0 then do;
+        error.flag=e.winch; enable; return;
+     end;
+
+  end;
+
+  select=card0 + volume.reg;
+  wconverter=0; /* shut down volume dac */
+  if (read(3))<>0 then write(3)=0; /* clear flag */
+  write(3)=0; write(3)=0; /* some delay to allow volume to decay */
+
+  break.rcvd=0;
+  if (d66.status&2048)<>0 then do;
+     error.flag=e.overrun; /* actually an underrun */
+     enable; return;
+  end;
+  enable;
+end windac;
+
+/* $SUBTITLE DAC Test Routine */
+
+testdac:proc(period,play.buf); /* Winchester to DAC */
+
+  dcl period     fixed; /* period between samples, units of 1/30 of a microsecond */
+  dcl play.buf   array; /* temporary play buffer */
+  dcl len        lit '16';
+
+  dcl g          lit 'wconverter=read(mr0i)';    /* mr0i to converter */
+  dcl h          lit 'g;g;g;g;g;g;g;g;g;g;g;g;g;g;g;g'; /* 16 mroi to dac */
+
+  dcl group.size lit '256';
+  dcl (i,j,k,l)  fixed;
+
+  select=card0 + outptr.reg; 
+  wconverter=0; 
+  select=card0 + data.reg;
+  wconverter=0; /* at least one zero is written */
+  select=card0 + divisor.reg;
+  wconverter=10; /* speed up */
+
+  interp_activate_real_time(true); // Inform interpreter that real time loop is now running.
+  interp_set_rtp_is_running(   2); // SFM Sampling
+
+  disable;
+  select=card0 + control.reg;
+  wconverter="370";
+  noper;
+  wconverter="200";
+  noper;
+
+  select=card0 + outptr.reg; /* zero output pointers */
+  wconverter=0; 
+  select=card0 + outlim.reg; /* output limit */
+  wconverter=2048-group.size;
+  select=card0 + volume.reg;
+  wconverter=0;
+
+  select=card0 + data.reg;
+  do i=0 to group.size-1; /* compute sine table */
+     call angle(shl(i,8)); 
+     play.buf(i)=sine;
+  end;
+
+  // Prefill
+  do i=0 to 2048/group.size-1; /* fill up dac */
+    do j=0 to group.size-1; wconverter=play.buf(j); end;
+  end;
+
+  // Start output
+  select=card0 + divisor.reg;
+  wconverter=period-2;
+  select=card0 + control.reg;
+  wconverter=2;
+  select=card0 + data.reg;
+  
+  d66.status= 0;
+  k=1;
+  do while (break.rcvd==0 || k!=0); /* loop until break and finish with volume ramp down*/
+    // Wait for room in buffer
+    do while (read(d66)&1024)=0; interp_run_host(); end; /* wait for room */
+
+    // Poll for underrun
+    d66.status=d66.status\(read(d66) xor 2048);
+
+    // Emit 256 samples
+    l=addr(play.buf(0));
+    do i=0 to group.size/len-1;
+      write(r0)=l;  
+      h; /* transfer 16 words */
+      l=read(r0);
+    end;
+
+    // Check for termination
+    if (read("51")&2)<>0 then do;
+      j=read("50")&"177";
+      if (j=0) or (j=A.S) or (j=A.S+32) then break.rcvd=1;
+    end;
+
+    // Ramp volume up or down
+    if (break.rcvd==0 && k<255) then do;
+       select=card0 + volume.reg;
+       k=k+1;
+       wconverter=k;
+       select=card0 + data.reg;
+    end;
+    if (break.rcvd==1 && k>0) then do;
+       select=card0 + volume.reg;
+       k=k-1;
+       wconverter=k;
+       select=card0 + data.reg;
+    end;
+  end; /* of loop until break */
+
+  break.rcvd=false;
+  if (d66.status&2048)<>0 then error.flag=e.overrun; /* actually an underrun */
+  enable;
+
+  // Clean up
+  interp_activate_real_time(false); // Inform interpreter that real time loop is now running.
+  interp_set_rtp_is_running(false); // SFM Sampling
+end testdac;

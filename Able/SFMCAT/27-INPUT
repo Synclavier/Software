@@ -1,1 +1,622 @@
-/* 27-INPUT  $TITLE  Command Line Interpreter and Driver and Menu Routines *//* Copyright 1985 by New England Digital Corporation */dcl number.of.commands lit '46';dcl cur.comnd          fixed; /* global for current command */menu:proc(buf1,buf2,i) swap; /* return command name string and units string */   dcl buf1 fixed array;   dcl buf2 fixed array;   dcl i    fixed;   dcl file   data ('(signal file name)'); /* commonly used strings */   dcl s.file data ('(spectral file)');   dcl volts  data ('<volts>');   dcl time   data ('<time>');   dcl number data ('<number>');   dcl symbol data ('<symbol>');   dcl scale  data ('HORIZONTAL/VERTICAL <volts>  <TO>  <volts>');   buf1(0) = 0; buf2(0) = 0; /* null out both strings */   do case i; /* case on specified command */     do; call assign(buf1,''); end; /* null */     do; call assign(buf1,'EXIT'); end;     do; call assign(buf1,'CATALOG'); end;     do; call assign(buf1,'CREATE'); call assign(buf2,time); end;          do; call assign(buf1,'ENVELOPE'); end;     do; call assign(buf1,'OLD '); call assign(buf2,file); end;     do; call assign(buf1,'DUPLICATE'); call assign(buf2,file); end;     do; call assign(buf1,'SAVE '); call assign(buf2,file); end;     do; call assign(buf1,'UNSAVE '); call assign(buf2,file); end;     do; call assign(buf1,'SPECTRAL-DISPLAY '); call assign(buf2,number); end;     do; call assign(buf1,'SYMBOL-CATALOG'); end;     do; call assign(buf1,'LABEL '); call assign(buf2,symbol); end;     do; call assign(buf1,'UNLABEL '); call assign(buf2,symbol); end;     do; call assign(buf1,'DISPLAY '); call assign(buf2,time); end;     do; call assign(buf1,'CENTER '); call assign(buf2,time); end;     do; call assign(buf1,'PLAY '); call assign(buf2,'<time> <TO> <time>'); end;     do; call assign(buf1,'MENU'); end;     do; call assign(buf1,'LINE-MODE'); end;     do; call assign(buf1,'LEFT'); call assign(buf2,time); end;     do; call assign(buf1,'ENTER'); call assign(buf2,file); end;     do; call assign(buf1,'MARK'); call assign(buf2,'START/END <time>'); end;     do; call assign(buf1,'EXTRACT'); call assign(buf2,'<time> to <time>'); end;     do; call assign(buf1,'SET'); call assign(buf2,'name <value>'); end;        do; call assign(buf1,'PRINT'); end;     do; call assign(buf1,'CONVOLVE'); call assign(buf2,file); end;     do; call assign(buf1,'CORRELATE'); call assign(buf2,file); end;     do; call assign(buf1,'ZERO'); end;     do; call assign(buf1,'ADD'); end;     do; call assign(buf1,'CAPTION'); call assign(buf2,'<string>'); end;     do; call assign(buf1,'SEARCH'); call assign(buf2,volts); end;     do; call assign(buf1,'PATCH'); end;     do; call assign(buf1,'TEST'); end;     do; call assign(buf1,'RESAMPLE'); end;     do; call assign(buf1,'RENAME'); call assign(buf2,file); end;     do; call assign(buf1,'EDIT'); end;     do; call assign(buf1,'MODULATE'); call assign(buf2,file); end;     do; call assign(buf1,'RECOVER'); call assign(buf2,s.file); end;     do; call assign(buf1,'AUTOCORRELATE'); call assign(buf2,s.file); end;     do; call assign(buf1,'IMPULSE-RESPONSE'); call assign(buf2,s.file); end;     do; call assign(buf1,'CEPSTRUM'); call assign(buf2,s.file); end;     do; call assign(buf1,'OVERLAY'); call assign(buf2,'(overlay file)'); end;     do; call assign(buf1,'SONOGRAPHIC-DISPLAY'); end;     do; call assign(buf1,'REVERSE'); end;     do; call assign(buf1,'DIRECTORY'); end;     do; call assign(buf1,'SYNTHESIZE'); end;     do; call assign(buf1,'LOOP'); end;   end; /* of do case */end menu;/* $SUBTITLE Menu Display and Command Line Status Routines */menu_display:proc swap; /* print command menu on screen */   dcl buf1(20) fixed;   dcl buf2(20) fixed;   dcl i        fixed;   clear;   call pos(4,29);   ps('List of valid commands');   do i=1 to 16;      call menu(buf1,buf2,i);      call pos(6+i,1); ps(buf1);      end;      do i=17 to 32;      call menu(buf1,buf2,i);      call pos(6+i-16,21); ps(buf1);   end;   do i=33 to number.of.commands;      call menu(buf1,buf2,i);      call pos(6+i-32,41); ps(buf1);   end;   display.type=menu.display; /* set the display type */end menu_display;status:proc swap; /* prints status on old command line */   call pos(2,30); call erase_line;   call pos(1,30); /* error position */   call error(error.flag);   error.flag=0;   call erase_line;   call cursor_restore;   call tty_wait;end status;/* $SUBTITLE Main Command Parser */scan_input:proc swap; /* main command parser */   dcl command(2) fixed;   dcl name(40)   fixed; /* name       temporary */   dcl temp (2)   fixed; /* general    temporary */   dcl temp1(2)   fixed;   dcl time1(2)   fixed; /* time value temporary */   dcl time2(2)   fixed; /* time value temporary */   dcl com1 data('EXI CAT CRE ENV OLD DUP SAV UNS SPE SYM ');   dcl com2 data('LAB UNL DIS CEN PLA MEN LIN LEF ENT MAR ');   dcl com3 data('EXT SET PRI CON COR ZER CAP SEA PAT TES ');   dcl com4 data('STO RES REN MOD REC EDI AUT IMP CEP ADD ');   dcl com5 data('OVE SON REV DIR SYN LOO ');   display:proc(center,force); /* handles DISPLAY and CENTER commands */      dcl center  fixed; /* =1 if time should be brought to center */      dcl force   fixed; /* =1 to force scroll of display buffer */      dcl time(2) fixed;          if (record.flag=1) or (f.name.bytes=0) then do; /* no file to display */         error.flag=e.no.file;         return;      end;      if display.type<>time.display then force=1; /* need to create a signal display */         if read_time(time) then do; /* if error in time value */         if error.flag=0 then error.flag=e.format;      end;      else call scroll_to_time(time,center,force); /* scroll to specified time */   end display;           if in.buf(0)=0 then do; /* user has entered a null line */      wait.for.scan=0;      if record.flag=1 then do; /* have received prompt to start recording */         nl; ps(prompt);         call record(1); /* start sampling */         call set_scale; /* set up attack buffer and tune keyboard */      end;      else if display.type<>time.display then do;         if read_time(cursor.time) then error.flag=e.format;         else call scroll_to_time(cursor.time,0,1);      end;      call status; /* display error message or OK */      return;   end; /* of null line */   byte.ptr=0; /* reset char pointer to command line */   call get_command(in.buf,command); /* extracts a command from command line */   call assign(local,in.buf); /* copy line into local buffer */   in.buf(0)=0;    wait.for.scan=0;   call erase_line;   nl; /* scroll command line */   ps(prompt); /* prompt */   cur.comnd=                    interpret_command(command,com1,1);   if cur.comnd=0 then cur.comnd=interpret_command(command,com2,11);   if cur.comnd=0 then cur.comnd=interpret_command(command,com3,21);   if cur.comnd=0 then cur.comnd=interpret_command(command,com4,31);   if cur.comnd=0 then cur.comnd=interpret_command(command,com5,41);   /* $SUBTITLE  Main Do Case for Command Selection */   do case cur.comnd; /* main command driver */                         error.flag=e.unrecog; /* 0; error */     call stop; /* 1; EXIT */     call catalog; /* 2; CATALOG */     do; /* 3; CREATE new file for recording */        call scan_number(local,temp); /* scan for number */        call get_command(local,name); /* scan for following string */        if interpret_command(name,'SEC ',1)=0 then do; /* not specifed as sectors */           call time_to_index(temp,temp,current.per.index); /* convert time to sectors */        end;        else do; /* change number format to index format */           temp(1)=temp(0); temp(0)=0; temp(2)=0;        end;        if not initialize_recording(temp) then error.flag=s.start;        if error.flag=s.start then ready.to.play=0; /* not ready */     end;     call construct_env; /* 4; ENVELOPE plot of data */     do; /* 5; OLD */        call get_filename(local,name,0);        if f.name.bytes<>0 then temp(0)=1; /* have current file - update to disk */        else                    temp(0)=0; /* no current file - don't do diskwrite */        call initialize_display(name,temp(0));     end;     do; /* 6; DUPLICATE display file and put into specified new file */        file1;        if      record.flag=1                   then error.flag=e.no.file;        else if compare(RECORDFILE.NAME,f.name) then error.flag=e.must.save;        else do; /* see if output file name specified */           call get_filename(local,name,0);           if name(0)=0 then call assign(name,RECORDFILE.NAME); /* if not then use .DATA */           if not duplicate(name) then call initialize_display(name,1); /* dup current file - put into 'name' */        end;     end;     do; /* 7; SAVE */        if record.flag=1 then call record(0);        call get_filename(local,name,0);        if name(0)=0 then error.flag=e.format;        else do;           if compare(f.name,RECORDFILE.NAME) then do;              if not rename(RECORDFILE.NAME,name,1) then error.flag=e.not.saved; /* rename file in catalog */              if c#status<>0 then do; /* error trying to rename */                 if c#status=e#name then error.flag=e.format; /* illegal filename */                 else if c#status=e#duplicate then error.flag=e.dup.file; /* duplicate filename */              end;              else call assign(f.name,name); /* save new name in F.NAME */           end;           else error.flag=e.saved; /* file has already been saved */        end;        if error.flag=0 then do;           record.flag=0;           if      display.type=cat.display then call catalog; /* update catalog display */           else if display.type=dir.display then call directory; /* update directory display */        end;     end;     do; /* 8; UNSAVE */        call get_filename(local,name,0);        if name(0)=0 then call assign(name,f.name); /* assume current file */        temp(0)=0; /* assume not unsaving current file */        if compare(name,f.name) then do;      /* unsaving curent file */           temp(0)=1;           if locate('.DATA',1)           then call unsave('.DATA');         /* get rid of any other .DATA */           call renamefile(name,'.DATA'); /* rename current to .DATA */           if c#status<>0 then do; /* error trying to rename */              if c#status=e#name then error.flag=e.format; /* illegal filename */              else if c#status=e#duplicate then error.flag=e.dup.file; /* duplicate filename */              else if c#status=e#no_file then error.flag=e.not.saved; /* old file not found */           end;           else call write_catalog;           call assign(f.name,'.DATA'); /* save new name in F.NAME */        end;        else call unsave(name);               /* unsave it */        if error.flag=0 then do;           if temp(0)<>0 then do;             /* unsaved current file */              if display.type<>dir.display then call catalog;              else                              call directory;           end;           else if display.type=cat.display then call catalog;   /* show catalog */           else if display.type=dir.display then call directory; /* show directory */        end;     end;     do; /* 9; SPECTRUM analysis */        if record.flag=2 then call initialize_display(RECORDFILE.NAME,1);        if (record.flag=1) or (f.name.bytes=0) then error.flag=e.no.file;        else                  call chain(SPE.FILE, false);     end;     if f.name.bytes<>0 then call symbol_catalog; /* 10; SYMBOL catalog */     else                    error.flag=e.no.file;     /* $PAGE */     do; /* 11; LABEL */        call get_word(local,name,8);        if not insert_symbol(name) /* insert label at current cursor pos */        then if display.type=sym.display then call symbol_catalog;     end;      do; /* 12; UNLABEL */        call get_word(local,name,8);        if not delete_symbol(name) /* delete symbol with given name */        then if display.type=sym.display then call symbol_catalog;     end;     call display(0,0); /* 13; DISPLAY - locate time and display */     call display(1,0); /* 14; CENTER - locate time and center cursor */     begin; /* 15; PLAY back file thru DAC */        dcl chr      fixed;        dcl period   fixed;        dcl start(2) fixed;        dcl stop (2) fixed;        dcl i        fixed;                call strip_blanks(local);        if (byte.ptr<>localbytes) and (byte(local,byte.ptr)=a.comma) then do;           byte.ptr=byte.ptr+1;           if scan_number(local,start)=1 then error.flag=e.format;           call strip_blanks(local);           if (byte.ptr<>localbytes) and (byte(local,byte.ptr)<>a.comma)           then error.flag=e.format;           byte.ptr=byte.ptr+1;           write(5)=start(0); write(6)=1000;   start(0)=read(5)+start(1); /* Hz */           write(5)=clock.rate; write(6)=1000; start(2)=read(5);           write(7)=start(0); period=read(5);           if (period ILT clock.rate/max.sampling.rate) then error.flag=e.samp.per;        end;        else period=period.index;        if localbytes<=byte.ptr then do; /* default - beginning to end */           call copy_vector(start,mark.start,3);           call copy_vector(stop, mark.end,  3);        end;        else do;           if read_time(start) then error.flag=e.format;           call get_command(local,command);           if interpret_command(command,'TO  ',1)=1 then do;              if read_time(stop) then error.flag=e.format;           end;             else call copy_vector(stop,location(data.end),3);        end;           if (record.flag=1) or (f.name.bytes=0) then error.flag=e.no.file;        if not d66_present then error.flag=e.no.D66;        if error.flag<>0 then do; call status; return; end;        /* need to insure that WINDAC routine does not detect clavier key            status has changed */        if any.kbd<>0 then do;           new.note.list(0)=0;   /* get rid of any waiting notes */           call scan.new.notes;  /* poll clavier keyboard */           new.note.list(0)=0;   /* toss any changes */           active.note.key=(-1); /* init to no active key */           active.note.vel=255;  /* but play at full volume */        end;        if not winchester(shr(f.drive,8)) then do;           error.flag=e.cannot.play;        end;        else do;           call setup_to_play(start,stop);          /* get ready to play samples */           call play(period);                       /* play the sound */           call setup_to_play(mark.start,mark.end); /* reinitialize for whole sound file */        end;     end; /* of PLAY command */     call menu_display; /* 16; MENU */     do; /* 17; LINE */        line.mode=not line.mode; /* toggle line mode flag */        if display.type=time.display then call scroll_to_time(cursor.time,0,1);     end;       /* $PAGE */          call display(0,1); /* 18; LEFT - force scrolling of data */     do; /* 19; ENTER */        call strip_blanks(local);        name(0)=0;        do while byte.ptr<localbytes; /* get rest of line */           call pbyte(name,name(0),byte(local,byte.ptr));           byte.ptr=byte.ptr+1;           name(0)=name(0)+1; /* treename */        end;        if enter_cat(name) then call catalog; /* enter catalog */     end;     do; /* 20; MARK start or end */        call get_command(local,command);        if      read_time(time1) then error.flag=e.format;        else if record.flag=1    then error.flag=e.no.file;        else do; /* process arg */           temp(0)=interpret_command(command,'STA END ',1);           if temp(0)>0 then do; /* valid arg */              if compare_vectors(total.length,zero.vector,3)>0 then do; /* have a looping sound file */                 if temp(0)=1 then do; /* check for valid start marker */                    call sub_len_from_len(total.length,loop.length,time2);                    call time_to_index(time1,temp1,period.index);                    if compare_vectors(temp1,time2,3)>0                    then error.flag=e.invalid.mark;                 end;                 else do; /* check for valid end marker */                    call time_to_index(time1,temp1,period.index);                    if compare_vectors(total.length,temp1,3)>0                    then error.flag=e.invalid.mark;                 end;              end;              if error.flag=0 then do;                 if temp(0)=1 then do; /* mark start */                   call plot_marker(mark.start);                   call copy_vector(mark.start,time1,3);                 end;                   else do; /* mark end */                   call plot_marker(mark.end);                   call copy_vector(mark.end,time1,3);                 end;                 call plot_marker(time1); /* update markers and scale */                 if compare_vectors(mark.start,mark.end,3)>0 then do; /* check order of times */                    call copy_vector(time1,     mark.start,3);                    call copy_vector(mark.start,mark.end,  3);                    call copy_vector(mark.end,  time1,     3);                 end;                 call set_scale;                 if display.type=sym.display then call symbol_catalog;              end;           end; /* of valid arg */           else error.flag=e.format;        end; /* of process arg */     end; /* of MARK command */     do; /* 21; EXTRACT a segment of the sound file, put in new file (.DATA)  */        if      record.flag=1                   then error.flag=e.no.file; /* no file present */        else if compare(f.name,RECORDFILE.NAME) then error.flag=e.must.save; /* must save before extract */        else                                         call chain(FUN.FILE, false);     end; /* extract */     do; /* 22; SET - change the value of a default */        if byte.ptr=localbytes then call set_menu(1);        else if change_value then do; /* if a change did occur, do updates */           if f.name.bytes<>0 then call set_scale; /* update keyboard data if there is a file */           if display.type=set.menu then call set_menu(0); /* update setmenu display */           else if replot.flag then do; /* update signal display */              call scroll_to_time(cursor.time,0,1);              replot.flag=0;           end;          end;       end; /* set */     do; /* 23; PRINT on Paper Tiger */        if d40_present then do; /* configured for printer */           if dq640 then do;              call sideways; /* rotate 90 degrees and print */              if display.type=time.display then call initialize_display(f.name,0); /* restore databuf1 */           end;           else call hardcopy; /* print normally */        end;        else error.flag=e.no.printer;     end;     /* $PAGE */          do; /* 24; CONVOLVE */        call get_filename(local,name,0);        if      record.flag=1 then error.flag=e.no.file;        else if name(0)=0     then error.flag=e.format;        else do; /* filter */           call chain_filter(4,name,FIL.FILE);           if error.flag<>0 then call file(1,0); /* restore proper current file */        end;     end;     do; /* 25; CORRELATE */        call get_filename(local,name,0);        if      record.flag=1 then error.flag=e.no.file;        else if name(0)=0     then error.flag=e.format;        else do; /* correlate */           call chain_filter(5,name,FIL.FILE);           if error.flag<>0 then call file(1,0); /* restore proper current file */        end;     end;        do; /* 26; ZERO out recording file */        if record(0) then error.flag=e.zero;        else              call set_scale;     end;     do; /* 27; CAPTION - alphanumeric string for labeling plots */        if (localbytes-byte.ptr)>max_caption_bytes        then call substr(id.field,local,byte.ptr,byte.ptr+max_caption_bytes-1);        else call substr(id.field,local,byte.ptr,localbytes-1);        if display.type=time.display then call scroll_to_time(cursor.time,0,1);     end;     do; /* 28; SEARCH forward to find threshold */        if      record.flag=1           then error.flag=e.no.file;        else if scan_number(local,temp) then error.flag=e.format;        else                                 call search(temp);     end;     do; /* 29; keyboard PATCH */        if any.kbd then do; /* overlay to patch */           file1;           core(loc.synmisc)=0; core(loc.syntimb)=0;           core(loc.synseq )=0; core(loc.synmed) =0; /* provide new pointers */           core(loc.synstat)=0;           core(loc.synret) =LOC.MON;           call get_filename(local,name,0);           if name(0)=0 then call chain(location(LOC.SYNRTPN), true);           else              call chain(name, true);        end;        else error.flag=e.not.available;     end;       call testdac(clock.rate/50,databuf1); /* 30; TEST tone */     call stop; /* 31; STOP (equivalent to exit) */     do; /* 32; RESAMPLE */        file1;        if f.name.bytes<>0 then do;           if not change_rate(databuf1,attack.buffer) then           call initialize_display(recordfile.name,1);        end;        else error.flag=e.format;     end;     do; /* 33; RENAME */        file1;        if f.name.bytes<>0 then do;           call get_filename(local,name,0);           if name(0)>0 then do;              call rename(f.name,name,1);               if c#status<>0 then do; /* error trying to rename */                 if c#status=e#name then error.flag=e.format; /* illegal filename */                 else if c#status=e#duplicate then error.flag=e.dup.file; /* duplicate filename */                 else if c#status=e#no_file then error.flag=e.not.saved; /* old file not found */              end;              call assign(f.name,name); /* save new name in F.NAME */              if error.flag=0 then do;                 if      display.type=cat.display then call catalog; /* show updated catalog */                 else if display.type=dir.display then call directory; /* show updated directory */              end;           end;           else error.flag=e.format;        end;        else error.flag=e.no.file;     end;     do; /* 34; ring MODULATE sound file */        file1;        if f.name.bytes=0 then error.flag=e.no.file;        else do;           if not modulate then call initialize_display(RECORDFILE.NAME,1);        end;     end;     do; /* 35; RECOVER spectral analysis file */        if f.name.bytes<>0 then call chain(SPE.FILE, false);        else                    error.flag=e.no.file; /* .SPE-x doesn't work right with no display file */     end;          /* $PAGE */     do; /* 36; go to EDIT Mode Overlay */        file1; /* update all files to disk before chaining */        call chain(EDIT.FILE, false);     end;     do; /* 37; AUTOCORRELATE */        if record.flag=1 then do;           if not record(0) then call chain(FUN.FILE, false);        end;         else call chain(FUN.FILE, false);     end;       do; /* 38; IMPULSE */        if record.flag=1 then do;           if not record(0) then call chain(FUN.FILE, false);        end;         else call chain(FUN.FILE, false);     end;       do; /* 39; CEPSTRUM */        if record.flag=1 then do;           if not record(0) then call chain(FUN.FILE, false);        end;         else call chain(FUN.FILE, false);     end;       do; /* 40; ADD */        if record.flag=1 then do;           if not record(0) then call chain(FUN.FILE, false);        end;         else call chain(FUN.FILE, false);     end;       do;  /* 41; OVERLAY named file */        file1;        call get_filename(local,name,0);        if name(0)=0 then error.flag=e.format;        else              call chain(name, false);     end;     do; /* 42; Chain to SONOGRAM producing module */        file1;        if f.name.bytes=0 then error.flag=e.no.file;        else                   call chain(SONO.FILE, false);     end;     do; /* 43; Do time REVERSAL of file */        if      record.flag=1                   then error.flag=e.no.file;        else if compare(RECORDFILE.NAME,f.name) then error.flag=e.must.save;        else                                         call chain(FUN.FILE, false);     end;     do; /* 44; Print DIRECTORY of sound files with captions */        if f.name.bytes<>0 then file1; /* Store all changes to disk */        call directory;     end;     do;  /* 45; Overlay to SYNTHESIS analysis program */        file1; /* Update all files before overlaying */        call chain(SYN.FILE, false);     end;     do; /* 46; Create a Perfect LOOP Point in the sound file, put in new file (.DATA)  */        if      record.flag=1                   then error.flag=e.no.file; /* no file present */        else if compare(f.name,RECORDFILE.NAME) then error.flag=e.must.save; /* must save before extract */        else                                         call chain(LOOP.FILE, false);     end;  end; /* do case */  break.rcvd=0; /* reset break flag */  call status; /* print OK or error message, any held characters */end scan_input;
+/* 27-INPUT  $TITLE  Command Line Interpreter and Driver and Menu Routines */
+
+/* Copyright 1985 by New England Digital Corporation */
+
+dcl number.of.commands lit '46';
+
+dcl cur.comnd          fixed; /* global for current command */
+
+menu:proc(buf1,buf2,i) swap; /* return command name string and units string */
+   dcl buf1 fixed array;
+   dcl buf2 fixed array;
+   dcl i    fixed;
+
+   dcl file   data ('(signal file name)'); /* commonly used strings */
+   dcl s.file data ('(spectral file)');
+   dcl volts  data ('<volts>');
+   dcl time   data ('<time>');
+   dcl number data ('<number>');
+   dcl symbol data ('<symbol>');
+   dcl scale  data ('HORIZONTAL/VERTICAL <volts>  <TO>  <volts>');
+
+   buf1(0) = 0; buf2(0) = 0; /* null out both strings */
+
+   do case i; /* case on specified command */
+     do; call assign(buf1,''); end; /* null */
+     do; call assign(buf1,'EXIT'); end;
+     do; call assign(buf1,'CATALOG'); end;
+     do; call assign(buf1,'CREATE'); call assign(buf2,time); end;
+     do; call assign(buf1,'ENVELOPE'); end;
+     do; call assign(buf1,'OLD '); call assign(buf2,file); end;
+     do; call assign(buf1,'DUPLICATE'); call assign(buf2,file); end;
+     do; call assign(buf1,'SAVE '); call assign(buf2,file); end;
+     do; call assign(buf1,'UNSAVE '); call assign(buf2,file); end;
+     do; call assign(buf1,'SPECTRAL-DISPLAY '); call assign(buf2,number); end;
+     do; call assign(buf1,'SYMBOL-CATALOG'); end;
+     do; call assign(buf1,'LABEL '); call assign(buf2,symbol); end;
+     do; call assign(buf1,'UNLABEL '); call assign(buf2,symbol); end;
+     do; call assign(buf1,'DISPLAY '); call assign(buf2,time); end;
+     do; call assign(buf1,'CENTER '); call assign(buf2,time); end;
+     do; call assign(buf1,'PLAY '); call assign(buf2,'<time> <TO> <time>'); end;
+     do; call assign(buf1,'MENU'); end;
+     do; call assign(buf1,'LINE-MODE'); end;
+     do; call assign(buf1,'LEFT'); call assign(buf2,time); end;
+     do; call assign(buf1,'ENTER'); call assign(buf2,file); end;
+     do; call assign(buf1,'MARK'); call assign(buf2,'START/END <time>'); end;
+     do; call assign(buf1,'EXTRACT'); call assign(buf2,'<time> to <time>'); end;
+     do; call assign(buf1,'SET'); call assign(buf2,'name <value>'); end;
+     do; call assign(buf1,'PRINT'); end;
+     do; call assign(buf1,'CONVOLVE'); call assign(buf2,file); end;
+     do; call assign(buf1,'CORRELATE'); call assign(buf2,file); end;
+     do; call assign(buf1,'ZERO'); end;
+     do; call assign(buf1,'ADD'); end;
+     do; call assign(buf1,'CAPTION'); call assign(buf2,'<string>'); end;
+     do; call assign(buf1,'SEARCH'); call assign(buf2,volts); end;
+     do; call assign(buf1,'PATCH'); end;
+     do; call assign(buf1,'TEST'); end;
+     do; call assign(buf1,'RESAMPLE'); end;
+     do; call assign(buf1,'RENAME'); call assign(buf2,file); end;
+     do; call assign(buf1,'EDIT'); end;
+     do; call assign(buf1,'MODULATE'); call assign(buf2,file); end;
+     do; call assign(buf1,'RECOVER'); call assign(buf2,s.file); end;
+     do; call assign(buf1,'AUTOCORRELATE'); call assign(buf2,s.file); end;
+     do; call assign(buf1,'IMPULSE-RESPONSE'); call assign(buf2,s.file); end;
+     do; call assign(buf1,'CEPSTRUM'); call assign(buf2,s.file); end;
+     do; call assign(buf1,'OVERLAY'); call assign(buf2,'(overlay file)'); end;
+     do; call assign(buf1,'SONOGRAPHIC-DISPLAY'); end;
+     do; call assign(buf1,'REVERSE'); end;
+     do; call assign(buf1,'DIRECTORY'); end;
+     do; call assign(buf1,'SYNTHESIZE'); end;
+     do; call assign(buf1,'LOOP'); end;
+   end; /* of do case */
+end menu;
+
+/* $SUBTITLE Menu Display and Command Line Status Routines */
+
+menu_display:proc swap; /* print command menu on screen */
+   dcl buf1(20) fixed;
+   dcl buf2(20) fixed;
+   dcl i        fixed;
+
+   clear;
+   call pos(4,29);
+   ps('List of valid commands');
+   do i=1 to 16;
+      call menu(buf1,buf2,i);
+      call pos(6+i,1); ps(buf1);
+   end;
+   do i=17 to 32;
+      call menu(buf1,buf2,i);
+      call pos(6+i-16,21); ps(buf1);
+   end;
+   do i=33 to number.of.commands;
+      call menu(buf1,buf2,i);
+      call pos(6+i-32,41); ps(buf1);
+   end;
+   display.type=menu.display; /* set the display type */
+end menu_display;
+
+status:proc swap; /* prints status on old command line */
+   call pos(2,30); call erase_line;
+   call pos(1,30); /* error position */
+   call error(error.flag);
+   error.flag=0;
+   call erase_line;
+   call cursor_restore;
+   call tty_wait;
+end status;
+
+/* $SUBTITLE Main Command Parser */
+
+scan_input:proc swap; /* main command parser */
+   dcl command(2) fixed;
+   dcl name(40)   fixed; /* name       temporary */
+   dcl temp (2)   fixed; /* general    temporary */
+   dcl temp1(2)   fixed;
+   dcl time1(2)   fixed; /* time value temporary */
+   dcl time2(2)   fixed; /* time value temporary */
+
+   dcl com1 data('EXI CAT CRE ENV OLD DUP SAV UNS SPE SYM ');
+   dcl com2 data('LAB UNL DIS CEN PLA MEN LIN LEF ENT MAR ');
+   dcl com3 data('EXT SET PRI CON COR ZER CAP SEA PAT TES ');
+   dcl com4 data('STO RES REN MOD REC EDI AUT IMP CEP ADD ');
+   dcl com5 data('OVE SON REV DIR SYN LOO ');
+
+   display:proc(center,force); /* handles DISPLAY and CENTER commands */
+      dcl center  fixed; /* =1 if time should be brought to center */
+      dcl force   fixed; /* =1 to force scroll of display buffer */
+      dcl time(2) fixed;
+
+      if (record.flag=1) or (f.name.bytes=0) then do; /* no file to display */
+         error.flag=e.no.file;
+         return;
+      end;
+
+      if display.type<>time.display then force=1; /* need to create a signal display */
+      if read_time(time) then do; /* if error in time value */
+         if error.flag=0 then error.flag=e.format;
+      end;
+      else call scroll_to_time(time,center,force); /* scroll to specified time */
+   end display;
+
+   if in.buf(0)=0 then do; /* user has entered a null line */
+      wait.for.scan=0;
+      if record.flag=1 then do; /* have received prompt to start recording */
+         nl; ps(prompt);
+         call record(1); /* start sampling */
+         call set_scale; /* set up attack buffer and tune keyboard */
+      end;
+      else if display.type<>time.display then do;
+         if read_time(cursor.time) then error.flag=e.format;
+         else call scroll_to_time(cursor.time,0,1);
+      end;
+      call status; /* display error message or OK */
+      return;
+   end; /* of null line */
+
+   byte.ptr=0; /* reset char pointer to command line */
+   call get_command(in.buf,command); /* extracts a command from command line */
+   call assign(local,in.buf); /* copy line into local buffer */
+   in.buf(0)=0;
+   wait.for.scan=0;
+   call erase_line;
+   nl; /* scroll command line */
+   ps(prompt); /* prompt */
+
+   cur.comnd=                    interpret_command(command,com1,1);
+   if cur.comnd=0 then cur.comnd=interpret_command(command,com2,11);
+   if cur.comnd=0 then cur.comnd=interpret_command(command,com3,21);
+   if cur.comnd=0 then cur.comnd=interpret_command(command,com4,31);
+   if cur.comnd=0 then cur.comnd=interpret_command(command,com5,41);
+
+   /* $SUBTITLE  Main Do Case for Command Selection */
+
+   do case cur.comnd; /* main command driver */
+
+     error.flag=e.unrecog; /* 0; error */
+
+     call stop; /* 1; EXIT */
+
+     call catalog; /* 2; CATALOG */
+
+     do; /* 3; CREATE new file for recording */
+        call scan_number(local,temp); /* scan for number */
+        call get_command(local,name); /* scan for following string */
+
+        if interpret_command(name,'SEC ',1)=0 then do; /* not specifed as sectors */
+           call time_to_index(temp,temp,current.per.index); /* convert time to sectors */
+        end;
+        else do; /* change number format to index format */
+           temp(1)=temp(0); temp(0)=0; temp(2)=0;
+        end;
+
+        if not initialize_recording(temp) then error.flag=s.start;
+        if error.flag=s.start then ready.to.play=0; /* not ready */
+     end;
+
+     call construct_env; /* 4; ENVELOPE plot of data */
+
+     do; /* 5; OLD */
+        call get_filename(local,name,0);
+        if f.name.bytes<>0 then temp(0)=1; /* have current file - update to disk */
+        else                    temp(0)=0; /* no current file - don't do diskwrite */
+        call initialize_display(name,temp(0));
+     end;
+
+     do; /* 6; DUPLICATE display file and put into specified new file */
+        file1;
+        if      record.flag=1                   then error.flag=e.no.file;
+        else if compare(RECORDFILE.NAME,f.name) then error.flag=e.must.save;
+        else do; /* see if output file name specified */
+           call get_filename(local,name,0);
+           if name(0)=0 then call assign(name,RECORDFILE.NAME); /* if not then use .DATA */
+           if not duplicate(name) then call initialize_display(name,1); /* dup current file - put into 'name' */
+        end;
+     end;
+
+     do; /* 7; SAVE */
+        if record.flag=1 then call record(0);
+        call get_filename(local,name,0);
+        if name(0)=0 then error.flag=e.format;
+        else do;
+           if compare(f.name,RECORDFILE.NAME) then do;
+              if not rename(RECORDFILE.NAME,name,1) then error.flag=e.not.saved; /* rename file in catalog */
+              if c#status<>0 then do; /* error trying to rename */
+                 if c#status=e#name then error.flag=e.format; /* illegal filename */
+                 else if c#status=e#duplicate then error.flag=e.dup.file; /* duplicate filename */
+              end;
+              else call assign(f.name,name); /* save new name in F.NAME */
+           end;
+           else error.flag=e.saved; /* file has already been saved */
+        end;
+        if error.flag=0 then do;
+           record.flag=0;
+           if      display.type=cat.display then call catalog; /* update catalog display */
+           else if display.type=dir.display then call directory; /* update directory display */
+        end;
+     end;
+
+     do; /* 8; UNSAVE */
+        call get_filename(local,name,0);
+        if name(0)=0 then call assign(name,f.name); /* assume current file */
+        temp(0)=0; /* assume not unsaving current file */
+        if compare(name,f.name) then do;      /* unsaving curent file */
+           temp(0)=1;
+           if locate('.DATA',1)
+           then call unsave('.DATA');         /* get rid of any other .DATA */
+           call renamefile(name,'.DATA'); /* rename current to .DATA */
+           if c#status<>0 then do; /* error trying to rename */
+              if c#status=e#name then error.flag=e.format; /* illegal filename */
+              else if c#status=e#duplicate then error.flag=e.dup.file; /* duplicate filename */
+              else if c#status=e#no_file then error.flag=e.not.saved; /* old file not found */
+           end;
+           else call write_catalog;
+           call assign(f.name,'.DATA'); /* save new name in F.NAME */
+        end;
+        else call unsave(name);               /* unsave it */
+        if error.flag=0 then do;
+           if temp(0)<>0 then do;             /* unsaved current file */
+              if display.type<>dir.display then call catalog;
+              else                              call directory;
+           end;
+           else if display.type=cat.display then call catalog;   /* show catalog */
+           else if display.type=dir.display then call directory; /* show directory */
+        end;
+     end;
+
+     do; /* 9; SPECTRUM analysis */
+        if record.flag=2 then call initialize_display(RECORDFILE.NAME,1);
+        if (record.flag=1) or (f.name.bytes=0) then error.flag=e.no.file;
+        else                  call chain(SPE.FILE, false);
+     end;
+
+     if f.name.bytes<>0 then call symbol_catalog; /* 10; SYMBOL catalog */
+     else                    error.flag=e.no.file;
+
+     /* $PAGE */
+
+     do; /* 11; LABEL */
+        call get_word(local,name,8);
+        if not insert_symbol(name) /* insert label at current cursor pos */
+        then if display.type=sym.display then call symbol_catalog;
+     end;
+
+     do; /* 12; UNLABEL */
+        call get_word(local,name,8);
+        if not delete_symbol(name) /* delete symbol with given name */
+        then if display.type=sym.display then call symbol_catalog;
+     end;
+
+     call display(0,0); /* 13; DISPLAY - locate time and display */
+
+     call display(1,0); /* 14; CENTER - locate time and center cursor */
+
+     begin; /* 15; PLAY back file thru DAC */
+        dcl chr      fixed;
+        dcl period   fixed;
+        dcl start(2) fixed;
+        dcl stop (2) fixed;
+        dcl i        fixed;
+
+        call strip_blanks(local);
+        if (byte.ptr<>localbytes) and (byte(local,byte.ptr)=a.comma) then do;
+           byte.ptr=byte.ptr+1;
+           if scan_number(local,start)=1 then error.flag=e.format;
+           call strip_blanks(local);
+           if (byte.ptr<>localbytes) and (byte(local,byte.ptr)<>a.comma)
+           then error.flag=e.format;
+           byte.ptr=byte.ptr+1;
+
+           write(5)=start(0); write(6)=1000;   start(0)=read(5)+start(1); /* Hz */
+           write(5)=clock.rate; write(6)=1000; start(2)=read(5);
+           write(7)=start(0); period=read(5);
+           if (period ILT clock.rate/max.sampling.rate) then error.flag=e.samp.per;
+        end;
+        else period=period.index;
+        if localbytes<=byte.ptr then do; /* default - beginning to end */
+           call copy_vector(start,mark.start,3);
+           call copy_vector(stop, mark.end,  3);
+        end;
+        else do;
+           if read_time(start) then error.flag=e.format;
+           call get_command(local,command);
+           if interpret_command(command,'TO  ',1)=1 then do;
+              if read_time(stop) then error.flag=e.format;
+           end;
+           else call copy_vector(stop,location(data.end),3);
+        end;
+        if (record.flag=1) or (f.name.bytes=0) then error.flag=e.no.file;
+        if not d66_present then error.flag=e.no.D66;
+
+        if error.flag<>0 then do; call status; return; end;
+
+        /* need to insure that WINDAC routine does not detect clavier key
+           status has changed */
+        if any.kbd<>0 then do;
+           new.note.list(0)=0;   /* get rid of any waiting notes */
+           call scan.new.notes;  /* poll clavier keyboard */
+           new.note.list(0)=0;   /* toss any changes */
+           active.note.key=(-1); /* init to no active key */
+           active.note.vel=255;  /* but play at full volume */
+        end;
+
+        if not winchester(shr(f.drive,8)) then do;
+           error.flag=e.cannot.play;
+        end;
+        else do;
+           call setup_to_play(start,stop);          /* get ready to play samples */
+           call play(period);                       /* play the sound */
+           call setup_to_play(mark.start,mark.end); /* reinitialize for whole sound file */
+        end;
+     end; /* of PLAY command */
+
+     call menu_display; /* 16; MENU */
+
+     do; /* 17; LINE */
+        line.mode=not line.mode; /* toggle line mode flag */
+        if display.type=time.display then call scroll_to_time(cursor.time,0,1);
+     end;
+
+     /* $PAGE */
+
+     call display(0,1); /* 18; LEFT - force scrolling of data */
+
+     do; /* 19; ENTER */
+        call strip_blanks(local);
+        name(0)=0;
+        do while byte.ptr<localbytes; /* get rest of line */
+           call pbyte(name,name(0),byte(local,byte.ptr));
+           byte.ptr=byte.ptr+1;
+           name(0)=name(0)+1; /* treename */
+        end;
+        if enter_cat(name) then call catalog; /* enter catalog */
+     end;
+
+     do; /* 20; MARK start or end */
+        call get_command(local,command);
+        if      read_time(time1) then error.flag=e.format;
+        else if record.flag=1    then error.flag=e.no.file;
+        else do; /* process arg */
+           temp(0)=interpret_command(command,'STA END ',1);
+           if temp(0)>0 then do; /* valid arg */
+              if compare_vectors(total.length,zero.vector,3)>0 then do; /* have a looping sound file */
+                 if temp(0)=1 then do; /* check for valid start marker */
+                    call sub_len_from_len(total.length,loop.length,time2);
+                    call time_to_index(time1,temp1,period.index);
+                    if compare_vectors(temp1,time2,3)>0
+                    then error.flag=e.invalid.mark;
+                 end;
+                 else do; /* check for valid end marker */
+                    call time_to_index(time1,temp1,period.index);
+                    if compare_vectors(total.length,temp1,3)>0
+                    then error.flag=e.invalid.mark;
+                 end;
+              end;
+              if error.flag=0 then do;
+                 if temp(0)=1 then do; /* mark start */
+                   call plot_marker(mark.start);
+                   call copy_vector(mark.start,time1,3);
+                 end;
+                 else do; /* mark end */
+                   call plot_marker(mark.end);
+                   call copy_vector(mark.end,time1,3);
+                 end;
+                 call plot_marker(time1); /* update markers and scale */
+                 if compare_vectors(mark.start,mark.end,3)>0 then do; /* check order of times */
+                    call copy_vector(time1,     mark.start,3);
+                    call copy_vector(mark.start,mark.end,  3);
+                    call copy_vector(mark.end,  time1,     3);
+                 end;
+                 call set_scale;
+                 if display.type=sym.display then call symbol_catalog;
+              end;
+           end; /* of valid arg */
+           else error.flag=e.format;
+        end; /* of process arg */
+     end; /* of MARK command */
+
+     do; /* 21; EXTRACT a segment of the sound file, put in new file (.DATA)  */
+        if      record.flag=1                   then error.flag=e.no.file; /* no file present */
+        else if compare(f.name,RECORDFILE.NAME) then error.flag=e.must.save; /* must save before extract */
+        else                                         call chain(FUN.FILE, false);
+     end; /* extract */
+
+     do; /* 22; SET - change the value of a default */
+        if byte.ptr=localbytes then call set_menu(1);
+        else if change_value then do; /* if a change did occur, do updates */
+           if f.name.bytes<>0 then call set_scale; /* update keyboard data if there is a file */
+           if display.type=set.menu then call set_menu(0); /* update setmenu display */
+           else if replot.flag then do; /* update signal display */
+              call scroll_to_time(cursor.time,0,1);
+              replot.flag=0;
+           end;
+        end;
+     end; /* set */
+
+     do; /* 23; PRINT on Paper Tiger */
+        if d40_present then do; /* configured for printer */
+           if dq640 then do;
+              call sideways; /* rotate 90 degrees and print */
+              if display.type=time.display then call initialize_display(f.name,0); /* restore databuf1 */
+           end;
+           else call hardcopy; /* print normally */
+        end;
+        else error.flag=e.no.printer;
+     end;
+
+     /* $PAGE */
+
+     do; /* 24; CONVOLVE */
+        call get_filename(local,name,0);
+        if      record.flag=1 then error.flag=e.no.file;
+        else if name(0)=0     then error.flag=e.format;
+        else do; /* filter */
+           call chain_filter(4,name,FIL.FILE);
+           if error.flag<>0 then call file(1,0); /* restore proper current file */
+        end;
+     end;
+
+     do; /* 25; CORRELATE */
+        call get_filename(local,name,0);
+        if      record.flag=1 then error.flag=e.no.file;
+        else if name(0)=0     then error.flag=e.format;
+        else do; /* correlate */
+           call chain_filter(5,name,FIL.FILE);
+           if error.flag<>0 then call file(1,0); /* restore proper current file */
+        end;
+     end;
+
+     do; /* 26; ZERO out recording file */
+        if record(0) then error.flag=e.zero;
+        else              call set_scale;
+     end;
+
+     do; /* 27; CAPTION - alphanumeric string for labeling plots */
+        if (localbytes-byte.ptr)>max_caption_bytes
+        then call substr(id.field,local,byte.ptr,byte.ptr+max_caption_bytes-1);
+        else call substr(id.field,local,byte.ptr,localbytes-1);
+        if display.type=time.display then call scroll_to_time(cursor.time,0,1);
+     end;
+
+     do; /* 28; SEARCH forward to find threshold */
+        if      record.flag=1           then error.flag=e.no.file;
+        else if scan_number(local,temp) then error.flag=e.format;
+        else                                 call search(temp);
+     end;
+
+     do; /* 29; keyboard PATCH */
+        if any.kbd then do; /* overlay to patch */
+           file1;
+           core(loc.synmisc)=0; core(loc.syntimb)=0;
+           core(loc.synseq )=0; core(loc.synmed) =0; /* provide new pointers */
+           core(loc.synstat)=0;
+           core(loc.synret) =LOC.MON;
+           call get_filename(local,name,0);
+           if name(0)=0 then call chain(location(LOC.SYNRTPN), true);
+           else              call chain(name, true);
+        end;
+        else error.flag=e.not.available;
+     end;
+
+     call testdac(clock.rate/50,databuf1); /* 30; TEST tone */
+
+     call stop; /* 31; STOP (equivalent to exit) */
+
+     do; /* 32; RESAMPLE */
+        file1;
+        if f.name.bytes<>0 then do;
+           if not change_rate(databuf1,attack.buffer) then
+           call initialize_display(recordfile.name,1);
+        end;
+        else error.flag=e.format;
+     end;
+
+     do; /* 33; RENAME */
+        file1;
+        if f.name.bytes<>0 then do;
+           call get_filename(local,name,0);
+           if name(0)>0 then do;
+              call rename(f.name,name,1);
+              if c#status<>0 then do; /* error trying to rename */
+                 if c#status=e#name then error.flag=e.format; /* illegal filename */
+                 else if c#status=e#duplicate then error.flag=e.dup.file; /* duplicate filename */
+                 else if c#status=e#no_file then error.flag=e.not.saved; /* old file not found */
+              end;
+              call assign(f.name,name); /* save new name in F.NAME */
+              if error.flag=0 then do;
+                 if      display.type=cat.display then call catalog; /* show updated catalog */
+                 else if display.type=dir.display then call directory; /* show updated directory */
+              end;
+           end;
+           else error.flag=e.format;
+        end;
+        else error.flag=e.no.file;
+     end;
+
+     do; /* 34; ring MODULATE sound file */
+        file1;
+        if f.name.bytes=0 then error.flag=e.no.file;
+        else do;
+           if not modulate then call initialize_display(RECORDFILE.NAME,1);
+        end;
+     end;
+
+     do; /* 35; RECOVER spectral analysis file */
+        if f.name.bytes<>0 then call chain(SPE.FILE, false);
+        else                    error.flag=e.no.file; /* .SPE-x doesn't work right with no display file */
+     end;
+
+     /* $PAGE */
+
+     do; /* 36; go to EDIT Mode Overlay */
+        file1; /* update all files to disk before chaining */
+        call chain(EDIT.FILE, false);
+     end;
+
+     do; /* 37; AUTOCORRELATE */
+        if record.flag=1 then do;
+           if not record(0) then call chain(FUN.FILE, false);
+        end;
+        else call chain(FUN.FILE, false);
+     end;
+
+     do; /* 38; IMPULSE */
+        if record.flag=1 then do;
+           if not record(0) then call chain(FUN.FILE, false);
+        end;
+        else call chain(FUN.FILE, false);
+     end;
+
+     do; /* 39; CEPSTRUM */
+        if record.flag=1 then do;
+           if not record(0) then call chain(FUN.FILE, false);
+        end;
+        else call chain(FUN.FILE, false);
+     end;
+
+     do; /* 40; ADD */
+        if record.flag=1 then do;
+           if not record(0) then call chain(FUN.FILE, false);
+        end;
+        else call chain(FUN.FILE, false);
+     end;
+
+     do;  /* 41; OVERLAY named file */
+        file1;
+        call get_filename(local,name,0);
+        if name(0)=0 then error.flag=e.format;
+        else              call chain(name, false);
+     end;
+
+     do; /* 42; Chain to SONOGRAM producing module */
+        file1;
+        if f.name.bytes=0 then error.flag=e.no.file;
+        else                   call chain(SONO.FILE, false);
+     end;
+
+     do; /* 43; Do time REVERSAL of file */
+        if      record.flag=1                   then error.flag=e.no.file;
+        else if compare(RECORDFILE.NAME,f.name) then error.flag=e.must.save;
+        else                                         call chain(FUN.FILE, false);
+     end;
+
+     do; /* 44; Print DIRECTORY of sound files with captions */
+        if f.name.bytes<>0 then file1; /* Store all changes to disk */
+        call directory;
+     end;
+
+     do;  /* 45; Overlay to SYNTHESIS analysis program */
+        file1; /* Update all files before overlaying */
+        call chain(SYN.FILE, false);
+     end;
+
+     do; /* 46; Create a Perfect LOOP Point in the sound file, put in new file (.DATA)  */
+        if      record.flag=1                   then error.flag=e.no.file; /* no file present */
+        else if compare(f.name,RECORDFILE.NAME) then error.flag=e.must.save; /* must save before extract */
+        else                                         call chain(LOOP.FILE, false);
+     end;
+  end; /* do case */
+  break.rcvd=0; /* reset break flag */
+
+  call status; /* print OK or error message, any held characters */
+end scan_input;
