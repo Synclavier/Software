@@ -131,125 +131,123 @@ chip_error_code issue_mac_file_sim_scsi_command  (scsi_device& the_device, scsi_
             // Look for segmentized disk
             if (the_device.fSegManager) {
                 SyncMutexWaiter   waiter(SyncScsiSegmentizerMutex);
-                scsi_segmentizer& izer = * (scsi_segmentizer*) the_device.fSegManager;
+                scsi_segmentizer& izer = *the_device.fSegManager;
                 
-                if (&izer) {
-                    // Handle read of catalog sectors
-                    if (block_address + block_count <= 4) {
-                        count = block_count * the_device.fBlockSize;
-                        memcpy((void *) the_command.fData, (const void *) &izer.fCatBuf[block_address*256], count); // Note stride of 2 bytes in fCatBuf...
-                        
-                        the_command.fNumBytesXferd += count;
-                        
-                        break;
-                    }
+                // Handle read of catalog sectors
+                if (block_address + block_count <= 4) {
+                    count = block_count * the_device.fBlockSize;
+                    memcpy((void *) the_command.fData, (const void *) &izer.fCatBuf[block_address*256], count); // Note stride of 2 bytes in fCatBuf...
                     
-                    // See if read request is in a simulated ABLE file. Note we don't support a single read spanning multiple files
-                    if ((block_address             >= izer.fBlockStartOnDevice)
-                    &&  (block_address+block_count <= izer.fBlockStartOnDevice + izer.fNumBlocksOnDevice)) {
-                        scsi_segment* segP = scsi_segment_for_range(izer, block_address, block_count);
+                    the_command.fNumBytesXferd += count;
+                    
+                    break;
+                }
+                
+                // See if read request is in a simulated ABLE file. Note we don't support a single read spanning multiple files
+                if ((block_address             >= izer.fBlockStartOnDevice)
+                &&  (block_address+block_count <= izer.fBlockStartOnDevice + izer.fNumBlocksOnDevice)) {
+                    scsi_segment* segP = scsi_segment_for_range(izer, block_address, block_count);
+                    
+                    if (segP) {
+                        scsi_segment& seg   = *segP;
+                        size_t        req   = (size_t) (block_count                          ) * (size_t) the_device.fBlockSize;
+                        off_t         where = (off_t ) (block_address - seg.fSegStartOnDevice) * (off_t ) the_device.fBlockSize;
                         
-                        if (segP) {
-                            scsi_segment& seg   = *segP;
-                            size_t        req   = (size_t) (block_count                          ) * (size_t) the_device.fBlockSize;
-                            off_t         where = (off_t ) (block_address - seg.fSegStartOnDevice) * (off_t ) the_device.fBlockSize;
-                            
-                            // Handle converted sound file - file is in memory. Copy the data being read.
-                            if (seg.fSegStash) {
-                                // Only handle raw synclavier sound files at this level
-                                if (seg.fSegStash->stashType != SYNCLAVIER_SOUND_FILE_STASH)
-                                    return (CHIP_BAD_STATUS);
-                                
-                                // Detect read off end of sound file. Happens if valid data is incorrectly swizzled.
-                                if (where >= seg.fSegStash->stashLength) {
-                                    SyncPrintf("Read off end of audio data stash\n");
-                                    
-                                    memset((void *) the_command.fData, 0, req);
-                                }
-                                
-                                // Detect read past end of sound file. This is normal; we zero fill to the sector boundary
-                                else if (where+req > seg.fSegStash->stashLength) {
-                                    memcpy((void *) the_command.fData, (const void *) &seg.fSegStash->stashData.stashData[where], seg.fSegStash->stashLength - where);
-                                    memset((void *) (the_command.fData + (seg.fSegStash->stashLength - where)), 0, req - (seg.fSegStash->stashLength - where));
-                                }
-                                
-                                // Else is a good read
-                                else
-                                    memcpy((void *) the_command.fData, (const void *) &seg.fSegStash->stashData.stashData[where], req);
-                                
-                                the_command.fNumBytesXferd += req;
- 
-                                break;
-                            }
-                            
-                            // Detect start of a sequence recall. Latch path
-                            if (seg.fSegAbleType == t_sync && (block_address == seg.fSegStartOnDevice) && seg.fSegURLRef) {
-                                
-                                // Report to app for publishing to Save menu
-                                if (mac_file_sim_sequence_file_accessed_proc)
-                                    mac_file_sim_sequence_file_accessed_proc(mac_file_sim_sequence_file_accessed_arg, seg.fSegURLRef, false);
-                            }
-                            
-                            // Synthesize empty sequence files here. That is, the file exists in the able catalog
-                            // structure, but the file does not yet exist on the mac. Synthesize all zeroes.
-                            if (seg.fSegFileRef->GetFile() == 0) {
-                                if (seg.fSegSynthsZeroes) {
-                                    memset((void *) the_command.fData, 0, req);
-                                    
-                                    the_command.fNumBytesXferd += req;
-                                    
-                                    break;
-                                }
-                                
-                                // File does not exist and does not allow us to create it or synthesize zeroes
+                        // Handle converted sound file - file is in memory. Copy the data being read.
+                        if (seg.fSegStash) {
+                            // Only handle raw synclavier sound files at this level
+                            if (seg.fSegStash->stashType != SYNCLAVIER_SOUND_FILE_STASH)
                                 return (CHIP_BAD_STATUS);
-                            }
                             
-                            //SyncPrintf("Read Segment %s %d %d\n", SyncCFSTR(seg.fSegFileRef->GetName()), block_address, block_count);
-                            
-                            ssize_t result = pread(seg.fSegFileRef->GetFile(), (void *) the_command.fData, req, where);
-                            
-                            // No data - see if we can return synthesized zeroes
-                            if (result == -1) {
-                                // Synthesize zeroes if reading past end of a file that allows synthesized zeroes
-                                if ((where >= seg.fSegFileRef->Size()) && seg.fSegSynthsZeroes) {
-                                    memset((void *) the_command.fData, 0, req);
-                                    
-                                    the_command.fNumBytesXferd += req;
-                                    
-                                    break;
-                                }
+                            // Detect read off end of sound file. Happens if valid data is incorrectly swizzled.
+                            if (where >= seg.fSegStash->stashLength) {
+                                SyncPrintf("Read off end of audio data stash\n");
                                 
-                                return (CHIP_BAD_STATUS);
+                                memset((void *) the_command.fData, 0, req);
                             }
                             
-                            // Else swizle the data that was read in
-                            else {
-                                #if __LITTLE_ENDIAN__
-                                {
-                                    ufixed * dataPtr = (ufixed *) the_command.fData;
-                                    ssize_t   i      = result >> 1;
-                                    
-                                    while (i--) {
-                                        *dataPtr = CFSwapInt16BigToHost(*dataPtr);
-                                        dataPtr++;
-                                    }
-                                }
-                                #endif
+                            // Detect read past end of sound file. This is normal; we zero fill to the sector boundary
+                            else if (where+req > seg.fSegStash->stashLength) {
+                                memcpy((void *) the_command.fData, (const void *) (seg.fSegStash->stashPtr+where), seg.fSegStash->stashLength - where);
+                                memset((void *) (the_command.fData + (seg.fSegStash->stashLength - where)), 0, req - (seg.fSegStash->stashLength - where));
                             }
                             
-                            // Allow reading past end of file - return zeroes.
-                            if (result < req && seg.fSegSynthsZeroes)
-                                memset((void *) (the_command.fData + result), 0, req - result);
-
+                            // Else is a good read
+                            else
+                                memcpy((void *) the_command.fData, (const void *) (seg.fSegStash->stashPtr+where), req);
+                            
                             the_command.fNumBytesXferd += req;
-     
+
                             break;
                         }
                         
-                        else
-                            SyncPrintf("Missing Segment For Read: %d %d\n", block_address, block_count);
+                        // Detect start of a sequence recall. Latch path
+                        if (seg.fSegAbleType == t_sync && (block_address == seg.fSegStartOnDevice) && seg.fSegURLRef) {
+                            
+                            // Report to app for publishing to Save menu
+                            if (mac_file_sim_sequence_file_accessed_proc)
+                                mac_file_sim_sequence_file_accessed_proc(mac_file_sim_sequence_file_accessed_arg, seg.fSegURLRef, false);
+                        }
+                        
+                        // Synthesize empty sequence files here. That is, the file exists in the able catalog
+                        // structure, but the file does not yet exist on the mac. Synthesize all zeroes.
+                        if (seg.fSegFileRef->GetFile() == 0) {
+                            if (seg.fSegSynthsZeroes) {
+                                memset((void *) the_command.fData, 0, req);
+                                
+                                the_command.fNumBytesXferd += req;
+                                
+                                break;
+                            }
+                            
+                            // File does not exist and does not allow us to create it or synthesize zeroes
+                            return (CHIP_BAD_STATUS);
+                        }
+                        
+                        //SyncPrintf("Read Segment %s %d %d\n", SyncCFSTR(seg.fSegFileRef->GetName()), block_address, block_count);
+                        
+                        ssize_t result = pread(seg.fSegFileRef->GetFile(), (void *) the_command.fData, req, where);
+                        
+                        // No data - see if we can return synthesized zeroes
+                        if (result == -1) {
+                            // Synthesize zeroes if reading past end of a file that allows synthesized zeroes
+                            if ((where >= seg.fSegFileRef->Size()) && seg.fSegSynthsZeroes) {
+                                memset((void *) the_command.fData, 0, req);
+                                
+                                the_command.fNumBytesXferd += req;
+                                
+                                break;
+                            }
+                            
+                            return (CHIP_BAD_STATUS);
+                        }
+                        
+                        // Else swizle the data that was read in
+                        else {
+                            #if __LITTLE_ENDIAN__
+                            {
+                                ufixed * dataPtr = (ufixed *) the_command.fData;
+                                ssize_t   i      = result >> 1;
+                                
+                                while (i--) {
+                                    *dataPtr = CFSwapInt16BigToHost(*dataPtr);
+                                    dataPtr++;
+                                }
+                            }
+                            #endif
+                        }
+                        
+                        // Allow reading past end of file - return zeroes.
+                        if (result < req && seg.fSegSynthsZeroes)
+                            memset((void *) (the_command.fData + result), 0, req - result);
+
+                        the_command.fNumBytesXferd += req;
+ 
+                        break;
                     }
+                    
+                    else
+                        SyncPrintf("Missing Segment For Read: %d %d\n", block_address, block_count);
                 }
             }
 			
@@ -328,114 +326,112 @@ chip_error_code issue_mac_file_sim_scsi_command  (scsi_device& the_device, scsi_
             // Look for segmentized disk
             if (the_device.fSegManager) {
                 SyncMutexWaiter   waiter(SyncScsiSegmentizerMutex);
-                scsi_segmentizer& izer = * (scsi_segmentizer*) the_device.fSegManager;
+                scsi_segmentizer& izer = *the_device.fSegManager;
                 
-                if (&izer) {
-                    // Handle write to catralog sectors. Not allowed from able; we own it.
-                    if (block_address + block_count <= 4)
-                        return (CHIP_BAD_STATUS);
+                // Handle write to catralog sectors. Not allowed from able; we own it.
+                if (block_address + block_count <= 4)
+                    return (CHIP_BAD_STATUS);
+                
+                // See if read request is in a simulated ABLE file. Note we don't support a single read spanning multiple files
+                if ((block_address             >= izer.fBlockStartOnDevice)
+                &&  (block_address+block_count <= izer.fBlockStartOnDevice + izer.fNumBlocksOnDevice)) {
+                    scsi_segment* segP = scsi_segment_for_range(izer, block_address, block_count);
                     
-                    // See if read request is in a simulated ABLE file. Note we don't support a single read spanning multiple files
-                    if ((block_address             >= izer.fBlockStartOnDevice)
-                    &&  (block_address+block_count <= izer.fBlockStartOnDevice + izer.fNumBlocksOnDevice)) {
-                        scsi_segment* segP = scsi_segment_for_range(izer, block_address, block_count);
+                    if (segP) {
+                        scsi_segment& seg   = *segP;
+                        size_t        req   = (size_t) (block_count                          ) * (size_t) the_device.fBlockSize;
+                        off_t         where = (off_t ) (block_address - seg.fSegStartOnDevice) * (off_t ) the_device.fBlockSize;
                         
-                        if (segP) {
-                            scsi_segment& seg   = *segP;
-                            size_t        req   = (size_t) (block_count                          ) * (size_t) the_device.fBlockSize;
-                            off_t         where = (off_t ) (block_address - seg.fSegStartOnDevice) * (off_t ) the_device.fBlockSize;
+                        // Disallow writes to synthesized files (e.g. converted sound files)
+                        if (seg.fSegStash)
+                            return (CHIP_BAD_STATUS);
+                       
+                        // Detect start of a sequence save. Latch path
+                        if (seg.fSegAbleType == t_sync && (block_address == seg.fSegStartOnDevice) && seg.fSegURLRef) {
                             
-                            // Disallow writes to synthesized files (e.g. converted sound files)
-                            if (seg.fSegStash)
-                                return (CHIP_BAD_STATUS);
-                           
-                            // Detect start of a sequence save. Latch path
-                            if (seg.fSegAbleType == t_sync && (block_address == seg.fSegStartOnDevice) && seg.fSegURLRef) {
-                                
-                                // Report to app for publishing to Save menu
-                                if (mac_file_sim_sequence_file_accessed_proc)
-                                    mac_file_sim_sequence_file_accessed_proc(mac_file_sim_sequence_file_accessed_arg, seg.fSegURLRef, true);
-                            }
-                           
-                            // If file does not exist, create it here
-                            if (seg.fSegFileRef->GetFile() == 0) {
-                                if (seg.fSegAllowsCreate) {
-                                    if (seg.fSegFileRef->MkPath() != noErr)
-                                        return (CHIP_BAD_STATUS);
-                                    
-                                    if (seg.fSegFileRef->Create(seg.fSegCreatedType, 'SNCL') != noErr)
-                                        return (CHIP_BAD_STATUS);
-                                    
-                                    if (seg.fSegFileRef->Open(O_RDWR))
-                                        return (CHIP_BAD_STATUS);
-                                 }
-                                
-                                // File does not exist and does not allow us to create it or synthesize zeroes
-                                else
+                            // Report to app for publishing to Save menu
+                            if (mac_file_sim_sequence_file_accessed_proc)
+                                mac_file_sim_sequence_file_accessed_proc(mac_file_sim_sequence_file_accessed_arg, seg.fSegURLRef, true);
+                        }
+                       
+                        // If file does not exist, create it here
+                        if (seg.fSegFileRef->GetFile() == 0) {
+                            if (seg.fSegAllowsCreate) {
+                                if (seg.fSegFileRef->MkPath() != noErr)
                                     return (CHIP_BAD_STATUS);
-                            }
-                           
-                            //SyncPrintf("Write Segment %s %d %d\n", SyncCFSTR(seg.fSegFileRef->GetName()), block_address, block_count);
+                                
+                                if (seg.fSegFileRef->Create(seg.fSegCreatedType, 'SNCL') != noErr)
+                                    return (CHIP_BAD_STATUS);
+                                
+                                if (seg.fSegFileRef->Open(O_RDWR))
+                                    return (CHIP_BAD_STATUS);
+                             }
                             
-                            #if __BIG_ENDIAN__
-                                ssize_t result = pwrite(seg.fSegFileRef->GetFile(), (void *) the_command.fData, req, where);
+                            // File does not exist and does not allow us to create it or synthesize zeroes
+                            else
+                                return (CHIP_BAD_STATUS);
+                        }
+                       
+                        //SyncPrintf("Write Segment %s %d %d\n", SyncCFSTR(seg.fSegFileRef->GetName()), block_address, block_count);
+                        
+                        #if __BIG_ENDIAN__
+                            ssize_t result = pwrite(seg.fSegFileRef->GetFile(), (void *) the_command.fData, req, where);
+                        
+                            if (result == -1)
+                                return (CHIP_BAD_STATUS);
+                        
+                            if (result < req)
+                                return (CHIP_BAD_STATUS);
+                        
+                            the_command.fNumBytesXferd += req;
+                        #else
+                            unsigned int   globCount = (unsigned int) req;
+                            char*		   globBuf   = (char *) the_command.fData;
+                            unsigned int   globDone  = 0;
+                        
+                            SyncSwizzleBuffer swb;
+                        
+                            if (!swb.Buffer())
+                                return (CHIP_BAD_STATUS);
+                        
+                            while (globCount)
+                            {
+                                unsigned int chunkCount = swb.Size();
+                                ufixed* dataPtr = (ufixed *) globBuf;
+                                ufixed* writPtr = (ufixed *) swb.Buffer();
+                                int i;
+                                
+                                if (chunkCount > globCount)
+                                    chunkCount = globCount;
+                                
+                                i = chunkCount >> 1;
+                                
+                                while (i--)
+                                    *writPtr++ = CFSwapInt16BigToHost(*dataPtr++);
+                                
+                                ssize_t result = pwrite(seg.fSegFileRef->GetFile(), (void *)swb.Buffer(), (size_t) chunkCount, where);
                                 
                                 if (result == -1)
                                     return (CHIP_BAD_STATUS);
                                 
-                                if (result < req)
+                                if (result < (ssize_t) chunkCount)
                                     return (CHIP_BAD_STATUS);
                                 
-                                the_command.fNumBytesXferd += req;
-                            #else
-                                unsigned int   globCount = (unsigned int) req;
-                                char*		   globBuf   = (char *) the_command.fData;
-                                unsigned int   globDone  = 0;
+                                the_command.fNumBytesXferd += (uint32)       result;
+                                globDone                   += (unsigned int) result;
                                 
-                                SyncSwizzleBuffer swb;
+                                globBuf   += chunkCount;
+                                globCount -= chunkCount;
                                 
-                                if (!swb.Buffer())
-                                    return (CHIP_BAD_STATUS);
-                                
-                                while (globCount)
-                                {
-                                    unsigned int chunkCount = swb.Size();
-                                    ufixed* dataPtr = (ufixed *) globBuf;
-                                    ufixed* writPtr = (ufixed *) swb.Buffer();
-                                    int i;
-                                    
-                                    if (chunkCount > globCount)
-                                        chunkCount = globCount;
-                                    
-                                    i = chunkCount >> 1;
-                                    
-                                    while (i--)
-                                        *writPtr++ = CFSwapInt16BigToHost(*dataPtr++);
-                                    
-                                    ssize_t result = pwrite(seg.fSegFileRef->GetFile(), (void *)swb.Buffer(), (size_t) chunkCount, where);
-                                    
-                                    if (result == -1)
-                                        return (CHIP_BAD_STATUS);
-                                    
-                                    if (result < (ssize_t) chunkCount)
-                                        return (CHIP_BAD_STATUS);
-                                    
-                                    the_command.fNumBytesXferd += (uint32)       result;
-                                    globDone                   += (unsigned int) result;
-                                    
-                                    globBuf   += chunkCount;
-                                    globCount -= chunkCount;
-                                    
-                                    where     += (off_t) chunkCount;
-                                }
-                            #endif
-                            
-                            break;
-                        }
+                                where     += (off_t) chunkCount;
+                            }
+                        #endif
                         
-                        else
-                            SyncPrintf("Missing Segment For Write: %d %d\n", block_address, block_count);
+                        break;
                     }
+                    
+                    else
+                        SyncPrintf("Missing Segment For Write: %d %d\n", block_address, block_count);
                 }
             }
 			

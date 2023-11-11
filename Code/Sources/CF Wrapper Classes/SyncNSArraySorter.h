@@ -13,11 +13,26 @@
 
 typedef NSObject<SyncNSArraySorterByRow> SyncSortableObject;
 
+// Maintains sorted arrays -
+//  Array of NSString
+//  Array of NSNumber
+//  Array of NSObjects sorted by 'row'
+
+// See SyncNSSortedString for more comprehensive solution
+// for general array of objects.
+
 @interface SyncNSArraySorter : NSObject
-    // NSString arrays
+    // NSString arrays. Localized insensitive compare:
     + (NSUInteger) insertNSStringIndex:   (NSString*)string inArray:(NSMutableArray*)array;
-    + (NSUInteger) matchNSStringIndex:    (NSString*)string inArray:(NSMutableArray*)array;
+    + (NSUInteger) matchNSStringIndex:    (NSString*)string inArray:(NSArray       *)array;
     + (void      ) insertNSString:        (NSString*)string inArray:(NSMutableArray*)array;
+
+    // NSString arrays. Precise comparison.
+    + (NSUInteger) insertXNSStringIndex:  (NSString*)string inArray:(NSMutableArray*)array;
+    + (NSUInteger) matchXNSStringIndex:   (NSString*)string inArray:(NSArray       *)array;
+    + (void      ) insertXNSString:       (NSString*)string inArray:(NSMutableArray*)array;
+
+    // Special cases used somewhere for some unknown purpose
     + (BOOL      ) eitherPrefixNSString:  (NSString*)string inArray:(NSMutableArray*)array;
     + (BOOL      ) hasPrefixNSString:     (NSString*)string inArray:(NSMutableArray*)array;
 

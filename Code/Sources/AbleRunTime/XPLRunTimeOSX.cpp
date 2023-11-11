@@ -24,6 +24,7 @@
 
 #include "InterChange.h"
 #include "SynclavierFileReference.h"
+#include "SyncAudioUtilities.h"
 
 #ifndef SYNC_USE_KERNEL
     #define SYNC_USE_KERNEL 1
@@ -506,7 +507,7 @@ void	print(const char *format, ...)
         XPLPrinter(format, vaList);
     else if (printChar)
         parse_printf(printChar, format, vaList);
-    else if (strstr(format, "%a") || strstr(format, "%1p"))
+    else if (strstr(format, "%a") || strstr(format, "%p") || strstr(format, "%1p"))
         parse_printf(out_char, format, vaList);
     else
         vprintf(format, vaList);
@@ -1120,7 +1121,7 @@ void* open_able_file(char *file_name)
 	
 	if (file_name[0] == ':' || file_name[0] == '/')		/* file name begins with ":" or "/" : use master dir	*/
 	{
-		i = (int) strlen(ABLE_CONTEXT.able_master_dir_name);	/* get length of master directory				*/
+		i = strlen(ABLE_CONTEXT.able_master_dir_name);	/* get length of master directory				*/
 		strncpy (ABLE_CONTEXT.opened_file_name, ABLE_CONTEXT.able_master_dir_name, sizeof(ABLE_CONTEXT.opened_file_name));
 	
 		if (i && ABLE_CONTEXT.opened_file_name[i-1] == ':')	/* remove trailing : from master dir name		*/
@@ -1132,7 +1133,7 @@ void* open_able_file(char *file_name)
 		strncat (ABLE_CONTEXT.opened_file_name, file_name, sizeof(ABLE_CONTEXT.opened_file_name) - strlen(ABLE_CONTEXT.opened_file_name));
 
         // Also compute file name in output hierarchy. Handles open of .srel files built just moments ago.
-        i = (int) strlen(ABLE_CONTEXT.host_output_dir_name);	/* get length of master directory				*/
+        i = strlen(ABLE_CONTEXT.host_output_dir_name);	/* get length of master directory				*/
         strncpy (opened_file_name, ABLE_CONTEXT.host_output_dir_name, sizeof(opened_file_name));
         
         if (i && opened_file_name[i-1] == ':')	/* remove trailing : from master dir name		*/
@@ -1157,13 +1158,13 @@ void* open_able_file(char *file_name)
 	}
 
 	// Convert ':' to '/'
-	i = (int) strlen(ABLE_CONTEXT.opened_file_name);
+	i = strlen(ABLE_CONTEXT.opened_file_name);
 	
 	for (j=0; j<i; j++)
 		if (ABLE_CONTEXT.opened_file_name[j] == ':')
 			ABLE_CONTEXT.opened_file_name[j] = '/';
     
-    i = (int) strlen(opened_file_name);
+    i = strlen(opened_file_name);
     
     for (j=0; j<i; j++)
         if (opened_file_name[j] == ':')
@@ -1211,13 +1212,13 @@ void* open_able_file_for_output(char *file_name, int type, int creator)
 	
 	if (file_name[0] == ':' || file_name[0] == '/')			/* file name begins with ":" or "/" : use output directory or master dir	*/
 	{
-		int i = (int) strlen(ABLE_CONTEXT.host_output_dir_name);	/* See if output directory specified */
+		int i = strlen(ABLE_CONTEXT.host_output_dir_name);	/* See if output directory specified */
 		
         if (i)
             strncpy (ABLE_CONTEXT.opened_file_name, ABLE_CONTEXT.host_output_dir_name, sizeof(ABLE_CONTEXT.opened_file_name));
 	
         else {
-            i = (int) strlen(ABLE_CONTEXT.able_master_dir_name);	/* get length of master directory				*/
+            i = strlen(ABLE_CONTEXT.able_master_dir_name);	/* get length of master directory				*/
             strncpy (ABLE_CONTEXT.opened_file_name, ABLE_CONTEXT.able_master_dir_name, sizeof(ABLE_CONTEXT.opened_file_name));
         }
         
@@ -1283,7 +1284,7 @@ void* open_able_file_for_output(char *file_name, int type, int creator)
 	}
 
 	// Convert ":" in file names to '/'
-	i =  (int) strlen(ABLE_CONTEXT.opened_file_name);
+	i =  strlen(ABLE_CONTEXT.opened_file_name);
 	
 	for (j=0; j<i; j++)
 		if (ABLE_CONTEXT.opened_file_name[j] == ':')
@@ -1847,7 +1848,7 @@ fixed disk_check (fixed device)			/* check floppy disk							*/
 // is saved until the device is actually accessed.  It also does not set up the high memory area
 // of the run time environment (see next routine).
 
-void	XPLRunTime_SetupSCSIMap(interchange_settings *interchangeSettings,  int d24Avail)
+void	XPLRunTime_SetupSCSIMap(interchange_settings *interchangeSettings,  int d24Avail, int t0Config, scsi_settings* t0Settings)
 {
 	zero_mem((byte *) &XPL_scsi_code_map, sizeof(XPL_scsi_code_map));					// init
 	
@@ -1855,10 +1856,10 @@ void	XPLRunTime_SetupSCSIMap(interchange_settings *interchangeSettings,  int d24
 		return;
 
 	if (((interchangeSettings->w0.bus_id     == SCSI_BUS_MENU_DISK_IMAGE   )			// if device is a disk image
-	&&   (interchangeSettings->w0.image_file != 0						     ))			// and alias exists
+	&&   (interchangeSettings->w0.image_file != 0						   ))			// and alias exists
 	||  ( interchangeSettings->w0.bus_id     == SCSI_BUS_MENU_MAC_SCSI_PORT )			// or is mac scsi port
 	||  ((interchangeSettings->w0.bus_id     == SCSI_BUS_MENU_D24           )			// or is device on board 0
-	&&   (d24Avail                           != 0                          )))			// and we have the hardware available
+	&&   (d24Avail                           != 0                           )))			// and we have the hardware available
 	{
 		XPL_scsi_code_map.board_list[0].target_list[ABLE_W0_DEFAULT_SCSI_ID].entry_avail    = true;
 		XPL_scsi_code_map.board_list[0].target_list[ABLE_W0_DEFAULT_SCSI_ID].device_manager = &g_scsi_device_data_base[ABLE_W0_DEFAULT_SCSI_ID];
@@ -1872,10 +1873,10 @@ void	XPLRunTime_SetupSCSIMap(interchange_settings *interchangeSettings,  int d24
 	}
 
 	if (((interchangeSettings->w1.bus_id     == SCSI_BUS_MENU_DISK_IMAGE   )			// if device is a disk image
-	&&   (interchangeSettings->w1.image_file != 0						     ))			// and alias exists
+	&&   (interchangeSettings->w1.image_file != 0						   ))			// and alias exists
 	||  ( interchangeSettings->w1.bus_id     == SCSI_BUS_MENU_MAC_SCSI_PORT )			// or is mac scsi port
 	||  ((interchangeSettings->w1.bus_id     == SCSI_BUS_MENU_D24           )			// or is device on board 0
-	&&   (d24Avail							!= 0                          )))			// and we have the hardware available
+	&&   (d24Avail							!= 0                            )))			// and we have the hardware available
 	{
 		XPL_scsi_code_map.board_list[0].target_list[ABLE_W1_DEFAULT_SCSI_ID].entry_avail    = true;
 		XPL_scsi_code_map.board_list[0].target_list[ABLE_W1_DEFAULT_SCSI_ID].device_manager = &g_scsi_device_data_base[ABLE_W1_DEFAULT_SCSI_ID];
@@ -1889,10 +1890,10 @@ void	XPLRunTime_SetupSCSIMap(interchange_settings *interchangeSettings,  int d24
 	}
 
 	if (((interchangeSettings->o0.bus_id     == SCSI_BUS_MENU_DISK_IMAGE   )			// if device is a disk image
-	&&   (interchangeSettings->o0.image_file != 0						     ))			// and alias exists
+	&&   (interchangeSettings->o0.image_file != 0						   ))			// and alias exists
 	||  ( interchangeSettings->o0.bus_id     == SCSI_BUS_MENU_MAC_SCSI_PORT )			// or is mac scsi port
 	||  ((interchangeSettings->o0.bus_id     == SCSI_BUS_MENU_D24           )			// or is device on board 0
-	&&   (d24Avail							!= 0                          )))			// and we have the hardware available
+	&&   (d24Avail							!= 0                            )))			// and we have the hardware available
 	{
 		XPL_scsi_code_map.board_list[0].target_list[ABLE_O0_DEFAULT_SCSI_ID].entry_avail    = true;
 		XPL_scsi_code_map.board_list[0].target_list[ABLE_O0_DEFAULT_SCSI_ID].device_manager = &g_scsi_device_data_base[ABLE_O0_DEFAULT_SCSI_ID];
@@ -1906,10 +1907,10 @@ void	XPLRunTime_SetupSCSIMap(interchange_settings *interchangeSettings,  int d24
 	}
 
 	if (((interchangeSettings->o1.bus_id     == SCSI_BUS_MENU_DISK_IMAGE   )			// if device is a disk image
-	&&   (interchangeSettings->o1.image_file != 0						     ))			// and alias exists
+	&&   (interchangeSettings->o1.image_file != 0						   ))			// and alias exists
 	||  ( interchangeSettings->o1.bus_id     == SCSI_BUS_MENU_MAC_SCSI_PORT )			// or is mac scsi port
 	||  ((interchangeSettings->o1.bus_id     == SCSI_BUS_MENU_D24           )			// or is device on board 0
-	&&   (d24Avail							!= 0                          )))			// and we have the hardware available
+	&&   (d24Avail							!= 0                            )))			// and we have the hardware available
 	{
 		XPL_scsi_code_map.board_list[0].target_list[ABLE_O1_DEFAULT_SCSI_ID].entry_avail    = true;
 		XPL_scsi_code_map.board_list[0].target_list[ABLE_O1_DEFAULT_SCSI_ID].device_manager = &g_scsi_device_data_base[ABLE_O1_DEFAULT_SCSI_ID];
@@ -1921,6 +1922,20 @@ void	XPLRunTime_SetupSCSIMap(interchange_settings *interchangeSettings,  int d24
 		else
 			XPL_scsi_code_map.board_list[0].target_list[ABLE_O1_DEFAULT_SCSI_ID].use_d24 = false;
 	}
+
+    // Configure SCSI tape
+    if (t0Config == SCSI_BUS_MENU_D24) // SCSI tape
+    {
+        XPL_scsi_code_map.board_list[0].target_list[ABLE_T0_DEFAULT_SCSI_ID].entry_avail    = true;
+        XPL_scsi_code_map.board_list[0].target_list[ABLE_T0_DEFAULT_SCSI_ID].device_manager = &g_scsi_device_data_base[ABLE_T0_DEFAULT_SCSI_ID];
+        XPL_scsi_code_map.board_list[0].target_list[ABLE_T0_DEFAULT_SCSI_ID].device_setup   = t0Settings;
+        zero_mem((byte *) &g_scsi_device_data_base[ABLE_T0_DEFAULT_SCSI_ID], sizeof(g_scsi_device_data_base[ABLE_T0_DEFAULT_SCSI_ID]));
+
+        if (t0Config == SCSI_BUS_MENU_D24)
+            XPL_scsi_code_map.board_list[0].target_list[ABLE_T0_DEFAULT_SCSI_ID].use_d24 = true;
+        else
+            XPL_scsi_code_map.board_list[0].target_list[ABLE_T0_DEFAULT_SCSI_ID].use_d24 = false;
+    }
 }
 
 
@@ -1931,7 +1946,7 @@ void	XPLRunTime_SetupSCSIMap(interchange_settings *interchangeSettings,  int d24
 
 // It is triggered by MONITOR shortly of MONITOR is loaded into memory via WINBOOT
 
-void	XPLRunTime_ConfigureSCSIMap(fixed floppy_available, fixed d66_available)
+void	XPLRunTime_ConfigureSCSIMap(fixed floppy_available, fixed d66_available, int t0Config)
 {
     int         i;
 	scsi_device *the_device;
@@ -2013,6 +2028,58 @@ void	XPLRunTime_ConfigureSCSIMap(fixed floppy_available, fixed d66_available)
 		
 		i += 4;
 	}
+    
+    // SCSI tape
+    // do; /* 1: Kennedy configuration */
+    //    tape_config (s#devtyp) = 0;   /* kennedy drive */
+    //    tape_config (s#seccyl) = 464; /* blocks / track */
+    //    tape_config (s#totcyl) = 4;   /* number of tracks */
+    //    tape_config (s#devadr) = 0;   /* reserved */
+    //    call assign_conf (dev, tape_config); /* Kennedy 1/4" cartridge */
+    // end;
+    // do; /* 2: SCSI configuration */
+    //    tape_config (s#devtyp) = shl(1,8); /* SCSI drive */
+    //    tape_config (s#seccyl) = 17024; /* blocks / track */
+    //    tape_config (s#totcyl) = 1;   /* number of tracks */
+    //    tape_config (s#devadr) = get_info(dev,0,i#scsi_adr); /* SCSI device address */
+    //    call assign_conf (dev, tape_config); /* SCSI 1/2" reel */
+    // end;
+    
+    // i = find_device (device); /* look up device */
+
+    // if ((i <> 0) and ((core(i + s#devtyp) and "17") = 3)) then do; /* if a tape drive */
+    //    tape_device = device; /* save last operation's device number */
+    //    device = 8 + (shr(core(i + s#devtyp), 4) and "17"); /* map to actual device number */
+    //    drive (device) = (device and 1); /* save drive number */
+    //    if (core(i + s#devtyp) and "377") = system_device  then drive (0) = drive (device); /* remember it if it's the system device */
+    //    if (core(i + s#devtyp) and "377") = current_device then drive (1) = drive (device); /* or the current device (this assumes another device won't be ENTERed while the tape is loaded!!!) */
+    //    type (drive (device)) = (shr(core(i + s#devtyp), 8) and "3"); /* pick up drive type */
+    //
+    //    if type (drive (device)) = 0 /* if Kennedy */
+    //    then call k#load;
+    //    else call s#load (device); /* must be SCSI */
+    //
+    //    tape_position (drive (device)) = 0; /* assume it succeeded */
+    // end; /* of tape drive */
+
+    if (XPL_scsi_code_map.board_list[0].target_list[ABLE_T0_DEFAULT_SCSI_ID].entry_avail)
+    {
+        set_able_core(i + s_devtyp, 0x0103);                    /* SCSI drive       */
+        set_able_core(i + s_seccyl, 17024);                     /* blocks / track   */
+        set_able_core(i + s_totcyl, 1);                         /* number of tracks */
+        set_able_core(i + s_devadr, ABLE_T0_DEFAULT_SCSI_ID);   /* target           */
+        
+        i += 4;
+    }
+    
+    else if (t0Config == SCSI_BUS_MENU_D30){
+        set_able_core(i + s_devtyp, 0x0003);                    /* kennedy drive    */
+        set_able_core(i + s_seccyl, 464);                       /* blocks / track   */
+        set_able_core(i + s_totcyl, 4);                         /* number of tracks */
+        set_able_core(i + s_devadr, 0);                         /* reserved         */
+        
+        i += 4;
+    }
 
 	while (i < c_contab + c_strend)
 		set_able_core(i++, -1);
@@ -2273,8 +2340,12 @@ void XPLRunTime_CloseupSCSIMap()
                                 if (seg.fSegURLRef)
                                     {CFRelease(seg.fSegURLRef); seg.fSegURLRef = NULL;}
                                 
-                                if (seg.fSegStash)
-                                    {free(seg.fSegStash); seg.fSegStash = NULL;}
+                                if (seg.fSegStash) {
+                                    if (--seg.fSegStash->stashRetains == 0)
+                                        free(seg.fSegStash);
+                                    
+                                    seg.fSegStash = NULL;
+                                }
                             }
                             
                             delete dm.fSegManager;

@@ -6,13 +6,17 @@
 // Includes %a for able string printout; also %1p to work around compiler warnings
 // Currently lacks long long output
 
+#include <stdio.h>
+
 // Handle kernel or user space applications
-#ifdef COMPILE_OSX_KERNEL
+#if   defined(COMPILE_OSX_DRIVERKIT)
+    #include <DriverKit/IOLib.h>
+#elif defined(COMPILE_OSX_KERNEL)
 	#include <IOKit/IOLib.h>
 #else
-	#include <ctype.h>
-	#include <stdarg.h>
-	#include <string.h>
+    #include <ctype.h>
+    #include <stdarg.h>
+    #include <string.h>
 #endif
 
 #include "Standard.h"
@@ -239,7 +243,6 @@ static char * parse_format(const char * format_string, va_list arg, print_format
 			break;
 		
 		case 'p':
-			
             // Detect %1p for able string
             if (f.field_width == 1) {
                 f.conversion_char  = 'a';

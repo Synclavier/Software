@@ -77,6 +77,15 @@ enum SynclavierRealTimePreferences
     SYNCLAVIER_PREF_USE_MTC         = 0x00010000,               // Real time code should trace
 };
 
+// Enumerations for Real Time Preferences
+enum SynclavierTimbreInfoCodes
+{
+    timbre_info_code_bank_read        = 1,
+    timbre_info_code_bank_written     = 2,
+    timbre_info_code_timbre_read      = 3,
+    timbre_info_code_timbre_written   = 4
+};
+
 // Offsets for raw synthesized RTP packets
 #define Synclavier_Packet_Len      0  		/* Length of packet (including length word) */
 #define Synclavier_Packet_Source   1  		/* Packet source node           */
@@ -84,13 +93,14 @@ enum SynclavierRealTimePreferences
 #define Synclavier_Packet_Data     3  		/* Packet data begins here      */
 
 // Struct versions
-#define	SYNCLAVIER_POWERPC_STRUCT_VERSION	04
-#define	SYNCLAVIER_POWERPC_STRUCT_NAME	   "04"
+#define	SYNCLAVIER_POWERPC_STRUCT_VERSION	07
+#define	SYNCLAVIER_POWERPC_STRUCT_NAME	   "07"
 #define SYNCLAVIER_POWERPC_MESSAGE_Q_SIZE	8
 #define SYNCLAVIER_POWERPC_MESSAGE_BUF_SIZE 20480
 #define SYNCLAVIER_POWERPC_OMS_SYNC_SIZE 	64
 #define SYNCLAVIER_POWERPC_TERMBUF_SIZE		8192
 #define	SYNCLAVIER_POWERPC_DEBUGBUF_SIZE	1024
+#define SYNCLAVIER_POWERPC_SNARF_BUF_SIZE   (32*512)    // SCSI snarf buffer; big enough for SFM sampling
 
 #define	SYNCLAVIER_BOARD_TARGET_AVAIL		1
 #define	SYNCLAVIER_BOARD_TARGET_USESD24		2
@@ -109,7 +119,9 @@ enum SynclavierRealTimePreferences
 #define PCI1SessionClientSize				5				// Number of shared sync-net sessions
 #define SYNCLAVIER_VIRTUAL_PORT_CODE		0x0800			// Bit set for virtual code - 7 bits of virtual port; 4 bits of MIDI channel
 
-#pragma pack(push,4)
+#pragma pack(push,8)
+
+typedef UInt64  AUInt64 __attribute__ ((aligned (8)));
 
 // Handy message structs
 typedef struct 	SynclavierCatUpdateStruct
@@ -124,12 +136,12 @@ typedef struct 	SynclavierCallupStruct
     #if defined(COMPILE_OSX_KERNEL)
         union {
             void*       callup_url;
-            UInt64      callup_64;
+            AUInt64     callup_64;
         };
     #else
         union {
             CFURLRef    callup_url;
-            UInt64      callup_64;
+            AUInt64     callup_64;
         };
     #endif
     
@@ -215,7 +227,7 @@ typedef	struct SynclavierSharedStruct
 	volatile char				callup_sound_pending_file    [256];	//	name for
 	volatile char				callup_sequence_pending_file [256];	//		RTP functions triggered
     volatile char				callup_timbre_pending_file   [256];	//			from InterChange
-    volatile char				callup_workspace_pending_file[256];	//			from InterChange
+    volatile char				callup_workspace_pending_file[256];	//
     volatile char				save_sequence_pending_file   [256];	//
 
 	// General state variables
@@ -230,6 +242,10 @@ typedef	struct SynclavierSharedStruct
     volatile int                patch_screen_active;
     volatile int                patch_screen_partial;
     volatile int                patch_screen_frame;
+    volatile int                timbre_info_changed;
+    volatile int                timbre_info_code;           // What happened
+    volatile int                timbre_info_arg;            // Details
+    volatile char               current_timbre_name[64];    // C-string by the time it gets here; should always be space-filled 16 characters
     
 	// Debug buffer
 	volatile int				message_write_ptr;
@@ -256,8 +272,8 @@ typedef	struct SynclavierSharedStruct
 	volatile int                oms_midi_bulk_sector;
 	volatile int                oms_midi_bulk_toggle;
     volatile int                oms_midi_lock;                      // mutex lock
-    volatile UInt64             oms_mtc_frame_boundary;             // instant of frame boundary, mach_absolute_time()
-    volatile UInt64             oms_mtc_frame_duration;             // duration of 1 frame precisely, mach_absolute_time() units
+    volatile AUInt64            oms_mtc_frame_boundary;             // instant of frame boundary, mach_absolute_time()
+    volatile AUInt64            oms_mtc_frame_duration;             // duration of 1 frame precisely, mach_absolute_time() units
     volatile int                oms_mtc_tracking;                   // true if tracking
     volatile int                oms_mtc_frame;                      // frame number
     volatile int                oms_mtc_second;                     // second number
@@ -271,7 +287,7 @@ typedef	struct SynclavierSharedStruct
 	int							timer_d03_counts_per_deftask;		// D03 interrupts to post per deferred task (e.g. timer_interval_for_deftask/5)
 	uint32_ratio				metronome_calib_data;				// measured calibration data
 	volatile uint32				MSecCount;							// millisecond ticker is published here by interpreter core
-    UInt64                      iokit_task_interpreting_time;       // start time of iokit task interpreting
+    AUInt64                     iokit_task_interpreting_time;       // start time of iokit task interpreting
 	
 	// Primary core interpreter state variables
     volatile int				signal_ui;                          // Set true when main loop level processing is needed before continuing. For example: read data from a mac file. (used within interpreter core only)
@@ -291,7 +307,7 @@ typedef	struct SynclavierSharedStruct
 
 	volatile int				do_main_loop_stuff;					// Sampled version of do_main_loop_at_def_prior sampled at start of IOKit task
     volatile int				rtp_is_playing;						// true: means RTP is playing (e.g. sequencer running)
-    volatile int				rtp_is_running;						// true: means RTP is running and ready to load sound files for example
+    volatile int				rtp_is_running;						// true: means RTP is running and ready to load sound files for example; 2 means SFM is sampling to/from disk
 	volatile int				newkey_is_pending;					// true: means RTP has sensed a newkey and DTask should launch immediately. Also set when character is typed to wake up DTask
 	volatile int				delay_d50_input;					// counter to delay passing d50 characters to interpreter to allow paste from mac to work
 	volatile int				termulator_just_pasted;				// true: termulator just pasted so special delays are needed
@@ -450,14 +466,14 @@ typedef	struct SynclavierSharedStruct
 	PCI1MIDIEvent				midiInBuf   [PCI1_MIDI_IN_BUF_SIZE ];		// Holds input    PCI1MIDIEvents
 	PCI1MIDIEvent				midiOutBuf  [PCI1_MIDI_OUT_BUF_SIZE];		// Holds outgoing PCI1MIDIEvents
 
-	UInt64						midiInStamp [PCI1_MIDI_IN_BUF_SIZE ];		// Holds time stamp of incoming midi event
-	UInt64						midiOutStamp[PCI1_MIDI_IN_BUF_SIZE ];		// Holds time stamp of outgoing midi event (going out to Synclavier interpreter)
+	AUInt64						midiInStamp [PCI1_MIDI_IN_BUF_SIZE ];		// Holds time stamp of incoming midi event
+	AUInt64						midiOutStamp[PCI1_MIDI_IN_BUF_SIZE ];		// Holds time stamp of outgoing midi event (going out to Synclavier interpreter)
 
 	volatile char				board_target_list [NUM_BOARDS_IN_BOARD_LIST][NUM_TARGETS_IN_TARGET_LIST];
 	volatile int				target_block_size [NUM_BOARDS_IN_BOARD_LIST][NUM_TARGETS_IN_TARGET_LIST];
 	volatile char				target_device_code[NUM_BOARDS_IN_BOARD_LIST][NUM_TARGETS_IN_TARGET_LIST];
 	
-	byte						snarfed_scsi_data[2048];
+	byte						snarfed_scsi_data[SYNCLAVIER_POWERPC_SNARF_BUF_SIZE];
 
 	// MIDI accessors
 	SynclavierMidiChannel		midi_channels[SYNCLAVIER_MIDI_PORTS];
@@ -555,7 +571,6 @@ enum PCI1UserClientSetParameterCode
 	extern	void								SynclavierPCILib_InitializePCI1			( int cable_load, int bus_load );
 	extern	void								SynclavierPCILIB_Finalize				();
 	extern	void								SynclavierPCILib_DoDebugOutput			( const char *m );
-	extern	void								SynclavierPCILib_FetchNanoseconds		( SInt64 *value);
 	
 // User-land versions
 #else
@@ -588,6 +603,8 @@ enum PCI1UserClientSetParameterCode
 	extern	fixed*								SynclavierPCILib_FetchBlankMemory		( int required_size_bytes );
 	extern	fixed*								SynclavierPCILib_FetchPolyBufMemory		( int required_size_bytes );
 	extern	fixed*								SynclavierPCILib_FetchSessionMemory		( int required_size_bytes, int whichSubMemory );
+    extern  void                                SynclavierPCILib_ReleaseInternalMemory  ();
+    extern  void                                SynclavierPCILib_ReleaseExternalMemory  ();
 	extern	void								SynclavierPCILib_BroadcastChange		();
 	extern	void								SynclavierPCILib_PrepInterpreterCore	();
 	extern	void								SynclavierPCILib_UnPrepInterpreterCore	();
@@ -643,7 +660,8 @@ enum PCI1UserClientSetParameterCode
 #endif
 
 // Implemented in Kernel in C; Implemented in user land via system call.
-extern	struct SynclavierSharedStruct*			SynclavierPCILib_FetchSharedStruct		( int required_version_id );
+extern	struct SynclavierSharedStruct*			SynclavierPCILib_FetchSharedStruct		( int required_version_id  );
+extern  bool                                    SynclavierPCILib_FetchFailed            ( int& required_version_id );
 
 extern	unsigned int							SynclavierPCILib_FetchDevReadCode		( int which );
 extern	unsigned int							SynclavierPCILib_FetchDevWriteCode		( int which );

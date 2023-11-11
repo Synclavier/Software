@@ -7,8 +7,8 @@
 // 2/8/00 C. Jones
 
 // Std C
-#include <StdIO.h>
-#include <String.h>
+#include <stdio.h>
+#include <string.h>
 
 #if !__LP64__
     #include "LThread.h"
@@ -25,7 +25,7 @@
 #include "Syslits.h"
 #include "Samplits.h"
 #include "Devutil.h"
-#include "SCSILib.h"
+#include "ScsiLib.h"
 #include "SCSIlits.h"
 #include "OPTLits.h"
 #include "AbleDiskLib.h"
@@ -680,7 +680,7 @@ static	fixed		AbleOptLib_readentry(								// read a directory entry
 	return (i);																		// return status of read
 }
 	
-static	fixed		AbleOptLib_writeentry(								// write a directory entry
+static __attribute__((unused)) fixed		AbleOptLib_writeentry(								// write a directory entry
 	fixed	entry, 														// entry to read
 	fixed	level)	_recursive	_swap									// level to read from
 {
@@ -697,7 +697,7 @@ static	fixed		AbleOptLib_writeentry(								// write a directory entry
 //		• AbleOptLib_readentries, AbleOptLib_writeentries
 // =================================================================================
 
-static	fixed		AbleOptLib_readentries(								// read directory entries
+static __attribute__((unused)) fixed		AbleOptLib_readentries(								// read directory entries
 	fixed	entry, 														// first entry to read
 	fixed	entrycount, 												// no. entries to read
 	fixed	level)	_recursive	_swap									// level to read from
@@ -710,7 +710,7 @@ static	fixed		AbleOptLib_readentries(								// read directory entries
 	return (i);															// return status of read
 }
 	
-static	fixed		AbleOptLib_writeentries(							// write directory entries
+static __attribute__((unused)) fixed		AbleOptLib_writeentries(							// write directory entries
 	fixed	entry, 														// first entry to write
 	fixed	entrycount, 												// no. entries to write
 	fixed	level)	_recursive	_swap									// level to write to
@@ -983,7 +983,7 @@ static	boolean		AbleOptLib_get_statistics(							// get disk statistics
 
 // Marginally useful routine to pre-cache controller type and
 // block size information for levels 10 and 11
-static	void	AbleOptLib_init_optical_controller()					// set optical controller type based on system configuration
+static __attribute__((unused)) void	AbleOptLib_init_optical_controller()					// set optical controller type based on system configuration
 {
 	dev10set = false;													// force re-polling in all cases if we are called
 	dev11set = false;
@@ -1765,7 +1765,7 @@ int     AbleOptLib_ParseSoundfileHeader(uint32 num_words,
     }
     
     // Import all valid data
-    if (1)
+    if ((1))
     {
         descriptor.byte_len_in_file = (header.valid_data.sector << 9) + (header.valid_data.word_offset << 1);
         

@@ -161,7 +161,7 @@ typedef	struct	able_registers				/* struct for accessing able register	*/
 	short		fill4;
 	ufixed		d57_software_device_bits;	// D57 bits set because we simulate the device
 
-	int			rtp_is_running;				// true if RTP is running (VS other applications)
+    int			rtp_is_running;				// true if RTP is running (VS other applications); 2 if SFM sampling to/from disk
 	
 	fixed		*sim_pmem_ptr;				// working pointer for simulated poly mem; points to last word fetched/stored
 	DO_PAD(pad13)

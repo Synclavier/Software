@@ -9,11 +9,24 @@
 #ifndef __PCI1SHAREDMEMORY_H__
 #define __PCI1SHAREDMEMORY_H__
 
-// Mac OS Includes
-#include <libkern/OSTypes.h>
+#ifdef COMPILE_OSX_DRIVERKIT
+    typedef unsigned char      UInt8;
+    typedef unsigned short     UInt16;
+    typedef unsigned int       UInt32;
+    typedef unsigned long long UInt64;
+
+    typedef signed char        SInt8;
+    typedef signed short       SInt16;
+    typedef signed int         SInt32;
+    typedef signed long long   SInt64;
+
+    typedef SInt32              OSStatus;
+#else
+    #include <libkern/OSTypes.h>
+#endif
 
 // Basic configuration
-#define	PCI1_SHARED_STRUCT_VERSION		5		// Current rev of shared struct
+#define	PCI1_SHARED_STRUCT_VERSION		6		// Current rev of shared struct
 #define PCI1_MAX_MIDI_PORTS				80		// Number of virtual MIDI ports
 
 #define PCI1_MIDI_IN_BUF_SIZE			1024	// Size of incoming MIDI event buffer
@@ -23,7 +36,6 @@
 #pragma pack(push,2)
 
 // Handy struct for Midi Events
-
 typedef struct PCI1MIDIEvent
 {
 	UInt16	type;								// Type codeing

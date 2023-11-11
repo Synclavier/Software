@@ -47,7 +47,7 @@ class   CSynclavierFileReference
 public:
     CSynclavierFileReference(CFDataRef   markData);                     // Create from a bookmark; takes ownership of the bookmark
     CSynclavierFileReference(CFURLRef    cfURL   );                     // Create from CFURLRef; takes ownership of the CFURLRef
-    CSynclavierFileReference(CFStringRef pathStr, bool isPosix = true); // Create from posix or URL path; takes ownership of the CFURLRef
+    CSynclavierFileReference(CFStringRef pathStr, bool isPosix = true); // Create from posix or URL path; takes ownership of the pathStr
     CSynclavierFileReference(const char* pathBuf, bool isPosix = true); // Create from posix or URL path; no ownership invovled
     CSynclavierFileReference(FSRef*      aFSRef  );                     // Create from a FSRef; no ownership invovled
     
@@ -109,8 +109,8 @@ public:
     bool        IsOpen     ();
     
     // Directory
-    short                           MkDir  ();
-    short                           MkPath ();
+    short       MkDir  ();
+    short       MkPath ();
     
 private:
     void        Init    ();
@@ -119,6 +119,7 @@ private:
     CFURLRef    URL     ();                                 // Creates URL from bookmark if need be
     CFStringRef Path    ();                                 // Creates posix path from URL if need be
     CFStringRef Name    ();                                 // Creates name string from URL UTF8
+    void        CName   (char *name, int maxLen);           // Creates name string from URL UTF8
     CFStringRef Handle  ();                                 // Creates handle string from URL UTF8
     CFDataRef   Bookmark();                                 // Creates bookmark from URL if need be
     CFURLRef    Parent  ();                                 // Creates parent URL if need be

@@ -16,6 +16,36 @@
 #include <libkern/OSAtomic.h>
 #include <sys/stat.h>
 
+static long long GetFolderSize(NSURL* nsURL) {
+    long long folderSize = 0;
+    NSArray*  contents = [[NSFileManager defaultManager] contentsOfDirectoryAtURL:nsURL
+                                                           includingPropertiesForKeys:nil
+                                                                              options:NSDirectoryEnumerationSkipsHiddenFiles | NSDirectoryEnumerationSkipsPackageDescendants
+                                                                                error:nil];
+    NSEnumerator* contentsEnumurator = [contents objectEnumerator];
+
+    while (NSURL* file = [contentsEnumurator nextObject]) {
+        CSynclavierFileReference fileRef((__bridge CFURLRef) file);
+        
+        long long fileSize = fileRef.Size();    // Which of course may be a folder so we recurse
+        
+        // If directory, round up and add 4 sector catalog
+        if (fileRef.IsDirectory())
+            fileSize = ((fileSize + 511) & ~511) + 2048;
+        
+        // Round up to sectors
+        else
+            fileSize = (fileSize + 511) & ~511;
+    
+        folderSize += fileSize;
+    }
+    
+    // Round up and add catalog sectors
+    folderSize = ((folderSize + 511) & ~511) + 2048;
+    
+    return folderSize;
+}
+
 //
 // SyncFSSpec Utility FUnctions
 //
@@ -313,6 +343,22 @@ CFStringRef CSynclavierFileReference::Name() {
     return nameRef;
 }
 
+// Get name in C String
+void CSynclavierFileReference::CName(char *name, int maxLen) {
+    if (maxLen == 0)
+        return;
+    
+    *name = 0;
+    
+    if (nameRef == NULL)
+        GetName();
+    
+    if (nameRef == NULL)
+        return;
+    
+    CFStringGetCString(nameRef, name, maxLen, kCFStringEncodingUTF8);
+}
+
 // Get handle. The handle is the file name without the file extension.
 CFStringRef CSynclavierFileReference::Handle() {
     if (handleRef != NULL)
@@ -424,6 +470,8 @@ short   CSynclavierFileReference::CreateFSSpec(SyncFSSpec* aFileSpec) {
         memset((void *) aFileSpec, 0, sizeof(*aFileSpec));
         
         aFileSpec->file_ref = this;
+    
+        CName(aFileSpec->file_name, sizeof(aFileSpec->file_name));
         
         Retain();
     #else
@@ -530,6 +578,9 @@ long long   CSynclavierFileReference::Size() {
         // Bail if not reachable
         if (!Reachable())
             return 0;
+        
+        if (IsDirectory())
+            return GetFolderSize((__bridge NSURL*) URL());
         
         CFURLCopyResourcePropertyForKey(GetURL(), kCFURLFileSizeKey, &sizeRef, NULL);
         
@@ -1175,15 +1226,13 @@ short   CSynclavierFileReference::MkPath() {
         
         CSynclavierFileReference& parentFileRef = *parentFileRefRef;
         
-        if (int err = parentFileRef.MkDir())
+        if (int err = parentFileRef.MkDir()) {
+            parentFileRef.Release();
             return err;
+        }
         
         parentFileRef.Release();
     }
     
-    // Make ourselves if we are a directory. If we are a file, then we are done; path is created
-    if (IsDirectory())
-        return MkDir();
-    else
-        return noErr;
+    return noErr;
 }

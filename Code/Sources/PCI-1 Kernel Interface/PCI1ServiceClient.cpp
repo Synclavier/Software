@@ -12,21 +12,18 @@
 
 // Local
 #include "PCI1ServiceClient.h"
-
-#undef  NULL
-#define NULL 0
+#include "AssertMacros.h"
 
 
 // =================================================================================
 //		¥ PCI1ServiceClient::PCI1ServiceClient
 // =================================================================================
 
-#undef  DEBUGASSERTMSG
-#define DEBUGASSERTMSG(componentSignature, options, assertionString, exceptionLabelString, errorString, fileName, lineNumber, value) {}
-
 PCI1ServiceClient::PCI1ServiceClient(CFRunLoopRef notifyRunLoop, CFMutableDictionaryRef matchingDict, struct __sFILE* logFIle, const char* hostAp) :
 	mRunLoop(notifyRunLoop), mMatchingDict(matchingDict), mLogFile(logFIle), mHostName(hostAp)
 {
+    kern_return_t err = KERN_SUCCESS;
+    
 	mMasterDevicePort 		  = NULL;
 	mNotifyPort 			  = NULL;
 	mRunLoopSource 			  = NULL;
@@ -36,35 +33,41 @@ PCI1ServiceClient::PCI1ServiceClient(CFRunLoopRef notifyRunLoop, CFMutableDictio
 
 	// This gets the master device mach port through which all messages
 	// to the kernel go, and initiates communication with IOKit.
-	require_noerr(IOMasterPort(MACH_PORT_NULL, &mMasterDevicePort), errexit);
+	err = IOMasterPort(MACH_PORT_NULL, &mMasterDevicePort);
+    
+    if (err != KERN_SUCCESS || mMasterDevicePort == MACH_PORT_NULL)
+        return;
 
 	if (mRunLoop) {
 		mNotifyPort = IONotificationPortCreate(mMasterDevicePort);
-		require(mNotifyPort != NULL, errexit);
+        
+        if (mNotifyPort == MACH_PORT_NULL)
+            return;
 
 		mRunLoopSource = IONotificationPortGetRunLoopSource(mNotifyPort);
-		require(mRunLoopSource != NULL, errexit);
-			
+		
+        if (mRunLoopSource == NULL)
+            return;
+        
 		CFRunLoopAddSource(mRunLoop, mRunLoopSource, kCFRunLoopDefaultMode);
 		
         if (matchingDict)
         {
             CFRetain(mMatchingDict); // of which one reference is always consumed
-            require_noerr(IOServiceAddMatchingNotification(mNotifyPort, kIOPublishNotification, mMatchingDict, ServicePublishCallback, this, &mServicePublishIterator), errexit);
+            err = IOServiceAddMatchingNotification(mNotifyPort, kIOPublishNotification, mMatchingDict, ServicePublishCallback, this, &mServicePublishIterator);
+            if (err != KERN_SUCCESS) return;
         }
         
         if (matchingDict)
         {
             CFRetain(mMatchingDict); // of which one reference is always consumed
-            require_noerr(IOServiceAddMatchingNotification(mNotifyPort, kIOTerminatedNotification, mMatchingDict, ServiceTerminateCallback, this, &mServiceTerminateIterator), errexit);
+            err = IOServiceAddMatchingNotification(mNotifyPort, kIOTerminatedNotification, mMatchingDict, ServiceTerminateCallback, this, &mServiceTerminateIterator);
+            if (err != KERN_SUCCESS) return;
         }
         
 		// signal that the first call to ScanServices needs to empty the publish/terminate iterators
 		mIteratorsNeedEmptying = true;
 	}
-	
-errexit:
-	;
 }
 
 
@@ -80,11 +83,11 @@ PCI1ServiceClient::~PCI1ServiceClient()
 	if (mRunLoopSource != NULL)
 		CFRelease(mRunLoopSource);
 	
-	if (mServicePublishIterator != NULL)
-		{IOObjectRelease(mServicePublishIterator); mServicePublishIterator= NULL;}
+	if (mServicePublishIterator != MACH_PORT_NULL)
+		{IOObjectRelease(mServicePublishIterator); mServicePublishIterator= MACH_PORT_NULL;}
 	
-	if (mServiceTerminateIterator != NULL)
-		{IOObjectRelease(mServiceTerminateIterator); mServiceTerminateIterator = NULL;}
+	if (mServiceTerminateIterator != MACH_PORT_NULL)
+		{IOObjectRelease(mServiceTerminateIterator); mServiceTerminateIterator = MACH_PORT_NULL;}
 
     // Can't do this
     // if (mNotifyPort != NULL)
@@ -93,7 +96,7 @@ PCI1ServiceClient::~PCI1ServiceClient()
 	if (mMatchingDict)
 		{CFRelease(mMatchingDict); mMatchingDict = NULL;}
     
-    mMasterDevicePort = NULL;
+    mMasterDevicePort = MACH_PORT_NULL;
 }
 
 
@@ -115,7 +118,9 @@ void		PCI1ServiceClient::ServiceTerminateCallback(void *refcon, io_iterator_t it
 
 void	PCI1ServiceClient::ScanServices()
 {
-	if (mMasterDevicePort == 0)
+    kern_return_t err = KERN_SUCCESS;
+
+    if (mMasterDevicePort == 0)
 		return;
 
 	if (mIteratorsNeedEmptying) {
@@ -130,43 +135,45 @@ void	PCI1ServiceClient::ScanServices()
 		return;
 	}
 
-	io_iterator_t iter = NULL;
+	io_iterator_t iter = MACH_PORT_NULL;
 
 	CFRetain(mMatchingDict); // of which one reference is always consumed
-	require_noerr(IOServiceGetMatchingServices(mMasterDevicePort, mMatchingDict, &iter), errexit);
+	err = IOServiceGetMatchingServices(mMasterDevicePort, mMatchingDict, &iter);
     
+    if (err != KERN_SUCCESS) return;
+
     if (iter)
         ServicesPublished(iter);
 
-errexit:
-	if (iter != NULL)
+	if (iter)
 		IOObjectRelease(iter);
 }
 
 int	PCI1ServiceClient::CountServices()
 {
-    io_service_t	ioServiceObj = NULL;
+    io_service_t	ioServiceObj = MACH_PORT_NULL;
     int             counted      = 0;
-    
-    if (mMasterDevicePort == 0)
+    kern_return_t   err          = KERN_SUCCESS;
+
+    if (mMasterDevicePort == MACH_PORT_NULL)
         return counted;
     
     if (mMatchingDict == NULL)
         return counted;
     
-    io_iterator_t iter = NULL;
+    io_iterator_t iter = MACH_PORT_NULL;
     
     CFRetain(mMatchingDict); // of which one reference is always consumed
-    require_noerr(IOServiceGetMatchingServices(mMasterDevicePort, mMatchingDict, &iter), errexit);
+    
+    err = IOServiceGetMatchingServices(mMasterDevicePort, mMatchingDict, &iter);
     
     if (iter) {
-        while ((ioServiceObj = IOIteratorNext(iter)) != NULL) {
+        while ((ioServiceObj = IOIteratorNext(iter)) != MACH_PORT_NULL) {
             counted++;
             IOObjectRelease(ioServiceObj);
         }
     }
     
-errexit:
     if (iter)
         IOObjectRelease(iter);
     
@@ -180,12 +187,12 @@ errexit:
 
 void	PCI1ServiceClient::ServicesPublished(io_iterator_t serviceIterator)
 {
-	io_service_t	ioServiceObj = NULL;
+	io_service_t	ioServiceObj = MACH_PORT_NULL;
 
     if (!serviceIterator)
         return;
         
-	while ((ioServiceObj = IOIteratorNext(serviceIterator)) != NULL) {
+	while ((ioServiceObj = IOIteratorNext(serviceIterator)) != MACH_PORT_NULL) {
 		ServicePublished(ioServiceObj);
 		IOObjectRelease(ioServiceObj);
 	}
@@ -193,12 +200,12 @@ void	PCI1ServiceClient::ServicesPublished(io_iterator_t serviceIterator)
 
 void	PCI1ServiceClient::ServicesTerminated(io_iterator_t serviceIterator)
 {
-	io_service_t	ioServiceObj = NULL;
+	io_service_t	ioServiceObj = MACH_PORT_NULL;
 
     if (!serviceIterator)
         return;
         
-	while ((ioServiceObj = IOIteratorNext(serviceIterator)) != NULL) {
+	while ((ioServiceObj = IOIteratorNext(serviceIterator)) != MACH_PORT_NULL) {
 		ServiceTerminated(ioServiceObj);
 		IOObjectRelease(ioServiceObj);
 	}

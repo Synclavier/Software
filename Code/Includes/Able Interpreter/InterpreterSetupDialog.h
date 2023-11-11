@@ -410,6 +410,12 @@ resource 'MENU' (CABLE_LENGTH_MENU_ID, "Cable Length", preload) {
 #endif
                                 
 #if	!Rez
+                                POLY_MENU_MODEL_512,
+#else
+                                "Simulate 512 Megabytes Poly Memory", noIcon, noKey, noMark, plain,
+#endif
+                                
+#if	!Rez
                                 POLY_MENU_END
 #else
                             }

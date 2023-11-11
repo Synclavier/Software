@@ -6,18 +6,18 @@
 //
 //
 
+#include <atomic>
+
 #include "SyncCFStringUtilities.h"
 #include "sha1.h"
 
-#include <libkern/OSAtomic.h>
-
 // Temporary string buffer for debug printouts. Allows up to 4 SyncCFSTR uses in one SyncPrintf...
-static  volatile int32_t    SyncCFStringUtilitiesWhichTempStringBuffer;
+static  std::atomic_int32_t SyncCFStringUtilitiesWhichTempStringBuffer;
 static  char                SyncCFStringUtilitiesTempStringBuffer[4][256];
 
 const char* SyncCFStringUtilitiesTempString(CFStringRef cfString)
 {
-    int32_t which_buffer = OSAtomicIncrement32(&SyncCFStringUtilitiesWhichTempStringBuffer);
+    int32_t which_buffer = SyncCFStringUtilitiesWhichTempStringBuffer.fetch_add(1);
 
     char* whichString = SyncCFStringUtilitiesTempStringBuffer[which_buffer&3];
     
@@ -70,9 +70,14 @@ CFStringRef SyncHashForString(CFStringRef str)
     CFStringUppercase(mutableString, localeRef);
     
     // Get string in UTF-8
-    if (!CFStringGetCString(mutableString, utf8Info, sizeof(utf8Info), kCFStringEncodingUTF8))
-        return NULL;
+    Boolean result = CFStringGetCString(mutableString, utf8Info, sizeof(utf8Info), kCFStringEncodingUTF8);
 
+    CFRelease(localeRef    ); localeRef     = NULL;
+    CFRelease(mutableString); mutableString = NULL;
+
+    if (!result)
+        return NULL;
+    
     unsigned char hash[20];
     
     sha1_init  (&sha1_info);

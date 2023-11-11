@@ -121,14 +121,14 @@ typedef struct	audio_volume_record
 // We save pointers to specific funcitonal segments so we can go in there
 // and change the file it refers to. We maintain an array of pointers
 // to segments that are for certain purposes.
-#define MAX_SCSI_SEGMENTS           100
+#define MAX_SCSI_SEGMENTS           200
 #define SCSI_SEGMENT_FOR_SEQ0         0     // Segment for .SQ0DATA through .SQ7DATA (8 sequences on the button panel)
 #define SCSI_SEGMENT_FOR_TIMB         8     // Segment for .NEWDATA
 #define SCSI_SEGMENT_FOR_SEQ          9     // Segment for .SEQDATA
 #define SCSI_SEGMENT_FOR_SOUND       10     // Segment for .SNDDATA
-#define SCSI_SEGMENT_FOR_SEQS        11     // 50 segments for user sequence files that are in a sequence workspace
-#define MAX_SEGMENTS_FOR_SEQS        50
-#define MAX_SPECIAL_SCSI_SEGMENTS    (SCSI_SEGMENT_FOR_SEQS+MAX_SEGMENTS_FOR_SEQS)
+#define SCSI_SEGMENT_FOR_BUFS        11     // 100 segments for mono sampling attack buffers
+#define MAX_SEGMENTS_FOR_BUFS       100
+#define MAX_SPECIAL_SCSI_SEGMENTS    (SCSI_SEGMENT_FOR_BUFS+MAX_SEGMENTS_FOR_BUFS)
 #define SCSI_SEGMENT_UNUSED          -1
 
 typedef struct scsi_segment                     /* struct for segments      */

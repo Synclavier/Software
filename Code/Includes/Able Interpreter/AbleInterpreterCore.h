@@ -37,11 +37,11 @@ typedef	struct	core_memory_hardware_addresses							// pass task-specific addres
 	volatile unsigned int*   my_able_passthru_tlimreg;
     
     // PCI hardware pointers for BTB-1
+    volatile unsigned int*   mmio_in;               // Kernel address    int  read of all data
     volatile unsigned char*  mmio_sync_rev_b_in;    // Kernel address    byte read of sync input and rev code
-    volatile unsigned short* mmio_data_w_in;        // Kernel address    word read of 16 data lines
     
+    volatile unsigned int*   mmio_out;              // Kernel address    int  write of all data
     volatile unsigned char*  mmio_ctrl_b_out;       // Kernel address    byte write of cable control signals (WCR, WADR, CREAD, CWRITE, enables)
-    volatile unsigned short* mmio_data_w_out;       // Kernel address    word write of cable data. Also can byte access LSB to write
 	
 }	core_memory_hardware_addresses;
 

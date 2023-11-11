@@ -37,6 +37,7 @@
 #define D41_XMIT_MT			0x0004			/* set if room in xmit output buffer						*/
 
 #define D54_D40_IRQ			0x0001			/* set in D54 if D40 is requesting an interrupt				*/
+#define D54_D24_IRQ         0x0080          /* set in D54 if D24 is requesting an interrupt             */
 
 #define D57_MODEL_D_EXISTS	0x0001			/* set by Model D processor									*/
 #define D57_D40Q_EXISTS		0x0002			/* set if D40Q  Serial Port Interface is present			*/

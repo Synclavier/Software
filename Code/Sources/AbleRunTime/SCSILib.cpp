@@ -26,57 +26,58 @@
 
 scsi_segment* scsi_segment_for_range(scsi_segmentizer& izer, uint32 blockStart, uint32 blockLength)
 {
-    int i = 0;
-    
-    while (i<MAX_SCSI_SEGMENTS) {
+    for (int i=0; i<MAX_SCSI_SEGMENTS; i++) {
         scsi_segment& seg = izer.fSegList[i];
         
         // List must be in order by location on the device.
-        // No URLRef means end of list
-        if (seg.fSegURLRef == NULL)
-            break;
         
-        if ((blockStart               >= seg.fSegStartOnDevice)
-        &&  (blockStart + blockLength <= seg.fSegStartOnDevice + seg.fSegMaxBlocks)) {
-            // File is in memory. Implementation requires entire file to be in memory.
-            if (seg.fSegStash)
-                return &seg;
-            
-            if (!seg.fSegFileRef) {
-                // Note - this transfers ownership of the CFURLRef to the
-                // file reference.
-                seg.fSegFileRef = new CSynclavierFileReference(seg.fSegURLRef);
-                
-                // Failed...
-                if (!seg.fSegFileRef)
-                    break;
-                
-                // Retain the URLRef since fSegFileRef now owns the one we had
-                CFRetain(seg.fSegURLRef);
-            }
-            
-            // If not open, open it
-            if (seg.fSegFileRef->GetFile() == 0)
-            {
-                seg.fSegFileRef->Resolve();
-                
-                seg.fSegFileRef->Open(O_RDWR);
-                
-                // Try for read only
-                if (seg.fSegFileRef->GetFile() == 0)
-                    seg.fSegFileRef->Open(O_RDONLY);
-                
-                if (seg.fSegFileRef->GetFile() == 0) {
-                    // Allow segment to be returned if allows creation or synthesizes zeroes; otherwise failure; segmented file not available
-                    if (!seg.fSegAllowsCreate && !seg.fSegSynthsZeroes)
-                        break;
-                }
-            }
-            
+        // Skip to block in range
+        if (seg.fSegStartOnDevice + seg.fSegMaxBlocks <= blockStart)
+            continue;
+        
+        // Error if accessing past end of block
+        if (blockStart + blockLength > seg.fSegStartOnDevice + seg.fSegMaxBlocks)
+            return NULL;
+
+        // File is in memory. Implementation requires entire file to be in memory.
+        if (seg.fSegStash)
             return &seg;
+        
+        if (seg.fSegURLRef == NULL)
+            return NULL;
+        
+        if (!seg.fSegFileRef) {
+            // Note - this transfers ownership of the CFURLRef to the
+            // file reference.
+            seg.fSegFileRef = new CSynclavierFileReference(seg.fSegURLRef);
+            
+            // Failed...
+            if (!seg.fSegFileRef)
+                break;
+            
+            // Retain the URLRef since fSegFileRef now owns the one we had
+            CFRetain(seg.fSegURLRef);
         }
         
-        i++;
+        // If not open, open it
+        if (seg.fSegFileRef->GetFile() == 0)
+        {
+            seg.fSegFileRef->Resolve();
+            
+            seg.fSegFileRef->Open(O_RDWR);
+            
+            // Try for read only
+            if (seg.fSegFileRef->GetFile() == 0)
+                seg.fSegFileRef->Open(O_RDONLY);
+            
+            if (seg.fSegFileRef->GetFile() == 0) {
+                // Allow segment to be returned if allows creation or synthesizes zeroes; otherwise failure; segmented file not available
+                if (!seg.fSegAllowsCreate && !seg.fSegSynthsZeroes)
+                    break;
+            }
+        }
+        
+        return &seg;
     }
     
     return NULL;
@@ -1278,9 +1279,9 @@ scsi_error_code interrogate_device  (scsi_device    *the_device)
 					uint16 *bytes  = (uint16 *) disk_buf;
 					boolean	isable = TRUE;
 					
-					for (i=0; i<512; i += 8)	/* check catalog entries	*/
+					for (i=0; i<512; i += 8)	    /* check catalog entries	*/
 					{
-						name       = bytes[i  ];
+						name       = bytes[i  ];    // First two characters of name field
 						blockstart = bytes[i+4];
 						blocklen   = bytes[i+5];
 						filelen    = bytes[i+6];
@@ -1310,12 +1311,14 @@ scsi_error_code interrogate_device  (scsi_device    *the_device)
                                 #error Not tested for big-endian
                             #endif
                             
-                            const char* symtab  = "-SYMTAB-";
-                            const char* copylog = "COPYLOG";
-                            
-							if ((name && name != (* (unsigned short*) symtab))		/* -SYMTAB files fail length/alloc test...	*/
-							&&  (name && name != (* (unsigned short*) copylog))		/* COPYLOG files fail length/alloc test...	*/
-							&&  (filetyp      != 5   ))		/* sound files contain no word length...	*/
+                            const char* symtab    = "-SYMTAB-";
+                            const char* copylog   = "COPYLOG";
+                            uint32      symtab32  = ((uint32) symtab [0]) + (((uint32) symtab [1]) << 8);
+                            uint32      copylog32 = ((uint32) copylog[0]) + (((uint32) copylog[1]) << 8);
+
+							if ((name && name != symtab32 )     /* -SYMTAB files fail length/alloc test...	*/
+							&&  (name && name != copylog32)		/* COPYLOG files fail length/alloc test...	*/
+							&&  (filetyp      != 5        ))    /* sound files contain no word length...	*/
 							{
 								fileblocks = (filelen + 255) >> 8;
 								

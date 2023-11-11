@@ -154,8 +154,8 @@ extern	struct scsi_device*     g_indexed_device [8];
 extern	struct scsi_settings*   g_indexed_setting[8];
 
 // Setup up global scsi board list from interchange setttings:
-extern	void					XPLRunTime_SetupSCSIMap		   (struct interchange_settings* interchangeSettings, int d24Avail);
-extern	void					XPLRunTime_ConfigureSCSIMap    (fixed floppy_available, fixed d66_available);
+extern	void					XPLRunTime_SetupSCSIMap		   (struct interchange_settings* interchangeSettings, int d24Avail, int t0Config, scsi_settings* t0Settings);
+extern	void					XPLRunTime_ConfigureSCSIMap    (fixed floppy_available, fixed d66_available, int t0Config);
 extern	void					XPLRunTime_UpdateHiMemConfig   ();
 extern	MAC_SCSI_Target*		XPLRunTime_InterrogateDevice   (struct MAC_SCSI_Target *the_target);
 extern	MAC_SCSI_Target*		XPLRunTime_ExamineDevice	   (int theBoard, int theScsiID);

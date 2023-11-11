@@ -37,6 +37,7 @@ enum scsi_bus_options {
     SCSI_BUS_MENU_MAC_SCSI_PORT,
     SCSI_BUS_MENU_DISK_IMAGE,
 	SCSI_BUS_MENU_D24,
+    SCSI_BUS_MENU_D30,  // Coding for Kennedy tape drive on D30
     SCSI_BUS_MENU_END
 };
 
@@ -76,13 +77,14 @@ typedef	struct scsi_settings
 
 }	scsi_settings;
 
-// Mongo struct for all InterChangeª 1.0 settings
+// Mondo struct for all InterChangeª 1.0 settings
 typedef	struct interchange_settings
 {			
 	scsi_settings		w0;							// holds settings for W0
 	scsi_settings		w1;							// holds settings for W1
 	scsi_settings		o0;							// holds settings for O0
 	scsi_settings		o1;							// holds settings for O1
+                                                    // tape was not supporte din InterChange
 
 	xpl_file_alias		export_fldr;				// alias to folder to export; meaningless except when in memory
 	xpl_file_alias		export_imge;				// alias to image to export; meaningless except when in memory
@@ -177,7 +179,7 @@ typedef	struct interpreter_settings
 	uint32_ratio		metronome_calib_data;		// measured calibration data
 	ulong				m512k;						// setting for m512ks to model
 	ulong				dont_warn_on_file_change;	// don't warn after interchange file change
-	ulong				polymem;					// setting for number of poly megs to simulate
+	ulong				polymem;					// setting for number of poly megs to simulate. Now actual number of MB to simulate 1 - 512
 	ulong				spare[119];
 }	interpreter_settings;
 
@@ -322,7 +324,7 @@ OSErr                               check_interpreter_prefs_file_rev (class CSyn
     OSErr 	check_interpreter_prefs_file_rev	(FSSpec *the_spec);
 #endif
 
-void 	read_interchange_setup				(char *prefs_name, interchange_settings *the_settings, int resolve_all_alii);
+void 	read_interchange_setup				(char *prefs_name, interchange_settings *the_settings, int resolve_all_alii, int& t0_setting, scsi_settings& t0_settings);
 int 	check_interchange_image_files		(interchange_settings *the_settings);
 int 	check_interchange_selected_files	(interchange_settings *the_settings);
 void 	toss_interchange_setup				(interchange_settings *the_settings);

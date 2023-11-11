@@ -5,7 +5,7 @@
 // Manages access to image files stored on the mac.
 
 // Std C
-#include <String.h>
+#include <string.h>
 
 // PowerPlant Addons
 #include "CHFSImageFile.h"

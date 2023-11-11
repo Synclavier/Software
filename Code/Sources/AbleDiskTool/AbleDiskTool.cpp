@@ -31,72 +31,58 @@ int main(int argc, const char *argv[])
 	
     if (0)
     {
-        // AbleDiskTool -s 5 -file "/Volumes/CJ Movies/XPL Build Products/Synclavier3/W0 Disk Image.simg" "-e" "CJ Data:Projects:SDC:Able:W0 Demo Files:CLARA3.ssnd" "W0:"
-        argc = 8;
-        argv[0] = "AbleDiskTool";
-        argv[1] = "-s";
-        argv[2] = "5";
-        argv[3] = "-file";
-        argv[4] = "/Users/cameronjones/Documents/Synclavier³/W0/USER.simg";
-        argv[5] = "-e";
-        argv[6] = "/Volumes/CJ Data/Projects/SDC/Able/W0 Demo Files/CLARA3.ssnd";
-        argv[6] = "/Volumes/10.10/TestDLLs/•Sine.aif";
-        argv[7] = "W0:";
+        // -create "/Volumes/CJ_Cache/XPL Build Products/Synclavier3/W0 Disk Image.simg" 7340032 -zero
+        argc = 0;
+        argv[argc++] = "AbleDiskTool";
+        argv[argc++] = "-create";
+        argv[argc++] = "/Volumes/CJ_Cache/XPL_Build_Products/Synclavier3/W0 Disk Image.simg";
+        argv[argc++] = "7340032";
+        argv[argc++] = "-zero";
+    }
+    
+    if (0)
+    {
+        // -w2 -s 5 -file "/Volumes/CJ_Cache/XPL_Build_Products/Synclavier3/W0 Disk Image.simg" "-e" "/Volumes/CJ_Cache/XPL_Build_Products/W0/MONITOR.sprg" "W0:MONITOR"
+        argc = 0;
+        argv[argc++] = "-w2";
+        argv[argc++] = "-s";
+        argv[argc++] = "5";
+        argv[argc++] = "-file";
+        argv[argc++] = "/Volumes/CJ_Cache/XPL_Build_Products/Synclavier3/W0 Disk Image.simg";
+        argv[argc++] = "-e";
+        argv[argc++] = "/Volumes/CJ_Cache/XPL_Build_Products/W0/MONITOR.sprg";
+        argv[argc++] = "W0:MONITOR";
     }
 
     if (0)
     {
-        // AbleDiskTool W0 -e "/ATEXTFIL" "W0:ATEXTFIL"
-        // AbleDiskTool -file "xtz" -e "/ATEXTFIL" "W0:"
-        argc = 6;
-		argv[0] = "something";
-		argv[1] = "-file";
-		argv[2] = "/A/Image File.simg";
-		argv[3] = "-e";
-		argv[4] = "/A/•NEWDATA.stmb";
-		argv[5] = "W0:";
-	}
+        // -w2 -s 5 -file "/Volumes/CJ_Cache/XPL_Build_Products/Synclavier3/W0 Disk Image.simg" "-e" "/Volumes/CJ_Cache/XPL_Build_Products/W0/*SYSTEM/" "W0:.SYSTEM"
+        argc = 0;
+        argv[argc++] = "-w2";
+        argv[argc++] = "-s";
+        argv[argc++] = "5";
+        argv[argc++] = "-file";
+        argv[argc++] = "/Volumes/CJ_Cache/XPL_Build_Products/Synclavier3/W0 Disk Image.simg";
+        argv[argc++] = "-e";
+        argv[argc++] = "/Volumes/CJ_Cache/XPL_Build_Products/W0/*SYSTEM/";
+        argv[argc++] = "W0:.SYSTEM";
+    }
 
-	if (0)
-	{
-		// Works: AbleDiskTool -ic2 5 -e "/A/•NEWDATA.stmb" W0:
-		// AbleDiskTool -ic2 4 -e "/A/•NEWDATA.stmb" "W1:"
-		argc = 6;
-		argv[0] = "AbleDiskTool";
-		argv[1] = "-ic2";
-		argv[2] = "4";
-		argv[3] = "-e";
-		argv[4] = "/A/•NEWDATA.stmb";
-		argv[5] = "W1:";
-	}
-    
-	if (0)
-	{
-		argc = 8;
-		argv[0] = "AbleDiskTool";
-		argv[1] = "-s";
-		argv[2] = "5";
-		argv[3] = "-file";
-		argv[4] = "/Volumes/CJ Data/Projects/SDC/Synclavier Development 5.2/Synclavier Digital SynclavierX/Release 5.2 W0 Disk Image.simg";
-		argv[5] = "-e";
-		argv[6] = "/Volumes/CJ Data/Projects/SDC/Synclavier Development 5.2/Able/W0/*SYSTEM/";
-		argv[7] = "W0:.SYSTEM";
-	}
-    
-	if (0)
-	{
-		argc = 8;
-		argv[0] = "AbleDiskTool";
-		argv[1] = "-s";
-		argv[2] = "5";
-		argv[3] = "-file";
-		argv[4] = "/Volumes/CJ Data/Projects/SDC/Synclavier Development 5.2/Synclavier Digital SynclavierX/Release 5.2 W0 Disk Image.simg";
-		argv[5] = "-e";
-		argv[6] = "/Volumes/CJ Data/Projects/SDC/Synclavier Development 5.2/Able/W0/MONITOR.sprg";
-		argv[7] = "W0:MONITOR";
-	}
-    
-	int status = AbleDiskTool(argc, argv);
+    if (0)
+    {
+        // -w2 -s 5 -file ~/Documents/Synclavier³/W0/USER.simg -e ~/Desktop/TestText.txt W0:TESTTEXT
+        argc = 0;
+        argv[argc++] = "-w2";
+        argv[argc++] = "-s";
+        argv[argc++] = "5";
+        argv[argc++] = "-file";
+        argv[argc++] = "/Users/cameronjones/Documents/Synclavier³/W0/USER.simg";
+        argv[argc++] = "-e";
+        argv[argc++] = "/Users/cameronjones/Desktop/TestText.txt";
+        argv[argc++] = "W0:TESTTEXT";
+    }
+
+    int status = AbleDiskTool(argc, argv);
 	
 	if (status)
 		return (-9);

@@ -126,6 +126,17 @@ void SynclavierPCILib_PeekAtHardware(int& numVirtuals, int& numPCI1s, int& numPC
         delete btb1Snooper;
         btb1Snooper = NULL;
     }
+    
+    // Look for base class
+    #ifdef USE_SYSTEM_EXTENSION
+        PCI1AudioDeviceManager* baseSnooper = new PCI1AudioDeviceManager(SyncBasePCIClassName, NULL, NULL, SYNCLAVIER_APPLICATION_NAME, kPCI1ServiceGeneric);
+        
+        if (baseSnooper) {
+            numPCIes += baseSnooper->CountServices();
+            delete baseSnooper;
+            baseSnooper = NULL;
+        }
+    #endif
 }
 
 
@@ -206,6 +217,10 @@ static	void	HandlePCIDeviceTerminate( void* objRef, int which )
 // Called at end of interpretation
 void SynclavierPCILIB_Finalize( bool doUnprep )
 {
+    // Handle case of not inited
+    if (gInitedInstances == 0)
+        return;
+    
     // See if opened by another part of this app
     if (--gInitedInstances > 0)
         return;
@@ -275,6 +290,9 @@ SynclavierPCILib_FetchServiceConnection ( )
 // Slightly complicated by the fact we synthesize a shared struct to facilitate communication within the application
 // even if we can't talk to the kernel
 
+static  bool    gDidFail;
+static  int     gRequiredVersion;
+
 static struct SynclavierSharedStruct*
 SynclavierPCILib_LookForSharedStruct ( int required_version_id )
 {
@@ -288,11 +306,18 @@ SynclavierPCILib_LookForSharedStruct ( int required_version_id )
 	
 		it = gPCIDeviceManager->FetchSharedMemory(gPCIDeviceConnection, kSynclavierSharedStructID, &itsSize, 0);
 	
+        if (it && itsSize > sizeof(int)) {
+            gRequiredVersion = * (int *) it;
+            
+            if (gRequiredVersion != required_version_id)
+                gDidFail = true;
+        }
+        
 		if (!it || itsSize < sizeof(SynclavierSharedStruct))
 			return NULL;
 
 		SynclavierSharedStruct& itsStruct = * (SynclavierSharedStruct *) it;
-		
+        
 		if (itsStruct.struct_version != required_version_id)
 			return NULL;
 			
@@ -301,6 +326,14 @@ SynclavierPCILib_LookForSharedStruct ( int required_version_id )
 	
 	return gPCIDeviceManager->mSyncStruct[gWhich];
 }
+
+bool SynclavierPCILib_FetchFailed ( int& required_version_id )
+{
+    required_version_id = gRequiredVersion;
+    
+    return gDidFail;
+}
+
 
 struct SynclavierSharedStruct*
 SynclavierPCILib_FetchSharedStruct ( int required_version_id )
@@ -318,9 +351,9 @@ SynclavierPCILib_FetchSharedStruct ( int required_version_id )
 		
 			if (gSharedfd != (-1))
 			{
-				int pages = (sizeof(SynclavierSharedStruct) + PAGE_SIZE - 1) / PAGE_SIZE;
+				int pages = (int) ((sizeof(SynclavierSharedStruct) + PAGE_SIZE - 1) / PAGE_SIZE);
 				
-				gSharedSharedStructLen = pages * PAGE_SIZE;
+				gSharedSharedStructLen = pages * (int) PAGE_SIZE;
 				
 				// Note: Truncate will fail if already exists
 				ftruncate(gSharedfd, gSharedSharedStructLen);
@@ -446,8 +479,11 @@ fixed* SynclavierPCILib_FetchInternalMemory ( int required_size_bytes )
 {
 	if (!gPCIDeviceManager || !gPCIDeviceConnection)
 		return NULL;
-		
-	if (gPCIDeviceManager->mIntMem[gWhich] == NULL || (required_size_bytes && gPCIDeviceManager->mIntMemS[gWhich] < required_size_bytes))
+    
+    // SynclavierPCILib_ReleaseInternalMemory does not work; it leads to crashes. We can't reuse the memory pointers
+    // stored in the device manager, since the underlying memory is reallocated in the kernel as the intepreter starts and stops.
+    // So we look up (and remap) the memory ranges whenever the interpreter comes back online
+	// if (1 || gPCIDeviceManager->mIntMem[gWhich] == NULL || (required_size_bytes && gPCIDeviceManager->mIntMemS[gWhich] < required_size_bytes))
 	{
 		UInt32 itsSize = 0;
 		void*  it      = NULL;
@@ -467,12 +503,41 @@ fixed* SynclavierPCILib_FetchInternalMemory ( int required_size_bytes )
 	return gPCIDeviceManager->mIntMem[gWhich];
 }
 
+void SynclavierPCILib_ReleaseInternalMemory()
+{
+    if (!gPCIDeviceManager || !gPCIDeviceConnection)
+        return;
+    
+    if (gPCIDeviceManager->mIntMem [gWhich]) {
+        gPCIDeviceManager->ReleaseSharedMemory(gPCIDeviceConnection, kAbleInternalMemoryID, gPCIDeviceManager->mIntMem [gWhich]);
+
+        gPCIDeviceManager->mIntMem [gWhich] = NULL;
+        gPCIDeviceManager->mIntMemS[gWhich] = 0;
+    }
+}
+
+void SynclavierPCILib_ReleaseExternalMemory()
+{
+    if (!gPCIDeviceManager || !gPCIDeviceConnection)
+        return;
+    
+    if (gPCIDeviceManager->mExtMem [gWhich]) {
+        gPCIDeviceManager->ReleaseSharedMemory(gPCIDeviceConnection, kAbleExternalMemoryID, gPCIDeviceManager->mExtMem [gWhich]);
+        
+        gPCIDeviceManager->mExtMem [gWhich] = NULL;
+        gPCIDeviceManager->mExtMemS[gWhich] = 0;
+    }
+}
+
 fixed* SynclavierPCILib_FetchExternalMemory ( int required_size_bytes )
 {
 	if (!gPCIDeviceManager || !gPCIDeviceConnection)
 		return NULL;
 		
-	if (gPCIDeviceManager->mExtMem[gWhich] == NULL || (required_size_bytes && gPCIDeviceManager->mExtMemS[gWhich] < required_size_bytes))
+    // SynclavierPCILib_ReleaseInternalMemory does not work; it leads to crashes. We can't reuse the memory pointers
+    // stored in the device manager, since the underlying memory is reallocated in the kernel as the intepreter starts and stops.
+    // So we look up (and remap) the memory ranges whenever the interpreter comes back online
+	// if (1 || gPCIDeviceManager->mExtMem[gWhich] == NULL || (required_size_bytes && gPCIDeviceManager->mExtMemS[gWhich] < required_size_bytes))
 	{
 		UInt32 itsSize = 0;
 		void*  it      = NULL;
@@ -497,7 +562,10 @@ fixed* SynclavierPCILib_FetchPolySimMemory ( int required_size_bytes )
 	if (!gPCIDeviceManager || !gPCIDeviceConnection)
 		return NULL;
 		
-	if (gPCIDeviceManager->mPSimMem[gWhich] == NULL || (required_size_bytes && gPCIDeviceManager->mPSimMemS[gWhich] < required_size_bytes))
+    // SynclavierPCILib_ReleaseInternalMemory does not work; it leads to crashes. We can't reuse the memory pointers
+    // stored in the device manager, since the underlying memory is reallocated in the kernel as the intepreter starts and stops.
+    // So we look up (and remap) the memory ranges whenever the interpreter comes back online
+	// if (1 || gPCIDeviceManager->mPSimMem[gWhich] == NULL || (required_size_bytes && gPCIDeviceManager->mPSimMemS[gWhich] < required_size_bytes))
 	{
 		UInt32 itsSize = 0;
 		void*  it      = NULL;
@@ -521,8 +589,11 @@ fixed* SynclavierPCILib_FetchBlankMemory ( int required_size_bytes )
 {
 	if (!gPCIDeviceManager || !gPCIDeviceConnection)
 		return NULL;
-		
-	if (gPCIDeviceManager->mBlankMem[gWhich] == NULL || (required_size_bytes && gPCIDeviceManager->mBlankMemS[gWhich] < required_size_bytes))
+    
+    // SynclavierPCILib_ReleaseInternalMemory does not work; it leads to crashes. We can't reuse the memory pointers
+    // stored in the device manager, since the underlying memory is reallocated in the kernel as the intepreter starts and stops.
+    // So we look up (and remap) the memory ranges whenever the interpreter comes back online
+    // if (1 || gPCIDeviceManager->mBlankMem[gWhich] == NULL || (required_size_bytes && gPCIDeviceManager->mBlankMemS[gWhich] < required_size_bytes))
 	{
 		UInt32 itsSize = 0;
 		void*  it      = NULL;
@@ -547,7 +618,10 @@ fixed* SynclavierPCILib_FetchPolyBufMemory ( int required_size_bytes )
 	if (!gPCIDeviceManager || !gPCIDeviceConnection)
 		return NULL;
 		
-	if (gPCIDeviceManager->mPolyMem[gWhich] == NULL || (required_size_bytes && gPCIDeviceManager->mPolyMemS[gWhich] < required_size_bytes))
+    // SynclavierPCILib_ReleaseInternalMemory does not work; it leads to crashes. We can't reuse the memory pointers
+    // stored in the device manager, since the underlying memory is reallocated in the kernel as the intepreter starts and stops.
+    // So we look up (and remap) the memory ranges whenever the interpreter comes back online
+    // if (1 || gPCIDeviceManager->mPolyMem[gWhich] == NULL || (required_size_bytes && gPCIDeviceManager->mPolyMemS[gWhich] < required_size_bytes))
 	{
 		UInt32 itsSize = 0;
 		void*  it      = NULL;
@@ -572,7 +646,10 @@ fixed* SynclavierPCILib_FetchSessionMemory ( int required_size_bytes, int whichS
 	if (!gPCIDeviceManager || !gPCIDeviceConnection)
 		return NULL;
 		
-	if (gPCIDeviceManager->mSessionMem[gWhich][whichSubMemory] == NULL || (required_size_bytes && gPCIDeviceManager->mSessionMemS[gWhich][whichSubMemory] < required_size_bytes))
+    // SynclavierPCILib_ReleaseInternalMemory does not work; it leads to crashes. We can't reuse the memory pointers
+    // stored in the device manager, since the underlying memory is reallocated in the kernel as the intepreter starts and stops.
+    // So we look up (and remap) the memory ranges whenever the interpreter comes back online
+    // if (1 || gPCIDeviceManager->mSessionMem[gWhich][whichSubMemory] == NULL || (required_size_bytes && gPCIDeviceManager->mSessionMemS[gWhich][whichSubMemory] < required_size_bytes))
 	{
 		UInt32 itsSize = 0;
 		void*  it      = NULL;

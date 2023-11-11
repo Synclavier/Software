@@ -23,7 +23,7 @@
                  }];
 }
 
-+ (NSUInteger) matchNSStringIndex:(NSString*)string  inArray:(NSMutableArray*)array {
++ (NSUInteger) matchNSStringIndex:(NSString*)string  inArray:(NSArray*)array {
     return  [array indexOfObject:string
                    inSortedRange:(NSRange){0, [array count]}
                          options:0
@@ -37,6 +37,37 @@
 
 + (void) insertNSString:(NSString*)string inArray:(NSMutableArray*)array {
     NSUInteger whereAt = [self insertNSStringIndex:string inArray:array];
+    
+    [array insertObject:string atIndex:whereAt];
+}
+
+// Sorted object is NSString with exact match
++ (NSUInteger) insertXNSStringIndex:(NSString*)string inArray:(NSMutableArray*)array {
+    return  [array indexOfObject:string
+                   inSortedRange:(NSRange){0, [array count]}
+                         options:NSBinarySearchingInsertionIndex
+                 usingComparator:^NSComparisonResult(id a, id b) {
+                     NSString* aString = (NSString*)a;
+                     NSString* bString = (NSString*)b;
+                     
+                     return [aString compare:bString];
+                 }];
+}
+
++ (NSUInteger) matchXNSStringIndex:(NSString*)string  inArray:(NSArray*)array {
+    return  [array indexOfObject:string
+                   inSortedRange:(NSRange){0, [array count]}
+                         options:0
+                 usingComparator:^NSComparisonResult(id a, id b) {
+                     NSString* aString = (NSString*)a;
+                     NSString* bString = (NSString*)b;
+                     
+                     return [aString compare:bString];
+                 }];
+}
+
++ (void) insertXNSString:(NSString*)string inArray:(NSMutableArray*)array {
+    NSUInteger whereAt = [self insertXNSStringIndex:string inArray:array];
     
     [array insertObject:string atIndex:whereAt];
 }

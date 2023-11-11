@@ -2,9 +2,12 @@
 //	AbleInterpreterShared.cpp
 // =================================================================================
 
-// Specific functions shared between Interchange, Synclavier PowerPC and the PCI-1 Kernel Driver
+// Specific functions shared between Interchange, Synclavier PowerPC and the PCI-1 Kernel Driver and the PCIDriverKit driver
 
-#ifdef	COMPILE_OSX_KERNEL
+#if   defined(COMPILE_OSX_DRIVERKIT)
+    #include <string.h>
+    #include <DriverKit/IOLib.h>
+#elif defined(COMPILE_OSX_KERNEL)
 	#include <IOKit/IOLib.h>
 #else
 	#include <string.h>

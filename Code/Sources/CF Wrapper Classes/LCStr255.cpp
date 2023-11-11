@@ -20,7 +20,7 @@ LCStr255& LCStr255::Append ( SInt32 num )
 {
     char it[256] = {0};
     
-    sprintf(it, "%d", num);
+    sprintf(it, "%d", (int) num);
     
     return Append(it);
 }

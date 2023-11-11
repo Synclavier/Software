@@ -25,6 +25,7 @@ void    SynclavierAudioStashInitForType(SynclavierAudioStash& stash, int type, l
     stash.stashType    = type;
     stash.stashLength  = length;
     stash.stashRetains = 1;
+    stash.stashPtr     = &stash.stashData.stashData[0];
     
     // Init only the header area
     if (type == SYNCLAVIER_SOUND_FILE_STASH) {

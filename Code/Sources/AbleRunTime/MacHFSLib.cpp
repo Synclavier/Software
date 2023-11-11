@@ -3,9 +3,9 @@
 // =================================================================================
 
 // Std C
-#include <StdIO.h>
-#include <String.h>
-#include <StdLib.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 
 // Mac OS
 #include <Files.h>
@@ -20,7 +20,7 @@
 #include "AbleDiskLib.h"
 #include "MacHFSLib.h"
 #include "CHFSImageFile.h"
-#include "SCSILib.h"
+#include "ScsiLib.h"
 #include "XPLRuntime.h"
 
 // =================================================================================

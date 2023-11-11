@@ -366,7 +366,7 @@ chip_error_code issue_d24_scsi_port_scsi_command (scsi_device& the_device, scsi_
 	lun       = 0;
 	
     // Test access of O1 using W0
-    if (0) {
+    if ((0)) {
         if (target == 1)    // O1 selected
             target = 5;     // Acess W0
     }

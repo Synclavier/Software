@@ -226,8 +226,10 @@ typedef enum                            /* readdata codes for able disk	*/
 {
 	ABLE_W0_READDATA_CODE  =  6,
 	ABLE_W1_READDATA_CODE  =  7,
-	
-	ABLE_O0_READDATA_CODE  = 10,
+    
+    ABLE_T0_READDATA_CODE  =  8,
+    
+    ABLE_O0_READDATA_CODE  = 10,
 	ABLE_O1_READDATA_CODE  = 11,
 
 	ABLE_HFS_READDATA_CODE = 16
@@ -239,7 +241,8 @@ typedef enum
 	ABLE_W0_DEFAULT_SCSI_ID = 5,
 	ABLE_W1_DEFAULT_SCSI_ID = 4,
 	ABLE_O0_DEFAULT_SCSI_ID = 1,
-	ABLE_O1_DEFAULT_SCSI_ID = 2,
+    ABLE_O1_DEFAULT_SCSI_ID = 2,
+    ABLE_T0_DEFAULT_SCSI_ID = 0,
     ABLE_IMPORT_SCSI_ID     = 3         // Use for Synclavier3 import window; device is not owned by the interpreter; was DTD in vitro
 	
 }	able_default_scsi_ids;

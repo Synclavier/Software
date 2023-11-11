@@ -10,23 +10,19 @@
 
 #define	PCI1_PREFS_VERSION				(1)
 
-#define SyncBasePCIDevice				com_Synclavier_BasePCIDevice
-#define SyncBasePCIClassName			"com_Synclavier_BasePCIDevice"
+#if !defined(COMPILE_OSX_DRIVERKIT)
+    #define SyncBasePCIDevice		    com_Synclavier_BasePCIDevice
+    #define SyncVirtualPCIDevice	    com_Synclavier_VirtualPCIDevice
+    #define SyncPCI1PCIDevice		    com_Synclavier_PCI1PCIDevice
+    #define SyncPCIePCIDevice		    com_Synclavier_PCIePCIDevice
+    #define PCI1UserClient              com_Synclavier_PCIUserClient
+ #endif
 
-#define SyncVirtualPCIDevice			com_Synclavier_VirtualPCIDevice
-#define SyncVirtualPCIClassName			"com_Synclavier_VirtualPCIDevice"
-
-#define SyncPCI1PCIDevice				com_Synclavier_PCI1PCIDevice
-#define SyncPCI1PCIClassName			"com_Synclavier_PCI1PCIDevice"
-
-#define SyncPCIePCIDevice				com_Synclavier_PCIePCIDevice
-#define SyncPCIePCIClassName			"com_Synclavier_PCIePCIDevice"
-
-#define	PCI1UserClient					com_Synclavier_PCIUserClient
-
-#define	PCI1AudioDevice					com_Synclavier_BaseAudioDeviceNotUsedYet
-#define PCI1AudioDeviceClassName		"com_Synclavier_BaseAudioDeviceNotUsedYet"
-#define PCI1AudioEngine 				com_Synclavier_BaseAudioEngineNotUsedYet
+#define SyncBasePCIClassName            "com_Synclavier_BasePCIDevice"
+#define SyncVirtualPCIClassName         "com_Synclavier_VirtualPCIDevice"
+#define SyncPCI1PCIClassName            "com_Synclavier_PCI1PCIDevice"
+#define SyncPCIePCIClassName            "com_Synclavier_PCIePCIDevice"
+#define PCI1UserClientClassName         "com_Synclavier_PCIUserClient"
 
 #define PCI1MIDIImagePath				"/Library/Audio/MIDI Devices/Generic/Images/SynclavierDigitalAudioMIDIIcon.tiff"
 

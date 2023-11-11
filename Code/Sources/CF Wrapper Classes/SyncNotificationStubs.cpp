@@ -7,6 +7,6 @@
 //
 
 #include "SyncNotification.h"
-#include "SynclavierTypes.h"
+#include "CSynclavierTypes.h"
 
 void    SyncNotificationPostNotification(CFStringRef notification, SyncUIObjectRef objRef) {}

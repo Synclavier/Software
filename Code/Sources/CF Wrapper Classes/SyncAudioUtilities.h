@@ -55,6 +55,7 @@ typedef struct SynclavierAudioStash {
     int                     stashType;
     volatile int32_t        stashRetains;
     long long               stashLength;
+    char*                   stashPtr;
     
     union {
         char                        stashData[0];

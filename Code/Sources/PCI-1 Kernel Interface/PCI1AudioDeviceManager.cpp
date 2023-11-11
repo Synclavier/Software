@@ -24,50 +24,59 @@
 // Extract published GUID from object. The GUID is used to distinguish between multiple IOServices.
 static UInt64 GetGUID(io_service_t theObject)
 {
-	CFMutableDictionaryRef 	properties = NULL;
-	CFStringRef 			strDesc    = NULL;
-	char 					poop [64]  = {0};
-	UInt64					theGuid    = 0;
-	int						i,j;
-	
-	IORegistryEntryCreateCFProperties(theObject, &properties, kCFAllocatorDefault, kNilOptions);
-	
-	if (!properties)
-		return (0);
-		
-	strDesc = (CFStringRef)CFDictionaryGetValue(properties, CFSTR(kPCI1UniqueIDKey));
+    // Can't SetProperty within DriverKit
+    #ifdef USE_SYSTEM_EXTENSION
+        uint64_t entryID = 0;
+    
+        IORegistryEntryGetRegistryEntryID(theObject, &entryID);
+    
+        return entryID;
+    #else
+            CFMutableDictionaryRef 	properties = NULL;
+        CFStringRef 			strDesc    = NULL;
+        char 					poop [64]  = {0};
+        UInt64					theGuid    = 0;
+        int						i,j;
+        
+        IORegistryEntryCreateCFProperties(theObject, &properties, kCFAllocatorDefault, kNilOptions);
+        
+        if (!properties)
+            return (0);
+            
+        strDesc = (CFStringRef)CFDictionaryGetValue(properties, CFSTR(kPCI1UniqueIDKey));
 
-	if (!strDesc)
-	{
-		CFRelease(properties);
-		return (0);
-	}
-	
-	if (!CFStringGetCString(strDesc, poop, sizeof(poop), kCFStringEncodingMacRoman))
-	{
-		CFRelease(properties);
-		return (0);
-	}
-		
-	for (i=0; i<16; i++)
-	{
-		j = poop[i];
-		
-		if (j >= 'A' & j <= 'F')
-			theGuid = (theGuid << 4) | (j - 'A' + 10);
-		else if (j >= 'a' & j <= 'f')
-			theGuid = (theGuid << 4) | (j - 'a' + 10);
-		else if (j >= '0' & j <= '9')
-			theGuid = (theGuid << 4) | (j - '0');
-		else
-   		{
-   			CFRelease(properties);
-   			return (0);
-   		}
-	}
-	
-   	CFRelease(properties);
-	return (theGuid+5);
+        if (!strDesc)
+        {
+            CFRelease(properties);
+            return (0);
+        }
+        
+        if (!CFStringGetCString(strDesc, poop, sizeof(poop), kCFStringEncodingMacRoman))
+        {
+            CFRelease(properties);
+            return (0);
+        }
+            
+        for (i=0; i<16; i++)
+        {
+            j = poop[i];
+            
+            if (j >= 'A' & j <= 'F')
+                theGuid = (theGuid << 4) | (j - 'A' + 10);
+            else if (j >= 'a' & j <= 'f')
+                theGuid = (theGuid << 4) | (j - 'a' + 10);
+            else if (j >= '0' & j <= '9')
+                theGuid = (theGuid << 4) | (j - '0');
+            else
+            {
+                CFRelease(properties);
+                return (0);
+            }
+        }
+        
+        CFRelease(properties);
+        return (theGuid+5);
+    #endif
 }
 
 	
@@ -75,8 +84,21 @@ static UInt64 GetGUID(io_service_t theObject)
 //		¥ PCI1AudioDeviceManager::PCI1AudioDeviceManager, ~PCI1AudioDeviceManager
 // =================================================================================
 
+// The IOKit implementation instantiates one of 3 possible classes so it is
+// easiest to match on the service tpe.
+
+// The PCIDriverKit implementation uses only one class, so we do a name match.
+
+// This ended up this way since we started down the path of supporting multiple devices
+// with an ability to choose between them.
+#ifdef USE_SYSTEM_EXTENSION
+    #define MATCHING_STYLE  IOServiceNameMatching
+#else
+    #define MATCHING_STYLE  IOServiceMatching
+#endif
+
 PCI1AudioDeviceManager::PCI1AudioDeviceManager(const char *className, CFRunLoopRef notifyRunLoop, struct __sFILE* logFIle, const char* hostAp, PCI1UserClientServiceTypes connectionType) :
-	PCI1ServiceClient(notifyRunLoop, IOServiceMatching(className), logFIle, hostAp), mConnectionType(connectionType)
+	PCI1ServiceClient(notifyRunLoop, MATCHING_STYLE(className), logFIle, hostAp), mConnectionType(connectionType)
 {
 	int i,j;
 
@@ -351,9 +373,18 @@ void* 	PCI1AudioDeviceManager::FetchSharedMemory (io_connect_t ref, PCI1UserClie
     	return (NULL);
 	
 	if (itsSize)
-    	*itsSize =(UInt32) size;
+    	*itsSize = (UInt32) size;
 		
 	return (it);		
+}
+
+void    PCI1AudioDeviceManager::ReleaseSharedMemory(io_connect_t ref, PCI1UserClientMemoryDescriptorID memoryID, void* itsAddress)
+{
+    #if !__LP64__
+        IOConnectUnmapMemory(ref, memoryID, mach_task_self(), (vm_address_t     ) itsAddress);
+    #else
+        IOConnectUnmapMemory(ref, memoryID, mach_task_self(), (mach_vm_address_t) itsAddress);
+    #endif
 }
 
 

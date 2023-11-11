@@ -39,7 +39,8 @@ public:
     void				DoTermination (int index);
 	
 	// Static utility methods
-	static void*		FetchSharedMemory  (io_connect_t ref, PCI1UserClientMemoryDescriptorID memoryID, UInt32* itsSize, UInt32 whichSubMemory);
+    static void*        FetchSharedMemory  (io_connect_t ref, PCI1UserClientMemoryDescriptorID memoryID, UInt32* itsSize, UInt32 whichSubMemory);
+    static void         ReleaseSharedMemory(io_connect_t ref, PCI1UserClientMemoryDescriptorID memoryID, void* itsAddress);
 	static void			IssueCall		   (io_connect_t ref, UInt32 code, UInt32 in1, UInt32 in2);
 	static void			IssuePointerCall   (io_connect_t ref, UInt32 code, void*  in1, void*  in2, UInt32 msb_code);
 	static void			IssueUserClientCall(io_connect_t ref, UInt32 code, UInt32 in1, UInt32 in2);

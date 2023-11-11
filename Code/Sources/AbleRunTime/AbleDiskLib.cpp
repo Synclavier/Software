@@ -7,16 +7,16 @@
 // 3/5/99 C. Jones
 
 // Std C
-#include <StdIO.h>
-#include <String.h>
-#include <StdLib.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 
 // Mac OS
 #if !__LP64__
     #include <NameRegistry.h>
     #include <Events.h>
     #include <Files.h>
-    #include <CType.h>
+    #include <ctype.h>
 
     #include "CInterChangeDeviceButton.h"
     #include "CInterChangeApp.h"

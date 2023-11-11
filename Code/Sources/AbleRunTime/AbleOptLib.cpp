@@ -7,8 +7,8 @@
 // 2/8/00 C. Jones
 
 // Std C
-#include <StdIO.h>
-#include <String.h>
+#include <stdio.h>
+#include <string.h>
 
 #include "LThread.h"
 #include "CInterChangeApp.h"
@@ -20,11 +20,11 @@
 #include "XPL.h"
 #include "XPLRuntime.h"
 #include "Syslits.h"
-#include "Samplits.h"
+#include "samplits.h"
 #include "Devutil.h"
-#include "SCSILib.h"
+#include "ScsiLib.h"
 #include "SCSIlits.h"
-#include "OPTLits.h"
+#include "optlits.h"
 
 
 // =================================================================================
@@ -1725,7 +1725,7 @@ int	AbleOptLib_RenameFile(InterChangeItemUnion& topUnion, LCStr255& topName, LCS
 			if (theError == memFullErr)
 				printf("Ran out of memory in AbleOptLib_RenameFile\n");
 			else
-				printf("Failed AbleOptLib_RenameFile (%d)\n", theError);
+				printf("Failed AbleOptLib_RenameFile (%d)\n", (int) theError);
 		}
 
 		catch (...)
@@ -2118,7 +2118,7 @@ int	AbleOptLib_UnsaveFile(InterChangeItemUnion& topUnion, LCStr255& topName, LCS
 			if (theError == memFullErr)
 				printf("Ran out of memory in AbleOptLib_UnsaveFile\n");
 			else
-				printf("Failed AbleOptLib_UnsaveFile (%d)\n", theError);
+				printf("Failed AbleOptLib_UnsaveFile (%d)\n", (int) theError);
 		}
 
 		catch (...)
@@ -2817,7 +2817,7 @@ int AbleOptLib_ConstructOpticalIndex(InterChangeItemUnion& itsUnion, CSharedOpti
 		if (theError == memFullErr)
 			printf("Ran out of memory in AbleOptLib_ConstructOpticalIndex\n");
 		else
-			printf("Failed AbleOptLib_ConstructOpticalIndex (%d)\n", theError);
+			printf("Failed AbleOptLib_ConstructOpticalIndex (%d)\n", (int) theError);
 
 		abortMe                 = true;
 		fatalUpdateErrorOccured = true;
@@ -2886,7 +2886,7 @@ _module(optical)
 
 #include "Literals.h"
 #include "Syslits.h"
-#include "XPLASCIILit.h"
+#include "asciilit.h"
 #include "Catrtns.h"
 #include "SCSICode.h"
 #include "CmdRout.h"

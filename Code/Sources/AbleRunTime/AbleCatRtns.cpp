@@ -1297,7 +1297,7 @@ static	fixed	device_specified(				/* get any remote device specification			*/
 	unsigned char p_name[64] = {0};				/* construct pascal string copy of name         */
 	
 	i = 0;
-	while (i < treename [0] && i < 60 &&  (byte(treename, i) != a_colon))
+	while (i < treename [0] && i < 60 && (byte(treename, i) != a_colon))
 		p_name[++p_name[0]] = byte(treename, i++);
 		
 	if ((treename [0] < 3) || (byte(treename, 2) != a_colon))/* device is 2 chars and a colon				*/

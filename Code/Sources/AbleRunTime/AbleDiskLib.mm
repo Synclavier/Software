@@ -7,9 +7,9 @@
 // 3/5/99 C. Jones
 
 // Std C
-#include <StdIO.h>
-#include <String.h>
-#include <StdLib.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 
 // Local includes
 #include "Standard.h"

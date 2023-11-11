@@ -3,15 +3,15 @@
 // Prefs utilities: Read & write prefs file
 
 //	Std C Includes
-#include <StdIO.h>
-#include <String.h>
+#include <stdio.h>
+#include <string.h>
 
 //	Local Includes
 #include "Standard.h"
 #include "XPL.h"
 
 #include "InterChange.h"
-#include "SCSILib.h"
+#include "ScsiLib.h"
 #include "Version.h"
 #include "SynclavierFileReference.h"
 
@@ -20,6 +20,7 @@
 #include "AbleDiskApMenus.h"
 #include "AbleDiskApPopUps.h"
 #include "InterpreterSetupDialog.h"
+#include "DialogUtilities.h"
 
 #import "SynclavierPreferenceManager.h"
 #import "Synclavier3Constants.h"
@@ -83,7 +84,7 @@ OSErr check_interpreter_prefs_file_rev(CSynclavierFileReference* aFileReference)
 // to default values if no file exists or can't read it.
 // -----------------------------------------------------
 
-void read_interchange_setup(char *prefs_name, interchange_settings *the_settings, int resolve_all_alii)
+void read_interchange_setup(char *prefs_name, interchange_settings *the_settings, int resolve_all_alii, int& t0_setting, scsi_settings& t0_settings)
 {
     // Init for possible failure
     memset(the_settings, 0, sizeof(*the_settings));
@@ -153,11 +154,50 @@ void read_interchange_setup(char *prefs_name, interchange_settings *the_settings
     the_settings->o1.scsi_id   = ABLE_O1_DEFAULT_SCSI_ID;
     the_settings->o1.sim_id    = ABLE_O1_DEFAULT_SCSI_ID;
     
-    // Done if can't find W0
+    t0_setting                 = SCSI_BUS_MENU_NONE;
+    t0_settings.bus_id         = SCSI_BUS_MENU_NONE;
+    t0_settings.device_id      = SCSI_ID_MENU_ID_0;
+    t0_settings.scsi_id        = ABLE_T0_DEFAULT_SCSI_ID;
+    t0_settings.sim_id         = ABLE_T0_DEFAULT_SCSI_ID;
+    
+    // Done if can't find default W0
     if (!w0FileRef)
         return;
         
     // Set up W0
+    int w0_type = [SynclavierPreferenceManager integerForKey:SYNC_PREF_W0_DEVICE_TYPE];
+    
+    // Look for custom W0 disk image file
+    if (w0_type == SCSI_BUS_MENU_DISK_IMAGE) {
+        id        w0_book     = [SynclavierPreferenceManager objectForKey: SYNC_PREF_W0_FILE_BOOKMARK];
+        NSData*   w0_bookData = DYNAMIC_CAST(w0_book, NSData);
+        
+        if (w0_bookData) {
+            CFDataRef                 w0_bookmark = (__bridge_retained CFDataRef) w0_bookData;
+            CSynclavierFileReference* w0_ref      = new CSynclavierFileReference(w0_bookmark); // Bookmark ownership passes to w0_ref
+            
+            if (w0_ref) {
+                w0_ref->Resolve();
+                
+                // Use custom image file
+                if (w0_ref->Reachable()) {
+                    w0FileRef->Release();
+                    w0FileRef = NULL;
+                    
+                    w0FileRef = w0_ref;
+                }
+
+                // Else is not available
+                else {
+                    DU_ReportErr("Your Custom W0 Disk Image File is not available at this time.");
+
+                    w0_ref->Release();
+                    w0_ref = NULL;
+                }
+            }
+        }
+    }
+
     the_settings->w0.bus_id      = SCSI_BUS_MENU_DISK_IMAGE;
     the_settings->w0.device_id   = SCSI_ID_MENU_ID_5;
     the_settings->w0.scsi_id     = ABLE_W0_DEFAULT_SCSI_ID;
@@ -211,7 +251,7 @@ void read_interchange_setup(char *prefs_name, interchange_settings *the_settings
             }
         }
     }
-       
+    
     // Look for O0 setting
     int o0_type = [SynclavierPreferenceManager integerForKey:SYNC_PREF_O0_DEVICE_TYPE];
     
@@ -256,11 +296,71 @@ void read_interchange_setup(char *prefs_name, interchange_settings *the_settings
         }
     }
     
+    // Look for O1 setting
+    int o1_type = [SynclavierPreferenceManager integerForKey:SYNC_PREF_O1_DEVICE_TYPE];
+    
+    if (o1_type == SCSI_BUS_MENU_D24) {
+        int o1_id = [SynclavierPreferenceManager integerForKey:SYNC_PREF_O1_SCSI_ID];
+        
+        if (o1_id == ABLE_O0_DEFAULT_SCSI_ID || o1_id == ABLE_O1_DEFAULT_SCSI_ID) {
+            the_settings->o1.bus_id      = SCSI_BUS_MENU_D24;
+            the_settings->o1.device_id   = SCSI_ID_MENU_ID_5;
+            the_settings->o1.scsi_id     = o1_id;
+            the_settings->o1.sim_id      = ABLE_O1_DEFAULT_SCSI_ID;
+            the_settings->o1.disk_type   = 0;
+            the_settings->o1.image_file  = NULL;
+        }
+    }
+    
+    else if (o1_type == SCSI_BUS_MENU_DISK_IMAGE) {
+        NSData*   o1_bookData = DYNAMIC_CAST([SynclavierPreferenceManager objectForKey:SYNC_PREF_O1_FILE_BOOKMARK], NSData);
+        
+        if (o1_bookData) {
+            CFDataRef                 o1_bookmark = (__bridge_retained CFDataRef) o1_bookData;
+            CSynclavierFileReference* o1_ref      = new CSynclavierFileReference(o1_bookmark); // Bookmark ownership passes to o1_ref
+            
+            if (o1_ref) {
+                o1_ref->Resolve();
+                
+                if (o1_ref->Reachable()) {
+                    the_settings->o1.bus_id      = SCSI_BUS_MENU_DISK_IMAGE;
+                    the_settings->o1.device_id   = SCSI_ID_MENU_ID_4;
+                    the_settings->o1.scsi_id     = ABLE_O1_DEFAULT_SCSI_ID;
+                    the_settings->o1.sim_id      = ABLE_O1_DEFAULT_SCSI_ID;
+                    the_settings->o1.disk_type   = 0;
+                    the_settings->o1.image_file  = o1_ref->CopyBookmark();;
+                    
+                    o1_ref->CreateFSSpec(&the_settings->o1.image_spec);
+                    o1_ref->Path(the_settings->o1.image_pathname, sizeof(the_settings->o1.image_pathname));
+                }
+                
+                o1_ref->Release();
+                o1_ref = NULL;
+            }
+        }
+    }
+    
     // Done with the W0 file ref; although it probably has been used & retained...
     if (w0FileRef) {
         w0FileRef->Release();
         w0FileRef = NULL;
     }
+    
+    // Grab T0 Pref
+    int t0_type = [SynclavierPreferenceManager integerForKey:SYNC_PREF_T0_DEVICE_TYPE];
+    
+    if (t0_type == SCSI_BUS_MENU_D24) {
+        t0_setting             = SCSI_BUS_MENU_D24;
+        t0_settings.bus_id     = SCSI_BUS_MENU_D24;
+        t0_settings.device_id  = SCSI_ID_MENU_ID_0;
+        t0_settings.scsi_id    = ABLE_T0_DEFAULT_SCSI_ID;
+        t0_settings.sim_id     = ABLE_T0_DEFAULT_SCSI_ID;
+        t0_settings.disk_type  = 0;
+        t0_settings.image_file = NULL;
+    }
+    
+    else if (t0_type == SCSI_BUS_MENU_D30)
+        t0_setting = SCSI_BUS_MENU_D30;
 }
 
 
@@ -372,6 +472,20 @@ void write_interchange_basic_settings(char *prefs_name, interchange_settings *th
     
     else
         [SynclavierPreferenceManager setIntegerForKey:SYNC_PREF_O0_DEVICE_TYPE value:SCSI_BUS_MENU_NONE];
+
+    if (the_settings->o1.bus_id == SCSI_BUS_MENU_D24) {
+        [SynclavierPreferenceManager setIntegerForKey:SYNC_PREF_O1_DEVICE_TYPE value:SCSI_BUS_MENU_D24       ];
+        [SynclavierPreferenceManager setIntegerForKey:SYNC_PREF_O1_SCSI_ID     value:the_settings->o1.scsi_id];
+        // Leave bookmark in place so user can switch back to it with ease
+    }
+    
+    else if (the_settings->o1.bus_id == SCSI_BUS_MENU_DISK_IMAGE && the_settings->o1.image_file) {
+        [SynclavierPreferenceManager setIntegerForKey:SYNC_PREF_O1_DEVICE_TYPE   value:SCSI_BUS_MENU_DISK_IMAGE                      ];
+        [SynclavierPreferenceManager setObjectForKey: SYNC_PREF_O1_FILE_BOOKMARK value:(__bridge NSData*) the_settings->o1.image_file];
+    }
+    
+    else
+        [SynclavierPreferenceManager setIntegerForKey:SYNC_PREF_O1_DEVICE_TYPE value:SCSI_BUS_MENU_NONE];
 }
 
 
@@ -484,7 +598,12 @@ void read_interpreter_setup(char *prefs_name, interpreter_settings *the_settings
     the_settings->net_visible   = NET_VISIBLE_MENU_NOT_VISIBLE;		// not visible
     the_settings->use_mp        = USE_MP_MENU_USE_MP;				// allow use of MP if available
     the_settings->m512k			= M512K_MENU_MODEL_10;				// provide 10 M512k's
-    the_settings->polymem		= POLY_MENU_MODEL_100;				// provide 100 megs poly
+    
+    the_settings->polymem		= [SynclavierPreferenceManager integerForKey:SYNC_PREF_REAL_TIME_POLY_VALUE];
+    
+    // Default is 100
+    if (the_settings->polymem == 0)
+        the_settings->polymem = 100;
 
     // Grab the MIDI routings
     if (the_patching) {
