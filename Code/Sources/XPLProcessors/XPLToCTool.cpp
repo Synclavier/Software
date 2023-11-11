@@ -5,7 +5,8 @@
 /* C header files */
 
 #include 	<string.h>
-#include 	<stdlib.h>
+#include    <stdlib.h>
+#include    <stdarg.h>
 #include 	<stdio.h>
 #include 	<signal.h>
 
@@ -19,6 +20,7 @@
 
 #define		FALSE	0
 #define		TRUE	1
+
 
 /*--------------------------------------------------------------------------------------*/
 /* Main - put at front to combat linker problems										*/
@@ -212,7 +214,7 @@ char 			error_file_name  [512] = {""};
 /*	Symbol table management																*/
 /*--------------------------------------------------------------------------------------*/
 
-#define	STORAGE_LENGTH	256*1024			/* general allocated storage				*/
+#define	STORAGE_LENGTH	1024*1024			/* general allocated storage				*/
 #define	SYMBOL_LENGTH   20000				/* for symmbol index						*/
 
 char			*storage    = 0;
@@ -394,7 +396,6 @@ static	void	construct_symbol_table()
 	symbol ("goto",          t_stmt, s_goto);
 	symbol ("enable",        t_stmt, s_enable);
 	symbol ("disable",       t_stmt, s_disable);
-	symbol ("stop",          t_stmt, s_stop);
 	symbol ("write",         t_stmt, s_write);
 	symbol ("linput",        t_stmt, s_linput);
 	symbol ("input",         t_stmt, s_input);
@@ -536,7 +537,8 @@ static	void	construct_symbol_table()
 	
 	/* runtime package routine names: */
 	  
-	defrtp ("exit",          l_ter, 1, t_var, t_var, 0, 0, 0);
+    defrtp ("exit",          l_ter, 1, t_var, t_var, 0, 0, 0);
+    defrtp ("stop",          l_ter, 1, t_var, t_var, 0, 0, 0);
 	defrtp ("byte",          l_byt, 2, t_var, t_arr, t_var, 0, 0);
 	defrtp ("pbyte",         l_pbt, 3, t_var, t_arr, t_var, t_var, 0);
 	defrtp ("rcvdcharacter", l_ich, 0, t_var, 0, 0, 0, 0);
@@ -623,10 +625,10 @@ static	void	pop_scope()
 /*	Insert Stack management																*/
 /*--------------------------------------------------------------------------------------*/
 
-int	insert_stack[STACK_SIZE];
-int	insert_stack_ptr = 0;
+long long   insert_stack[STACK_SIZE];
+int	        insert_stack_ptr = 0;
 
-static	void        insert_push(int it)
+static	void        insert_push(long long it)
 {
 	if (insert_stack_ptr >= STACK_SIZE)
 		{printf("xpltoc: out of insert stack storage\n"); error_exit();}
@@ -1347,11 +1349,17 @@ static	int	scan_symbol(char *the_string, int space_left)
 
 		else if (next == '#' && !recognize_c_syntax)
 		{
+            *the_string++ = '_';
+            space_left--;
 			next = '_';
 		}
 		
 		else if (next == '$')
 		{
+            *the_string++ = '_';
+            space_left--;
+            *the_string++ = '_';
+            space_left--;
 			next = '_';
 		}
 
@@ -1402,6 +1410,11 @@ static	int	scan_string(char *the_string, int space_left)
 					*the_string = 0;			/* terminate c string		*/
 					return (space_left);
 				}
+                
+                // handle ''
+                else {
+                    static int x; x++;
+                }
 			}
 		}
 		
@@ -1778,8 +1791,8 @@ static void	scan()
 
 static	char *	scan_space_and_comment()
 {
-	char	stuff      [1000] = {""};
-	char	other_stuff[1000] = {""};
+	char	stuff      [10000] = {""};
+	char	other_stuff[10000] = {""};
 	
 	int		i = 0;
 	char	*new_stuff = 0;
@@ -1792,7 +1805,7 @@ static	char *	scan_space_and_comment()
 		j = 0;
 		while (token[j])				/* stash what we have temporarily		*/
 		{								/* in 'other_stuff'						*/
-			if (j >= 1000)
+			if (j >= 10000)
 				{printf( "xpltoc: expression too long\n"); error_exit();}
 			
 			other_stuff[j] = token[j];
@@ -1850,7 +1863,7 @@ static	char *	scan_space_and_comment()
 		j = 0;
 		while (other_stuff[j])
 		{
-			if (i >= 1000)
+			if (i >= 10000)
 				{printf( "xpltoc: expression too long\n"); error_exit();}
 			
 			stuff[i++] = other_stuff[j++];
@@ -1861,7 +1874,7 @@ static	char *	scan_space_and_comment()
 	if (i == 0)							/* no stuff, return null			*/
 		return (NULL);
 		
-	if ((new_stuff = (char *)malloc(i)) == 0)	/* else get storage & return		*/
+	if ((new_stuff = (char *)malloc(i+1)) == 0)	/* else get storage & return		*/
 		{printf( "xpltoc: out of memory during expression\n"); error_exit();}
 		
 	strcpy(new_stuff, stuff);
@@ -5471,13 +5484,18 @@ static	void	handle_do()
 			||   (token_type == t_lbra)
 			||   (token_type == t_while))
 			{
-				scan();									/* accept 'do' here				*/
+                bool wasBrace = (token_type == t_lbra);
+				
+                scan();									/* accept 'do' here				*/
 				toss_non_essentials();					/* get to likely food			*/
 	
-				if (token_type != t_semi)				/* better be simple do/begin	*/
-					{printf( "xpltoc: incompatible nested 'do' statements\n"); error_exit();}
-
-				scan();									/* accept semi					*/
+                if (!wasBrace) {
+                    if (token_type != t_semi)		    /* better be simple do/begin	*/
+                    {printf( "xpltoc: incompatible nested 'do' statements\n"); error_exit();}
+                    
+                    scan();								/* accept semi					*/
+                }
+                
 				toss_white_space();						/* on to likely comment			*/
 		
 				tab(indent);
@@ -6382,7 +6400,38 @@ static	boolean	handle_declare(char *type_name, int var_type, boolean extern_dcl,
 		sym_struct[0]->type = t_lit;			/* assume we will be literal	*/
 
 		if (token_type == t_apo)				/* null string; token == t_lit	*/
-			;									/* set below					*/
+        {
+            // Literal string '''.SINF-7'''
+            if (next == '\'')    {
+                strcpy(lit_string, "'");
+                
+                get();
+                
+                i = strlen(lit_string);                /* get its length                */
+                
+                more:
+                
+                while (next != '\'' && i < sizeof(lit_string) - 1)
+                {
+                    lit_string[i++] = next;
+                    lit_string[i  ] = 0;
+                    get();
+                }
+                
+                get();
+                
+                if (next == '\'' && i < sizeof(lit_string) - 1) {
+                    lit_string[i++] = '\'';
+                    lit_string[i  ] = 0;
+                    get();
+                    goto more;
+                }
+                
+                token_type = t_apo;
+                token_info = 0;
+                token_sym  = 0;
+            }
+        }									/* set below					*/
 			
 		else if (next == '\'')					/* else if single token			*/
 		{
@@ -6841,6 +6890,9 @@ static	boolean	handle_declare(char *type_name, int var_type, boolean extern_dcl,
 									scan();
 									toss_non_essentials();
 								}
+                                
+                                else if (token_type == t_comment)
+                                    put_symbol(token);
 								
 								else
 								{
@@ -8397,6 +8449,7 @@ static	int	stmt()
 					break;
 
 				case s_print:							/* print statement - executable		*/
+                case s_send:
 					check_sharp_if_level();				/* make sure not in outer #if		*/
 					
 					if (proc_level == 0) set_main();	/* emit to main if main level code	*/
@@ -8888,14 +8941,24 @@ int translate(int argc, char *argv[])
 	char			main_proc_name[512] = {""};
     
     if (0) {
-        argc = 7;
-        argv[0] = (char *)"XPLTranslator";
-        argv[1] = (char *)"-m";
-        argv[2] = (char *)"/Volumes/CJ Data/Projects/SDC/Able";
-        argv[3] = (char *)"-o";
-        argv[4] = (char *)"/Volumes/CJ Movies/XPL Build Products/Translated";
-        argv[5] = (char *)"-h";
-        argv[6] = (char *)":SYNLITS:PRMLITS";
+        argc = 11;
+        argv[ 0] = (char *)"XPLTranslator";
+        argv[ 1] = (char *)"";
+        argv[ 2] = (char *)"-1";
+        argv[ 3] = (char *)"-p";
+        argv[ 4] = (char *)"-m";
+        argv[ 5] = (char *)"/Volumes/CJ Data/Dropbox/Synclavier Digital Repository/Able";
+        argv[ 6] = (char *)"-o";
+        argv[ 7] = (char *)"/Users/cameronjones/Desktop";
+        argv[ 8] = (char *)"-d";
+        argv[ 9] = (char *)"/Volumes/CJ Data/Dropbox/Synclavier Digital Repository/Able/SYNRSOU/05-BUTT/";
+        argv[10] = (char *)":SYNRSOU/05-BUTT/VKBUTMOD";
+                
+        // XPLTranslator -c -1 -p\
+        // -m "/Volumes/CJ Data/Dropbox/Synclavier Digital Repository/Able" \
+        // -d "/Volumes/CJ Data/Dropbox/Synclavier Digital Repository/Able/SYNRSOU/05-BUTT" \
+        // -o "/Users/cameronjones/Desktop" \
+        // ":SYNRSOU/05-BUTT/VKBUTMOD"
     }
 
 	/* set up to clean-up on termination */

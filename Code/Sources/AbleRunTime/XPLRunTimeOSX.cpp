@@ -1120,7 +1120,7 @@ void* open_able_file(char *file_name)
 	
 	if (file_name[0] == ':' || file_name[0] == '/')		/* file name begins with ":" or "/" : use master dir	*/
 	{
-		i = strlen(ABLE_CONTEXT.able_master_dir_name);	/* get length of master directory				*/
+		i = (int) strlen(ABLE_CONTEXT.able_master_dir_name);	/* get length of master directory				*/
 		strncpy (ABLE_CONTEXT.opened_file_name, ABLE_CONTEXT.able_master_dir_name, sizeof(ABLE_CONTEXT.opened_file_name));
 	
 		if (i && ABLE_CONTEXT.opened_file_name[i-1] == ':')	/* remove trailing : from master dir name		*/
@@ -1132,7 +1132,7 @@ void* open_able_file(char *file_name)
 		strncat (ABLE_CONTEXT.opened_file_name, file_name, sizeof(ABLE_CONTEXT.opened_file_name) - strlen(ABLE_CONTEXT.opened_file_name));
 
         // Also compute file name in output hierarchy. Handles open of .srel files built just moments ago.
-        i = strlen(ABLE_CONTEXT.host_output_dir_name);	/* get length of master directory				*/
+        i = (int) strlen(ABLE_CONTEXT.host_output_dir_name);	/* get length of master directory				*/
         strncpy (opened_file_name, ABLE_CONTEXT.host_output_dir_name, sizeof(opened_file_name));
         
         if (i && opened_file_name[i-1] == ':')	/* remove trailing : from master dir name		*/
@@ -1157,13 +1157,13 @@ void* open_able_file(char *file_name)
 	}
 
 	// Convert ':' to '/'
-	i = strlen(ABLE_CONTEXT.opened_file_name);
+	i = (int) strlen(ABLE_CONTEXT.opened_file_name);
 	
 	for (j=0; j<i; j++)
 		if (ABLE_CONTEXT.opened_file_name[j] == ':')
 			ABLE_CONTEXT.opened_file_name[j] = '/';
     
-    i = strlen(opened_file_name);
+    i = (int) strlen(opened_file_name);
     
     for (j=0; j<i; j++)
         if (opened_file_name[j] == ':')
@@ -1211,13 +1211,13 @@ void* open_able_file_for_output(char *file_name, int type, int creator)
 	
 	if (file_name[0] == ':' || file_name[0] == '/')			/* file name begins with ":" or "/" : use output directory or master dir	*/
 	{
-		int i = strlen(ABLE_CONTEXT.host_output_dir_name);	/* See if output directory specified */
+		int i = (int) strlen(ABLE_CONTEXT.host_output_dir_name);	/* See if output directory specified */
 		
         if (i)
             strncpy (ABLE_CONTEXT.opened_file_name, ABLE_CONTEXT.host_output_dir_name, sizeof(ABLE_CONTEXT.opened_file_name));
 	
         else {
-            i = strlen(ABLE_CONTEXT.able_master_dir_name);	/* get length of master directory				*/
+            i = (int) strlen(ABLE_CONTEXT.able_master_dir_name);	/* get length of master directory				*/
             strncpy (ABLE_CONTEXT.opened_file_name, ABLE_CONTEXT.able_master_dir_name, sizeof(ABLE_CONTEXT.opened_file_name));
         }
         
@@ -1283,7 +1283,7 @@ void* open_able_file_for_output(char *file_name, int type, int creator)
 	}
 
 	// Convert ":" in file names to '/'
-	i =  strlen(ABLE_CONTEXT.opened_file_name);
+	i =  (int) strlen(ABLE_CONTEXT.opened_file_name);
 	
 	for (j=0; j<i; j++)
 		if (ABLE_CONTEXT.opened_file_name[j] == ':')

@@ -483,15 +483,6 @@ static	fixed	gkey()							/* used to get a key							*/
 	return (nexkey);							/* note that zero is never returned				*/
 }
 	
-static	fixed	galt()							/* used to get an alternate key					*/
-{
-	altkey = altkey + 1;						/* incr alt key									*/
-	
-	if (_IGE_(altkey + 20, shr(extern_base, 1))) er_tmpl();	/* did we collide with the externals? too many procs/labels	*/
-		
-	return (altkey);							/* note that zero is never returned				*/
-}
-	
 /* Variable and constant locations:
 .
 .  All variable and constant area locations are assigned by pass1.  These
