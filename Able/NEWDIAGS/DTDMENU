@@ -28,6 +28,8 @@ insert ':-xpl:catrtns'; /* catalog routines */
 insert ':-xpl:scsilits'; /* SCSI literals */
 insert ':-xpl:termutil';     /* termutil won't work, (interrupt problem)  */
                              /* without INITIALIZED flag in when d03int */
+insert ':-xpl:intrprtr';                /* INTERPRETER ROUTINES */
+
 dcl initialized boolean; initialized = false;
 
 
@@ -52,7 +54,7 @@ DCL URES   LIT 'READ(4)'  ;             /* UPPER RESULT */
 DCL MWAIT  LIT 'WRITE("324")=RES';      /* D5 TO ATNV TO WAIT FOR MUL/DIV */
 DCL RPC    LIT 'WRITE("010")=(-1)+';    /* REPEAT COUNTER: */  
 
-dcl catalog_name data('.dtdxcat');
+dcl catalog_name data('w0:diagbins:dtdxcat');
 
 dcl scsibits data (256,512,1024,2048);
 dcl bits     data (1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768);
@@ -423,8 +425,10 @@ send.to.lod:proc(msgtype);
 
    dcl (i,j,k)           fixed;
 
+
    send.again:;
 
+   interp_set_scsi_id(interp_set_scsi_id_access_dtd, lod.d24.#, lod.target.#);
    write(ScsiSel)=S$SelectEnable \ Scsibits (lod.d24.#);  /* select this d24 */
    write(ScsiBus) = 0;
    write(ScsiData)= 0;
@@ -442,6 +446,7 @@ send.to.lod:proc(msgtype);
       
 		call run.syn.loop;
       
+      interp_set_scsi_id(interp_set_scsi_id_access_dtd, lod.d24.#, lod.target.#);
 		write(ScsiSel)=S$SelectEnable \ Scsibits (lod.d24.#);  
       write(ScsiBus) = 0;
       write(ScsiData)= 0;
@@ -449,6 +454,7 @@ send.to.lod:proc(msgtype);
 
    scsi.busy=1;          /* set scsi.busy so main loop knows what is happening */
 
+   interp_set_scsi_id(interp_set_scsi_id_access_dtd, lod.d24.#, lod.target.#);
    write(ScsiSel)  =S$SelectEnable \ Scsibits (lod.d24.#);  /* select this d24 */
    write(ScsiData) =bits(lod.target.#);        /* single initiator   */
    write(ScsiBus)  =S$SEL;                     /* gnd SEL            */
@@ -619,6 +625,7 @@ do forever;
    then do;                               /* time for lod activity  */
 
       if (look.for.lod<>0) then do;       /* find a lod if possible */
+         interp_set_scsi_id(interp_set_scsi_id_access_dtd, lod.d24.#, lod.target.#);
          write(ScsiSel)  =S$SelectEnable \ Scsibits (lod.d24.#);  /* select this d24 */
          if (read(ScsiSel) & Scsibits(lod.d24.#))=0 then do;      /* board does not exist */
             lod.d24.#=(lod.d24.#+1)&3;             /* try other d24      */

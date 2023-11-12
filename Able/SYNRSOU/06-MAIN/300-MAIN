@@ -122,18 +122,47 @@ REAL.TIME.LOOP:PROC public;	/* MAIN REAL TIME LOOP */
 	.	18. CHECK FOR PROTOCOL POLY SCRUBBING NEEDS
 	.	19. CHECK FOR TIMED.INFO.NOTES IN PROGRESS */
 
+   // Time test
+   if (0) {
+      dcl itsTime fixed static;
+      dcl itsLime fixed static;
+      dcl itsBime fixed static;
+      itsBime = itsBime + 1;
+      if (itsTime == 0) itsTime = interp_fetch_real_msecs(0);
+      if ((interp_fetch_real_msecs(0) - itsTime) > 2000) {
+         itsTime = itsTime + 2000;
+         send 'time', itsLime, itsBime;
+         itsLime = itsLime + 1;
+      }
+      // July 17 2018 - very steady 5 msec intervals; plus extra run through loop when new note starts. CJ. Very good!
+   }
 
-	IF (0)									// ANALYZE RESPONSE
-	{
-		DCL (A,B) FIXED STATIC;
-		A = A+1;
-		IF (A == 1000)
-		{
-			SEND 'REAL.TIME.LOOP ', PLAY.TIME.LSB - B;
-			A = 0;
-			B = PLAY.TIME.LSB;
+   // D66 and D24 are not implemented in Synclavier3. To support mono sampling we poll
+   // here and simulate the D24 and D66 interrupts.
+   if (inc.mono) then do;
+      digmore:
+      disable;
+      if (POLL.MONO.IO != 0) {
+         write(D66)=8;           // card 0, data register
+         if ((read(d66)&1024)!=0) {
+            invoke d66int;
+            enable;
+            interp_check_interrupts();
+            goto digmore;
+         }
+      }
+      if (POLL.SCSI.IO != 0) {
+         if (interp_check_scsi_io(0) == 0) {
+            if ((read(ScsiBus)&S$Req) <> 0) {
+               invoke d24int;
+               enable;
+               interp_check_interrupts();
+               goto digmore;
+            }
 		}
 	}
+      enable;
+   end;
 
 	CALL SCANDATA;		/* SCAN ALL INPUT DATA INTO GLOBAL VARIABLES */
 

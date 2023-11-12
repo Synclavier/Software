@@ -430,6 +430,9 @@ ALLOC.PATCH.PARTIAL:PROC(TB,PTL,TBP) SWAPABLE;
            GET.NAME.FROM.PARTIAL(J);
 
            IF FNBUF(1)<>0 THEN DO;                  /* ONLY LOOK UP IF FILE SPECIFIED */
+              dcl attackBuffer fixed;
+
+              attackBuffer = 0;
 
               IF (INC.MONO=0)                       /* IF NO MONO, THEN IS POLY   */
               OR ((INC.POLY<>0)&(SYNTYP=TIM#POLY))  /* IF POLY, THEN CHECK SYNTYP */
@@ -443,26 +446,36 @@ ALLOC.PATCH.PARTIAL:PROC(TB,PTL,TBP) SWAPABLE;
 
                  K=0;                                   /* ASSUME NOT FOUND */
 
-                 IF ((INC.MONO=0))                      /* MUST BE POLY */ 
+                 IF ((INC.MONO<>0)&(SYNTYP=TIM#MONO))   /*    IS MONO */
                  OR ((INC.POLY<>0)&(SYNTYP=TIM#POLY))   /* OR IS POLY */
                  THEN DO;                               /* POLY COMPILATION OR TIMBRE */
-
-                    /* POLY SITUATIONS ONLY: */
 
                     IF INC.MONO<>0 THEN CALL STOP.DISK; /* BE SAFE */
 
                     // Check asset library
                     if ((k == 0) && (interp_is_running != 0)) {
-                       dcl gotFile fixed;
-                       dcl gotRev  fixed;
+                       dcl gotFile    fixed;
+                       dcl gotRev     fixed;
+                       dcl locateInfo fixed;
                        
-                       interp_locate_file(T#Sound, addr(lnbuf(0)));  // See if in data base
+                       locateInfo = T#Sound;
+                       
+                       // Allocate attack buffer for mono sampling at this point
+                       if (INC.MONO<>0) {
+                          attackBuffer = MS.FIND.BUFFER;
+                          locateInfo = T#Sound + SHL(attackBuffer, 8);
+                       }
+                       
+                       interp_locate_file(locateInfo, addr(lnbuf(0)));  // See if in data base
                        
                        gotFile = interp_located_file(0) & 0x0001;
                        gotRev  = interp_located_file(0) & 0xFFFE;
                        
                        if (gotFile) then do;
                           K = LOCATE(interp_snd_file_name, 0);
+                       end;
+                       else do;
+                          attackBuffer = 0;   // Won't use attack buffer if found locally
                        end;
                     }
 
@@ -507,6 +520,7 @@ ALLOC.PATCH.PARTIAL:PROC(TB,PTL,TBP) SWAPABLE;
                     end;
                  END;
 
+                 #if (0)
                  ELSE IF ((INC.POLY=0))              /* MUST BE MONO */
                  OR      ((INC.MONO<>0)&(SYNTYP=TIM#MONO))
                  THEN DO;                               /* MONO COMPILATION OR MONO TIMBRE */
@@ -537,6 +551,7 @@ ALLOC.PATCH.PARTIAL:PROC(TB,PTL,TBP) SWAPABLE;
                     THEN K=LOCATE(FNBUF,7);      /* LOOK IN W1         */
 
                  END;
+                 #endif
 
                  IF K=0 THEN DO;           /* NEVER FOUND THE FILE */
                     IF THERE=0 THEN DO;    /* DISPLAY ERROR UNLESS CHECK */
@@ -565,7 +580,12 @@ ALLOC.PATCH.PARTIAL:PROC(TB,PTL,TBP) SWAPABLE;
                     END;
                     IF (INC.POLY=0)                    /* IF NO POLY, THEN IS MONO */
                     OR ((INC.MONO<>0)&(SYNTYP=TIM#MONO))      /* MONO */
-                    THEN THERE=MS.LOAD(F#MS_SECTOR,F#LS_SECTOR); /* DISK IO STOPPED ABOVE */
+                    THEN DO;
+                       IF SHR(F#MS_SECTOR,8)<>10 THEN DO;  /* NOT OPTICAL DISK */
+                          DIRMSB=F#MS_SECTOR; DIRLSB=F#LS_SECTOR;
+                       END;
+                       THERE=MS.LOAD(F#MS_SECTOR,F#LS_SECTOR,DIRMSB,DIRLSB,attackBuffer); /* DISK IO STOPPED ABOVE */
+                    END;
                     IF THERE=0
                     THEN SAMPLE.STATUS=SAMPLE.STATUS\2; /* SET FLAG FOR OUT OF MEMORY */
                  END;       /* OF FILE IS FOUND      */

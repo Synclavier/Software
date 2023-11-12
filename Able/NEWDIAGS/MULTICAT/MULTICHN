@@ -64,7 +64,6 @@ dcl (bin#,bin_base) fixed;
 
 dcl page            boolean;
 
-
 /***************************************************************************/
 heading: proc(mode);
   dcl mode fixed;
@@ -87,20 +86,21 @@ dcl display_menu lit 'call #display_menu';
   dcl map_err boolean;
 
   clear_screen;
-  do i = 1 to 10000; chr = peek; end;
-  if chr <> "H04" then do;
+  chr = Really.Peek();
+  if chr != "H04" then do;
     pos(1,20);
     if (read("51") & shl(1,11)) = 0 then do;     /* if D32X is not  present   */
-       pstring('D32X card missing or faulty');   /* send message to terminal  */
-       pstring('  -Test aborted');
+       pstring('D32X card missing or faulty; test aborted');   /* send message to terminal  */
        flush_term;
+       Deactivate.Deferred.Interpretation();
        call exit(0);                             /* abort test                */
     end;
 
     write(con)="20";                             /* check MT3                 */
-    if not (read(mtdat)) then do;                  /* if no response then       */
-       pstring('MT3 card missing or faulty');    /* send message to terminal  */
+    if (!read_d33()) then do;                    /* if no response then       */
+       pstring('MT3 card missing or faulty; test aborted');    /* send message to terminal  */
        flush_term;
+       Deactivate.Deferred.Interpretation();
        call exit(0);                             /* abort test                */
     end;
   end;
@@ -196,23 +196,25 @@ outtest: proc;
 		 if ii >= 0 then do;                    /* if input exists then do     */
 			do j = 0 to num_output-1;            /* loop over mt output chans   */
 				write(mtdat) = vcon \ shl(j,8) \ ii;/* connect input ii to output j*/
-				nop;                              /* delay for voice to start up */
-				if (read(mtdat)) then do;           /* if connected to output then */
+				wait_for_voice;                   /* delay for voice to start up */
+				if (read_d33()) then do;          /* if connected to output then */
 					if stat(j) = 0 then stat(j)=1; /* set status to show connect  */
 					do k = 0 to num_output-1;      /* loop over mt output channels*/
 						if (j<>k) then do;          /* if not the same channel     */
 							if ii=0 then write(mtdat) = vcon \ shl(k,8) \ 1; /* input 1 to output k */
 							else         write(mtdat) = vcon \ shl(k,8) \ 0; /* input 0 to output k */
-							nop;                     /* delay for voice to start    */
-							if (read(mtdat)) then do;  /* error, voice at > 1 output  */
+							wait_for_voice;            /* delay for voice to start    */
+							if (read_d33()) then do;  /* error, voice at > 1 output  */
 								stat(j) = -1; stat(k) = -1;
 							end;
 							if ii=0 then write(mtdat) = vcoff \ shl(k,8) \ 1; /* cancel voice */
 							else         write(mtdat) = vcoff \ shl(k,8) \ 0;
+							wait_for_voice;            /* delay for voice to start    */
 						end;
 					end;
 				end; /* if read(mtdat) */
 				write(mtdat) = vcoff \ shl(j,8) \ ii;   /* connect input ii to voice off */
+			  wait_for_voice;                         /* delay for voice to start    */
 			end;
 
 			pstring('FM');                            /* display 'FM'            */
@@ -302,23 +304,25 @@ outtest: proc;
 			  write(con)="21";                      /* select MT operations        */
 			  do j = 0 to num_output-1;             /* loop over mt output channels*/
 				  write(mtdat) = vcon \ shl(j,8) \ ii; /* connect input ii to output j*/
-				  nop;                               /* delay for voice to start    */
-				  if (read(mtdat)) then do;
+				  wait_for_voice;                     /* delay for voice to start    */
+				  if (read_d33()) then do;
 					  if stat(j) = 0 then stat(j)=1;
 					  do k = 0 to num_output-1; /* loop over mt output channels */
 						  if (j<>k) then do; /* if other channel */
 							  if ii=0 then write(mtdat) = vcon \ shl(k,8) \ 1; /* input 1 to output k */
 							  else         write(mtdat) = vcon \ shl(k,8) \ 0; /* input 0 to output k */
-							  nop;
-							  if (read(mtdat)) then do;
+                wait_for_voice;               /* delay for voice to start    */
+							  if (read_d33()) then do;
 								  stat(k) = -1; stat(j) = -1;
 							  end;
 							  if ii=0 then write(mtdat) = vcoff \ shl(k,8) \ 1; /* cancel voice */
 							  else         write(mtdat) = vcoff \ shl(k,8) \ 0;
+                wait_for_voice;               /* delay for voice to start    */
 						  end;
 					  end;
 				  end; /* of primary connection present */
 				  write(mtdat) = vcoff \ shl(j,8) \ ii; /* connect input i' to voice off */
+          wait_for_voice;                     /* delay for voice to start    */
 			  end; /* loop over mt output channels */
 
 			  pstring('PS');                         /* display PS                 */
@@ -406,7 +410,8 @@ outlev: proc;
     there = false;
     timeout = 1000;
     do while timeout > 0;
-     if (read(mtdat)) then return true;           /* if connected to output then */
+     wait_for_voice;                              /* delay for voice to start    */
+     if (read_d33()) then return true;           /* if connected to output then */
      timeout = timeout - 1;
     end;
 
@@ -488,6 +493,7 @@ outlev: proc;
 				write(mtdat) = vcon \ shl(j,8) \ ii;/* connect input ii to output j*/
 				if connected then stat(j) = 0;           /* if connected to output then */
 				write(mtdat) = vcoff \ shl(j,8) \ ii;   /* connect input ii to voice off */
+        wait_for_voice;                         /* delay for voice to start    */
 			end;
 
 			if (i&1)=0 then call fm_turn_on(i,0,hivol);     /* turn on channel i full left */
@@ -497,6 +503,7 @@ outlev: proc;
 				write(mtdat) = vcon \ shl(j,8) \ ii;/* connect input ii to output j*/
 				if connected then stat(j) = 1;  /* if connected to output then */
 				write(mtdat) = vcoff \ shl(j,8) \ ii;   /* connect input ii to voice off */
+        wait_for_voice;                         /* delay for voice to start    */
 			end;
 
 			pnum(int(ii/8),2); pstring(',');          /* display mt card number  */
@@ -561,6 +568,7 @@ outlev: proc;
 				 write(mtdat) = vcon \ shl(j,8) \ ii; /* connect input ii to output j*/
 				 if connected then stat(j) = 0;
 				 write(mtdat) = vcoff \ shl(j,8) \ ii; /* connect input i' to voice off */
+         wait_for_voice;                         /* delay for voice to start    */
 			  end; /* loop over mt output channels */
 
 			  if (i&1)=0 then call poly_turn_on(bin#,shr(i,1),0,ps_hivol);
@@ -571,6 +579,7 @@ outlev: proc;
 				  write(mtdat) = vcon \ shl(j,8) \ ii;/* connect input ii to output j*/
 				  if connected then stat(j) = 1;  /* if connected to output then */
 				  write(mtdat) = vcoff \ shl(j,8) \ ii;   /* connect input ii to voice off */
+          wait_for_voice;                         /* delay for voice to start    */
 			  end;
 
 			  pnum(int(ii/8),2); pstring(',');       /* display mt card number     */
@@ -713,8 +722,8 @@ debug: proc;
           do i = 0 to 128;
             do j = 0 to 63;
               write(mtdat) = vcon \ shl(j,8) \ i;
-              do k = 1 to 15; end;
-              flag = read(mtdat);
+              wait_for_voice;                         /* delay for voice to start    */
+              flag = read_d33();
             end;
           end;
 
@@ -735,6 +744,12 @@ end debug;
 /***************************************************************************/
 /*************************   MAIN PROGRAM   ********************************/
 /***************************************************************************/
+// Jump to hyper space
+Activate.Deferred.Interpretation();
+
+// Come back at deferred task
+Really.Run.Host();
+
 clear_screen;  pos(1,5);
 pstring('If this line remains on the screen then the d160 is missing or faulty.');
 flush_term;
@@ -746,23 +761,21 @@ write(con) = "21";                      /* select mt operations         */
 do i = 0 to 255;                        /* loop over mt input channels  */
    write(mtdat) = vcon \ shl(7,8) \ i;  /* route voice i to output 7    */
 end;
-do i = 0 to 100; Really.Do.Delay(1); Really.Run.Host(); end;
+Really.Do.Delay(1); Really.Run.Host();
+
 do i = 0 to 255;                            /* loop over mt input channels  */
    write(mtdat) = vcoff \ shl(7,8) \ i;     /* turn off routing for input   */
 end;
-do j = 0 to 100; Really.Do.Delay(1); Really.Run.Host(); end;
+Really.Do.Delay(1); Really.Run.Host();
 
 if poly_exists then initialize_poly_wave(dc_hi);
 do bin# = 0 to (#_poly_bins - 1);
   bin_base = bin# * 64;
   do i = 0 to (#_poly_voices(bin#) - 1);
-     /*call poly_turn_on(bin#,i,0,4095);   */ /* pan it to left */
-     call poly_turn_on(bin#,i,4095,4095); /* pan it to right */
+     call poly_turn_on(bin#,i,4095,4095);
      call poly_turn_off(bin#,i);
   end;
 end;
-
-bin# = 0;
 
 if num_fmv > 0 then do;
   determine_mt2_type;
@@ -782,7 +795,10 @@ do forever;                                  /* do forever (until <BREAK>) */
   chr = peek;                                /* check type-ahead buffer    */
   if chr <> -1 then do;                      /* if there's a character then*/
     chr = rchar;                             /* put character in ch        */
-    if chr = 0 then call exit(0);            /* if <BREAK> then exit       */
+    if chr = 0 then do;                      /* if <BREAK> then exit       */
+       Deactivate.Deferred.Interpretation();
+       exit(0);
+    end;
     if chr = "H04" then do;                  /* control-d for debug        */
       call debug;
       clear_typeahead;

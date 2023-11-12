@@ -154,7 +154,7 @@ test_pacs: proc(bin#,pac_number);
      write(psd) = "HFF7F"; write(psd) = "HFF00"; /* loop length of 64k */
      write(psd) =       0; write(psd) = 1;       /* phase incr of 1          */
      write(psd) =       0;                       /* incr of 1                */
-     write(psd) = 255;                           /* mod of 1(SR = 101.01 KHz)*/
+     write(psd) =     255;                       /* mod of 1(SR = 101.01 KHz)*/
 
      do j = 0 to 3;   
         if Really.Peek() >= 0 then return;
@@ -253,7 +253,7 @@ test_pacs: proc(bin#,pac_number);
 
      pos(status_line2); erase_line; 
      pstring('  - Filling memory bank ');
-     do i = 1 to (#_poly_mbytes(bin#) * 8)-1; /* 8 banks of 64K per board */
+     do i = 1 to (#_poly_mbytes(bin#) * 8)-1; /* 8 banks of 64K per megabyte */
        pos(status_line2 + 24); erase_line; unum(i,0); pstring('  ');
        flush_term;
        if Really.Peek() >= 0 then return;
@@ -317,13 +317,81 @@ test_pacs: proc(bin#,pac_number);
                if (i > 100)
                {
                    do x = 0 to i - 100;
-                       if (buf(x) <> j)
+                       // Pre-2.2.3 kexts used timing and sync reads to get at PSD. This resulted
+                       // in occasional 0's in the mix.
+                       // 2.2.3 and later use async reads; but may not be fast enough.
+                       // CJ 2013-03-10
+                       if (buf(x) <> j && buf(x) != 0)
                        {
                            // dbug 'log_pac_error 2', x, buf(x), j, i;
                            
-                           do x = 0 to i-1;
-                                dbug buf(x);
-                           end;
+                           // Error  15101 00082 05529 00000
+                           // 05524 00082
+                           // 05525 00082
+                           // 05526 00082
+                           // 05527 00082
+                           // 05528 00082
+                           // 05529 00000
+                           // 05530 00000
+                           // 05531 00000
+                           // 05532 00082
+                           // 05533 00000
+                           // 05534 00000
+                           // Error  15101 00114 01636 00000
+                           // 01631 00114
+                           // 01632 00114
+                           // 01633 00114
+                           // 01634 00114
+                           // 01635 00114
+                           // 01636 00000
+                           // 01637 00114
+                           // 01638 00114
+                           // 01639 00114
+                           // 01640 00114
+                           // 01641 00114
+                           // Error  15109 00044 08996 00000
+                           // 08991 00044
+                           // 08992 00044
+                           // 08993 00044
+                           // 08994 00044
+                           // 08995 00044
+                           // 08996 00000
+                           // 08997 00044
+                           // 08998 00000
+                           // 08999 00000
+                           // 09000 00000
+                           // 09001 00044
+                           // Error  15109 00017 12648 00000
+                           // 12643 00017
+                           // 12644 00017
+                           // 12645 00017
+                           // 12646 00017
+                           // 12647 00017
+                           // 12648 00000
+                           // 12649 00017
+                           // 12650 00000
+                           // 12651 00000
+                           // 12652 00000
+                           // 12653 00017
+
+                           // I think it is some kind of race condition. There are a bunch of 0 readings.
+                           // Mac comes by to read just as the data is showing up.
+                           // Model D would have always been waiting...
+                           // CJ 2018-03-10
+                           
+                           dbug 'Error ', i, j, x, buf(x);
+                           if (x>5) dbug x-5, buf(x-5);
+                           if (x>4) dbug x-4, buf(x-4);
+                           if (x>3) dbug x-3, buf(x-3);
+                           if (x>2) dbug x-2, buf(x-2);
+                           if (x>1) dbug x-1, buf(x-1);
+                                    dbug   x, buf(x  );
+                                    dbug x+1, buf(x+1);
+                                    dbug x+2, buf(x+2);
+                                    dbug x+3, buf(x+3);
+                                    dbug x+4, buf(x+4);
+                                    dbug x+5, buf(x+5);
+                           Really.Run.Host();
 
                            log_pac_error(bin#,2);
                            

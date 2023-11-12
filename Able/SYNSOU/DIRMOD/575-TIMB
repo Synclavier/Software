@@ -136,6 +136,7 @@ end PRINT.TIMBRE.DIRECTORY;
 
 RECALL.TIMBRE:  proc(bank,entry) swapable; /* routine to call up a timbre */
    dcl (bank,entry,i) fixed;               /* BANK and ENTRY of desired timbre */
+   DCL (NAMEARRAY)   (8)   FIXED;
 
    our.bank=bank; our.timbre=entry;
    call DISPLAY.BANK.BUTTONS;          /* set up lights */
@@ -183,6 +184,12 @@ RECALL.TIMBRE:  proc(bank,entry) swapable; /* routine to call up a timbre */
       END;
 
       DONE:
+
+      IF (LENGTH.OVERFLOW == 0) {
+         // Timbre from bank
+         CALL LOOKUP.TIMBRE.NAME(0,NAMEARRAY);     /* GET TIMBRE NAME, OR FILE NAME */
+         interp_timbre_info(timbre_info_code_timbre_read, OUR.TIMBRE+1, addr(NAMEARRAY(0)));
+      }
 
       FLOPPY.CACHE.VALID=0;
       CALL DISABLE_CACHE(FLOPPY.CACHE.NUM);
@@ -318,20 +325,6 @@ FILL.TIMBRE.DIRECTORY:  proc (refresh.bits) swapable;
    end;
 end FILL.TIMBRE.DIRECTORY;
 
-REFRESH.TIMBRE.DIRECTORY: proc swapable;
-
-	if ((next.event.info & 256) != 0)
-		PRINT.TIMBRE.DIRECTORY.DEVICE.FIELD();
-
-   call FILL.TIMBRE.DIRECTORY(next.event.info); /* refresh those banks   */
-
-   call POS.TIMBRE.DIRECTORY.CURSOR;  /* and reposition cursor */
-
-   if not TIMBRE.BANK.IN.DIR.DEVICE      /* no timbre bank in current device */
-   then call No.Timbre.Bank.Warning;     /* Put up warning message about no timbre bank on current device */
-
-end REFRESH.TIMBRE.DIRECTORY;
-
 /* $SUBTITLE  Routine to Handle Chars on Timbre Directory */
 
 TIMBRE.DIRECTORY.INPUT:  proc(in.cmd,in.arg) swapable; /* process input for the TIMBRE DIRECTORY SCREEN */
@@ -354,6 +347,7 @@ TIMBRE.DIRECTORY.INPUT:  proc(in.cmd,in.arg) swapable; /* process input for the 
 
          if in.arg=esc         /* <ESC>:  return to startup menu without changes */
          then do;
+            if (dir.device != 6)       // Change back to current cat unless we started using a timbre file. Ugh.
             call CHANGE.OUR.DEV(dir.device,1); /* change from cur device back to current cat */
             call RETURN.TO.PREV.STATE;
          end;

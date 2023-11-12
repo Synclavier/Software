@@ -277,6 +277,7 @@ end log.lod.error;
 dcl (scsi.busy      )      fixed;
 dcl (scsi.reset.time)      fixed;  /*       timer for reset                       */
 
+#if (inc.mono == 0)
 abort.scsi:proc public swapable;
    dcl (i,j) fixed;
    if inc.dtd=0 then return;
@@ -340,6 +341,11 @@ abort.scsi:proc public swapable;
 	scsi.busy=0;
 
 end abort.scsi;
+#endif
+
+#if (inc.mono == 1)
+   dcl Abort.Scsi proc external;
+#endif
 
 /* $page - RESET.LOD.SCSI */
 

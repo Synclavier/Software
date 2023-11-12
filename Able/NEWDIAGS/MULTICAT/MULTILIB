@@ -27,12 +27,12 @@ dcl mt2_type        fixed;
   dcl inverting     lit  '0';
   dcl non_inverting lit  '1';
 
-dcl num_output       fixed;         /* number of mt outputs          */
-dcl stat(32)         fixed;         /* multichns output status   */
+dcl num_output       fixed;         /* number of mt outputs         */
+dcl stat(32)         fixed;         /* multichns output status      */
 dcl no_poly_lefts    boolean;
 dcl all_poly_rights  boolean;
 dcl mono_poly_voices boolean;
-dcl mt_short(256)    boolean;               /* mt_short(i) true if shorted */
+dcl mt_short(256)    boolean;       /* mt_short(i) true if shorted  */
 
 /***************************************************************************/
 /**********************   Multi-channel routines    ************************/
@@ -43,6 +43,16 @@ vwait: proc;
    dcl j fixed;
    do i = 1 to 30; interp_usleep(1); end;
 end vwait;
+
+read_d33: proc returns (boolean);
+  dcl xyz fixed;
+
+  do xyz = 0 to 1;  //  read twice for better noise immunity
+    if ((read(mtdat)&1) != 0) return true;
+  end;
+
+  return false;
+end read_d33;
 
 /***************************************************************************/
 dcl display_map_heading lit 'call map_heading';
@@ -60,23 +70,22 @@ search_for_input:  proc(map,index) returns (boolean);
    dcl map     fixed array;                /* voice-mt input mapping array */
    dcl index   fixed;                      /* array index                  */
    dcl num_out fixed;
-   dcl (i,j)   fixed;                        /* counter                      */
+   dcl (i,j)   fixed;                      /* counter                      */
 
    map(index) = (-1);                      /* assume no connection         */
    write(con) = "21";                      /* select mt operations         */
 
    do i = 0 to 255;                        /* loop over mt input channels  */
-      write(mtdat) = vcon \ shl(7,8) \ i;    /* route voice i to output 7    */
-
+      write(mtdat) = vcon \ shl(7,8) \ i;  /* route voice i to output 7    */
       wait_for_voice;                      /* delay for voice to start up  */
-       if read(mtdat) then                   /* found a routing              */
+       if read_d33() then                  /* found a routing              */
         if map(index) = -1 then do;        /* if 1st route found then      */
           map(index) = i;                  /* store mt input # in map      */
           num_out = 0;                     /* assume no outputs            */
           do j = 0 to 63;                  /* count multi-channel outputs  */
             write(mtdat) = vcon\shl(j,8)\i; 
             wait_for_voice;                /* delay for voice to start up  */
-            if read(mtdat) then num_out = num_out + 1;
+            if read_d33() then num_out = num_out + 1;
           end;
           wchar(asc.0+i/100); wchar(asc.0+((i/10) mod 10)); wchar(asc.0+(i mod 10));
         end;
@@ -91,7 +100,9 @@ search_for_input:  proc(map,index) returns (boolean);
         end;
 
       write(mtdat) = vcoff \ shl(7,8) \ i;   /* turn off routing for input   */
+      Really.Run.Host();
    end;
+
    if map(index) = -1 then pstring('   '); /* if no input found then       */
 
    if num_out > num_output                 /* global num_output = the max  */
@@ -110,7 +121,7 @@ find_dc: proc returns (boolean);
   do i = 0 to 255;                         /* loop over mt input channels  */
     write(mtdat) = vcon \ shl(7,8) \ i;    /* route voice i to output 7    */
     wait_for_voice;                        /* delay for voice to start up  */
-    if read(mtdat) then do;
+    if read_d33() then do;
       write(mtdat) = vcoff \ shl(7,8) \ i; /* turn off routing for input   */
       return true;                         /* found a routing              */
     end;
@@ -152,6 +163,7 @@ mt1_short: proc;                         /* display mt1 shorts          */
         pnum((i mod 8),1); pstring(','); /* display card input number   */
         input_cnt = input_cnt + 1;
       end;
+      Really.Run.Host();
     end;   /* do i = 0 to 255 */
     wchar(bs); wchar(sp);                /* erase last comma displayed  */
 

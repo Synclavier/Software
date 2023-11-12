@@ -447,6 +447,11 @@ BEGIN;
 
           DECADJ=P.LOOKUP(PTPTR+P.DECADJ); /* LOOK UP DECAY/HARM ADUST ALSO   */
 
+          // In the days before PINFO blocks, the keyboard envelope parameters were stored in the upper 6 bits
+          // of the envelope peak/sustain locations. Here we move them to a PINFO area if a PINFO area exists.
+          // If keyboard envelope is set, but there is no PINFO area, we just set the KBD.ENV timbre options bit.
+          // The real time software must extract the keyboard envelope values from the peak/sustain values if there
+          // is no PINFO block but KBD.ENV is set.
           IF ((EPEAKL\ESUSTL\IPEAKL\ISUSTL)&"176000")<>0  /* CHECK FOR KBD ENVELOPE BEFORE MASKING */
           THEN DO;
              WRITE(MAM)=TIM.HEADP;               /* POINT TO TIMBRE HEAD    */
@@ -611,9 +616,13 @@ BEGIN;
                 WRITE(MD )=READ(MD) \ ENV.DADJ;
              END;
 
+             // C5 in this model is the top key of the original keyboard.
+             // So the decays would have been performed at the dialed-in decay value for the top key
+             // of that keyboard. Decay Adjust lengthens the decay by the specified percentage for
+             // every octave down from the top note.
              DO J=0 TO 4;                      /* ONLY DO DECAY ADJUST FOR C0-B5 (5 OCTAVES) */
                 WRITE(MAM)=TIM.HEADP;          /* POINT TO TIMBRE HEAD    */
-                WRITE(MAL)=TIM.DEC.ADJ+(PTL*TIM.DEC.ADJ.STR)+4-J;
+                WRITE(MAL)=TIM.DEC.ADJ+(PTL*TIM.DEC.ADJ.STR)+4-J; // 4, 3, 2, 1, 0
                 WRITE(MD)=K;                   /* STORE PREVIOUS COMPUTATION */
                 LOAD (DECADJ&"1777")+1000; 
                 MUL K; MWAIT; DIV 1000; 

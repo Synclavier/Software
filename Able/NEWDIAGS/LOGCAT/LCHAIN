@@ -57,6 +57,7 @@ test_chain: proc(bin#);
      dcl bin# fixed;
      dcl bin_base fixed;
      dcl (sector,word) fixed;
+     dcl result     fixed;
 
      bin_base = bin# * 64;
 
@@ -74,9 +75,24 @@ test_chain: proc(bin#);
      call pbmread(bin#,"HFF00","H0F00");
      do sector = 0 to 255;              
        do word = 0 to 255;
-         if read(psd) <> (shl(sector,8) + word) then 
+         result = read(psd);
+         if result <> (shl(sector,8) + word) then {
+           if (serial_chain_errors(bin#) ILT 5) {
+               pos(status_line2);
+               pstring('Failed. Got: 0x');
+               hnum(result, 4);
+               pstring('  Expected: 0x');
+               hnum((shl(sector,8) + word), 4);
+               flush_term;
+               milliseconds = 0;
+               do while milliseconds < 2000;
+                  if Really.Peek() <> (-1) then return;
+                  interp_run_host_at_level();
+               end;
+           }
            if serial_chain_errors(bin#) <> "HFFFF" then
               serial_chain_errors(bin#) = serial_chain_errors(bin#) + 1;
+         }
        end;      
      end;
      Really.Run.Host();

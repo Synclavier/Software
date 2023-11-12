@@ -283,6 +283,12 @@ READ.IN.BANK:PROC PUBLIC SWAPABLE;			/*	CALL THIS PROCEDURE TO ATTEMPT TO READ I
 		END;
 	END;
 
+   // Ask synclavier3 to read in the 8 bank descriptions
+   if (active.level == 6)
+      interp_timbre_info(timbre_info_code_bank_read, OUR.BANK+1, 0);
+   else
+      interp_timbre_info(timbre_info_code_bank_read, 0, 0);
+
 	RETURN 1;											/*	BANK WAS FOUND	*/
 
 END READ.IN.BANK;
@@ -395,6 +401,7 @@ END CHECK.FOR.REDUNDANT.TIMBRE;
 
 MOVE.FROM.BANK: PROC(DES)	FIXED SWAPABLE;	/*	PROCEDURE TO PERFORM TIMBRE MOVE FROM BANK	*/
 	DCL (DES,MUST.READ,K)	FIXED;
+   DCL (NAMEARRAY)   (8)   FIXED;
 
 	CALL SETUP.FLOPPY.CACHE;			/*	SET UP FLOPPY CACHE				*/
 	CALL MOUNT.OPTICAL.VOLUME;			/*	ALSO CACHE OPT DISK IF NEEDED	*/
@@ -425,6 +432,12 @@ MOVE.FROM.BANK: PROC(DES)	FIXED SWAPABLE;	/*	PROCEDURE TO PERFORM TIMBRE MOVE FR
 			FLOPPY.CACHE.VALID=0;
 			CALL DISABLE_CACHE(FLOPPY.CACHE.NUM);	/*	DISABLE CACHE	*/
 			OPTICAL.DISK.READY=0;
+         // Timbre from bank
+         if (DES == 0) {
+            CALL LOOKUP.TIMBRE.NAME(0,NAMEARRAY);     /* GET TIMBRE NAME, OR FILE NAME */
+            interp_timbre_info(timbre_info_code_timbre_read, OUR.TIMBRE+1, addr(NAMEARRAY(0)));
+         }
+
 			RETURN 1;	/*	OK MOVE IF NO ERROR	*/
 		END;
 	END;
@@ -470,7 +483,14 @@ MOVE.FROM.BANK: PROC(DES)	FIXED SWAPABLE;	/*	PROCEDURE TO PERFORM TIMBRE MOVE FR
 	CALL DISABLE_CACHE(FLOPPY.CACHE.NUM);	/*	DISABLE CACHE	*/
 	OPTICAL.DISK.READY=0;
 
-	IF LENGTH.OVERFLOW=0 THEN RETURN 1;	/*	OK MOVE IF NO ERROR	*/
+   IF LENGTH.OVERFLOW=0 THEN DO;
+      // Timbre from bank
+      if (DES == 0) {
+         CALL LOOKUP.TIMBRE.NAME(0,NAMEARRAY);     /* GET TIMBRE NAME, OR FILE NAME */
+         interp_timbre_info(timbre_info_code_timbre_read, OUR.TIMBRE+1, addr(NAMEARRAY(0)));
+      }
+      RETURN 1;	/*	OK MOVE IF NO ERROR	*/
+   END;
 	RETURN 0;	/*	LENGTH ERROR	*/
 
 END MOVE.FROM.BANK;
@@ -518,7 +538,10 @@ COPY.TIMBRE:  PROC (FROM.TRK,TO.TRK)	FIXED PUBLIC SWAPABLE;	/*	COPIES A TIMBRE F
 			IF MOVE.FROM.BANK(TO.TRK)=0	/*	PUT CURRENT ENTRY ONTO KBD	*/
 			THEN RETURN 0;						/*	HAD AN ERROR - BOMB OUT	*/
 		END;
-		ELSE IF FROM.TRK=(-2) THEN DO;	/*	FROM DISK BUT NOT A .NEWDATA	*/
+      ELSE DO;
+         if (TO.TRK == 0)              // Keyboard timbre can no longer be related to a file
+            interp_timbre_info(timbre_info_code_timbre_read, 0, 0);
+         IF FROM.TRK=(-2) THEN DO;	/*	FROM DISK BUT NOT A .NEWDATA	*/
 			CALL MOVE.TIMBRE.TO(-1,0,TO.TRK);	/*	MOVE FROM DISK TO DESTINATION	*/
 		END;
 		ELSE IF FROM.TRK=(-3) THEN DO;	/*	NEW NULL TIMBRE DESIRED	*/
@@ -546,6 +569,7 @@ COPY.TIMBRE:  PROC (FROM.TRK,TO.TRK)	FIXED PUBLIC SWAPABLE;	/*	COPIES A TIMBRE F
 			ELSE CALL MOVE.TIMBRE.TO(NUL.PTR,0,TO.TRK);	/*	MAKE COPY OF NULL TIMBRE	*/
 
 		END;
+      END;
 
 		IF LENGTH.OVERFLOW<>0 THEN DO;	/*	CANNOT CONTINUE - OUT OF MEMORY	*/
 			EDIT.ERROR = E#NOROOM;

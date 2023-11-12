@@ -384,6 +384,12 @@ static int ExportMacFile(const SyncFSSpec *the_spec, const char *mac_entity_name
         if (local_level_name[i] == '*')     // map leading * back to . for able's use
             local_level_name[i] = '.';
     
+    // Append file name
+    int i = strlen(local_level_name);
+    
+    if (i > 0 && local_level_name[i-1] == ':')
+        strncat(local_level_name, the_spec->file_name, sizeof(local_level_name)-1);
+        
     WipeNameExtension(local_level_name);
 
 	// Create the able directory entry

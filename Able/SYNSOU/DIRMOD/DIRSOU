@@ -17,6 +17,7 @@ module dirmod;
 
    insert ':-xpl:catrout';  /* get catalog routines */
    insert ':-xpl:devutil';  /* device utilities */
+   insert ':-xpl:intrprtr'; /* interpreter interface */
 
    insert ':synmods:indexdcl';  /* for mount optical volume  */
    insert ':synmods:giddcl';    /* for seq name storage      */
@@ -119,7 +120,31 @@ module dirmod;
             ;                          /* unused event type         */
             ;                          /* new seq info not used     */
             ;                          /* no play scrolling         */
-            do; call REFRESH.TIMBRE.DIRECTORY; remove.timbre.error(); end;    /* refresh on write    */
+
+            // Get Entry Writes
+            do;
+               // Handle new timbre file activation
+               if ((next.event.info & 256) != 0) {
+                  // Oops, not showing W0
+                  if (dir.device != 6) {
+                     CHANGE.OUR.DEV(dir.device, 6);
+                     dir.device = 6;
+                     Find.Timbre.Bank.In.Dir.Device();
+                  }
+                  
+                  // Update timbre file name
+                  PRINT.TIMBRE.DIRECTORY.DEVICE.FIELD();
+               }
+
+               call FILL.TIMBRE.DIRECTORY(next.event.info); /* refresh those banks   */
+
+               call POS.TIMBRE.DIRECTORY.CURSOR;  /* and reposition cursor */
+
+               if not TIMBRE.BANK.IN.DIR.DEVICE      /* no timbre bank in current device */
+               then call No.Timbre.Bank.Warning;     /* Put up warning message about no timbre bank on current device */
+
+               remove.timbre.error();
+            end;
             ;                          /* tds update - nothing      */
             ;                          /* dtd info - nothing        */
             do;                        /* new poly contents         */

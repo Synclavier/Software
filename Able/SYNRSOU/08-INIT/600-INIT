@@ -46,7 +46,6 @@ Modified:
 1988/09/22 - TSS - MODIFIED CODE TO SUPPORT RUN-TIME VOICE DIAGNOSTICS ENABLING
 1988/09/21 - TSS - Allocated external mem for BSTAT.PTR
 1988/09/20 - PF  - CREATED MISC.PTR MAINLY FOR SENDING PROTOCOL PACKETS
-1988/09/01 - SGS - Modified multi-chan boot to accommodate mono poly voices (INC.PVOC)
 1988/08/30 - MWH - Undo temp changes below (leave in but commented)
 1988/07/29 - SGS - Created INIT.INFOFILE and INIT.DEFAULTS. Added defaults.
 1988/07/22 - MWH - TEMP CODE TO BLOCK ANYONE FROM STEALING THE RTP
@@ -85,7 +84,6 @@ BEGIN;		/*	PUT ALL OF INITMODS INSIDE A BEGIN/END BLOCK	*/
 	//	DIAGNOSTIC LITERALS
 	dcl diagnostic	lit 'false';
 	dcl d_print		lit 'send';
-	dcl cj_changes	lit 'false';
 
 /*	PROCEDURES USED BY INITIALIZATION - NO.MEMORY, OPENFILE, ALLOC.EXT	*/
 
@@ -571,7 +569,18 @@ SETUP.EXTERNAL.ALLOCATIONS: PROC SWAPABLE;
 	MFM.PTR =ALLOC.EXT(1);					/*	MULTICHAN-FM MAP		*/
 
 	IF INC.MONO<>0 THEN DO;			/*	SET UP FOR MONO BLOCK ALLOCATION				*/
-		IF (NOT     MONO.LB)			/*	NOT COMPILING LARGE BUFFER MODEL				*/
+      IF (EXAMOUNT IGT 12000) {  // SYNC3 - RESERVE 100 FIXED LENGTH 100-SECTOR ATTACK BUFFERS
+			MSFREE=10000;					         /*	USE 10000 SECTORS	*/
+			MSFIRST=EXAMOUNT-MSFREE;				/*	START LIST HERE		*/
+			MSLAST=MSFIRST;							/*	ENDING BLOCK IS HERE	*/
+			MSMAX=EXAMOUNT;							/*	MAX IS HERE				*/
+			IF (MSFIRST ILT TRD.PTR) THEN DO;	/*	OUT OF ROOM				*/
+				CALL NO.MEMORY;
+			END;
+			EXAMOUNT=MSFIRST;							/*	AND ONLY THIS MUCH IS NOW AVAIL FOR SYN2	*/
+      }
+
+		ELSE IF (NOT     MONO.LB)	/*	NOT COMPILING LARGE BUFFER MODEL				*/
 		OR (EXAMOUNT ILT 316)		/*	OR LESS THAN 15,000 NOTES IN ANY EVENT!	*/
 		THEN DO;							/*	USE NORMAL ALGORITHM								*/
 			MSFREE=SHR(EXAMOUNT,1);					/*	USE HALF OF STORAGE FOR ATTACK BUFFERS	*/
@@ -931,10 +940,6 @@ INIT.EXPAND.SYSTEM: PROC SWAPABLE;
 	DCL (POLY.TRIES,POLY.ERRORS)	FIXED;
 	DCL WAVE.DIRECTION				FIXED;
 
-#if (cj_changes)
-	DCL LOCAL_RETRY_COUNT         FIXED;
-#endif
-
 	read_d33: proc returns (boolean);
 		dcl xyz fixed;
 
@@ -1091,7 +1096,7 @@ INIT.EXPAND.SYSTEM: PROC SWAPABLE;
 									WRITE(MAL) = IVOICE;
 									WRITE(MD) = (READ(MD)&255) \ SHL(M,8);    /*	LEFT VOICE IN UPPER	*/
 									IF MULTI.MAX=100 THEN DO;                 /*	MEASURE FIRST TIME	*/
-										K=8;                                   /*	AT LEATS 8 OUTPUTS	*/
+										K=8;                                   /*	AT LEAST 8 OUTPUTS	*/
 										MORE.SYN2.TRACKS:
 										WRITE(D33)="040000"\SHL(K+7,8)\M;      /*	MAP INPUT TO TR7		*/
 										DO J=0 TO 30; interp_usleep(1); END;	/*	DELAY FOR SWITCH		*/
@@ -1102,18 +1107,10 @@ INIT.EXPAND.SYSTEM: PROC SWAPABLE;
 										END;
 										MULTI.MAX=K;
 									END;
-									#if (cj_changes)
-										WRITE(D33)=SHL(7,8)\M;		/*	DISCONNECT INPUT V	*/
-									#else
 										WRITE(D33)=M;					/*	DISCONNECT INPUT V	*/
-									#endif
 									GOTO TRY.FM.RIGHT;
 								END;
-								#if (cj_changes)
-									WRITE(D33)=SHL(7,8)\M;			/*	DISCONNECT INPUT V	*/
-								#else
 									WRITE(D33)=M;						/*	DISCONNECT INPUT V	*/
-								#endif
 							END;
 
 							THIS.ERROR = 1;
@@ -1137,18 +1134,10 @@ INIT.EXPAND.SYSTEM: PROC SWAPABLE;
 									WRITE(MAM) = MFM.PTR;						/*	STORE IN EXT MEMORY	*/
 									WRITE(MAL) = IVOICE;
 									WRITE(MD) = (READ(MD)&"177400") \ M;	/*	RIGHT VOICE IN LOWER	*/
-									#if (cj_changes)
-										WRITE(D33)=SHL(7,8)\M;		/*	DISCONNECT INPUT V	*/
-									#else
 										WRITE(D33)=M;					/*	DISCONNECT INPUT V	*/
-									#endif
 									GOTO CLEAN.SYN2;
 								END;
-								#if (cj_changes)
-									WRITE(D33)=SHL(7,8)\M;			/*	DISCONNECT INPUT V	*/
-								#else
 									WRITE(D33)=M;						/*	DISCONNECT INPUT V	*/
-								#endif
 							END;
 
 							THIS.ERROR = THIS.ERROR + 1;
@@ -1184,6 +1173,17 @@ INIT.EXPAND.SYSTEM: PROC SWAPABLE;
 									GOTO RETRY.FM.ROUTING;
 								END;
 								FM.ERRORS = FM.ERRORS+THIS.ERROR;	/*	COUNT ERROR - NO INPUT VOICE FOR THIS CHANNEL	*/
+
+                        CALL PS('FM error detected: Mod channel = ');
+                        CALL PNUM(SHL(IVOICE,1), 0);
+                        CALL PS(', User channel = ');
+                        CALL PNUM(SHL(IVOICE,1)+1, 0);
+                        call PCR;
+                        do m = 0 to 100;
+                           write(3) = 0;
+                           enable; interp_run_host_250(); disable;
+                        end;
+
 								#if (diagnostic)
 									d_print
 									'FM error detected: Mod channel =',SHL(IVOICE,1),', User channel =',SHL(IVOICE,1)+1,
@@ -1220,10 +1220,6 @@ INIT.EXPAND.SYSTEM: PROC SWAPABLE;
 
 								RETRY			= 0;						/*	CLEAR FLAG FOR POSSIBLE RETRY	*/
 
-								#if (cj_changes)
-									LOCAL_RETRY_COUNT = 0;
-								#endif
-
 				RETRY.POLY.ROUTING:
 
 								THIS.TRY = 1; THIS.ERROR = 0;		/*	RESET COUNTERS				*/
@@ -1231,22 +1227,12 @@ INIT.EXPAND.SYSTEM: PROC SWAPABLE;
 								BASE(LW#MSB) = SHL(BIN,14);		/*	BIN IN UPPER 2 MS BITS	*/
 								CALL PSMWRITE(BASE,0,254);			/*	SET UP 1 WORD COMPL		*/
 								IF WAVE.DIRECTION = 0 THEN DO;
-									#if (cj_changes)
-										WRITE(PSD)=+32767;
-										WRITE(PSD)=-32767;
-									#else
 										WRITE(PSD)=-32767;
 										WRITE(PSD)=+32767;
-									#endif
 								END;
 								ELSE DO;
-									#if (cj_changes)
-										WRITE(PSD)=-32767;
-										WRITE(PSD)=+32767;
-									#else
 										WRITE(PSD)=+32767;
 										WRITE(PSD)=-32767;
-									#endif
 								END;
 
 								DISABLE;	/*	AFTER PSMWRITE CALL!!	*/
@@ -1267,25 +1253,6 @@ INIT.EXPAND.SYSTEM: PROC SWAPABLE;
 								/*	(LEFT CHANS DON'T EXIST IN MONO VOICES)					*/
 
 								IF (NOT MONO_VOICES_PRESENT) THEN DO;
-									#if (cj_changes)
-										WRITE(PSC)= CHAN;                      /*	SELECT CHANNEL				*/
-										WRITE(PSF)= PSELIM;                    /*	SET UP FOR LIMIT, CVAL	*/
-										WRITE(PSD)= 4095;                      /*	LIMIT,			TO MAX	*/
-										WRITE(PSD)= 4095;                      /*	CVAL  			TO MAX	*/
-										WRITE(PSF)= PSRCVOL;
-										WRITE(PSD)= 0; WRITE(PSD)=4095;        /*	R,L CVOL						*/
-										WRITE(PSD)= 0; WRITE(PSD)=4095;        /*	R,L DVOL						*/
-
-										WRITE(PSC)= L;                         /*	SELECT COMPL CHAN			*/
-										WRITE(PSF)= PSELIM;                    /*	SET UP FOR LIMIT, CVAL	*/
-										WRITE(PSD)=4095;                       /*	LIMIT,			TO MAX	*/
-										WRITE(PSD)=4095;                       /*	CVAL  			TO MAX	*/
-										WRITE(PSF)= PSRCVOL;
-										WRITE(PSD)= 0; WRITE(PSD)=4095;        /*	R,L CVOL						*/
-										WRITE(PSD)= 0; WRITE(PSD)=4095;        /*	R,L DVOL						*/
-
-                              DO J=0 TO 1000; interp_usleep(1); END;	/*	DELAY FOR SWITCH			*/
-									#else
 										WRITE(PSC)= CHAN;                      /*	SELECT CHANNEL			*/
 										WRITE(PSF)= PSRCVOL;
 										WRITE(PSD)= 0; WRITE(PSD)=4095;        /*	R,L CVOL					*/
@@ -1301,42 +1268,9 @@ INIT.EXPAND.SYSTEM: PROC SWAPABLE;
 										WRITE(PSD)=4095;                       /*	LIMIT,			TO MAX	*/
 
 										WRITE(3)=0;                            /*	WAIT FOR RAMP UP			*/
-									#endif
 
-									WRITE(D32)="21";                          /*	SELECT MULTI PORT			*/
+									WRITE(D32)="21";                         /*	SELECT MULTI PORT			*/
 
-									#if (cj_changes)
-										// From MC Test:
-										DO I=0 TO 255;                         /*	TRY 64 POSSIBLE INPUT CHANNELS	*/
-											M = I;												/*	COMPUTE POSSIBLE INPUT #	*/
-											WRITE(D33)="040000"\SHL(7,8)\M;				/*	MAP INPUT TO TR7		*/
-											DO J=0 TO 30; interp_usleep(1); END;      /*	DELAY FOR SWITCH		*/
-											IF (read_d33() != false) THEN DO;			/*	INPUT FOUND FOR THIS	*/
-												WRITE(MAM) = MPOLY.PTR;						/*	STORE IN EXT MEMORY	*/
-												WRITE(MAL) = CHAN;							/*	IVOICE + 64 * BIN		*/
-												WRITE(MD) = (READ(MD)&255) \ SHL(M,8);	/*	LEFT VOICE IN UPPER	*/
-												IF MULTI.MAX=100 THEN DO;					/*	MEASURE FIRST TIME	*/
-													K=8;											/*	AT LEAST 8 OUTPUTS	*/
-													MORE.POLY.TRACKS:
-													WRITE(D33)="040000"\SHL(K+7,8)\M;	/*	MAP INPUT TO TR7	*/
-													DO J=0 TO 30; interp_usleep(1); END;
-													IF (read_d33() != false) THEN DO;	/*	MORE TRACKS			*/
-														K=K+8;
-														IF K<64 THEN
-														GOTO MORE.POLY.TRACKS;	/*	COUNT UP TO REASON	*/
-													END;
-													MULTI.MAX=K;
-												END;
-												WRITE(D33)=SHL(7,8)\M;			/*	DISCONNECT INPUT V	*/
-												GOTO CLEAN.POLY.LEFT;
-											END;
-											WRITE(D33)=SHL(7,8)\M;				/*	DISCONNECT INPUT V	*/
-											DO J=0 TO 30; interp_usleep(1); END;
-										END;
-
-										LOCAL_RETRY_COUNT = LOCAL_RETRY_COUNT + 1;
-										if (LOCAL_RETRY_COUNT < 5)	goto RETRY.POLY.ROUTING;
-									#else
 										// Optimized:
 										DO I=0 TO 63;						/*	TRY 64 POSSIBLE INPUT CHANNELS	*/
 											M = (SHL(I,2) \ (IVOICE&3));
@@ -1346,6 +1280,11 @@ INIT.EXPAND.SYSTEM: PROC SWAPABLE;
 												WRITE(MAM) = MPOLY.PTR;						/*	STORE IN EXT MEMORY	*/
 												WRITE(MAL) = CHAN;							/*	IVOICE + 64 * BIN		*/
 												WRITE(MD) = (READ(MD)&255) \ SHL(M,8);	/*	LEFT VOICE IN UPPER	*/
+
+                                 #if (diagnostic)
+                                    d_print 'Poly ',CHAN,' L Connected: ',I;
+                                 #endif
+
 												IF MULTI.MAX=100 THEN DO;					/*	MEASURE FIRST TIME	*/
 													K=8;											/*	AT LEAST 8 OUTPUTS	*/
 													MORE.POLY.TRACKS:
@@ -1363,14 +1302,11 @@ INIT.EXPAND.SYSTEM: PROC SWAPABLE;
 											END;
 											WRITE(D33)=M;							/*	DISCONNECT INPUT V	*/
 										END;
-									#endif
 
 									THIS.ERROR = 1;
 
 				CLEAN.POLY.LEFT:										/*	CLEAN UP FROM LEFT CHAN INTERROGATION	*/
 
-									#if (cj_changes)
-									#else
 										WRITE(PSC)= CHAN;					/*	SELECT CHANNEL				*/
 										WRITE(PSF)= PSELIM;				/*	SET UP FOR LIMIT, CVAL	*/
 										WRITE(PSD)=0;						/*	LIMIT,			TO 0		*/
@@ -1380,7 +1316,6 @@ INIT.EXPAND.SYSTEM: PROC SWAPABLE;
 										WRITE(PSD)=0;						/*	LIMIT,			TO 0		*/
 
 										WRITE(3)=0; WRITE(3)=0;			/*	WAIT FOR RAMP DOWN		*/
-									#endif
 
 								END;	/*	OF NOT MONO (IE: STEREO) VOICES	*/
 
@@ -1389,25 +1324,6 @@ INIT.EXPAND.SYSTEM: PROC SWAPABLE;
 				TRY.POLY.RIGHT:	//	Nothing points here anymore.
 								THIS.TRY = THIS.TRY + 1;
 
-								#if (cj_changes)
-									WRITE(PSC)=CHAN;
-									WRITE(PSF)= PSELIM;                    /*	SET UP FOR LIMIT, CVAL	*/
-									WRITE(PSD)=4095;                       /*	LIMIT,			TO MAX	*/
-									WRITE(PSD)=4095;                       /*	CVAL           TO MAX	*/
-									WRITE(PSF)= PSRCVOL;
-									WRITE(PSD)= 4095; WRITE(PSD)=0;        /*	R,L CVOL						*/
-									WRITE(PSD)= 4095; WRITE(PSD)=0;        /*	R,L DVOL						*/
-
-									WRITE(PSC)=L;
-									WRITE(PSF)= PSELIM;                    /*	SET UP FOR LIMIT, CVAL	*/
-									WRITE(PSD)=4095;                       /*	LIMIT,			TO MAX	*/
-									WRITE(PSD)=4095;                       /*	CVAL           TO MAX	*/
-									WRITE(PSF)= PSRCVOL;
-									WRITE(PSD)= 4095; WRITE(PSD)=0;        /*	R,L CVOL						*/
-									WRITE(PSD)= 4095; WRITE(PSD)=0;        /*	R,L DVOL						*/
-
-									DO J=0 TO 1000; interp_usleep(1); END;	/*	DELAY FOR SWITCH			*/
-								#else
 									WRITE(PSC)=CHAN;                       /*	SELECT CHANNEL				*/
 									WRITE(PSF)= PSRCVOL;
 									WRITE(PSD)= 4095; WRITE(PSD)=0;        /*	R,L CVOL						*/
@@ -1423,42 +1339,9 @@ INIT.EXPAND.SYSTEM: PROC SWAPABLE;
 									WRITE(PSD)=4095;                       /*	LIMIT,			TO MAX	*/
 
 									WRITE(3)=0;                            /*	WAIT FOR RAMP UP			*/
-								#endif
 
-								WRITE(D32)="21";                          /*	SELECT MULTI PORT			*/
+								WRITE(D32)="21";                       /*	SELECT MULTI PORT			*/
 
-								#if (cj_changes)
-									// From MC Test:
-									DO I=0 TO 255;                         /*	TRY 64 POSSIBLE INPUT CHANNELS	*/
-										M = I;                                       /*	COMPUTE POSSIBLE INPUT #	*/
-										WRITE(D33)="040000"\SHL(7,8)\M;              /*	MAP INPUT TO TR7		*/
-										DO J=0 TO 30; interp_usleep(1); END;         /*	DELAY FOR SWITCH		*/
-										IF (read_d33() != false) THEN DO;            /*	INPUT FOUND FOR THIS	*/
-											WRITE(MAM) = MPOLY.PTR;                   /*	STORE IN EXT MEMORY	*/
-											WRITE(MAL) = CHAN;                        /*	IVOICE + 64 * BIN		*/
-											WRITE(MD) = (READ(MD)&"177400") \ M;      /*	RIGHT VOICE IN LOWER	*/
-											IF MULTI.MAX=100 THEN DO;                 /*	MEASURE FIRST TIME	*/
-												K=8;                                   /*	AT LEAST 8 OUTPUTS	*/
-												MORE.POLY.TRACKS1:
-												WRITE(D33)="040000"\SHL(K+7,8)\M;      /*	MAP INPUT TO TR7		*/
-												DO J=0 TO 30; interp_usleep(1); END;	/*	DELAY FOR SWITCH		*/
-												IF (read_d33() != false) THEN DO;      /*	MORE TRACKS				*/
-													K=K+8;
-													IF K<64 THEN
-													GOTO MORE.POLY.TRACKS1;             /*	COUNT UP TO REASON		*/
-												END;
-												MULTI.MAX=K;
-											END;
-											WRITE(D33)=SHL(7,8)\M;                    /*	DISCONNECT INPUT V		*/
-											GOTO CLEAN.POLY;
-										END;
-										WRITE(D33)=SHL(7,8)\M;                       /*	DISCONNECT INPUT V		*/
-										DO J=0 TO 30; interp_usleep(1); END;
-									END;
-
-									LOCAL_RETRY_COUNT = LOCAL_RETRY_COUNT + 1;
-									if (LOCAL_RETRY_COUNT < 5)	goto RETRY.POLY.ROUTING;
-								#else
 									// Optimized:
 									DO I=0 TO 63;						/*	TRY 64 POSSIBLE INPUT CHANNELS	*/
 										M = (SHL(I,2) \ (IVOICE&3));
@@ -1468,6 +1351,11 @@ INIT.EXPAND.SYSTEM: PROC SWAPABLE;
 											WRITE(MAM) = MPOLY.PTR;                   /*	STORE IN EXT MEMORY	*/
 											WRITE(MAL) = CHAN;                        /*	IVOICE + 64 * BIN		*/
 											WRITE(MD) = (READ(MD)&"177400") \ M;      /*	RIGHT VOICE IN LOWER	*/
+
+                              #if (diagnostic)
+                                 d_print 'Poly ',CHAN,' R Connected: ',I;
+                              #endif
+
 											IF MULTI.MAX=100 THEN DO;                 /*	MEASURE FIRST TIME	*/
 												K=8;                                   /*	AT LEAST 8 OUTPUTS	*/
 												MORE.POLY.TRACKS1:
@@ -1485,43 +1373,12 @@ INIT.EXPAND.SYSTEM: PROC SWAPABLE;
 										END;
 										WRITE(D33)=M;							/*	DISCONNECT INPUT V		*/
 									END;
-								#endif
 
 								THIS.ERROR = THIS.ERROR + 1;
 
 								/*	$PAGE - CLEAN UP FROM POLY INTERROGATION	*/
 
 				CLEAN.POLY:
-								#if (cj_changes)
-									WRITE(PSC)= CHAN;						/*	SELECT CHANNEL				*/
-									WRITE(PSF)= PSELIM;					/*	SET UP FOR LIMIT, CVAL	*/
-									WRITE(PSD)=0;							/*	LIMIT,			TO 0		*/
-									WRITE(PSD)=0;							/*	CVAL   			TO 0		*/
-									WRITE(PSF)= PSRCVOL;
-									WRITE(PSD)= 0; WRITE(PSD)=0;		/*	R,L CVOL						*/
-									WRITE(PSD)= 0; WRITE(PSD)=0;		/*	R,L DVOL						*/
-
-									WRITE(PSC)= L;							/*	SELECT COMPL CHAN			*/
-									WRITE(PSF)= PSELIM;					/*	SET UP FOR LIMIT, CVAL	*/
-									WRITE(PSD)=0;							/*	LIMIT,			TO 0		*/
-									WRITE(PSD)=0;							/*	CVAL   			TO 0		*/
-									WRITE(PSF)= PSRCVOL;
-									WRITE(PSD)= 0; WRITE(PSD)=0;		/*	R,L CVOL						*/
-									WRITE(PSD)= 0; WRITE(PSD)=0;		/*	R,L DVOL						*/
-
-									WRITE(PSC)=CHAN;
-									WRITE(PSF)= PSON;
-									WRITE(PSD)= 0;							/*	TURN OFF						*/
-
-									WRITE(PSC)=L;
-									WRITE(PSF)= PSON;
-									WRITE(PSD)= 0;							/*	TURN OFF						*/
-
-									DO J=0 TO 1000; interp_usleep(1); END;	/*	DELAY FOR SWITCH			*/
-
-									// Delay a la MC test
-									write(3) = 0; write(3) = 0;
-								#else
 									WRITE(PSC)= CHAN;						/*	SELECT CHANNEL				*/
 									WRITE(PSF)= PSELIM;					/*	SET UP FOR LIMIT, CVAL	*/
 									WRITE(PSD)=0;							/*	LIMIT,			TO 0		*/
@@ -1551,7 +1408,6 @@ INIT.EXPAND.SYSTEM: PROC SWAPABLE;
 									WRITE(PSD)= 0;							/*	TURN OFF						*/
 
 									WRITE(3)=0;								/*	WAIT FOR CHAN OFF			*/
-								#endif
 
 								/*	SEE IF NO INPUT FOR THIS VOICE COULD BE FOUND	*/
 
@@ -1563,6 +1419,17 @@ INIT.EXPAND.SYSTEM: PROC SWAPABLE;
 									END;
 
 									POLY.ERRORS = POLY.ERRORS+THIS.ERROR;	/*	COUNT ERROR - NO INPUT VOICE FOR THIS CHANNEL	*/
+
+                           CALL PS('Poly error detected: Channel = ');
+                           CALL PNUM(CHAN, 0);
+                           CALL PS(', Compl channel = ');
+                           CALL PNUM(L, 0);
+                           call PCR;
+                           do m = 0 to 100;
+                              write(3) = 0;
+                              enable; interp_run_host_250(); disable;
+                           end;
+
 									#if (diagnostic)
 										d_print 'Poly error detected: Channel =',CHAN,', Compl channel =',L;
 									#endif
@@ -1580,6 +1447,7 @@ INIT.EXPAND.SYSTEM: PROC SWAPABLE;
 					d_print 'POLY.TRIES  =',POLY.TRIES;
 					d_print 'POLY.ERRORS =',POLY.ERRORS;
 				#endif
+
 				if FM.ERRORS	ieq FM.TRIES	then FM.ERRORS	= 0;
 				if POLY.ERRORS	ieq POLY.TRIES	then POLY.ERRORS = 0;
 				MULTI.ERRS = FM.ERRORS + POLY.ERRORS;
@@ -1705,12 +1573,13 @@ INIT.SYNTHS: PROC PUBLIC SWAPABLE;
 		CALL COMPUTE.MAX.DIAG.VOICES;
 
 	END;
+	
 	ELSE IF INC.FM THEN DO;								/*	SET UP CHANNELS FOR 4X PROGRAM	*/
 		IF LSYN2.END<>0									/*	IF ANY FM CHANNELS AT ALL	*/
 		THEN CORE(FR2.PTR)=1;							/*	USE ONLY ONE OF THEM			*/
 		PTR=ADDR(FP0.PTR);								/*	POINT AT 1ST POINTER			*/
 		DO BIN=0 TO PSMAXBINS-1;
-			IF POLYNUMVS(BIN)<>0							/*	IF ANY VOICES IN THIS BIN	*/
+			IF POLYNUMVS(BIN) > XXXXCH				   /*	if xxxxch available in bin	*/
 			THEN CORE(CORE(PTR))=1;						/*	USE ONLY ONE					*/
 			PTR=PTR+1;
 		END;

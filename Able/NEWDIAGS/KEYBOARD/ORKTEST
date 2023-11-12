@@ -1,0 +1,187 @@
+// ORK TEST FOR KBI-1
+
+insert ':-xpl:intrprtr';
+
+DCL (i,j,k) FIXED;
+
+DCL DREG             LIT '"130"';   /* data address for SK2               */
+DCL CREG             LIT '"131"';   /* control address for SK2            */
+
+// CREG bits
+//      01      ADR0
+//      02      ADR1
+//      04      ADR2
+//     010      ADR3
+//     020      Ead     external adress counter
+//     040      Exw     external write
+//    0100      Exr
+//    0200      Start conversion
+
+// DREG bits
+//  16 data bits. Positive logic on bus (0V == 0)
+WRITE(CREG)="20";   /* FIRST STOP THE WRITE IN PROGRESS (write of button data out to the buttons) */
+WRITE(CREG)="00";   /* FIRST STOP THE WRITE IN PROGRESS (write of button data out to the buttons) */
+
+print 'Todays Test';
+
+// 7 Segment
+if (1) while (1) {
+    dcl whichSeg fixed;
+    
+    interp_delay_on_d3_write(true);
+    
+    // 0 lsb == seg 0
+    // 0 msb == seg 1
+    // 1 lsb == seg 3
+    // 1 msb == seg 4
+    // 2 msb == units
+    whichSeg = 0;
+    
+    write(creg) = whichSeg;
+    write(dreg) = k;
+    write(creg) = "40"+whichSeg;
+    write(creg) = whichSeg;
+    
+    do j = 0 to 255;
+        // Check for any character typed
+        if (read("51")&2)<>0 {
+            WRITE(CREG)="20";   /* SET UP EXTERNAL WRITE AGAIN */
+            WRITE(CREG)="260";  /* START CONVERSION, SET UP EXTERNAL WRITE */
+            exit(0);
+        }
+    end;
+    
+    k = k + 1;
+    
+    if (k == 0) k = 1;
+    
+    interp_run_host_250_call();
+}
+
+// Lights
+if (0) while (1) {
+    dcl whichSeg fixed;
+    
+    interp_delay_on_d3_write(true);
+    
+    whichSeg = 8;
+    
+    write(creg) = whichSeg;
+    write(dreg) = k;
+    write(creg) = "40"+whichSeg;
+    write(creg) = whichSeg;
+    
+    WRITE(CREG)="20";   /* SET UP EXTERNAL WRITE AGAIN */
+    WRITE(CREG)="260";  /* START CONVERSION, SET UP EXTERNAL WRITE */
+
+    do j = 0 to 255;
+        write(3) = 0;
+
+        // Check for any character typed
+        if (read("51")&2)<>0 {
+            exit(0);
+        }
+    end;
+    
+    k = shl(k, 1);
+    
+    if (k == 0) k = 1;
+    
+    interp_run_host_250_call();
+    
+    WRITE(CREG)="20";   /* FIRST STOP THE WRITE IN PROGRESS (write of button data out to the buttons) */
+    WRITE(CREG)="00";   /* FIRST STOP THE WRITE IN PROGRESS (write of button data out to the buttons) */
+}
+
+// Excercise CREG address bits
+if (0) while (1) {
+    do i = 0 to 15;
+        WRITE(CREG)=0;
+        WRITE(CREG)=1;
+        WRITE(CREG)=1;
+        WRITE(CREG)=1;
+        WRITE(CREG)=1;
+        WRITE(CREG)=1;
+        WRITE(CREG)=1;
+        WRITE(CREG)=1;
+        WRITE(CREG)=1;
+        WRITE(CREG)=1;
+        WRITE(CREG)=1;
+
+        // Check for any character typed
+        if (read("51")&2)<>0 {
+            WRITE(CREG)="20";   /* SET UP EXTERNAL WRITE AGAIN */
+            WRITE(CREG)="260";  /* START CONVERSION, SET UP EXTERNAL WRITE */
+            exit(0);
+        }
+
+        // Need to call this to keep interpreter from killing the job because it locked up
+        interp_run_host_250_call();
+    end;
+}
+
+// External Write
+if (0) while (1) {
+    WRITE(CREG)="40"; /* PULSE EXW FOR LATCH STROBE */
+    WRITE(CREG)="40"; /* PULSE EXW FOR LATCH STROBE */
+    WRITE(CREG)="40"; /* PULSE EXW FOR LATCH STROBE */
+    WRITE(CREG)="40"; /* PULSE EXW FOR LATCH STROBE */
+    WRITE(CREG)="40"; /* PULSE EXW FOR LATCH STROBE */
+    WRITE(CREG)="40"; /* PULSE EXW FOR LATCH STROBE */
+    WRITE(CREG)="40"; /* PULSE EXW FOR LATCH STROBE */
+    WRITE(CREG)="40"; /* PULSE EXW FOR LATCH STROBE */
+    WRITE(CREG)="40"; /* PULSE EXW FOR LATCH STROBE */
+    WRITE(CREG)=0;
+    
+    // Check for any character typed
+    if (read("51")&2)<>0 {
+        WRITE(CREG)="20";   /* SET UP EXTERNAL WRITE AGAIN */
+        WRITE(CREG)="260";  /* START CONVERSION, SET UP EXTERNAL WRITE */
+        exit(0);
+    }
+    // Need to call this to keep interpreter from killing the job because it locked up
+    interp_run_host_250_call();
+}
+
+// External Read
+if (0) while (1) {
+    WRITE(CREG)="100"; /* PULSE EXR FOR LATCH STROBE */
+    WRITE(CREG)=0;
+    
+    // Check for any character typed
+    if (read("51")&2)<>0 {
+        WRITE(CREG)="20";   /* SET UP EXTERNAL WRITE AGAIN */
+        WRITE(CREG)="260";  /* START CONVERSION, SET UP EXTERNAL WRITE */
+        exit(0);
+    }
+    // Need to call this to keep interpreter from killing the job because it locked up
+    interp_run_host_250_call();
+}
+
+// Data Lines
+if (0) while (1) {
+    i = 0;
+    
+    write(creg) = 0;        // address 0
+    write(creg) = "40";     // Write on
+    
+    while (1) {
+        do j = 0 to 255;
+            do k = 0 to 255;
+                WRITE(DREG) = 0x7FFF;
+                WRITE(DREG) = 0xFFFF;
+                i = i + 1;
+            end;
+
+            // Need to call this to keep interpreter from killing the job because it locked up
+            interp_run_host_250_call();
+        end;
+        
+        // Check for any character typed
+        if (read("51")&2)<>0 {
+            WRITE(CREG)="20";   /* SET UP EXTERNAL WRITE AGAIN */
+            WRITE(CREG)="260";  /* START CONVERSION, SET UP EXTERNAL WRITE */
+            exit(0);
+        }
+    }
+}
